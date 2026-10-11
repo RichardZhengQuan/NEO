@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, writeFile, mkdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { INBOX_LIST_ID, NeoError, parsePairingUrl } from '@neo/protocol';
-import type { Conversation, Message, MemoryNode, Note, ProviderView, Reminder, Task, TaskList, UiActionResult } from '@neo/protocol';
+import { INBOX_LIST_ID, NeoError, parsePairingLink, parsePairingUrl } from '@neo/protocol';
+import type { Conversation, Message, MemoryNode, Note, PairingSession, PhoneAccessStatus, ProviderView, Reminder, Task, TaskList, UiActionResult } from '@neo/protocol';
 import { createApp } from './app.js';
 import { routeFixture, OWNER_TOKEN } from './route-fixture.test-utils.js';
 
@@ -43,6 +43,61 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     f.services.config.server.publicUrl = 'https://neo.example/base';
     const result = await json<{ pairingUrl: string }>(await f.request('/api/devices', 'POST', { name: 'Phone' }, OWNER_TOKEN, { Origin: 'https://attacker.example' }), 201);
     expect(parsePairingUrl(result.pairingUrl)?.serverUrl).toBe('https://neo.example/base');
+  });
+
+  it('allows any device to inspect phone access but only the owner to change it', async () => {
+    const paired = f.services.devices.create({ name: 'Phone', platform: 'ios', owner: false });
+    const initial = await json<PhoneAccessStatus>(await f.request('/api/phone-access', 'GET', undefined, paired.token));
+    expect(initial).toMatchObject({ enabled: false, lan: { listening: false, port: null, addresses: [], error: null }, relay: { status: 'off' } });
+    expect(initial.serverId).toMatch(/^[a-f0-9]{32}$/);
+    expect(initial.publicKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect((await f.request('/api/phone-access', 'GET', undefined, null)).status).toBe(401);
+    expect((await f.request('/api/phone-access', 'PATCH', { enabled: true }, paired.token)).status).toBe(403);
+    expect(f.services.settings.get().phoneAccess.enabled).toBe(false);
+    expect(await json(await f.request('/api/phone-access', 'PATCH', { enabled: true, relayUrl: 'wss://relay.example' }))).toMatchObject({
+      enabled: true, lan: { listening: false }, relay: { url: 'wss://relay.example', status: 'off', error: null },
+    });
+    expect(await json(await f.request('/api/phone-access', 'PATCH', { enabled: false }))).toMatchObject({ enabled: false });
+  });
+
+  it('accepts default, disabled and websocket relay URLs without starting the manager', async () => {
+    f.services.config.tunnel.relayUrl = 'wss://default.example';
+    for (const [relayUrl, expected] of [[null, 'wss://default.example'], ['', null], ['ws://relay.example/path', 'ws://relay.example/path']] as const) {
+      expect(await json(await f.request('/api/phone-access', 'PATCH', { relayUrl }))).toMatchObject({ relay: { url: expected, status: 'off' } });
+      expect(f.services.settings.get().phoneAccess.relayUrl).toBe(relayUrl);
+    }
+  });
+
+  it.each(['https://relay.example', 'file:///tmp/relay', 'wss://user:secret@relay.example', 'wss://relay.example?token=secret', 'wss://relay.example#private', 'wss://relay.example?', 'wss://relay.example#', 'not a URL'])('rejects malformed or credential-bearing relay URL %s', async (relayUrl) => {
+    expect(await json(await f.request('/api/phone-access', 'PATCH', { enabled: true, relayUrl }), 400)).toMatchObject({ code: 'bad_request' });
+    expect(f.services.settings.get().phoneAccess).toMatchObject({ enabled: false, relayUrl: null });
+  });
+
+  it('rejects phone access on general settings patches even for the owner', async () => {
+    const paired = f.services.devices.create({ name: 'Phone', platform: 'android', owner: false });
+    for (const token of [OWNER_TOKEN, paired.token]) {
+      expect(await json(await f.request('/api/settings', 'PATCH', { phoneAccess: { enabled: true }, onboarded: true }, token), 400)).toMatchObject({
+        code: 'bad_request', message: 'Use PATCH /api/phone-access',
+      });
+    }
+    expect(f.services.settings.get()).toMatchObject({ phoneAccess: { enabled: false }, onboarded: false });
+  });
+
+  it('pairing enables local phone access and never advertises a loopback or tunnel origin', async () => {
+    const loopback = await json<{ code: string }>(await f.request('/api/pairing', 'POST'), 409);
+    expect(loopback.code).toBe('conflict');
+    expect(f.services.settings.get().phoneAccess.enabled).toBe(true);
+    expect(await json(await f.request('/api/phone-access'))).toMatchObject({ enabled: true, lan: { listening: false } });
+    expect((await f.request('http://0123456789abcdef0123456789abcdef.tunnel.invalid/api/pairing', 'POST')).status).toBe(409);
+    const lan = await json<PairingSession>(await f.request('http://192.168.1.20:7777/api/pairing', 'POST'), 201);
+    expect(parsePairingLink(lan.pairingUrl)).toMatchObject({ version: 2, serverUrl: 'http://192.168.1.20:7777', tunnel: null });
+  });
+
+  it('pairing through a public URL leaves phone access off', async () => {
+    f.services.config.server.publicUrl = 'https://neo.example';
+    const result = await json<PairingSession>(await f.request('/api/pairing', 'POST'), 201);
+    expect(f.services.settings.get().phoneAccess.enabled).toBe(false);
+    expect(parsePairingLink(result.pairingUrl)).toMatchObject({ version: 2, serverUrl: 'https://neo.example', tunnel: null });
   });
 
   it('limits failed auth to ten per IP per minute using the injected clock', async () => {
@@ -422,6 +477,7 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     ['PATCH', '/api/notes/id', { tags: [1] }], ['POST', '/api/notifications/read', { ids: 1 }],
     ['POST', '/api/providers', { kind: 'bogus' }], ['POST', '/api/providers/test', { kind: 'mock', baseUrl: 'no' }],
     ['PATCH', '/api/settings', { persona: { tone: 'bogus' } }], ['PUT', '/api/tools/read_test/permission', { permission: 'bogus' }],
+    ['PATCH', '/api/phone-access', { enabled: 'yes' }], ['PATCH', '/api/phone-access', { relayUrl: 1 }],
     ['POST', '/api/devices', { name: '' }], ['POST', '/api/push/subscribe', {}], ['POST', '/api/push/unsubscribe', { endpoint: 1 }],
   ])('validates %s %s with structured zod details', async (method, path, body) => {
     if (path.endsWith('/messages')) path = `/api/conversations/${f.services.conversations.create().id}/messages`;

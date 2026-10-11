@@ -3,6 +3,8 @@
  */
 import type {
   AgentEvent,
+  ClaimPairingRequest,
+  ClaimPairingResponse,
   ConfirmToolRequest,
   Conversation,
   ConversationWithMessages,
@@ -30,6 +32,9 @@ import type {
   NoteInput,
   NotePatch,
   Notification,
+  PairingSession,
+  PhoneAccessStatus,
+  UpdatePhoneAccessRequest,
   PermissionLevel,
   ProviderTestResult,
   ProviderView,
@@ -322,6 +327,21 @@ export class NeoClientImpl {
         body: { name, platform: platform ?? 'other' },
       }),
     revoke: (id: string) => this.req<void>('DELETE', `/devices/${id}`),
+  };
+
+  // ─── Pairing ──────────────────────────────────────────────────────────────
+
+  readonly phoneAccess = {
+    status: () => this.req<PhoneAccessStatus>('GET', '/phone-access'),
+    update: (body: UpdatePhoneAccessRequest) =>
+      this.req<PhoneAccessStatus>('PATCH', '/phone-access', { body }),
+  };
+
+  readonly pairing = {
+    create: () => this.req<PairingSession>('POST', '/pairing'),
+    cancel: (id: string) => this.req<void>('DELETE', `/pairing/${id}`),
+    claim: (body: ClaimPairingRequest) =>
+      this.req<ClaimPairingResponse>('POST', '/pairing/claim', { body }),
   };
 
   // ─── Push ─────────────────────────────────────────────────────────────────

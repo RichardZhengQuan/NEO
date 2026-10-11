@@ -48,6 +48,7 @@ export function writeJson(key: string, value: unknown, kind: 'local' | 'session'
 /** Keys used across the app (one place, so they never collide). */
 export const STORAGE_KEYS = {
   connection: 'neo.connection',
+  pairingLaunchLink: 'neo.pairing.launch-link',
   theme: 'neo.theme',
   locale: 'neo.locale',
   onboardingStep: 'neo.onboarding.step',

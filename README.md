@@ -76,7 +76,7 @@ The full algorithm is in [docs/MEMORY.md](docs/MEMORY.md).
 ## Architecture
 
 ```
-packages/  protocol · storage · providers · memory · tools · core · server · client · ui · cli
+packages/  protocol · tunnel · relay · storage · providers · memory · tools · core · server · client · ui · cli
 apps/      web (PWA) · desktop (Electron) · mobile (Capacitor)
 ```
 

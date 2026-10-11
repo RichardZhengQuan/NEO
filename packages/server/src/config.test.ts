@@ -79,6 +79,42 @@ describe('loadConfig', () => {
     expect(cfg.server.authToken).toBe('my-secret-token-1234');
   });
 
+  it('reads the encrypted tunnel environment variables, including port zero and an empty relay', () => {
+    const cfg = loadConfig({ env: {
+      NEO_TUNNEL_LAN: 'false', NEO_TUNNEL_HOST: '127.0.0.1', NEO_TUNNEL_PORT: '0',
+      NEO_TUNNEL_ADVERTISE: '192.168.1.20:7778, mac.local:8888, [fe80::1]:7778', NEO_RELAY_URL: '',
+    } });
+    expect(cfg.tunnel).toEqual({
+      lan: false, host: '127.0.0.1', port: 0,
+      advertise: ['192.168.1.20:7778', 'mac.local:8888', '[fe80::1]:7778'], relayUrl: '',
+    });
+    expect(loadConfig({ env: { NEO_RELAY_URL: 'wss://relay.example' } }).tunnel.relayUrl).toBe('wss://relay.example');
+  });
+
+  it.each([['true', true], [' TRUE ', true], ['1', true], ['false', false], ['0', false]])('strictly parses NEO_TUNNEL_LAN=%s', (value, expected) => {
+    expect(loadConfig({ env: { NEO_TUNNEL_LAN: value } }).tunnel.lan).toBe(expected);
+  });
+
+  it.each(['', 'yes', 'on', '2'])('rejects invalid NEO_TUNNEL_LAN=%s', (value) => {
+    expect(() => loadConfig({ env: { NEO_TUNNEL_LAN: value } })).toThrowError(expect.objectContaining({ code: 'config_error' }));
+  });
+
+  it.each(['http://192.168.1.20:7778', '192.168.1.20', 'mac.local:0', 'bad host:7778', '192.168.1.20:7778,wrong'])('validates each advertised tunnel address: %s', (value) => {
+    expect(() => loadConfig({ env: { NEO_TUNNEL_ADVERTISE: value } })).toThrowError(expect.objectContaining({ code: 'config_error' }));
+  });
+
+  it.each(['-1', '65536', '1.5', 'oops'])('rejects invalid tunnel port %s', (value) => {
+    expect(() => loadConfig({ env: { NEO_TUNNEL_PORT: value } })).toThrow();
+  });
+
+  it('preserves file < tunnel environment < overrides precedence', () => {
+    const dir = makeTempDir();
+    const path = join(dir, 'config.json');
+    writeFileSync(path, JSON.stringify({ tunnel: { port: 9999, host: '0.0.0.0', lan: false, advertise: ['old.local:9999'] } }));
+    const cfg = loadConfig({ path, env: { NEO_TUNNEL_PORT: '8888', NEO_TUNNEL_LAN: '1', NEO_TUNNEL_ADVERTISE: '' }, overrides: { tunnel: { port: 7779 } } });
+    expect(cfg.tunnel).toMatchObject({ port: 7779, host: '0.0.0.0', lan: true, advertise: [] });
+  });
+
   it('ANTHROPIC_API_KEY creates an anthropic provider', () => {
     const cfg = loadConfig({
       env: { ANTHROPIC_API_KEY: 'sk-ant-test' },

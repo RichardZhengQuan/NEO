@@ -6,17 +6,19 @@ import { useState, type ReactElement } from 'react';
 import type { CreateDeviceResponse, Device } from '@neo/protocol';
 import { Badge, Button, CopyButton, EmptyState, Icon, IconButton, Modal, Select, Skeleton, TextField, formatRelative, useConfirm, useLocale, useT } from '@neo/ui';
 import { QrCode } from '../../components/QrCode.js';
+import { PairPhoneDialog } from '../../components/PairPhoneDialog.js';
 import { useLoader } from '../../hooks/useLoader.js';
 import { errorMessage, httpStatus } from '../../lib/errors.js';
 import { getPlatform } from '../../platform/index.js';
 import { pushToast } from '../../state/notifications.js';
 import { requireClient } from '../../state/session.js';
 import { Section } from './common.js';
+import { PhoneAccessCard } from './PhoneAccessCard.js';
 
 const PLATFORM_ICON: Record<Device['platform'], string> = { web: 'globe', desktop: 'laptop', ios: 'smartphone', android: 'smartphone', cli: 'terminal', other: 'cpu' };
 const PLATFORMS: Device['platform'][] = ['ios', 'android', 'desktop', 'web', 'cli', 'other'];
 
-function PairDialog({ onClose, onPaired }: { onClose: () => void; onPaired: () => void }): ReactElement {
+function AccessTokenDialog({ onClose, onPaired }: { onClose: () => void; onPaired: () => void }): ReactElement {
   const t = useT();
   const [name, setName] = useState('');
   const [platform, setPlatform] = useState<Device['platform']>('ios');
@@ -38,7 +40,7 @@ function PairDialog({ onClose, onPaired }: { onClose: () => void; onPaired: () =
     <Modal
       open
       onClose={onClose}
-      title={result ? t('devices.scan_title', { name: result.device.name }) : t('devices.pair_title')}
+      title={result ? t('devices.scan_title', { name: result.device.name }) : t('devices.access_token')}
       size="md"
       footer={
         result ? (
@@ -112,6 +114,8 @@ export function DevicesSection(): ReactElement {
   const confirm = useConfirm();
   const loader = useLoader(async () => (await requireClient().devices.list()).items, []);
   const [pairing, setPairing] = useState(false);
+  const [accessToken, setAccessToken] = useState(false);
+  const [phoneAccessRefresh, setPhoneAccessRefresh] = useState(0);
   const devices = loader.data;
 
   const revoke = async (device: Device) => {
@@ -132,12 +136,18 @@ export function DevicesSection(): ReactElement {
       description={t('devices.help')}
       actions={
         getPlatform().kind !== 'capacitor' ? (
-          <Button size="sm" variant="primary" icon="qr-code" onClick={() => setPairing(true)}>
-            {t('devices.pair')}
-          </Button>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <Button size="sm" variant="primary" icon="qr-code" onClick={() => setPairing(true)}>
+              {t('devices.pair')}
+            </Button>
+            <Button size="sm" variant="ghost" icon="key" onClick={() => setAccessToken(true)}>
+              {t('devices.access_token')}
+            </Button>
+          </div>
         ) : undefined
       }
     >
+      {getPlatform().kind !== 'capacitor' && <PhoneAccessCard refresh={phoneAccessRefresh} />}
       {!devices ? (
         loader.error ? (
           <EmptyState icon="alert-circle" title={t('common.error')} />
@@ -168,7 +178,8 @@ export function DevicesSection(): ReactElement {
             ))}
         </ul>
       )}
-      {pairing && <PairDialog onClose={() => setPairing(false)} onPaired={() => void loader.reload()} />}
+      {pairing && <PairPhoneDialog onClose={() => { setPairing(false); setPhoneAccessRefresh((value) => value + 1); }} onPaired={() => void loader.reload()} />}
+      {accessToken && <AccessTokenDialog onClose={() => setAccessToken(false)} onPaired={() => void loader.reload()} />}
     </Section>
   );
 }

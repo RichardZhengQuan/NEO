@@ -8,6 +8,8 @@
 import {
   NeoError,
   type AgentEvent,
+  type ClaimPairingRequest,
+  type ClaimPairingResponse,
   type ConfirmToolRequest,
   type Conversation,
   type ConversationWithMessages,
@@ -36,6 +38,9 @@ import {
   type NoteInput,
   type NotePatch,
   type Notification,
+  type PairingSession,
+  type PhoneAccessStatus,
+  type UpdatePhoneAccessRequest,
   type PermissionLevel,
   type ProviderTestResult,
   type ProviderView,
@@ -64,6 +69,8 @@ import {
 
 export type {
   AgentEvent,
+  ClaimPairingRequest,
+  ClaimPairingResponse,
   ConfirmToolRequest,
   Conversation,
   ConversationWithMessages,
@@ -92,6 +99,9 @@ export type {
   NoteInput,
   NotePatch,
   Notification,
+  PairingSession,
+  PhoneAccessStatus,
+  UpdatePhoneAccessRequest,
   PermissionLevel,
   ProviderTestResult,
   ProviderView,
@@ -316,6 +326,22 @@ export class NeoClient {
       this._impl.devices.create(name, platform),
     revoke: (id: string): Promise<void> =>
       this._impl.devices.revoke(id),
+  };
+
+  readonly phoneAccess = {
+    status: (): Promise<PhoneAccessStatus> =>
+      this._impl.phoneAccess.status(),
+    update: (body: UpdatePhoneAccessRequest): Promise<PhoneAccessStatus> =>
+      this._impl.phoneAccess.update(body),
+  };
+
+  readonly pairing = {
+    create: (): Promise<PairingSession> =>
+      this._impl.pairing.create(),
+    cancel: (id: string): Promise<void> =>
+      this._impl.pairing.cancel(id),
+    claim: (body: ClaimPairingRequest): Promise<ClaimPairingResponse> =>
+      this._impl.pairing.claim(body),
   };
 
   readonly push = {

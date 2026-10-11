@@ -307,7 +307,7 @@ describe('NoteEditor autosave', () => {
     await act(() => vi.advanceTimersByTimeAsync(700));
     fireEvent.change(textarea, { target: { value: 'Queued' } });
     unmount();
-    startSession('https://new.example', 'token', 'manual');
+    startSession({ serverUrl: 'https://new.example', token: 'token' }, 'manual');
     await act(() => vi.advanceTimersByTimeAsync(10));
     await act(async () => { resolveFirst(makeNote({ content: 'First', updatedAt: 2000 })); });
     expect(mockUpdate).toHaveBeenCalledTimes(1);

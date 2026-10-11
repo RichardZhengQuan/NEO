@@ -22,6 +22,7 @@ import {
 } from './productivity.js';
 import { ProviderConfigSchema, ProviderKindSchema, type ModelInfo, type ProviderView } from './providers.js';
 import { PermissionLevelSchema } from './tools.js';
+import { DevicePlatformSchema } from './pairing.js';
 import type { UIAction } from './ui.js';
 
 export const API_VERSION = '1';
@@ -173,44 +174,17 @@ export const SetToolPermissionRequestSchema = z.object({ permission: PermissionL
 
 export const CreateDeviceRequestSchema = z.object({
   name: z.string().min(1).max(100),
-  platform: z.enum(['web', 'desktop', 'ios', 'android', 'cli', 'other']).default('other'),
+  platform: DevicePlatformSchema.default('other'),
 });
 export interface CreateDeviceResponse {
   device: Device;
   /** Shown once. */
   token: string;
-  /** neo://pair?server=…&token=… — render as a QR code for phones. */
+  /** v1 link (neo://pair?server=…&token=…) for advanced setups; phones pair with `POST /api/pairing`. */
   pairingUrl: string;
 }
 
 export const PushSubscribeRequestSchema = z.object({ subscription: PushSubscriptionSchema });
 export interface VapidKeyResponse {
   publicKey: string | null;
-}
-
-// ───────────────────────────── pairing links ─────────────────────────────
-
-export function buildPairingUrl(serverUrl: string, token: string): string {
-  return `neo://pair?server=${encodeURIComponent(serverUrl)}&token=${encodeURIComponent(token)}`;
-}
-
-/** Accepts neo://pair?server=…&token=… and https://host/#/pair?token=… */
-export function parsePairingUrl(input: string): { serverUrl: string; token: string } | null {
-  try {
-    const url = new URL(input.trim());
-    if (url.protocol === 'neo:') {
-      const server = url.searchParams.get('server');
-      const token = url.searchParams.get('token');
-      return server && token ? { serverUrl: server, token } : null;
-    }
-    if (url.protocol === 'https:' || url.protocol === 'http:') {
-      const hash = url.hash.replace(/^#\/?/, '');
-      const q = hash.startsWith('pair?') ? new URLSearchParams(hash.slice(5)) : url.searchParams;
-      const token = q.get('token');
-      return token ? { serverUrl: url.origin, token } : null;
-    }
-  } catch {
-    // fall through
-  }
-  return null;
 }

@@ -201,6 +201,15 @@ NEO is configured in three layers (later layers win):
     "maxBodyBytes": 20971520  // 20 MB
   },
 
+  // Separate encrypted LAN listener; starts only while phone access is enabled.
+  "tunnel": {
+    "lan": true,
+    "host": "0.0.0.0",
+    "port": 7778,
+    "advertise": [],          // explicit host:port addresses (for Docker/NAT)
+    "relayUrl": ""            // optional relay default; no NEO public relay exists yet
+  },
+
   // Boot-time provider list. Providers added via the UI are stored in the DB.
   "providers": [
     { "id": "demo", "kind": "mock", "label": "Demo mode", "enabled": true }
@@ -246,6 +255,11 @@ NEO is configured in three layers (later layers win):
 | `NEO_WEB_DIR` | `server.webDir` |
 | `NEO_TRUST_PROXY` | `server.trustProxy` (`true`/`false`, also `1`/`0`) |
 | `NEO_LOG_LEVEL` | `log.level` |
+| `NEO_TUNNEL_LAN` | `tunnel.lan` (strict `true`/`false`/`1`/`0`) |
+| `NEO_TUNNEL_HOST` | `tunnel.host` (default `0.0.0.0`) |
+| `NEO_TUNNEL_PORT` | `tunnel.port` (default 7778; 0 chooses an available port) |
+| `NEO_TUNNEL_ADVERTISE` | `tunnel.advertise` (comma-separated validated `host:port` addresses) |
+| `NEO_RELAY_URL` | `tunnel.relayUrl` (default empty; supply your own relay's ws(s) base URL) |
 
 Proxy headers are ignored by default. Enable `NEO_TRUST_PROXY=true` or
 `server.trustProxy: true` only when clients cannot reach NEO directly and your
@@ -297,9 +311,30 @@ it automatically. Treat any output captured with that option as secret.
 
 **From the web UI:**
 
-1. Open **Settings → Devices**.
-2. Click **Add device** → choose a name and platform.
-3. A QR code and pairing link appear.
+1. Open **Settings → Devices → Pair a phone**.
+2. A one-time QR code and pairing link appear (valid for five minutes).
+3. Scan with your phone; it receives its own revocable token.
+
+For on-device servers, pairing turns on **Phone access** automatically. You
+can also use the owner-only switch in Devices. Phones on the same network
+connect to the encrypted listener on **7778/TCP** by default, independently of
+the desktop window's loopback HTTP port. macOS or Windows may show a firewall
+prompt the first time phone access is turned on; allow local-network access.
+The computer must stay on and NEO must keep running. Keep it in the menu bar /
+tray and enable opening at login. Turning phone access off closes active LAN
+and relay tunnels. The LAN listener returns 404 for plaintext HTTP, including `/api/*`.
+
+If 7778 is occupied, NEO logs a warning and uses an available port; new QR codes
+carry that actual port. Existing phones may need a fresh pairing link after an
+address or port change. Phones try the LAN route first and fall back to a
+configured relay when it is unreachable. For away-from-home access, see
+[self-hosting a relay](#self-hosting-a-relay).
+
+For Docker, publish the tunnel port separately (for example `7778:7778`) and
+set `NEO_TUNNEL_ADVERTISE=192.168.1.20:7778` to the host's reachable address when
+container addresses differ from the host. Explicit advertisements retain their
+configured ports, so match any published-port mapping. Restrict this port to
+the local network; it serves only the encrypted tunnel.
 
 **On mobile:**
 
@@ -323,6 +358,134 @@ change it when using the deletion method. Rotation atomically invalidates all
 previous owner credentials. Paired device tokens keep working; they do not
 need to re-pair. Keep an environment override in place until you intentionally
 change it again: the existing token file is not overwritten by `NEO_TOKEN`.
+
+---
+
+## Self-hosting a relay
+
+NEO does not run a public relay yet. The default `tunnel.relayUrl` is `''`;
+away-from-home access requires a relay you host or another relay you choose.
+The relay is separate from your NEO server and stores no conversations or
+keys. Both the phone and the NEO computer make outbound WebSocket connections
+to it, so the computer needs no public API or inbound internet port.
+
+### Docker
+
+Build from the repository root. This image includes only `@neo/protocol`,
+`@neo/tunnel` and `@neo/relay`, and runs as a non-root user:
+
+```bash
+docker build -f packages/relay/Dockerfile -t neo-relay .
+docker run -d --name neo-relay --restart unless-stopped \
+  -p 127.0.0.1:8787:8787 -e RELAY_TRUST_PROXY=true neo-relay
+```
+
+Use the Caddy setup below for public access. The host-only port mapping
+prevents clients from bypassing that proxy. The image has a `/healthz` health
+check; the relay needs no persistent volume. Restarting it disconnects current
+phones; NEO reconnects automatically.
+
+### Node
+
+Requirements are Node.js ≥ 22.13 and pnpm. From the source checkout:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm --filter @neo/protocol build
+pnpm --filter @neo/tunnel build
+pnpm --filter @neo/relay build
+RELAY_HOST=127.0.0.1 RELAY_PORT=8787 RELAY_TRUST_PROXY=true \
+  node packages/relay/dist/main.js
+```
+
+The package also declares the `neo-relay` executable. SIGINT and SIGTERM shut
+down the listener and all sockets cleanly. `GET /healthz` returns `200 ok`;
+other HTTP paths return 404.
+
+### Secure WebSocket access with Caddy
+
+Point a domain you control at the relay host and replace `relay.example.com`
+in this Caddyfile with it. This is an example domain, not a NEO public relay:
+
+```caddyfile
+relay.example.com {
+    reverse_proxy 127.0.0.1:8787 {
+        header_up X-Forwarded-For {http.request.remote.host}
+    }
+}
+```
+
+Caddy handles TLS certificates and WebSocket upgrades, making your relay base
+URL `wss://` followed by your domain. Set `RELAY_TRUST_PROXY=true` only behind
+a trusted proxy that overwrites `X-Forwarded-For`, and block direct public
+access to the relay's port. The relay then uses the first forwarded address
+for per-IP limits. With proxy trust off, it uses the socket address.
+
+### Point NEO at your relay
+
+On the NEO computer, open **Settings → Devices → Phone access → Custom
+relay**, enter your secure `wss://` base URL and save. Custom URLs cannot
+contain credentials, query parameters or fragments. Enable Phone access.
+The **Away from home** status reports connecting, connected or an error.
+Selecting **No relay (same network only)** disables relay access. **Default
+relay** uses the server's configured default and is unavailable when it is
+empty; NEO honestly shows that no public relay is available yet.
+
+For a self-hosted NEO server, set `NEO_RELAY_URL` to your relay's base URL (or
+`tunnel.relayUrl` in its config) to provide a default. A saved custom URL
+overrides that default; selecting Default relay resets the override to null.
+The relay process uses `RELAY_*` variables, while the NEO server uses
+`NEO_RELAY_URL`. Phones receive the relay URL in their pinned pairing route,
+try LAN first and then the relay, and can claim a pairing code through either
+path. The configured URL remains advertised during relay reconnection. The
+computer must stay on with NEO running for either path to work.
+
+### What the relay can and cannot see
+
+The phone pins the computer's static X25519 key from the pairing QR and uses
+Noise NK end-to-end encryption. The relay forwards opaque bytes and has no
+decryption keys: it cannot read conversations, pairing codes, API requests or
+device tokens. Each server registration proves its Ed25519 signing key by
+signing a fresh challenge; the server id is derived from that key, preventing
+an attacker from claiming a stolen id or replaying an earlier signature.
+
+The relay can see IP addresses, server ids, connection timing and traffic
+sizes, and it can drop or delay traffic. TLS protects the outer connection;
+it does not hide this metadata from the relay. Payloads are never logged.
+Logs contain events and counts, with server ids truncated to eight characters.
+
+### Relay environment and limits
+
+The defaults below apply to `neo-relay`, not the NEO server. Count, byte and
+timing overrides are positive integers; byte limits are in bytes and timing
+limits in milliseconds.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RELAY_HOST` | `0.0.0.0` | Bind address; use `127.0.0.1` for bare Node behind Caddy |
+| `RELAY_PORT` | `8787` | HTTP/WebSocket port |
+| `RELAY_TRUST_PROXY` | `false` | Trust the first `X-Forwarded-For` address |
+| `RELAY_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `silent` |
+| `RELAY_PER_IP_PHONE_CONNECTIONS` | `20` | Concurrent phones per IP |
+| `RELAY_PER_IP_PHONE_CONNECTIONS_PER_MINUTE` | `60` | New phones per IP per minute |
+| `RELAY_PER_IP_SERVER_REGISTRATIONS_PER_MINUTE` | `10` | Server registrations per IP per minute |
+| `RELAY_PER_SERVER_PHONE_CONNECTIONS` | `64` | Concurrent phones per server id |
+| `RELAY_MAX_SERVERS` | `10000` | Registered servers globally |
+| `RELAY_MAX_PHONES` | `50000` | Phone connections globally |
+| `RELAY_BYTES_PER_SECOND` | `4194304` | Combined per-phone sustained traffic in both directions (4 MiB/s) |
+| `RELAY_BURST_BYTES` | `16777216` | Per-phone token-bucket burst (16 MiB) |
+| `RELAY_MAX_BUFFERED_BYTES` | `8388608` | Destination queue cap (8 MiB) |
+| `RELAY_REGISTRATION_TIMEOUT_MS` | `10000` | Time to answer the registration challenge |
+| `RELAY_PHONE_IDLE_TIMEOUT_MS` | `120000` | Maximum inactivity in both directions |
+| `RELAY_HEARTBEAT_INTERVAL_MS` | `30000` | Server ping interval; missed pong terminates the socket |
+
+Each Noise message is capped at 65,535 bytes (plus the five-byte server relay
+header). The relay disconnects phones that exceed the byte-rate bucket or
+destination queue cap; idle phones also close. Server sockets must register
+once, then send only binary relay frames. A disconnected server closes its
+phones; a genuine re-registration replaces its older connection. The NEO
+server connector additionally caps live relay sessions at 256. See
+[`packages/relay/README.md`](../packages/relay/README.md) for the package API.
 
 ---
 
@@ -352,6 +515,7 @@ The **data directory** (`NEO_DATA_DIR`) contains everything:
 | `key` | 32-byte AES master key (mode 0600) — **keep this secret** |
 | `token` | Owner authentication token |
 | `vapid.json` | Web Push VAPID key pair |
+| `tunnel-identity.json` | Static tunnel / signing keys (mode 0600); preserve to keep paired phones' pinned identity |
 | `plugins/` | Installed plugins (optional) |
 
 **Back up the whole directory**, not just `neo.db` — without the `key` file the

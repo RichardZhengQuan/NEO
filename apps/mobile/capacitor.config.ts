@@ -2,7 +2,9 @@
  * Capacitor configuration for NEO mobile (iOS & Android).
  *
  * The app wraps the same web build used by the desktop and PWA, connecting to
- * a NEO server over HTTP/HTTPS.  Reminders are scheduled as on-device local
+ * a NEO server over HTTPS or an encrypted LAN tunnel after scanning a pairing code.
+ * Native URL-scheme and camera permissions are documented in README.md.
+ * Reminders are scheduled as on-device local
  * notifications so they fire even when the server is unreachable.
  */
 import type { CapacitorConfig } from '@capacitor/cli';
@@ -32,6 +34,12 @@ const config: CapacitorConfig = {
      * url: 'http://192.168.1.100:7777',
      * cleartext: true,
      */
+  },
+
+  android: {
+    // The WebView origin is https://localhost; LAN uses ws:// to a private
+    // address. Its payload is end-to-end encrypted and the server key is pinned.
+    allowMixedContent: true,
   },
 
   plugins: {

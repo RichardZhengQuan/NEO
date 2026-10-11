@@ -44,6 +44,12 @@ export interface PlatformBridge {
   readonly devicePlatform: Device['platform'];
   /** Suggested device name ("iPhone", "Mac"). */
   deviceName(): string;
+  /** Scan a pairing QR code; cancel or unavailable camera returns null. */
+  scanQrCode?(): Promise<string | null>;
+  /** Receive pairing deep links while the Connect screen is mounted. */
+  watchPairLinks?(onLink: (url: string) => void): () => void;
+  /** Consume a mobile launch pairing link once, including across reloads. */
+  launchLink?(): Promise<string | null>;
   /** Open a web/mail/tel link outside the app. */
   openExternal(url: string): void;
   notificationStatus(client: NeoClient): Promise<NotificationStatus>;

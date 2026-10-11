@@ -34,6 +34,8 @@ export { EventHub } from './events.js';
 export { createServices } from './services.js';
 export { createApp } from './app.js';
 export { startServer } from './server.js';
+export { createPhoneAccess } from './tunnel/manager.js';
+export type { PhoneAccessManager } from './tunnel/manager.js';
 
 // ── Interfaces ────────────────────────────────────────────────────────────────
 
@@ -42,6 +44,7 @@ export interface LoadConfigOptions {
   path?: string;
   /** Defaults to process.env. Reads NEO_MODE, NEO_DATA_DIR, NEO_HOST, NEO_PORT, NEO_TOKEN,
    *  NEO_PUBLIC_URL, NEO_WEB_DIR, NEO_TRUST_PROXY, NEO_LOG_LEVEL,
+   *  NEO_TUNNEL_LAN, NEO_TUNNEL_HOST, NEO_TUNNEL_PORT, NEO_TUNNEL_ADVERTISE, NEO_RELAY_URL,
    *  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, OLLAMA_BASE_URL
    *  (each adds/updates a provider). */
   env?: Record<string, string | undefined>;
@@ -92,6 +95,7 @@ export interface CreateServicesOptions {
 
 export interface NeoApp {
   app: Hono;
+  phoneAccess: import('./tunnel/manager.js').PhoneAccessManager;
   /** Attach the /api/ws WebSocket handler to the Node HTTP server returned by @hono/node-server. */
   injectWebSocket(server: Server): void;
 }

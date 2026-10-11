@@ -13,6 +13,10 @@ export function registerSettings(app: Hono, services: NeoServices): void {
 
   // PATCH /api/settings
   app.patch('/api/settings', async (c) => {
+    const raw: unknown = await c.req.json().catch(() => { throw new NeoError('bad_request', 'Invalid JSON body'); });
+    if (raw && typeof raw === 'object' && 'phoneAccess' in raw) {
+      throw new NeoError('bad_request', 'Use PATCH /api/phone-access');
+    }
     const body = await validateBody(c, UpdateSettingsRequestSchema);
 
     // Deep partial patch: update settings (validate + merge done inside)

@@ -5,7 +5,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { DEMO_PROVIDER, NeoConfigSchema, NeoError, PROVIDER_PRESETS, deepMerge, type NeoConfig } from '@neo/protocol';
+import { DEMO_PROVIDER, NeoConfigSchema, NeoError, PROVIDER_PRESETS, deepMerge, isLanAddress, type NeoConfig } from '@neo/protocol';
 import type { LoadConfigOptions } from './index.js';
 import { validatePushAllowedHosts } from './push-policy.js';
 
@@ -75,6 +75,22 @@ export function loadConfig(options: LoadConfigOptions = {}): NeoConfig {
     serverPatch['trustProxy'] = value === 'true' || value === '1';
   }
   if (Object.keys(serverPatch).length) envPatch['server'] = serverPatch;
+
+  const tunnelPatch: Record<string, unknown> = {};
+  if (env['NEO_TUNNEL_LAN'] !== undefined) {
+    const value = env['NEO_TUNNEL_LAN'].trim().toLowerCase();
+    if (!['true', 'false', '1', '0'].includes(value)) throw new NeoError('config_error', 'NEO_TUNNEL_LAN must be true or false');
+    tunnelPatch['lan'] = value === 'true' || value === '1';
+  }
+  if (env['NEO_TUNNEL_HOST']) tunnelPatch['host'] = env['NEO_TUNNEL_HOST'];
+  if (env['NEO_TUNNEL_PORT'] !== undefined) tunnelPatch['port'] = Number(env['NEO_TUNNEL_PORT']);
+  if (env['NEO_TUNNEL_ADVERTISE'] !== undefined) {
+    const addresses = env['NEO_TUNNEL_ADVERTISE'].split(',').map((address) => address.trim()).filter(Boolean);
+    if (!addresses.every(isLanAddress)) throw new NeoError('config_error', 'NEO_TUNNEL_ADVERTISE must contain host:port addresses');
+    tunnelPatch['advertise'] = addresses;
+  }
+  if (env['NEO_RELAY_URL'] !== undefined) tunnelPatch['relayUrl'] = env['NEO_RELAY_URL'];
+  if (Object.keys(tunnelPatch).length) envPatch['tunnel'] = tunnelPatch;
 
   if (env['NEO_LOG_LEVEL']) envPatch['log'] = { level: env['NEO_LOG_LEVEL'] };
 
