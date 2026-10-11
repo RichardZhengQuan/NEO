@@ -15,13 +15,12 @@ export interface EyeArt {
 }
 
 /**
- * An open mouth, drawn in a local frame placed at (x, y) and rotated by rot.
- * 'drop' mouths hang below the painted smile (the local x axis runs along
- * it) and open by stretching down from it, like a jaw dropping. 'grow'
- * mouths open out of the point (0, 0), where the painted mouth lines meet.
+ * An open mouth, drawn in a local frame placed at (x, y) and rotated by rot,
+ * that opens by growing out of the point (0, 0), where the painted mouth
+ * lines meet (the cat's "人").
  */
 export interface ScaledMouth {
-  mode: 'drop' | 'grow';
+  mode: 'grow';
   x: number;
   y: number;
   rot: number;
@@ -35,25 +34,18 @@ export interface ScaledMouth {
  */
 export interface FlapMouth {
   mode: 'flap';
+  lipColor?: string | undefined;
   frames: [MouthFrame, MouthFrame];
 }
 
 export interface MouthFrame {
   shape: string;
   tongue: string;
+  /** A lower lip below the opening, which moves down as the mouth opens; '' for none. */
+  lip: string;
 }
 
 export type MouthArt = ScaledMouth | FlapMouth;
-
-/** A 'drop' mouth w wide and h deep; `sag` bends its top edge to follow a curved smile. */
-function drop(x: number, y: number, rot: number, w: number, h: number, sag = 0): ScaledMouth {
-  const half = w / 2;
-  return {
-    x, y, rot, mode: 'drop',
-    shape: `M${-half} ${-sag} Q0 ${sag} ${half} ${-sag} Q${w * 0.42} ${h} 0 ${h} Q${-w * 0.42} ${h} ${-half} ${-sag} Z`,
-    tongue: `M${-w * 0.3} ${h * 0.81} Q0 ${h * 0.42} ${w * 0.3} ${h * 0.81} Q${w * 0.16} ${h * 0.99} 0 ${h * 0.99} Q${-w * 0.16} ${h * 0.99} ${-w * 0.3} ${h * 0.81} Z`,
-  };
-}
 
 type Pt = [number, number];
 
@@ -96,22 +88,24 @@ function poly(top: Pt[], bottom: Pt[]): string {
  * Lip-flap frames for a mouth whose painted lip line runs along `line`
  * (left to right, the mouth opening on the right-hand side of that direction,
  * which is below it). `half` and `open` are the depths at the middle.
+ * `lip` redraws a painted lower lip in that color below the opening.
  */
-function flap(line: Pt[], half: number, open: number): FlapMouth {
+function flap(line: Pt[], half: number, open: number, lip?: string): FlapMouth {
   const pts = resample(line, 25);
   const [a, b] = [6, 18];
   const frame = (depth: number, tongue: boolean): MouthFrame => {
     const bottom = offset(pts, depth);
-    if (!tongue) return { shape: poly(pts, bottom), tongue: '' };
+    const lipPath = lip ? poly(bottom, offset(pts, depth + 1.2)) : '';
+    if (!tongue) return { shape: poly(pts, bottom), tongue: '', lip: lipPath };
     // A rounded tongue resting on the bottom of the opening, in the middle.
     const lump = bottom.slice(a, b + 1).map((q, k): Pt => {
       const p = pts[a + k]!;
       const lift = 0.55 * Math.sin((Math.PI * k) / (b - a));
       return [q[0] + (p[0] - q[0]) * lift, q[1] + (p[1] - q[1]) * lift];
     });
-    return { shape: poly(pts, bottom), tongue: poly(lump, bottom.slice(a, b + 1)) };
+    return { shape: poly(pts, bottom), tongue: poly(lump, bottom.slice(a, b + 1)), lip: lipPath };
   };
-  return { mode: 'flap', frames: [frame(half, false), frame(open, true)] };
+  return { mode: 'flap', lipColor: lip, frames: [frame(half, false), frame(open, true)] };
 }
 
 export interface PortraitArt {
@@ -143,7 +137,8 @@ export const PORTRAIT_ART: Record<AvatarCharacter, PortraitArt> = {
       { lid: 'M42.8 48.4 C44 41.8 57.6 39.6 60.8 47.4 C59.6 51.8 55 53.8 51 53.8 C47 53.8 43.8 51.6 42.8 48.4 Z', line: 'M43.4 48.6 Q51.5 53 60.2 48' },
       { lid: 'M71.4 49 C71.4 42 76.2 36.4 83.2 41.6 C82.8 46.6 80.2 50.8 76.8 51 C74.6 51.1 72.6 50.4 71.4 49 Z', line: 'M72 48.8 Q78.4 49.6 82.6 43' },
     ],
-    mouth: drop(64.75, 65.7, -4.3, 6.6, 2.5),
+    // Her lip line, from the left corner to the upturned right one, with the pink lower lip under it.
+    mouth: flap([[60.6, 65.55], [62, 65.85], [64, 65.75], [66, 65.55], [68, 65.3], [69.5, 64.8], [71, 63.95], [71.8, 63.6]], 1.3, 2.6, '#F7B899'),
   },
   cat: {
     lidColor: '#FEFDF9',
@@ -165,8 +160,9 @@ export const PORTRAIT_ART: Record<AvatarCharacter, PortraitArt> = {
       { lid: 'M33.2 25.6 C33.8 20.8 41.6 19.8 44.6 26.6 C44.8 29.8 42.4 31.4 39.6 31.2 C36.4 31 33.4 28.8 33.2 25.6 Z', line: 'M34 26.4 Q39 30.6 44 27.4' },
       { lid: 'M61.6 37.4 C62.4 31 70.4 28.6 73.6 36.6 C74 39.8 72.4 41.4 69.4 41.4 C66 41.4 62.6 40.2 61.6 37.4 Z', line: 'M62.4 37.6 Q67.6 41 73 37.4' },
     ],
-    // The front upper lip, from under the nose round to the cheek.
-    mouth: flap([[43, 60.3], [45, 62.4], [47, 64.4], [49, 66.1], [51, 67.1], [53, 67.45], [55, 67.2], [57, 66.4], [58.4, 65.2], [59.4, 63.9]], 1.6, 3.4),
+    // The "ω" under the nose: the left lip in to the point under the nose,
+    // then down the front of the right lip. The lower jaw sits below it.
+    mouth: flap([[33.5, 60.3], [36, 60.6], [39, 60.2], [42, 59.7], [43.5, 60.8], [45, 62.3], [46.5, 63.9], [48, 65.3]], 2, 4),
   },
   robot: {
     lidColor: '#3A3C3F',

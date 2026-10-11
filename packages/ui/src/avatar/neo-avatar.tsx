@@ -4,7 +4,7 @@
  * blinking, leaning in, a talking mouth, thought bubble and alert marks).
  */
 import type { CSSProperties, ReactElement } from 'react';
-import { PORTRAIT_ART } from './art.js';
+import { PORTRAIT_ART, type FlapMouth } from './art.js';
 import {
   DEFAULT_AVATAR, luminance, normalizeAvatar, parseAvatar,
   type AvatarConfig, type AvatarState,
@@ -71,6 +71,21 @@ function StateMarks({ bg }: { bg: string }): ReactElement {
   );
 }
 
+/** Lip-flap frames over the painted mouth; the stylesheet shows one at a time while speaking. */
+function FlapMouthView({ mouth }: { mouth: FlapMouth }): ReactElement {
+  return (
+    <g className="neo-av-mouth-open neo-av-mouth--flap">
+      {mouth.frames.map((frame, i) => (
+        <g key={i} className={`neo-av-flap neo-av-flap-${i ? 'open' : 'half'}`}>
+          {frame.lip && <path d={frame.lip} fill={mouth.lipColor} />}
+          <path d={frame.shape} fill={MOUTH} />
+          {frame.tongue && <path d={frame.tongue} fill={TONGUE} />}
+        </g>
+      ))}
+    </g>
+  );
+}
+
 export function NeoAvatar(props: NeoAvatarProps): ReactElement {
   const { avatar, state = 'idle', size = 40, shape = 'circle', animated = true, title, className, style } = props;
 
@@ -113,16 +128,7 @@ export function NeoAvatar(props: NeoAvatarProps): ReactElement {
                 <path d={eye.line} fill="none" stroke={art.lineColor} strokeWidth={1} strokeLinecap="round" />
               </g>
             ))}
-            {art.mouth?.mode === 'flap' && (
-              <g className="neo-av-mouth-open neo-av-mouth--flap">
-                {art.mouth.frames.map((frame, i) => (
-                  <g key={i} className={`neo-av-flap neo-av-flap-${i ? 'open' : 'half'}`}>
-                    <path d={frame.shape} fill={MOUTH} />
-                    {frame.tongue && <path d={frame.tongue} fill={TONGUE} />}
-                  </g>
-                ))}
-              </g>
-            )}
+            {art.mouth?.mode === 'flap' && <FlapMouthView mouth={art.mouth} />}
             {art.mouth && art.mouth.mode !== 'flap' && (
               <g transform={`translate(${art.mouth.x} ${art.mouth.y}) rotate(${art.mouth.rot})`}>
                 <g className={`neo-av-mouth-open neo-av-mouth--${art.mouth.mode}`}>
