@@ -9,13 +9,13 @@ const SENSITIVE_LABEL = '(a sensitive memory)';
 
 export function createMemoryTools(memory: MemoryService) {
   /** id → label of memories this process has seen, so confirmations can name them synchronously. */
-  const labels = new Map<string, string>();
-  const remember = (n: Pick<MemoryNode, 'id' | 'label'>) => {
+  const labels = new Map<string, Pick<MemoryNode, 'label' | 'sensitivity'>>();
+  const remember = (n: Pick<MemoryNode, 'id' | 'label' | 'sensitivity'>) => {
     labels.delete(n.id);
-    labels.set(n.id, n.label);
+    labels.set(n.id, { label: n.label, sensitivity: n.sensitivity });
     if (labels.size > 2000) labels.delete(labels.keys().next().value as string);
   };
-  const shown = (n: MemoryNode, allowSensitive: boolean) => (n.sensitivity === 'sensitive' && !allowSensitive ? SENSITIVE_LABEL : n.label);
+  const shown = (n: Pick<MemoryNode, 'label' | 'sensitivity'>, allowSensitive: boolean) => (n.sensitivity === 'sensitive' && !allowSensitive ? SENSITIVE_LABEL : n.label);
 
   const rememberTool = defineTool({
     name: 'remember',
@@ -60,6 +60,7 @@ export function createMemoryTools(memory: MemoryService) {
         output: { id: node.id, label: node.label, kind: node.kind, status: node.status, ...(pending ? { note: 'Waiting for the user to approve it.' } : {}) },
         ui,
         summary: pending ? `Asked to remember “${clip(node.label, 60)}”` : `Remembered “${clip(node.label, 60)}”`,
+        ...(node.sensitivity === 'sensitive' ? { sensitive: true } : {}),
       };
     },
   });
@@ -119,7 +120,7 @@ export function createMemoryTools(memory: MemoryService) {
     defaultPermission: 'confirm',
     describeCall: (input) => {
       if (input.ids?.length) {
-        const named = input.ids.map((id) => labels.get(id));
+        const named = input.ids.map((id) => labels.get(id)?.label);
         if (named.every((l) => l !== undefined)) return `Forget ${named.map((l) => `“${clip(l as string, 60)}”`).join(', ')}`;
         return `Forget ${input.ids.length} memor${input.ids.length === 1 ? 'y' : 'ies'}${named.some(Boolean) ? ` (${named.filter(Boolean).map((l) => `“${clip(l as string, 40)}”`).join(', ')}…)` : ''}`;
       }
@@ -128,23 +129,26 @@ export function createMemoryTools(memory: MemoryService) {
     async execute(input, ctx) {
       let ids: string[];
       let forgotten: string[];
+      let sensitive = false;
       if (input.ids?.length) {
         ids = [...new Set(input.ids)];
         const details = await Promise.all(ids.map((id) => memory.get(id).catch(() => null)));
         forgotten = ids.map((id, i) => {
-          const n = details[i]?.node;
-          return n ? shown(n, ctx.allowSensitive) : (labels.get(id) ?? id);
+          const n = details[i]?.node ?? labels.get(id);
+          if (n?.sensitivity === 'sensitive' && ctx.allowSensitive) sensitive = true;
+          return n ? shown(n, ctx.allowSensitive) : id;
         });
       } else {
         const found = await memory.findForForget(input.query as string, 20);
         if (!found.length) return { output: { forgotten: [], note: `No memories match “${input.query}”.` }, summary: 'Nothing to forget' };
         ids = found.map((n) => n.id);
         forgotten = found.map((n) => shown(n, ctx.allowSensitive));
+        sensitive = ctx.allowSensitive && found.some((n) => n.sensitivity === 'sensitive');
       }
       const deleted = await memory.forget(ids);
       for (const id of ids) labels.delete(id);
       if (deleted === 0) throw new NeoError('not_found', 'None of those memories exist (already forgotten?).');
-      return { output: { forgotten }, summary: `Forgot ${deleted} memor${deleted === 1 ? 'y' : 'ies'}` };
+      return { output: { forgotten }, summary: `Forgot ${deleted} memor${deleted === 1 ? 'y' : 'ies'}`, ...(sensitive ? { sensitive: true } : {}) };
     },
   });
 

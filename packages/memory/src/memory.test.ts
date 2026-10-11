@@ -8,7 +8,7 @@
  *  - fake LLMs implementing ChatModel
  */
 import { describe, it, expect } from 'vitest';
-import type { ChatRequest, ChatStreamEvent, ChatModel, ObservedTurn, RememberInput } from '@neo/protocol';
+import type { ChatRequest, ChatStreamEvent, ChatModel, ObservedTurn, RememberInput, ToolDefinition } from '@neo/protocol';
 import { silentLogger, newId, DEFAULT_MEMORY_POLICY } from '@neo/protocol';
 import { openNeoDatabase } from '@neo/storage';
 import {
@@ -21,6 +21,7 @@ import {
 } from './index.js';
 import { reinforceStability } from './utils.js';
 import { parseLenientJson } from './extract.js';
+import { createMemoryTools } from '../../tools/src/builtins/memory.js';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -1305,6 +1306,51 @@ describe('heuristicExtract does not extract forget commands (F04)', () => {
 });
 
 describe('observe: forget tool result prevents heuristic re-creation (F04)', () => {
+  it.each([
+    'Forget that I live in Paris.',
+    "Don't remember that I live in Paris.",
+    'Delete the fact that I live in Paris.',
+    '忘掉我住在Paris。',
+    '请忘掉我住在Paris。',
+    '忘掉我住在巴黎。',
+    'Forget that I live in Paris（巴黎）.',
+  ])('does not restore a fact deleted by the real forget tool: %s', async (text) => {
+    const { svc, db } = makeTestService();
+    try {
+      const node = await svc.remember({ kind: 'fact', content: 'The user lives in Paris.' });
+      const tools: ToolDefinition[] = createMemoryTools(svc);
+      const forget = tools.find((tool) => tool.name === 'forget')!;
+      const result = await forget.execute({ ids: [node.id] }, {
+        toolCallId: 'call_fgt', conversationId: 'conv_f04', signal: new AbortController().signal,
+        now: () => 1_000_000_000_000, timezone: 'UTC', locale: 'en', allowSensitive: true,
+        origin: 'model', logger: silentLogger,
+      });
+      const turn = makeForgotTurn(text, []);
+      turn.assistantMessage.parts[1] = { type: 'tool_result', toolCallId: 'call_fgt', name: 'forget', ...result };
+      await svc.observe(turn);
+      expect(await svc.search({ query: 'Paris' })).toMatchObject({ items: [], total: 0 });
+      expect(await svc.search({ query: '巴黎' })).toMatchObject({ items: [], total: 0 });
+      expect((await svc.stats()).total).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps ordinary statements using forget in offline extraction', async () => {
+    const { svc, db } = makeTestService();
+    try {
+      const result = await svc.observe(makeTurn('I often forget my keys.', 'I can help with reminders.'));
+      expect(result.created).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'episode', content: 'User: I often forget my keys.' }),
+      ]));
+      expect(heuristicExtract('I often forget my keys. I live in Oslo.')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'fact', content: 'The user lives in Oslo.' }),
+      ]));
+    } finally {
+      db.close();
+    }
+  });
+
   /** Build a turn where the user says forget and the forget tool succeeded. */
   function makeForgotTurn(userText: string, forgottenLabels: string[], now = 1_000_000_000_000): ObservedTurn {
     const convId = 'conv_f04';
@@ -1361,8 +1407,8 @@ describe('observe: forget tool result prevents heuristic re-creation (F04)', () 
     });
     const { svc } = makeTestService(makeFakeLLM(llmRecreates));
     const statsBefore = await svc.stats();
-    // Forget tool just deleted "The user lives in Paris." — forgotten label matches LLM re-creation
-    const turn = makeForgotTurn('Forget that I live in Paris.', ['The user lives in Paris.']);
+    // The forget tool reports node labels (not content), as the real tool does for this memory.
+    const turn = makeForgotTurn('Forget that I live in Paris.', ['Home city']);
     await svc.observe(turn);
     const statsAfter = await svc.stats();
     // No new memory should have been created
@@ -1373,41 +1419,100 @@ describe('observe: forget tool result prevents heuristic re-creation (F04)', () 
 // ─── F11: policy re-check before committing ────────────────────────────────────
 
 describe('observe: policy is rechecked before writing (F11)', () => {
-  it('returns skipped when memory is turned off during extraction', async () => {
-    let callCount = 0;
-    // LLM that turns memory off after being called once (simulating async gap)
-    const llm: import('@neo/protocol').ChatModel = {
+  async function pausedObservation() {
+    const db = openNeoDatabase(':memory:');
+    const hashing = new HashingEmbedder(256);
+    let entered!: () => void;
+    let release!: () => void;
+    const embeddingStarted = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const embedder = {
+      id: hashing.id, dimensions: hashing.dimensions, isLocal: true,
+      async embed(texts: string[]) {
+        if (texts.some((text) => text.startsWith('fact: Race test.'))) {
+          entered();
+          await gate;
+        }
+        return hashing.embed(texts);
+      },
+    };
+    const svc = createMemoryService({
+      db, embedder,
+      llm: () => ({ model: makeFakeLLM(JSON.stringify({
+        episode: { label: 'Meeting Mira', summary: 'The user met Mira.' },
+        memories: [{ op: 'create', kind: 'fact', label: 'Race test', content: 'The user met Mira.', entities: ['Mira'] }],
+        links: [],
+      })), name: 'fake', isLocal: true }),
+      logger: silentLogger,
+    });
+    const pending = svc.observe(makeTurn('I met Mira yesterday.', 'How was your meeting?'));
+    await embeddingStarted;
+    expect((await svc.stats()).total).toBe(0);
+    return { svc, db, pending, release };
+  }
+
+  it('drops an observation when memory is turned off during embedding', async () => {
+    const { svc, db, pending, release } = await pausedObservation();
+    try {
+      svc.setPolicy({ ...svc.getPolicy(), mode: 'off' });
+      release();
+      expect((await pending).skipped).toBe('memory was disabled after extraction');
+      expect((await svc.stats()).total).toBe(0);
+    } finally { release(); await pending; db.close(); }
+  });
+
+  it('makes the episode, fact and entity pending when approve mode is selected during embedding', async () => {
+    const { svc, db, pending, release } = await pausedObservation();
+    try {
+      svc.setPolicy({ ...svc.getPolicy(), mode: 'approve' });
+      release();
+      const result = await pending;
+      expect(result.created).toEqual([]);
+      expect(result.pending.map((node) => node.kind).sort()).toEqual(['episode', 'fact']);
+      expect(result.pending.every((node) => node.status === 'pending')).toBe(true);
+      const stored = (await svc.search({})).items;
+      expect(stored.map((node) => node.kind).sort()).toEqual(['entity', 'episode', 'fact']);
+      expect(stored.every((node) => node.status === 'pending')).toBe(true);
+      expect((await svc.recall({ text: 'Mira', reinforce: false })).items).toEqual([]);
+    } finally { release(); await pending; db.close(); }
+  });
+
+  it.each([
+    { blockedTopics: ['Mira'] },
+    { allowedKinds: ['preference'] as const },
+    { sendSensitiveToCloud: true },
+  ])('drops an observation when extraction rules change during embedding: %j', async (change) => {
+    const { svc, db, pending, release } = await pausedObservation();
+    try {
+      svc.setPolicy({ ...svc.getPolicy(), ...change, allowedKinds: [...(change.allowedKinds ?? svc.getPolicy().allowedKinds)] });
+      release();
+      expect((await pending).skipped).toBe('memory settings changed during extraction');
+      expect((await svc.stats()).total).toBe(0);
+    } finally { release(); await pending; db.close(); }
+  });
+});
+
+describe('observe: private replay metadata protects cloud extraction (F02)', () => {
+  it.each(['user', 'assistant', 'tool_result'] as const)('keeps a flagged %s on the device without a surviving source memory', async (flag) => {
+    const db = openNeoDatabase(':memory:');
+    let calls = 0;
+    const model: ChatModel = {
       async *chat() {
-        callCount++;
-        yield { type: 'text', text: JSON.stringify({ episode: null, memories: [{ op: 'create', kind: 'fact', label: 'Test', content: 'Test fact', importance: 0.5 }], links: [] }) };
+        calls++;
+        yield { type: 'text', text: JSON.stringify({ episode: null, memories: [], links: [] }) };
         yield { type: 'done', stopReason: 'end' };
       },
     };
-    const { svc } = makeTestService(llm);
-
-    // Intercept the policy check by setting mode to 'off' before we call observe.
-    // The real race is between embedding and the transaction; we simulate it by
-    // pre-setting 'off' so the recheck at the start of section 4 fires.
-    svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'off' });
-    const statsBefore = await svc.stats();
-    const result = await svc.observe(makeTurn('My name is Alice.', 'Nice to meet you, Alice.'));
-    const statsAfter = await svc.stats();
-    expect(result.skipped).toBeTruthy();
-    expect(statsAfter.total).toBe(statsBefore.total);
-    expect(callCount).toBe(0); // mode=off skips LLM entirely
-  });
-
-  it('routes to pending when mode is switched to approve before writing', async () => {
-    // This test simulates the race by starting with 'on' but switching to 'approve'
-    // before observe completes. We do it by setting 'approve' before calling observe.
-    const { svc } = makeTestService(makeEmptyLLM());
-    svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'approve' });
-    const node = await svc.remember({ kind: 'fact', label: 'Race test', content: 'Race content', importance: 0.5 });
-    expect(node.status).toBe('pending');
-    // Approve mode is enforced by the initial policy capture, ensuring consistency.
-    const all = await svc.recall({ text: 'Race test', limit: 5, reinforce: false });
-    // Pending nodes should not be returned by recall
-    expect(all.items.some((r) => r.node.status === 'pending')).toBe(false);
+    const svc = createMemoryService({ db, llm: () => ({ model, name: 'cloud', isLocal: false }), logger: silentLogger });
+    try {
+      const turn = makeTurn('Tell me a little more about yesterday.', 'The private word was orchid.');
+      if (flag === 'user') turn.userMessage.sensitive = true;
+      else if (flag === 'assistant') turn.assistantMessage.sensitive = true;
+      else turn.assistantMessage.parts.push({ type: 'tool_result', toolCallId: 'forgotten', name: 'forget', sensitive: true, output: { forgotten: ['Orchid'] } });
+      const result = await svc.observe(turn);
+      expect(calls).toBe(0);
+      expect(result.created).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'episode', sensitivity: 'sensitive' })]));
+    } finally { db.close(); }
   });
 });
 

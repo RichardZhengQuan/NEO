@@ -115,6 +115,10 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
       } catch { return null; }
     };
     const memory = createMemoryService({ db, embedder, llm, policy: initial.memory, clock, logger });
+    const refreshEmbeddingProvider = (providerId: string): void => {
+      const embedding = settings.get().embedding;
+      if (embedding?.provider === providerId) memory.setEmbedder(buildEmbedder(embedding));
+    };
     const stores = createProductivityStores(db, { clock, defaultTimezone: initial.timezone });
     const tools = createToolRegistry({ permissions: initial.tools.permissions, logger });
     for (const tool of createBuiltinTools({ stores, memory, webSearch: config.webSearch, allowPrivateNetwork: config.mode === 'local', clock })) {
@@ -203,7 +207,7 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
       }
       return closePromise;
     }
-    return { config, logger, clock, ownerToken, db, conversations, settings, secrets, devices, push, providerConfigs, providers, memory, tools, stores, scheduler, runtime, events, notifier, close };
+    return { config, logger, clock, ownerToken, db, conversations, settings, secrets, devices, push, providerConfigs, providers, refreshEmbeddingProvider, memory, tools, stores, scheduler, runtime, events, notifier, close };
   } catch (err) {
     scheduler?.stop();
     for (const unsubscribe of subscriptions) unsubscribe();

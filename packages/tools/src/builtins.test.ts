@@ -58,7 +58,7 @@ function fakeMemory(opts: { pending?: boolean; recall?: boolean } = {}) {
     },
     async remember(input: RememberInput) {
       calls.push({ method: 'remember', args: input });
-      const m = node(`mem_${++n}`, input.label ?? input.content.slice(0, 40), { content: input.content, status: opts.pending ? 'pending' : 'active' });
+      const m = node(`mem_${++n}`, input.label ?? input.content.slice(0, 40), { content: input.content, status: opts.pending ? 'pending' : 'active', sensitivity: input.sensitivity ?? 'normal' });
       nodes.set(m.id, m);
       return m;
     },
@@ -340,6 +340,30 @@ describe('note tools', () => {
 });
 
 describe('memory tools', () => {
+  it('flags outputs of remember, recall and forget when they carry sensitive memory text', async () => {
+    const t = setup();
+    const remembered = await t.run('remember', { content: 'Private atlas project', sensitivity: 'sensitive' }, { allowSensitive: true });
+    expect(remembered.sensitive).toBe(true);
+    const recalled = await t.run('recall', { query: 'atlas' }, { allowSensitive: true });
+    expect(recalled.sensitive).toBe(true);
+    const forgotten = await t.run('forget', { query: 'atlas' }, { allowSensitive: true });
+    expect(forgotten.sensitive).toBe(true);
+    expect(forgotten.output).toMatchObject({ forgotten: ['Private atlas project'] });
+    const normal = await t.run('remember', { content: 'Likes tea' });
+    expect(normal.sensitive).not.toBe(true);
+    expect((await t.run('recall', { query: 'tea' })).sensitive).not.toBe(true);
+  });
+
+  it.each([false, true])('protects cached sensitive labels during forget when details are unavailable (allowed=%s)', async (allowSensitive) => {
+    const t = setup();
+    const remembered = await t.run('remember', { content: 'Private atlas project', sensitivity: 'sensitive' });
+    const id = (remembered.output as { id: string }).id;
+    t.mem.memory.get = async () => null;
+    const forgotten = await t.run('forget', { ids: [id] }, { allowSensitive });
+    expect(forgotten.output).toMatchObject({ forgotten: [allowSensitive ? 'Private atlas project' : '(a sensitive memory)'] });
+    expect(forgotten.sensitive === true).toBe(allowSensitive);
+  });
+
   it('remember: tool source with conversation id, memory card with pending status', async () => {
     const t = setup({ pending: true });
     const res = await t.run('remember', { content: 'The user is allergic to peanuts', label: 'Peanut allergy', kind: 'fact', importance: 0.9 });

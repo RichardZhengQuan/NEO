@@ -1,5 +1,5 @@
 # ─── Stage 1: build ───────────────────────────────────────────────────────────
-# Installs all deps, builds every package, then prunes to production deps.
+# Installs build dependencies, then creates a production deployment bundle.
 FROM node:22-slim AS builder
 
 # Install corepack and pin pnpm version.
@@ -60,9 +60,9 @@ RUN pnpm -r --filter @neo/protocol build \
  && pnpm -r --filter @neo/cli       build
 
 # ── Create a self-contained production deployment for the CLI ──
-# pnpm deploy bundles the CLI and ALL its transitive workspace + external
-# dependencies into /prod with a flat node_modules, so the runtime stage needs
-# no pnpm, no workspace layout, and no virtual-store symlinks. --legacy because
+# pnpm deploy bundles the CLI and all its transitive workspace + external
+# dependencies into /prod, so the runtime stage needs no pnpm or source workspace.
+# Dependency links stay inside the deployed bundle. --legacy because
 # pnpm >=10 only deploys injected workspaces by default.
 RUN pnpm --filter @neo/cli deploy --prod --legacy /prod
 
@@ -71,13 +71,13 @@ RUN pnpm --filter @neo/cli deploy --prod --legacy /prod
 FROM node:22-slim AS runtime
 
 # Create a non-root user.
-RUN groupadd --system neo && useradd --system --gid neo --home /app neo
+RUN groupadd --system neo && useradd --system --gid neo --home /app neo \
+ && mkdir -p /data && chown neo:neo /data
 
 WORKDIR /app
 
 # ── Copy the self-contained CLI bundle ──
-# /prod contains dist/, node_modules/ (all deps flattened) and package.json —
-# no workspace symlinks, no .pnpm virtual store required.
+# /prod contains dist/, node_modules/ (including its dependency links) and package.json.
 COPY --from=builder --chown=neo:neo /prod ./
 
 # ── Copy the web app static build (served via NEO_WEB_DIR) ──

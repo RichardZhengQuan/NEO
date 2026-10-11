@@ -81,6 +81,7 @@ export function toChatMessages(messages: readonly Message[], options: ToChatOpti
 
 function splitAssistant(parts: readonly ContentPart[], options: ToChatOptions, msgSensitive?: boolean): ChatMessage[] {
   const omit = options.omitSensitiveContext === true;
+  const omitAssistant = omit && msgSensitive === true;
   const entries: ChatMessage[] = [];
   let assistant: ContentPart[] = [];
   let results: ToolResultPart[] = [];
@@ -92,8 +93,10 @@ function splitAssistant(parts: readonly ContentPart[], options: ToChatOptions, m
     const byId = new Map(results.map((r) => [r.toolCallId, r]));
     const closed: ToolResultPart[] = pendingCalls.map((c) => {
       const r = byId.get(c.id) ?? { type: 'tool_result', toolCallId: c.id, name: c.name, output: CANCELLED_RESULT, isError: true };
-      // Redact sensitive tool results for cloud models.
-      if (omit && r.sensitive) return { ...r, output: SENSITIVE_TOOL_PLACEHOLDER, sensitive: undefined };
+      // Arguments, summaries and other outputs of a private-derived turn may quote the same memory.
+      if (omitAssistant || (omit && r.sensitive)) {
+        return { type: 'tool_result', toolCallId: r.toolCallId, name: r.name, output: SENSITIVE_TOOL_PLACEHOLDER, ...(r.isError ? { isError: true } : {}) };
+      }
       return r;
     });
     // Results without a matching call in this step (should not happen) are dropped: they would be rejected by providers.
@@ -109,13 +112,13 @@ function splitAssistant(parts: readonly ContentPart[], options: ToChatOptions, m
       case 'reasoning':
         if (results.length) flush();
         // Reasoning from a sensitive-derived turn may quote private memories too.
-        if (!options.dropReasoning && !(omit && msgSensitive)) assistant.push(p);
+        if (!options.dropReasoning && !omitAssistant) assistant.push(p);
         break;
       case 'text':
         if (results.length) flush();
         if (p.text) {
           // Replace all text from a sensitive-derived assistant turn with one placeholder.
-          if (omit && msgSensitive) {
+          if (omitAssistant) {
             if (!assistantPlaceholderEmitted) {
               assistant.push({ type: 'text', text: SENSITIVE_ASSISTANT_PLACEHOLDER });
               assistantPlaceholderEmitted = true;
@@ -127,7 +130,7 @@ function splitAssistant(parts: readonly ContentPart[], options: ToChatOptions, m
         break;
       case 'tool_call':
         if (results.length) flush();
-        assistant.push(p);
+        assistant.push(omitAssistant ? { type: 'tool_call', id: p.id, name: p.name, input: {} } : p);
         pendingCalls.push(p);
         break;
       case 'tool_result':

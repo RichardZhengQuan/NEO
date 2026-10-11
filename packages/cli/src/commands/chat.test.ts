@@ -7,7 +7,20 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Conversation } from '@neo/protocol';
 import type { NeoClient } from '@neo/client';
-import { handleSlash, type SlashContext } from './chat.js';
+import { handleSlash, runChat, type SlashContext } from './chat.js';
+
+const repl = vi.hoisted(() => ({
+  listeners: new Map<string, (...args: any[]) => Promise<void> | void>(),
+  client: { conversations: { create: vi.fn(), stream: vi.fn() } },
+}));
+
+vi.mock('@neo/client', () => ({ NeoClient: vi.fn(function () { return repl.client; }) }));
+vi.mock('node:readline/promises', () => ({
+  createInterface: () => ({
+    on: (name: string, handler: (...args: any[]) => Promise<void> | void) => repl.listeners.set(name, handler),
+    setPrompt: vi.fn(), prompt: vi.fn(), pause: vi.fn(), resume: vi.fn(),
+  }),
+}));
 
 // Minimal fake readline that satisfies handleSlash's usage (only question() is called for /forget).
 const fakeRl = {
@@ -42,6 +55,28 @@ function makeCtx(overrides: Partial<SlashContext> = {}): SlashContext {
 }
 
 describe('/new slash command — shared session context', () => {
+  it('the real REPL line handler streams the next message to the new incognito conversation', async () => {
+    const original = makeConv('conv-original');
+    const incognito = { ...makeConv('conv-incognito'), incognito: true };
+    repl.listeners.clear();
+    repl.client.conversations.create.mockReset().mockResolvedValueOnce(original).mockResolvedValueOnce(incognito);
+    repl.client.conversations.stream.mockReset().mockImplementation(async function* () {});
+    const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    try {
+      await runChat({ server: 'http://fixture.test', token: 'fixture-token' });
+      const line = repl.listeners.get('line')!;
+      await line('/new --incognito');
+      await line('Keep this conversation private.');
+      expect(repl.client.conversations.create).toHaveBeenLastCalledWith({ incognito: true });
+      expect(repl.client.conversations.stream).toHaveBeenCalledWith(
+        incognito.id, { text: 'Keep this conversation private.', model: undefined }, expect.any(AbortSignal),
+      );
+      expect(repl.client.conversations.stream).not.toHaveBeenCalledWith(original.id, expect.anything(), expect.anything());
+    } finally {
+      output.mockRestore();
+    }
+  });
+
   it('updates ctx.conv so the next message streams to the new conversation', async () => {
     const newConv = makeConv('conv-new-123');
     const mockClient = {

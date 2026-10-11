@@ -602,6 +602,8 @@ function rememberedThisTurn(ctx: MemoryContext, assistant: Message): MemoryNode[
  * remember tool stored a sensitive memory in it.
  */
 function turnTouchesSensitive(ctx: MemoryContext, turn: ObservedTurn, written: readonly MemoryNode[]): boolean {
+  if (turn.userMessage.sensitive || turn.assistantMessage.sensitive) return true;
+  if (turn.assistantMessage.parts.some((p) => p.type === 'tool_result' && p.sensitive === true)) return true;
   if (turn.userMessage.parts.some((p) => p.type === 'context' && p.sensitive === true)) return true;
   if (written.some((n) => n.sensitivity === 'sensitive')) return true;
   const recalledIds = memoryIds(

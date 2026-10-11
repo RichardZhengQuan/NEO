@@ -50,6 +50,7 @@ function context(over: Partial<EventContext> = {}) {
     debounce: (_key, fn) => fn(),
     ...over,
   };
+  useSession.setState({ client: ctx.client });
   return { ctx, client };
 }
 

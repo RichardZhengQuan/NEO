@@ -7,7 +7,7 @@ import { PROVIDER_PRESETS, type ProviderKind, type ProviderTestResult, type Prov
 import { Badge, Button, Icon, IconButton, Select, Spinner, TextField, useT } from '@neo/ui';
 import { errorMessage } from '../lib/errors.js';
 import { openLink } from '../actions/links.js';
-import { loadModels, loadProviders, requireClient } from '../state/session.js';
+import { currentSessionEpoch, isCurrentSession, loadModels, loadProviders, requireClient } from '../state/session.js';
 import { providerLabel } from './ModelPicker.js';
 
 export const PRESET_ORDER: ProviderKind[] = ['anthropic', 'openai', 'gemini', 'ollama', 'openai-compatible', 'mock'];
@@ -119,6 +119,7 @@ export function ProviderSetup(props: {
   };
 
   const create = async () => {
+    const epoch = currentSessionEpoch();
     if (!kind || !preset) return;
     setSaving(true);
     setError(null);
@@ -137,7 +138,9 @@ export function ProviderSetup(props: {
           ...(preset.defaultModel ? { defaultModel: preset.defaultModel } : {}),
         });
       }
+      if (!isCurrentSession(epoch)) return;
       await loadProviders().catch(() => undefined);
+      if (!isCurrentSession(epoch)) return;
       await chooseModel(p);
     } catch (err) {
       setError(errorMessage(err, t));
@@ -147,6 +150,7 @@ export function ProviderSetup(props: {
   };
 
   const finish = async () => {
+    const epoch = currentSessionEpoch();
     if (!provider || !model) return;
     setSaving(true);
     try {
@@ -155,7 +159,7 @@ export function ProviderSetup(props: {
           .providers.update(provider.id, { defaultModel: model })
           .catch(() => undefined);
       }
-      await onDone({ provider, model });
+      if (isCurrentSession(epoch)) await onDone({ provider, model });
     } catch (err) {
       setError(errorMessage(err, t));
     } finally {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ChatMessage, ChatRequest, ProviderConfig } from '@neo/protocol';
+import { toolInputJsonSchema, type ChatMessage, type ChatRequest, type ProviderConfig, type MemoryService, type ProductivityStores } from '@neo/protocol';
+import { createBuiltinTools } from '../../tools/src/builtins/index.js';
 import { GeminiAdapter, sanitizeGeminiSchema } from './gemini.js';
 import { collect, dataFrames, fakeFetch, jsonResponse, ofType, recordingSleep, sseResponse, textOfEvents, type FakeResponder } from './testing/http.js';
 
@@ -187,87 +188,46 @@ describe('sanitizeGeminiSchema', () => {
 });
 
 // ── Built-in tool schema coverage ──────────────────────────────────────────────
-// These schemas are the JSON Schema representations that toolInputJsonSchema()
-// produces for the actual built-in tools in @neo/tools (inlined here to avoid a
-// package-dep cycle between providers and tools). Every array in the sanitized
-// output must have an `items` key — Gemini's OpenAPI schema contract requires it.
 
-function collectArraysMissingItems(schema: unknown, path = ''): string[] {
-  if (typeof schema !== 'object' || schema === null) return [];
-  const s = schema as Record<string, unknown>;
-  const missing: string[] = [];
-  if (s['type'] === 'array' && s['items'] === undefined) {
-    missing.push(path || '(root)');
+function checkDeclaration(schema: unknown, path: string): void {
+  expect(schema, path).toBeTypeOf('object');
+  expect(schema, path).not.toBeNull();
+  const node = schema as Record<string, unknown>;
+  const supported = new Set([
+    'type', 'title', 'description', 'nullable', 'format', 'enum', 'properties', 'required', 'items', 'anyOf',
+    'minItems', 'maxItems', 'minProperties', 'maxProperties', 'minLength', 'maxLength', 'pattern', 'minimum', 'maximum',
+  ]);
+  for (const key of Object.keys(node)) expect(supported.has(key), `${path}.${key}`).toBe(true);
+  if (node['type'] === 'array') {
+    expect(node['items'], `${path}.items`).toBeDefined();
+    checkDeclaration(node['items'], `${path}.items`);
   }
-  for (const [key, value] of Object.entries(s)) {
-    if (key === 'items' || key === 'properties') {
-      if (key === 'items') {
-        missing.push(...collectArraysMissingItems(value, `${path}.items`));
-      } else if (typeof value === 'object' && value !== null) {
-        for (const [prop, propSchema] of Object.entries(value as Record<string, unknown>)) {
-          missing.push(...collectArraysMissingItems(propSchema, `${path}.${prop}`));
-        }
-      }
-    }
+  for (const [name, child] of Object.entries((node['properties'] ?? {}) as Record<string, unknown>)) {
+    checkDeclaration(child, `${path}.properties.${name}`);
   }
-  return missing;
+  if (Array.isArray(node['anyOf'])) node['anyOf'].forEach((child, i) => checkDeclaration(child, `${path}.anyOf.${i}`));
 }
 
-// Representative inputSchema JSON for every built-in tool that carries arrays.
-// Derived from the Zod definitions in packages/tools/src/builtins/*.ts after
-// running z.toJSONSchema(schema, { io: 'input', unrepresentable: 'any' }).
-const BUILTIN_TOOL_SCHEMAS: Record<string, Record<string, unknown>> = {
-  // render_ui: blocks is z.array(z.record(z.string(), z.unknown())) — free-form object items.
-  render_ui: {
-    type: 'object',
-    properties: {
-      blocks: {
-        type: 'array',
-        items: { type: 'object', additionalProperties: {} },
-        minItems: 1,
-        maxItems: 20,
-        description: 'UI blocks, each an object with a "type".',
-      },
-    },
-    required: ['blocks'],
-  },
-  // web_fetch: headers is additionalProperties — becomes a free-form object (not an array, but kept for completeness).
-  web_fetch: {
-    type: 'object',
-    properties: {
-      url: { type: 'string' },
-      method: { type: 'string' },
-      headers: { type: 'object', additionalProperties: { type: 'string' } },
-    },
-    required: ['url'],
-  },
-  // create_reminder: recurrence.byWeekday is an array of integers.
-  create_reminder: {
-    type: 'object',
-    properties: {
-      title: { type: 'string' },
-      when: { type: 'string' },
-      recurrence: {
-        type: 'object',
-        properties: {
-          freq: { type: 'string' },
-          byWeekday: { type: 'array', items: { type: 'integer' } },
-          byMonthDay: { type: 'array', items: { type: 'integer' } },
-        },
-      },
-    },
-    required: ['title', 'when'],
-  },
-};
-
-describe('built-in tool schemas: every array has items after sanitization (F07)', () => {
-  for (const [toolName, rawSchema] of Object.entries(BUILTIN_TOOL_SCHEMAS)) {
-    it(`${toolName} — no array is missing items`, () => {
-      const sanitized = sanitizeGeminiSchema(rawSchema);
-      const missing = collectArraysMissingItems(sanitized);
-      expect(missing, `Arrays without items in ${toolName}: ${missing.join(', ')}`).toEqual([]);
+describe('built-in Gemini declarations (F07)', () => {
+  it('emits every real built-in schema with items on every array and only supported keywords', async () => {
+    // Schema generation never executes a tool; enable web_search to include the optional built-in too.
+    const builtins = createBuiltinTools({
+      stores: {} as ProductivityStores,
+      memory: {} as MemoryService,
+      webSearch: { provider: 'brave', apiKey: 'fixture' },
     });
-  }
+    const tools = builtins.map((tool) => ({
+      name: tool.name, description: tool.description, inputSchema: toolInputJsonSchema(tool.inputSchema),
+    }));
+    const { a, f } = make(okReply);
+    await collect(a.chat(req({ tools })));
+    const declarations = (f.calls[0]!.body!['tools'] as { functionDeclarations: { name: string; parameters?: unknown }[] }[])[0]!.functionDeclarations;
+    expect(declarations.map((d) => d.name)).toEqual(builtins.map((tool) => tool.name));
+    expect(declarations.map((d) => d.name)).toContain('web_search');
+    for (const declaration of declarations) {
+      if (declaration.parameters !== undefined) checkDeclaration(declaration.parameters, declaration.name);
+    }
+  });
 });
 
 describe('Gemini streaming', () => {

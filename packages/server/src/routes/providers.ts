@@ -103,6 +103,7 @@ export function registerProviders(app: Hono, services: NeoServices): void {
     const { apiKey, ...rest } = body;
     const config: ProviderConfig = { ...rest, id, ...(apiKey !== undefined ? { apiKeySecret: apiKey ? `provider:${id}` : undefined } : {}) };
     const saved = save(config, apiKey, null);
+    services.refreshEmbeddingProvider?.(id);
 
     // Set as default model if no default exists yet
     const currentSettings = settings.get();
@@ -131,6 +132,7 @@ export function registerProviders(app: Hono, services: NeoServices): void {
     const { apiKey, ...rest } = body;
     const patch: Partial<ProviderConfig> = { ...rest, ...(apiKey !== undefined ? { apiKey: undefined, apiKeySecret: apiKey ? `provider:${id}` : undefined } : {}) };
     const updated = save({ ...existing, ...patch }, apiKey, existing);
+    services.refreshEmbeddingProvider?.(id);
 
     return c.json(toView(updated, secrets));
   });
@@ -151,6 +153,7 @@ export function registerProviders(app: Hono, services: NeoServices): void {
     for (const name of secrets.list()) {
       if (name.startsWith(`provider:${id}:header:`)) secrets.delete(name);
     }
+    services.refreshEmbeddingProvider?.(id);
 
     // Clear default model/memory model if pointing at this provider
     const currentSettings = settings.get();
@@ -191,7 +194,7 @@ export function registerProviders(app: Hono, services: NeoServices): void {
       apiKey: body.apiKey,
       headers: body.headers,
       enabled: true,
-    }, { logger: services.logger, resolveSecret: (name) => secrets.get(name) });
+    }, { logger: services.logger });
     const result = await adapter.test();
     return c.json(result);
   });

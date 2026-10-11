@@ -95,6 +95,11 @@ docker compose up -d --remove-orphans
 
 Data persists in the `neo_data` Docker volume across upgrades.
 
+The image runs the deployed CLI at `/app/dist/index.js` with its production
+dependencies in `/app/node_modules`. The web build stays at
+`/app/apps/web/dist` (`NEO_WEB_DIR`); the fresh `/data` volume is owned by the
+non-root `neo` user. Compose uses these same paths.
+
 ---
 
 ## 3. Self-hosted — Bare Node + systemd

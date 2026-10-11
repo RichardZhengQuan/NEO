@@ -232,11 +232,11 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
   };
 }
 
-/** Text the user contributed in this turn (text parts + ui_event descriptions). */
 function containsSensitive(message: Message): boolean {
   return message.sensitive === true || message.parts.some((p) => (p.type === 'context' || p.type === 'tool_result') && p.sensitive === true);
 }
 
+/** Text the user contributed in this turn (text parts + ui_event descriptions). */
 function inputText(parts: readonly ContentPart[]): string {
   return parts
     .map((p) => (p.type === 'text' ? p.text : p.type === 'ui_event' ? describeUiEvent(p).replace(/<\/?ui_event>/g, '') : ''))
@@ -259,7 +259,8 @@ async function recallMemories(
   // so NEO's own wording can't pull memories in.
   const text = inputText(parts).trim();
   if (!text) return [];
-  const previousReply = textOf([...history].reverse().find((m) => m.role === 'assistant')?.parts ?? []).trim();
+  const previousMessage = [...history].reverse().find((m) => m.role === 'assistant');
+  const previousReply = previousMessage && !(containsSensitive(previousMessage) && !allowSensitive) ? textOf(previousMessage.parts).trim() : '';
   const context = previousReply.slice(-RECALL_PREVIOUS_REPLY_CHARS).trim();
   try {
     const result = await services.memory.recall({
@@ -414,7 +415,11 @@ class TurnRunner {
     const { plan, caps, systemPrompt } = this.init;
     const agent = plan.settings.agent;
     const stored = this.services.conversations.messages(this.conversationId);
-    const current: Message = { ...this.init.assistantMessage, parts: [...this.parts] };
+    const current: Message = {
+      ...this.init.assistantMessage,
+      parts: [...this.parts],
+      ...(this.sawSensitive || this.parts.some((p) => p.type === 'tool_result' && p.sensitive) ? { sensitive: true } : {}),
+    };
     const history = stored.some((m) => m.id === this.messageId)
       ? stored.map((m) => (m.id === this.messageId ? current : m))
       : [...stored, current];
@@ -887,6 +892,7 @@ class TurnRunner {
   private async autoTitle(final: Message): Promise<void> {
     const { conversations } = this.services;
     const { adapter, model, conversation } = this.init.plan;
+    if (final.sensitive && !adapter.isLocal && !this.services.settings.get().memory.sendSensitiveToCloud) return;
     try {
       const title = await generateTitle(adapter, model, inputText(this.init.userMessage.parts), textOf(final.parts));
       // Respect a rename (or deletion) that happened while the turn or the title request ran.

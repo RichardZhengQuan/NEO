@@ -12,7 +12,7 @@ import {
 import { z } from 'zod';
 
 import { ConfirmationManager } from './confirmations.js';
-import { EPOCH, ScriptedAdapter, deferred, ev, harness, memoryNode, recalled, runTurn, until } from './fakes.test-utils.js';
+import { EPOCH, ScriptedAdapter, deferred, ev, harness, memoryNode, recalled, runTurn, settle, until } from './fakes.test-utils.js';
 
 const SECRET = 'The private vault code is orchid-729.';
 
@@ -74,6 +74,27 @@ describe('sensitive historical memory context', () => {
     expect(JSON.stringify(h.model.requests[1]!.messages)).toContain(SENSITIVE_CONTEXT_PLACEHOLDER);
   });
 
+  it('withholds the current answer and reasoning when sharing is revoked between steps', async () => {
+    const h = harness({
+      adapters: [new ScriptedAdapter({ caps: { reasoning: true } })],
+      settings: { agent: { autoTitle: false }, memory: { sendSensitiveToCloud: true } },
+    });
+    h.memory.recallItems = [sensitiveMemory()];
+    h.model.script(
+      [ev.reasoning(`Thinking about ${SECRET}`), ev.text(`I remember ${SECRET}`), ev.call('echo_call', 'echo', { msg: 'hello' }), ev.done('tool_use')],
+      [ev.text('Finished'), ev.done()],
+    );
+    h.runtime.subscribe((event) => {
+      if (event.type === 'tool.finished') h.settings.update({ memory: { sendSensitiveToCloud: false } });
+    });
+    const turn = await runTurn(h, 'Recall and echo');
+
+    expect(JSON.stringify(h.model.requests[0]!.messages)).toContain(SECRET);
+    expect(JSON.stringify(h.model.requests[1]!.messages)).not.toContain(SECRET);
+    expect(JSON.stringify(h.model.requests[1]!.messages)).toContain(SENSITIVE_ASSISTANT_PLACEHOLDER);
+    expect(turn.message.sensitive).toBe(true);
+  });
+
   it('does not pass sensitive context parts into automatic title requests', async () => {
     const h = harness({ adapters: [new ScriptedAdapter({ isLocal: true })] });
     h.memory.recallItems = [sensitiveMemory()];
@@ -82,6 +103,22 @@ describe('sensitive historical memory context', () => {
 
     expect(JSON.stringify(h.model.requests[0]!.messages)).toContain(SECRET);
     expect(JSON.stringify(h.model.titleRequests[0]!.messages)).not.toContain(SECRET);
+  });
+
+  it('does not send a private-derived cloud answer for a title after sharing is revoked', async () => {
+    const h = harness({ settings: { memory: { sendSensitiveToCloud: true } } });
+    h.memory.recallItems = [sensitiveMemory()];
+    h.model.script(
+      [ev.text(`I remember ${SECRET}`), ev.call('echo_call', 'echo', { msg: 'hello' }), ev.done('tool_use')],
+      [ev.text('Finished'), ev.done()],
+    );
+    h.runtime.subscribe((event) => {
+      if (event.type === 'tool.finished') h.settings.update({ memory: { sendSensitiveToCloud: false } });
+    });
+    const turn = await runTurn(h, 'Help me make a plan');
+    await settle();
+    expect(turn.message.sensitive).toBe(true);
+    expect(h.model.titleRequests).toEqual([]);
   });
 });
 

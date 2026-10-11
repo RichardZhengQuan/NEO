@@ -224,6 +224,19 @@ describe('conversations routes', () => {
     expect(requests[0]!.url).toContain('limit=50');
   });
 
+  it('preserves optional sensitivity metadata on messages and tool results', async () => {
+    const message = {
+      id: 'private_msg', conversationId: 'conv-1', role: 'assistant', status: 'complete', createdAt: 1, sensitive: true,
+      parts: [
+        { type: 'tool_call', id: 'recall_call', name: 'recall', input: {} },
+        { type: 'tool_result', toolCallId: 'recall_call', name: 'recall', output: { memories: [] }, sensitive: true },
+      ],
+    };
+    const { client } = makeClient([{ status: 200, body: { conversation: { id: 'conv-1' }, messages: [message], hasMore: false } }]);
+    const result = await client.conversations.get('conv-1');
+    expect(result.messages[0]).toEqual(message);
+  });
+
   it('create: POST /api/conversations', async () => {
     const { client, requests } = makeClient([{ status: 201, body: { id: 'c1', title: 'New' } }]);
     await client.conversations.create({ title: 'New' });

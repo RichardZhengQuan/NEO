@@ -514,6 +514,19 @@ describe('ConfirmationCard', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('MessageView', () => {
+  it('renders optional sensitivity metadata without changing visible local history', () => {
+    const { container } = wrap(<MessageView message={msg({
+      role: 'assistant', sensitive: true,
+      parts: [
+        { type: 'tool_call', id: 'recall_call', name: 'recall', input: {} },
+        { type: 'tool_result', toolCallId: 'recall_call', name: 'recall', output: { memories: [] }, summary: '1 memory recalled', sensitive: true },
+        { type: 'text', text: 'Your private saved answer' },
+      ],
+    })} />);
+    expect(container.textContent).toContain('1 memory recalled');
+    expect(container.textContent).toContain('Your private saved answer');
+  });
+
   it('user message shows text and hides context parts', () => {
     const { container } = wrap(
       <MessageView message={msg({ role: 'user', parts: [{ type: 'context', text: '<neo_context>secret</neo_context>' }, { type: 'text', text: 'Hello there' }] })} />,

@@ -19,7 +19,7 @@ import { ConnectScreen, OfflineScreen } from './screens/ConnectScreen.js';
 import { loadConversationList, loadPendingConfirmations, refreshAll, startEventStream } from './state/connection.js';
 import { loadReminders, refreshPendingMemories } from './state/data.js';
 import { runReminderAction, type EventContext } from './state/events.js';
-import { useSession } from './state/session.js';
+import { onSessionEnd, useSession } from './state/session.js';
 import { focusComposer, setDrawer } from './state/ui.js';
 import { originOf, usePreferences } from './state/preferences.js';
 
@@ -64,8 +64,10 @@ function useSessionWiring(route: Route): void {
   useEffect(() => {
     if (!client) return;
     const platform = getPlatform();
+    let disposed = false;
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
     const debounce = (key: string, fn: () => void, ms: number) => {
+      if (disposed) return;
       const prev = timers.get(key);
       if (prev) clearTimeout(prev);
       timers.set(
@@ -103,10 +105,17 @@ function useSessionWiring(route: Route): void {
     void refreshPendingMemories(client);
     syncReminders();
 
-    return () => {
+    const cleanup = () => {
+      if (disposed) return;
+      disposed = true;
       stopEvents();
       stopPlatform();
       for (const timer of timers.values()) clearTimeout(timer);
+    };
+    const unregister = onSessionEnd(cleanup);
+    return () => {
+      unregister();
+      cleanup();
     };
   }, [client]);
 

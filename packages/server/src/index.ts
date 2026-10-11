@@ -68,6 +68,8 @@ export interface NeoServices {
   push: PushSubscriptionStore;
   providerConfigs: ProviderConfigStore;
   providers: ProviderRegistry;
+  /** Rebuild the selected memory embedder after a provider change is committed. */
+  refreshEmbeddingProvider?(providerId: string): void;
   memory: MemoryService;
   tools: ToolRegistry;
   stores: ProductivityStores;

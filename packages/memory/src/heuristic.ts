@@ -26,12 +26,12 @@ function isQuestion(sentence: string): boolean {
 
 /** An imperative delete/forget request: never extract memories from these ("Forget that I live in Paris"). */
 const EN_FORGET_START = /^(?:please\s+)?(?:forget|delete|remove|stop\s+remembering|don't\s+remember|do\s+not\s+remember)\b/i;
-const ZH_FORGET_START = /^(?:忘记|删除|不要记|不用记|请忘记|请删除)/u;
+const ZH_FORGET_START = /^(?:请\s*)?(?:忘记|忘掉|刪除|删除|不要记|不用记)/u;
 
 function isForgetCommand(sentence: string): boolean {
   const s = sentence.trim();
   if (!s) return false;
-  return HAN.test(s) ? ZH_FORGET_START.test(s) : EN_FORGET_START.test(s);
+  return ZH_FORGET_START.test(s) || EN_FORGET_START.test(s);
 }
 
 /** Sentences of a text (split after . ! ? and their CJK forms). */

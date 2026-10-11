@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { Note } from '@neo/protocol';
 import { useData } from '../state/data.js';
+import { startSession } from '../state/session.js';
 
 // ── module mocks ──────────────────────────────────────────────────────────────
 
@@ -115,7 +116,7 @@ describe('NoteEditor autosave', () => {
     await act(() => vi.advanceTimersByTimeAsync(700));
 
     // Resolve the request — no new edits so the status should show saved.
-    await act(() => { resolve(serverNote); });
+    await act(async () => { resolve(serverNote); });
 
     // The status area should not say "unsaved" (it shows "Saved")
     const status = screen.getByRole('status');
@@ -144,7 +145,7 @@ describe('NoteEditor autosave', () => {
     fireEvent.change(textarea, { target: { value: 'Second revision' } });
 
     // 2. Resolve the *first* (stale) save — must NOT overwrite the editor.
-    await act(() => { resolveFirst(makeNote({ content: 'First revision', updatedAt: 2000 })); });
+    await act(async () => { resolveFirst(makeNote({ content: 'First revision', updatedAt: 2000 })); });
 
     // Editor should still show "Second revision".
     expect((textarea as HTMLTextAreaElement).value).toBe('Second revision');
@@ -173,7 +174,7 @@ describe('NoteEditor autosave', () => {
 
     // After the failure a retry button should appear (aria-label "Retry").
     const retryBtn = screen.getByRole('button', { name: /retry/i });
-    await act(() => { fireEvent.click(retryBtn); });
+    await act(async () => { fireEvent.click(retryBtn); });
 
     expect(upsertedNotes).toHaveLength(1);
     unmount();
@@ -195,4 +196,123 @@ describe('NoteEditor autosave', () => {
 
     expect(mockUpdate).toHaveBeenCalledWith(note.id, expect.objectContaining({ content: 'Leaving' }));
   });
+
+  it('serializes overlapping saves and sends only the latest pending revision', async () => {
+    let resolveFirst!: (n: Note) => void;
+    let resolveLatest!: (n: Note) => void;
+    let active = 0;
+    let maxActive = 0;
+    mockUpdate.mockImplementation((_id, patch) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      return new Promise<Note>((resolve) => {
+        const finish = (n: Note) => { active--; resolve(n); };
+        if (patch.content === 'First') resolveFirst = finish;
+        else resolveLatest = finish;
+      });
+    });
+    const { unmount } = await renderEditor(makeNote());
+    const textarea = screen.getByRole('textbox', { name: /content/i });
+    fireEvent.change(textarea, { target: { value: 'First' } });
+    await act(() => vi.advanceTimersByTimeAsync(700));
+    fireEvent.change(textarea, { target: { value: 'Intermediate' } });
+    await act(() => vi.advanceTimersByTimeAsync(700));
+    fireEvent.change(textarea, { target: { value: 'Latest' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /title/i }), { target: { value: 'Latest title' } });
+    await act(() => vi.advanceTimersByTimeAsync(700));
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status').textContent).toMatch(/unsaved/i);
+
+    await act(async () => { resolveFirst(makeNote({ content: 'First', updatedAt: 2000 })); });
+    expect(mockUpdate).toHaveBeenCalledTimes(2);
+    expect(mockUpdate).toHaveBeenLastCalledWith('note_1', { title: 'Latest title', content: 'Latest', tags: [], pinned: false });
+    expect(upsertedNotes).toEqual([]);
+    expect((textarea as HTMLTextAreaElement).value).toBe('Latest');
+    expect(screen.getByRole('status').textContent).toMatch(/saving/i);
+    await act(async () => { resolveLatest(makeNote({ title: 'Latest title', content: 'Latest', updatedAt: 3000 })); });
+    expect(maxActive).toBe(1);
+    expect(useData.getState().notes.note_1!.content).toBe('Latest');
+    expect(screen.getByRole('status').textContent).toMatch(/saved/i);
+    unmount();
+  });
+
+  it('continues the queued latest save after an older request fails', async () => {
+    let rejectFirst!: (e: Error) => void;
+    mockUpdate.mockReturnValueOnce(new Promise<Note>((_resolve, reject) => { rejectFirst = reject; }));
+    mockUpdate.mockRejectedValueOnce(new Error('latest failed'));
+    mockUpdate.mockResolvedValueOnce(makeNote({ content: 'Latest', updatedAt: 3000 }));
+    const { unmount } = await renderEditor(makeNote());
+    const textarea = screen.getByRole('textbox', { name: /content/i });
+    fireEvent.change(textarea, { target: { value: 'First' } });
+    await act(() => vi.advanceTimersByTimeAsync(700));
+    fireEvent.change(textarea, { target: { value: 'Latest' } });
+    await act(() => vi.advanceTimersByTimeAsync(700));
+    await act(async () => { rejectFirst(new Error('old failed')); });
+    expect(mockUpdate).toHaveBeenCalledTimes(2);
+    expect((textarea as HTMLTextAreaElement).value).toBe('Latest');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /retry/i })); });
+    expect(mockUpdate).toHaveBeenCalledTimes(3);
+    expect(mockUpdate).toHaveBeenLastCalledWith('note_1', expect.objectContaining({ content: 'Latest' }));
+    expect(upsertedNotes.map((n) => n.content)).toEqual(['Latest']);
+    unmount();
+  });
+
+  it('leaving during an in-flight save queues the latest edit behind it', async () => {
+    let resolveFirst!: (n: Note) => void;
+    mockUpdate.mockReturnValueOnce(new Promise<Note>((resolve) => { resolveFirst = resolve; }));
+    mockUpdate.mockResolvedValueOnce(makeNote({ content: 'Leaving latest', updatedAt: 3000 }));
+    const { unmount } = await renderEditor(makeNote());
+    const textarea = screen.getByRole('textbox', { name: /content/i });
+    fireEvent.change(textarea, { target: { value: 'First' } });
+    await act(() => vi.advanceTimersByTimeAsync(700));
+    fireEvent.change(textarea, { target: { value: 'Leaving latest' } });
+    unmount();
+    await act(() => vi.advanceTimersByTimeAsync(10));
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveFirst(makeNote({ content: 'First', updatedAt: 2000 })); });
+    expect(mockUpdate).toHaveBeenCalledTimes(2);
+    expect(mockUpdate).toHaveBeenLastCalledWith('note_1', expect.objectContaining({ content: 'Leaving latest' }));
+    expect(upsertedNotes.map((n) => n.content)).toEqual(['Leaving latest']);
+  });
+
+
+  it('serializes pin changes with content and tags without applying the old snapshot', async () => {
+    let resolvePin!: (n: Note) => void;
+    mockUpdate.mockReturnValueOnce(new Promise<Note>((resolve) => { resolvePin = resolve; }));
+    mockUpdate.mockResolvedValueOnce(makeNote({ content: 'Newest text', tags: ['work'], pinned: true, updatedAt: 3000 }));
+    const { unmount } = await renderEditor(makeNote());
+    fireEvent.click(screen.getByRole('button', { name: /^pin$/i }));
+    expect(mockUpdate).toHaveBeenCalledWith('note_1', expect.objectContaining({ pinned: true }));
+    const textarea = screen.getByRole('textbox', { name: /content/i });
+    fireEvent.change(textarea, { target: { value: 'Newest text' } });
+    const tags = screen.getByRole('textbox', { name: /tags/i });
+    fireEvent.change(tags, { target: { value: 'work' } });
+    fireEvent.keyDown(tags, { key: 'Enter' });
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    await act(async () => { resolvePin(makeNote({ pinned: true, updatedAt: 2000 })); });
+    expect(mockUpdate).toHaveBeenCalledTimes(2);
+    expect(mockUpdate).toHaveBeenLastCalledWith('note_1', expect.objectContaining({ content: 'Newest text', tags: ['work'], pinned: true }));
+    expect(upsertedNotes.map((n) => n.content)).toEqual(['Newest text']);
+    expect((textarea as HTMLTextAreaElement).value).toBe('Newest text');
+    unmount();
+  });
+
+
+  it('does not save queued edits or apply an old response after switching servers', async () => {
+    let resolveFirst!: (n: Note) => void;
+    mockUpdate.mockReturnValueOnce(new Promise<Note>((resolve) => { resolveFirst = resolve; }));
+    const { unmount } = await renderEditor(makeNote());
+    const textarea = screen.getByRole('textbox', { name: /content/i });
+    fireEvent.change(textarea, { target: { value: 'First' } });
+    await act(() => vi.advanceTimersByTimeAsync(700));
+    fireEvent.change(textarea, { target: { value: 'Queued' } });
+    unmount();
+    startSession('https://new.example', 'token', 'manual');
+    await act(() => vi.advanceTimersByTimeAsync(10));
+    await act(async () => { resolveFirst(makeNote({ content: 'First', updatedAt: 2000 })); });
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(upsertedNotes).toEqual([]);
+    expect(useData.getState().notes).toEqual({});
+  });
+
 });

@@ -160,8 +160,8 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
       return db.transaction(() => {
         const conv = mustGet(message.conversationId);
         db.prepare(
-          `INSERT INTO messages (id, conversation_id, role, parts, created_at, turn_id, model, status, error, usage)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO messages (id, conversation_id, role, parts, created_at, turn_id, model, status, error, usage, sensitive)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           message.id,
           message.conversationId,
@@ -173,6 +173,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
           message.status,
           toJson(message.error),
           toJson(message.usage),
+          message.sensitive ? 1 : null,
         );
         const preview = previewOf(message.parts) || conv.preview;
         db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ?, preview = ? WHERE id = ?').run(

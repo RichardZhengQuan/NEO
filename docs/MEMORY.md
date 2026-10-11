@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS memory_meta (
 
 **Re-embedding** (`reembedStale`) selects nodes whose `embedding_model` is `NULL` or differs from the main embedder's id. It works in batches of 64, ordered by id and yielding between batches. Each node goes to the embedder where it belongs, and a node already stored in its target space is skipped. Before storing a vector, it re-checks that the node's text and place haven't changed meanwhile. It never touches `updated_at`. Concurrent calls share one pass, plus one more pass if nodes were added while it ran. Re-embedding runs:
 
-- at service start, which covers a changed embedder (the embedder is fixed for the process lifetime), including a new version of the hashing embedder (`hash-512` → `hash2-512`, `local-hash-512` → `local-hash2-512`);
+- at service start and after a live embedder change, including a new version of the hashing embedder (`hash-512` → `hash2-512`, `local-hash-512` → `local-hash2-512`); changes to embedding settings or the selected provider rebuild the live embedder, and an unavailable provider falls back to `hash2-512`;
 - after any write that couldn't embed (embedder failure), or whose vector was computed in another space than the one the node belongs to (a merge that replaced a sensitive memory's content, see [the create path](#the-create-path));
 - after a node moved place (approved, or became sensitive);
 - when `sendSensitiveToCloud` is switched on (sensitive memories move to the main embedder), and when it is switched off again: sensitive memories embedded by the main embedder get `embedding_model = NULL`, their main-model vectors leave the cache at once, and they are re-embedded on the device (their text is not sent anywhere);
@@ -597,8 +597,9 @@ Return ONLY a JSON object:
 
 Where memory text can leave the device, and what keeps it in:
 
-- **Chat model context**: recall excludes sensitive memories unless `allowSensitive`. Core sets it only when the chat model is local or `sendSensitiveToCloud` is on.
+- **Chat model context**: recall excludes sensitive memories unless `allowSensitive`. Core sets it only when the chat model is local or `sendSensitiveToCloud` is on. Memory tools flag results that expose sensitive memories; assistant messages are flagged when their model actually saw sensitive content. On cloud replay with sharing off, flagged context, tool output and private-derived assistant text, reasoning and tool arguments are withheld while call/result pairing is preserved. Stored messages are unchanged. The same policy excludes private-derived previous replies from recall context and prevents cloud title generation from re-sending a private answer after sharing is revoked. Storage migration v2 backfills legacy assistant flags from existing sensitive context/results. Legacy recall/remember results remain normal when their ids identify existing normal nodes; unknown or deleted memory references and successful forget labels are withheld conservatively because their original sensitivity cannot be recovered. Empty memory results remain normal.
 - **Extraction model** (NEO-07): when the memory model is in the cloud and `sendSensitiveToCloud` is off, a **sensitive turn is extracted offline** (heuristics), and the cloud model never sees it. A turn is sensitive when any of these holds:
+  - either message or a tool result is flagged `sensitive: true`, even if its source memory has since been forgotten;
   - the user message's context part is flagged `sensitive: true`;
   - the `remember` tool stored a sensitive memory in it;
   - the `recall` tool returned a sensitive memory in it;

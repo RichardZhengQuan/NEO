@@ -3,20 +3,21 @@
  */
 import { bootstrapConnection, browserBootstrapDeps, clearCredentials, saveCredentials, type ConnectionSource } from '../connection.js';
 import { httpStatus } from '../lib/errors.js';
-import { useConversations } from '../state/conversations.js';
-import { useData } from '../state/data.js';
-import { loadProviders, setSettings, showConnect, startSession, useSession } from '../state/session.js';
+import { currentSessionEpoch, isCurrentSession, loadProviders, setSettings, showConnect, startSession, useSession } from '../state/session.js';
 
 /** Start a session with known-good credentials and load the essentials. */
 export async function connectWith(serverUrl: string, token: string, source: ConnectionSource): Promise<void> {
   const client = startSession(serverUrl, token, source);
+  const epoch = currentSessionEpoch();
   try {
     const [settings, health] = await Promise.all([client.settings.get(), client.health().catch(() => null)]);
+    if (!isCurrentSession(epoch, client)) return;
     setSettings(settings);
     useSession.setState({ health, phase: 'ready' });
     if (source !== 'desktop') saveCredentials({ serverUrl, token });
     void loadProviders().catch(() => undefined);
   } catch (err) {
+    if (!isCurrentSession(epoch, client)) return;
     const status = httpStatus(err);
     if (status === 401 || status === 403) showConnect({ reason: 'unauthorized', serverUrl });
     else useSession.setState({ phase: 'offline', serverUrl, connectHint: { reason: 'manual', serverUrl, token } });
@@ -42,7 +43,5 @@ async function runBootstrap(): Promise<void> {
 export function disconnect(): void {
   const serverUrl = useSession.getState().serverUrl ?? undefined;
   clearCredentials();
-  useConversations.setState({ conversations: {}, entries: {}, listLoaded: false, archivedLoaded: false });
-  useData.setState({ reminders: {}, remindersLoaded: false, tasks: {}, taskLists: [], tasksLoaded: false, notes: {}, notesLoaded: false, pendingMemories: 0, notifications: [], unreadNotifications: 0 });
   showConnect({ reason: 'none', serverUrl });
 }

