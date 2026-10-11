@@ -1,0 +1,27 @@
+{
+  "name": "@neo/core",
+  "version": "0.1.0",
+  "description": "The NEO agent runtime: context assembly, streaming multi-step tool use, confirmations, memory recall & write-back.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*",
+    "zod": "^4.1.0"
+  }
+}

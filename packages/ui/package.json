@@ -1,0 +1,42 @@
+{
+  "name": "@neo/ui",
+  "version": "0.1.0",
+  "description": "NEO React UI kit: generative-UI renderer, chat components, memory-net graph, theming and i18n.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./styles.css": "./src/styles.css"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/dom": "^10.4.0",
+    "jsdom": "^26.1.0"
+  },
+  "peerDependencies": {
+    "react": ">=19",
+    "react-dom": ">=19"
+  }
+}

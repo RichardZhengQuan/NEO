@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "neo",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["packages/cli/dist/index.js", "serve", "--data-dir", ".neo-data", "--port", "7791"],
+      "port": 7791
+    }
+  ]
+}

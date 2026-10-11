@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8B70FF"/>
+      <stop offset="1" stop-color="#6343EC"/>
+    </linearGradient>
+  </defs>
+  <!-- Full-bleed background: safe for maskable crops; the glyph stays inside the central 80%. -->
+  <rect width="512" height="512" fill="url(#g)"/>
+  <g stroke="#fff" stroke-width="12" stroke-linecap="round" opacity="0.55">
+    <line x1="256" y1="206" x2="170" y2="318"/>
+    <line x1="256" y1="206" x2="342" y2="318"/>
+    <line x1="170" y1="318" x2="342" y2="318"/>
+  </g>
+  <circle cx="256" cy="200" r="54" fill="#fff"/>
+  <circle cx="170" cy="322" r="32" fill="#fff" opacity="0.85"/>
+  <circle cx="342" cy="322" r="32" fill="#fff" opacity="0.85"/>
+</svg>

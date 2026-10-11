@@ -1,0 +1,23 @@
+{
+  "name": "NEO",
+  "short_name": "NEO",
+  "description": "Your personal AI assistant. You choose the AI, what it remembers and where it runs.",
+  "id": "./",
+  "start_url": "./#/chat",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f7f7fa",
+  "theme_color": "#f7f7fa",
+  "icons": [
+    { "src": "./icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "./icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "./icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "maskable" }
+  ],
+  "categories": ["productivity", "utilities"],
+  "shortcuts": [
+    { "name": "New chat", "url": "./#/chat", "description": "Start a new conversation" },
+    { "name": "Reminders", "url": "./#/reminders", "description": "See what's coming up" },
+    { "name": "Memory", "url": "./#/memory", "description": "Explore what NEO remembers" }
+  ]
+}

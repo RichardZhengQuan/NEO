@@ -1,0 +1,172 @@
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { NeoConfigSchema, silentLogger } from '@neo/protocol';
+import type { Message, ServerEvent } from '@neo/protocol';
+import { createServices, environmentLocale } from './services.js';
+import type { NeoServices } from './index.js';
+
+const resources: NeoServices[] = [];
+const directories: string[] = [];
+const clock = () => 1_800_000_000_000;
+function temp(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'neo-server-services-'));
+  directories.push(directory);
+  return directory;
+}
+async function services(raw: unknown = {}, inMemory = true, mockScript?: import('@neo/providers').MockScript) {
+  const result = await createServices(NeoConfigSchema.parse({ dataDir: join(temp(), 'data'), log: { level: 'silent' }, ...raw as object }), {
+    inMemory, clock, logger: silentLogger, ...(mockScript ? { mockScript } : {}),
+  });
+  resources.push(result);
+  return result;
+}
+function exchange(text: string): { conversationId: string; userMessage: Message; assistantMessage: Message } {
+  return {
+    conversationId: 'conv_test',
+    userMessage: { id: 'msg_user', conversationId: 'conv_test', role: 'user', parts: [{ type: 'text', text }], createdAt: clock(), status: 'complete' },
+    assistantMessage: { id: 'msg_reply', conversationId: 'conv_test', role: 'assistant', parts: [{ type: 'text', text: 'Thanks for telling me.' }], createdAt: clock(), status: 'complete' },
+  };
+}
+afterEach(async () => {
+  for (const service of resources.splice(0)) await service.close();
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+});
+
+describe('server composition', () => {
+  // WP-providers regression: isLocalUrl(undefined) is false, so the stock
+  // MockProvider's `?? true` fallback never marks its offline endpoint local.
+  it('stock offline mock is treated as local for sensitive-memory policy', async () => {
+    const s = await services();
+    expect(s.providers.get('demo')?.isLocal).toBe(true);
+  });
+
+  it('keeps the entire in-memory instance off disk and creates an owner and ephemeral push keys', async () => {
+    const s = await services();
+    expect(existsSync(s.config.dataDir)).toBe(false);
+    expect(s.db?.path).toBe(':memory:');
+    expect(s.devices.verify(s.ownerToken)?.owner).toBe(true);
+    expect(s.config.push.vapidPublicKey).toBeTruthy();
+    expect(s.tools.info().find(tool => tool.name === 'create_reminder')?.source).toBe('builtin');
+    await s.close();
+    await s.close();
+    expect(s.db?.raw.isOpen).toBe(false);
+  });
+
+  it('detects host defaults, merges initial settings, and never re-applies them on restart', async () => {
+    vi.stubEnv('LC_ALL', 'zh_CN.UTF-8');
+    const dataDir = join(temp(), 'private');
+    const s = await services({ dataDir, settings: { persona: { name: 'Nova' }, memory: { recallLimit: 5 } } }, false);
+    expect(s.settings.get().timezone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    expect(s.settings.get().locale).toBe('zh-CN');
+    expect(s.settings.get().persona).toMatchObject({ name: 'Nova', tone: 'warm' });
+    expect(s.settings.get().memory.recallLimit).toBe(5);
+    expect(statSync(dataDir).mode & 0o777).toBe(0o700);
+    expect(statSync(join(dataDir, 'token')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(dataDir, 'key')).mode & 0o777).toBe(0o600);
+    s.settings.update({ persona: { name: 'Persisted' }, timezone: 'Europe/Berlin', locale: 'de-DE' });
+    await s.close();
+    const again = await services({ dataDir, settings: { persona: { name: 'Overwrite' } } }, false);
+    expect(again.settings.get()).toMatchObject({ timezone: 'Europe/Berlin', locale: 'de-DE', onboarded: false, persona: { name: 'Persisted' } });
+    expect(again.ownerToken).toBe(s.ownerToken);
+  });
+
+  it('uses config token ahead of disk and registers a changed owner token', async () => {
+    const dataDir = join(temp(), 'data');
+    const first = await services({ dataDir }, false);
+    const diskToken = readFileSync(join(dataDir, 'token'), 'utf8');
+    await first.close();
+    const changed = await services({ dataDir, server: { authToken: 'a-new-owner-token-0123456789' } }, false);
+    expect(changed.ownerToken).toBe('a-new-owner-token-0123456789');
+    expect(changed.devices.verify(changed.ownerToken)?.owner).toBe(true);
+    expect(readFileSync(join(dataDir, 'token'), 'utf8')).toBe(diskToken);
+  });
+
+  it('immediately propagates settings policy/permissions and forwards each change once', async () => {
+    const s = await services();
+    const events: ServerEvent[] = [];
+    s.events.subscribe(envelope => {
+      expect(envelope.at).toBe(clock());
+      events.push(envelope.event);
+    });
+    s.settings.update({ memory: { mode: 'approve' }, tools: { permissions: { calculate: 'deny', delete_task: 'auto' } } });
+    expect(s.memory.getPolicy().mode).toBe('approve');
+    expect(s.tools.permissionFor('calculate')).toBe('deny');
+    expect(s.tools.permissionFor('delete_task')).toBe('auto');
+    await s.memory.remember({ content: 'Richard enjoys hiking', source: { by: 'user' } });
+    const reminder = s.stores.reminders.create({ title: 'Water', dueAt: clock() + 10_000 });
+    s.stores.reminders.delete(reminder.id);
+    const task = s.stores.tasks.create({ title: 'Plan a hike' });
+    s.stores.tasks.delete(task.id);
+    const note = s.stores.notes.create({ content: 'A route' });
+    s.stores.notes.delete(note.id);
+    expect(events.map(e => e.type)).toEqual(['settings.updated', 'memory.changed', 'reminder.updated', 'reminder.deleted', 'task.updated', 'task.deleted', 'note.updated', 'note.deleted']);
+  });
+
+  it('creates the specified reminder notification including missed and empty-note fallbacks', async () => {
+    const s = await services();
+    const fire = (title: string, notes: string | null, lateness: number) => {
+      const r = s.stores.reminders.create({ title, notes, dueAt: clock() - lateness });
+      s.scheduler.tick(clock());
+      return s.stores.notifications.list().find(n => n.data?.['reminderId'] === r.id)!;
+    };
+    expect(fire('Water', null, 0)).toMatchObject({ kind: 'reminder', title: 'Water', body: "It's time" });
+    expect(fire('Stretch', 'Stand up', 0).body).toBe('Stand up');
+    expect(fire('Medicine', 'Daily', 1_000_000)).toMatchObject({ title: 'Medicine', body: 'Missed while you were away: Medicine' });
+    expect(s.stores.notifications.list().every(n => n.data?.['url'] === `neo://reminders/${n.data?.['reminderId']}`)).toBe(true);
+    expect(s.events.since(0).filter(e => e.event.type === 'reminder.fired')).toHaveLength(3);
+  });
+
+  it('falls back to the offline embedder when the configured embedding provider cannot embed', async () => {
+    // The offline mock has no embeddings endpoint; a missing provider behaves the same way.
+    for (const provider of ['demo', 'deleted-provider']) {
+      const s = await services({ settings: { embedding: { provider, model: 'test-embedding' } } });
+      expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
+      const node = await s.memory.remember({ content: 'Embedded hiking preference', source: { by: 'user' } });
+      expect(s.db?.prepare('SELECT model FROM memory_vectors WHERE node_id = ?').get(node.id)).toEqual({ model: 'hash2-512' });
+    }
+  });
+
+  it('resolves memory LLM dynamically and falls back without throwing for missing/disabled models', async () => {
+    const requests: string[] = [];
+    const script: import('@neo/providers').MockScript = request => {
+      requests.push(request.model);
+      return { text: JSON.stringify({ episode: null, memories: [{ op: 'create', kind: 'preference', label: 'Hiking', content: 'Richard loves hiking', importance: 0.8 }], links: [] }) };
+    };
+    const s = await services({ providers: [
+      { id: 'disabled', kind: 'mock', enabled: false, defaultModel: 'disabled-model' },
+      { id: 'demo', kind: 'mock', enabled: true, defaultModel: 'fallback-model' },
+    ] }, true, script);
+    await s.memory.observe(exchange('My name is Richard and I love hiking'));
+    expect(requests).toEqual(['fallback-model']);
+    s.settings.update({ defaultModel: { provider: 'demo', model: 'default-model' } });
+    await s.memory.observe(exchange('I love hiking in the mountains'));
+    s.settings.update({ memoryModel: { provider: 'demo', model: 'memory-model' } });
+    await s.memory.observe(exchange('I love hiking with friends'));
+    expect(requests).toEqual(['fallback-model', 'default-model', 'memory-model']);
+    s.settings.update({ memoryModel: { provider: 'missing', model: 'missing-model' } });
+    const write = await s.memory.observe(exchange('I like skating'));
+    expect(requests).toHaveLength(3);
+    expect(write.created.length + write.updated.length).toBeGreaterThan(0);
+  });
+
+  it('loads enabled plugins using plugin source', async () => {
+    const dataDir = join(temp(), 'data');
+    const plugins = join(dataDir, 'plugins');
+    mkdirSync(plugins, { recursive: true });
+    writeFileSync(join(plugins, 'test.mjs'), `export default { name: 'test', tools: [{ name: 'plugin_read', title: 'Plugin', description: 'Fixture', inputSchema: { safeParse: (input) => ({ success: true, data: input }) }, risk: 'read', defaultPermission: 'auto', execute: async () => ({ output: 'ok' }) }] };`);
+    const s = await services({ dataDir, plugins: { enabled: true } });
+    expect(s.tools.info().find(tool => tool.name === 'plugin_read')).toMatchObject({ source: 'plugin', permission: 'auto' });
+    expect(existsSync(join(dataDir, 'token'))).toBe(false);
+  });
+});
+
+describe('locale detection', () => {
+  it.each([
+    [{ LANG: 'en_US.UTF-8' }, 'en-US'], [{ LANG: 'de_DE@euro' }, 'de-DE'],
+    [{ LANG: 'en_US.UTF-8', LC_ALL: 'zh_CN.UTF-8' }, 'zh-CN'],
+    [{ LANG: 'C.UTF-8' }, 'en'], [{ LANG: 'POSIX' }, 'en'], [{ LANG: 'invalid_locale!' }, 'en'], [{}, 'en'],
+  ])('canonicalizes %j', (env, expected) => { expect(environmentLocale(env)).toBe(expected); });
+});

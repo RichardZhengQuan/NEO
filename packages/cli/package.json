@@ -1,0 +1,36 @@
+{
+  "name": "@neo/cli",
+  "version": "0.1.0",
+  "description": "The `neo` command: run the server, chat in the terminal, set up providers, pair devices, export memory.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "neo": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev": "tsc -p tsconfig.build.json && node dist/index.js"
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*",
+    "@neo/client": "workspace:*",
+    "@neo/server": "workspace:*",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.5"
+  }
+}

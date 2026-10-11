@@ -1,0 +1,28 @@
+{
+  "name": "@neo/providers",
+  "version": "0.1.0",
+  "description": "Model provider adapters for NEO: Anthropic, OpenAI & OpenAI-compatible (Ollama, LM Studio, vLLM, OpenRouter…), Gemini, and an offline mock.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*",
+    "@anthropic-ai/sdk": "^0.133.0",
+    "zod": "^4.1.0"
+  }
+}

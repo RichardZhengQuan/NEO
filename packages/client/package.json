@@ -1,0 +1,26 @@
+{
+  "name": "@neo/client",
+  "version": "0.1.0",
+  "description": "Typed TypeScript client for the NEO API (HTTP + WebSocket + SSE). Works in browsers, Node, Electron and Capacitor.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*"
+  }
+}

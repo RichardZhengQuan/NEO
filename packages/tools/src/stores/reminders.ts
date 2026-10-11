@@ -1,0 +1,230 @@
+/**
+ * ReminderStore on node:sqlite.
+ *
+ * `anchor_at` (not part of the Reminder type) is the first dueAt of the
+ * series; it fixes the local time of day for recurrences. Updating `dueAt`
+ * re-anchors the reminder; snoozing changes `dueAt` only.
+ */
+import {
+  NeoError,
+  ReminderInputSchema,
+  ReminderPatchSchema,
+  newId,
+  type Clock,
+  type Reminder,
+  type ReminderFiring,
+  type ReminderInput,
+  type ReminderListQuery,
+  type ReminderPatch,
+  type ReminderStore,
+} from '@neo/protocol';
+import { fromJson, toJson, toNum, toNumOrNull, type NeoDatabase } from '@neo/storage';
+import { nextOccurrence } from '../recurrence.js';
+import { assertTimeZone } from '../time.js';
+import { changes, clampLimit, parseInput, requireText } from './validate.js';
+
+type Row = Record<string, unknown>;
+type ChangeEvent = { type: 'upsert'; reminder: Reminder } | { type: 'delete'; id: string };
+
+/** Longest accepted snooze: one year. */
+const MAX_SNOOZE_MINUTES = 366 * 24 * 60;
+
+function toReminder(r: Row): Reminder {
+  return {
+    id: r.id as string,
+    title: r.title as string,
+    notes: (r.notes as string | null) ?? null,
+    dueAt: toNum(r.due_at),
+    timezone: r.timezone as string,
+    recurrence: fromJson(r.recurrence, null),
+    status: r.status as Reminder['status'],
+    firedCount: toNum(r.fired_count),
+    lastFiredAt: toNumOrNull(r.last_fired_at),
+    conversationId: (r.conversation_id as string | null) ?? null,
+    createdAt: toNum(r.created_at),
+    updatedAt: toNum(r.updated_at),
+  };
+}
+
+export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; defaultTimezone?: string } = {}): ReminderStore {
+  const clock = options.clock ?? (() => Date.now());
+  const defaultTimezone = options.defaultTimezone ?? 'UTC';
+  const listeners = new Set<(event: ChangeEvent) => void>();
+
+  const emit = (event: ChangeEvent) => {
+    for (const l of [...listeners]) {
+      try {
+        l(event);
+      } catch {
+        // A failing listener must not break the mutation that already happened.
+      }
+    }
+  };
+
+  const row = (id: string): Row | undefined => db.prepare('SELECT * FROM reminders WHERE id = ?').get(id) as Row | undefined;
+  const get = (id: string): Reminder | null => {
+    const r = row(id);
+    return r ? toReminder(r) : null;
+  };
+  const mustGet = (id: string): Reminder => {
+    const r = get(id);
+    if (!r) throw new NeoError('not_found', `Reminder ${id} not found.`);
+    return r;
+  };
+  const finite = (n: number, what: string) => {
+    if (!Number.isFinite(n)) throw new NeoError('bad_request', `Invalid ${what}: ${n}`);
+    return n;
+  };
+
+  return {
+    list(query: ReminderListQuery = {}) {
+      const where: string[] = [];
+      const args: (string | number)[] = [];
+      if (query.status?.length) {
+        where.push(`status IN (${query.status.map(() => '?').join(', ')})`);
+        args.push(...query.status);
+      }
+      if (typeof query.from === 'number' && Number.isFinite(query.from)) {
+        where.push('due_at >= ?');
+        args.push(query.from);
+      }
+      if (typeof query.to === 'number' && Number.isFinite(query.to)) {
+        where.push('due_at <= ?');
+        args.push(query.to);
+      }
+      args.push(clampLimit(query.limit, 100, 500));
+      const sql = `SELECT * FROM reminders${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY due_at ASC, created_at ASC LIMIT ?`;
+      return (db.prepare(sql).all(...args) as Row[]).map(toReminder);
+    },
+
+    get,
+
+    create(input: ReminderInput): Reminder {
+      const data = parseInput(ReminderInputSchema, input, 'reminder');
+      const now = clock();
+      const reminder: Reminder = {
+        id: newId('rem', now),
+        title: requireText(data.title, 'title'),
+        notes: data.notes ?? null,
+        dueAt: Math.round(data.dueAt),
+        timezone: assertTimeZone(data.timezone ?? defaultTimezone),
+        recurrence: data.recurrence ?? null,
+        status: 'scheduled',
+        firedCount: 0,
+        lastFiredAt: null,
+        conversationId: data.conversationId ?? null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      db.prepare(
+        `INSERT INTO reminders (id, title, notes, due_at, anchor_at, timezone, recurrence, status, fired_count, last_fired_at, conversation_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        reminder.id, reminder.title, reminder.notes, reminder.dueAt, reminder.dueAt, reminder.timezone,
+        toJson(reminder.recurrence), reminder.status, 0, null, reminder.conversationId, now, now,
+      );
+      emit({ type: 'upsert', reminder });
+      return reminder;
+    },
+
+    update(id: string, patch: ReminderPatch): Reminder {
+      const data = parseInput(ReminderPatchSchema, patch, 'reminder update');
+      const existing = mustGet(id);
+      const now = clock();
+      const next: Reminder = { ...existing, updatedAt: now };
+      if (data.title !== undefined) next.title = requireText(data.title, 'title');
+      if (data.notes !== undefined) next.notes = data.notes;
+      if (data.timezone !== undefined) next.timezone = assertTimeZone(data.timezone);
+      if (data.recurrence !== undefined) next.recurrence = data.recurrence;
+      const reanchor = data.dueAt !== undefined && Math.round(data.dueAt) !== existing.dueAt;
+      if (data.dueAt !== undefined) next.dueAt = Math.round(data.dueAt);
+      if (data.status !== undefined) next.status = data.status;
+      // Moving a reminder that already fired to a new time means "remind me again".
+      else if (reanchor && existing.status === 'fired') next.status = 'scheduled';
+
+      db.prepare(
+        `UPDATE reminders SET title = ?, notes = ?, due_at = ?, anchor_at = CASE WHEN ? THEN ? ELSE anchor_at END,
+           timezone = ?, recurrence = ?, status = ?, updated_at = ? WHERE id = ?`,
+      ).run(next.title, next.notes, next.dueAt, reanchor ? 1 : 0, next.dueAt, next.timezone, toJson(next.recurrence), next.status, now, id);
+      emit({ type: 'upsert', reminder: next });
+      return next;
+    },
+
+    delete(id: string): boolean {
+      if (changes(db.prepare('DELETE FROM reminders WHERE id = ?').run(id)) === 0) return false;
+      emit({ type: 'delete', id });
+      return true;
+    },
+
+    snooze(id: string, minutes: number): Reminder {
+      if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0 || minutes > MAX_SNOOZE_MINUTES) {
+        throw new NeoError('bad_request', `Invalid snooze: minutes must be between 1 and ${MAX_SNOOZE_MINUTES}.`);
+      }
+      const existing = mustGet(id);
+      const now = clock();
+      const dueAt = now + Math.round(minutes * 60_000);
+      const updated: Reminder = { ...existing, dueAt, status: 'scheduled', updatedAt: now };
+      db.prepare('UPDATE reminders SET due_at = ?, status = ?, updated_at = ? WHERE id = ?').run(dueAt, 'scheduled', now, id);
+      emit({ type: 'upsert', reminder: updated });
+      return updated;
+    },
+
+    complete(id: string): Reminder {
+      const existing = mustGet(id);
+      const now = clock();
+      const updated: Reminder = { ...existing, status: 'completed', updatedAt: now };
+      db.prepare('UPDATE reminders SET status = ?, updated_at = ? WHERE id = ?').run('completed', now, id);
+      emit({ type: 'upsert', reminder: updated });
+      return updated;
+    },
+
+    due(now: number): Reminder[] {
+      return (db.prepare("SELECT * FROM reminders WHERE status = 'scheduled' AND due_at <= ? ORDER BY due_at ASC, created_at ASC").all(finite(now, 'time')) as Row[]).map(toReminder);
+    },
+
+    nextDue(): Reminder | null {
+      const r = db.prepare("SELECT * FROM reminders WHERE status = 'scheduled' ORDER BY due_at ASC LIMIT 1").get() as Row | undefined;
+      return r ? toReminder(r) : null;
+    },
+
+    markFired(id: string, firedAt: number): ReminderFiring {
+      finite(firedAt, 'firing time');
+      const firing = db.transaction((): ReminderFiring => {
+        const r = row(id);
+        if (!r) throw new NeoError('not_found', `Reminder ${id} not found.`);
+        const existing = toReminder(r);
+        if (existing.status !== 'scheduled') {
+          throw new NeoError('conflict', `Reminder ${id} is ${existing.status}, not scheduled.`);
+        }
+        const now = clock();
+        const firedCount = existing.firedCount + 1;
+        // Advance past both the occurrence and the firing time, so a long downtime
+        // collapses every missed occurrence into this one firing.
+        const nextDueAt = existing.recurrence
+          ? nextOccurrence(existing.recurrence, toNum(r.anchor_at), Math.max(firedAt, existing.dueAt), existing.timezone, firedCount)
+          : null;
+        const reminder: Reminder = {
+          ...existing,
+          status: nextDueAt === null ? 'fired' : 'scheduled',
+          dueAt: nextDueAt ?? existing.dueAt,
+          firedCount,
+          lastFiredAt: firedAt,
+          updatedAt: now,
+        };
+        db.prepare('UPDATE reminders SET status = ?, due_at = ?, fired_count = ?, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
+          reminder.status, reminder.dueAt, firedCount, firedAt, now, id,
+        );
+        return { reminder, occurrenceAt: existing.dueAt, firedAt, missed: false, nextDueAt };
+      });
+      emit({ type: 'upsert', reminder: firing.reminder });
+      return firing;
+    },
+
+    onChange(listener: (event: ChangeEvent) => void): () => void {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}

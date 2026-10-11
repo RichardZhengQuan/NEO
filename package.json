@@ -1,0 +1,25 @@
+{
+  "name": "neo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NEO — an open-source personal AI assistant you can make your own.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.11.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "pnpm -r --workspace-concurrency=1 build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "dev": "pnpm -r --workspace-concurrency=1 --filter @neo/cli... build && node packages/cli/dist/index.js serve",
+    "dev:web": "pnpm --filter @neo/web dev",
+    "start": "node packages/cli/dist/index.js serve"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

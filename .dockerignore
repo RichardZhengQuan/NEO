@@ -1,0 +1,40 @@
+# Git / CI
+.git
+.github
+.gitignore
+
+# Editor / OS artefacts
+.DS_Store
+*.swp
+*.swo
+.idea
+.vscode
+
+# Build outputs (copied selectively in Dockerfile)
+**/dist
+**/node_modules
+apps/web/dist
+apps/desktop/dist
+apps/desktop/node_modules
+
+# Native app project directories (Capacitor)
+apps/mobile/ios
+apps/mobile/android
+apps/mobile/node_modules
+
+# Test / coverage artefacts
+coverage
+.vitest-cache
+
+# Docker itself
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Docs (not needed at runtime)
+docs
+
+# Miscellaneous
+*.log
+*.md
+output
