@@ -193,6 +193,22 @@ importers:
         specifier: ^4.1.0
         version: 4.6.5
 
+  packages/relay:
+    dependencies:
+      '@neo/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@neo/tunnel':
+        specifier: workspace:*
+        version: link:../tunnel
+      ws:
+        specifier: ^8.22.0
+        version: 8.22.0
+    devDependencies:
+      '@types/ws':
+        specifier: ^8.18.2
+        version: 8.18.2
+
   packages/server:
     dependencies:
       '@hono/node-server':
@@ -235,6 +251,9 @@ importers:
         specifier: ^4.1.0
         version: 4.6.5
     devDependencies:
+      '@neo/relay':
+        specifier: workspace:*
+        version: link:../relay
       '@types/web-push':
         specifier: ^3.6.4
         version: 3.6.4

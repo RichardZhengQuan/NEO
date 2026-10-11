@@ -12,6 +12,9 @@ WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 COPY packages/protocol/package.json  packages/protocol/
 COPY packages/tunnel/package.json    packages/tunnel/
+# The relay is only a dev dependency of the server (its e2e test), but pnpm needs
+# every workspace manifest the lockfile names.
+COPY packages/relay/package.json     packages/relay/
 COPY packages/storage/package.json   packages/storage/
 COPY packages/providers/package.json packages/providers/
 COPY packages/memory/package.json    packages/memory/

@@ -91,19 +91,27 @@ Codes expire after five minutes and work once. The server keeps only SHA-256 cod
 
 Unknown, expired, cancelled or used codes return `401 unauthorized` with “This pairing code is invalid or has expired.” Malformed bodies return `400 bad_request`. Claims have a separate per-IP failure limiter: after ten failed claims within sixty seconds, even a valid code receives `429 rate_limited` with `Retry-After: 60` until the window resets. The limiter runs before code lookup and honors `server.trustProxy` when determining the client IP.
 
-New phone links use `neo://pair?v=2&code=<code>` with an optional `server=<encoded-http(s)-url>` and/or a pinned tunnel route. The v2 contract also accepts a tunnel route (`id`, `pk`, optional comma-separated `lan`, optional ws(s) `relay`), and this phase creates and connects through the encrypted LAN tunnel. An http(s) `#/pair?v=2&code=…` link without `server` uses its origin. Existing v1 `neo://pair?server=…&token=…` and http(s) `#/pair?token=…` links remain accepted; `POST /api/devices` continues to generate v1 links for advanced access-token setups.
+New phone links use `neo://pair?v=2&code=<code>` with an optional `server=<encoded-http(s)-url>` and/or a pinned tunnel route. The v2 contract accepts a tunnel route (`id`, `pk`, optional comma-separated `lan`, optional ws(s) `relay`); phones try LAN first, then the relay, including when claiming the pairing code. Relay-only routes are valid and omit LAN addresses. An http(s) `#/pair?v=2&code=…` link without `server` uses its origin. Existing v1 `neo://pair?server=…&token=…` and http(s) `#/pair?token=…` links remain accepted; `POST /api/devices` continues to generate v1 links for advanced access-token setups.
 
 The computer must stay on with NEO running. Pairing automatically enables phone access when it is off and no public URL is configured. A running LAN tunnel replaces a loopback-only `serverUrl` in the QR; unstarted app fixtures retain their request origin.
 
 ## Phone access
 
-`GET /api/phone-access` reports `enabled`, `serverId`, the pinned `publicKey`, LAN listener state (`listening`, actual `port`, `addresses`, `error`), relay state and `defaultRelayUrl`. Relay status is `off` in this phase even when a URL is configured.
+`GET /api/phone-access` reports `enabled`, `serverId`, the pinned `publicKey`, LAN listener state (`listening`, actual `port`, `addresses`, `error`), relay state and `defaultRelayUrl`.
 
-Only the owner can use `PATCH /api/phone-access`. Its body accepts optional `enabled` and `relayUrl`: null uses the boot default, an empty string selects no relay, and a nonempty override must be a `ws:`/`wss:` URL without credentials, query or hash. Invalid bodies return 400; paired devices return 403. Disabling closes the listener and its live sessions. `PATCH /api/settings` rejects any `phoneAccess` field with `400 bad_request` and “Use PATCH /api/phone-access”.
+| `PhoneAccessStatus.relay` field | Meaning |
+|---|---|
+| `url: string \| null` | Configured effective relay URL, retained during connection, retries and while access is off; null when no relay is selected |
+| `status: 'off' \| 'connecting' \| 'connected' \| 'error'` | Connector state; connected means its server registration succeeded |
+| `error: string \| null` | Latest connection/registration error, otherwise null |
+
+`defaultRelayUrl` is the boot-time `tunnel.relayUrl` (or `NEO_RELAY_URL`). Its default is empty: NEO has no public relay yet. The effective URL is `settings.phoneAccess.relayUrl ?? config.tunnel.relayUrl`. Pairing routes carry a configured relay even while its connector is reconnecting so phones can retry later.
+
+Only the owner can use `PATCH /api/phone-access`. Its body accepts optional `enabled` and `relayUrl`: null uses the boot default, an empty string selects no relay, and a nonempty override must be a `ws:`/`wss:` URL without credentials, query or hash. The app accepts secure `wss://` custom URLs; `ws://` is available through the API for local development. Invalid bodies return 400; paired devices return 403. Disabling closes the LAN listener, the relay connector and their live sessions. Changing the effective URL restarts the relay connector. `PATCH /api/settings` rejects any `phoneAccess` field with `400 bad_request` and “Use PATCH /api/phone-access”.
 
 ## Tunnel
 
-The wire contract is authoritative in `@neo/protocol`'s `packages/protocol/src/tunnel.ts`. The separate LAN listener upgrades only `/v1/tunnel`, carries Noise-encrypted HTTP/SSE and event WebSocket frames, and returns 404 for all plaintext HTTP paths. Decrypted requests enter the normal Hono app with the tunnel peer address; forwarded IP headers are stripped even with proxy trust enabled. Device bearer tokens still authenticate inside the tunnel. Relay peers have a separate `relay:` IP namespace reserved for the next phase.
+The wire contract is authoritative in `@neo/protocol`'s `packages/protocol/src/tunnel.ts`. The separate LAN listener upgrades only `/v1/tunnel`, carries Noise-encrypted HTTP/SSE and event WebSocket frames, and returns 404 for all plaintext HTTP paths. Relay peers use the same encrypted frames through opaque `/v1/server` and `/v1/connect/<serverId>` routing. Decrypted requests enter the normal Hono app with the tunnel peer address; forwarded IP headers are stripped even with proxy trust enabled. Device bearer tokens still authenticate inside the tunnel. Relay peers have a separate `relay:` IP namespace for rate limiting.
 
 ## Tool confirmations
 

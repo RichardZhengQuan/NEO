@@ -36,6 +36,7 @@
     "zod": "^4.1.0"
   },
   "devDependencies": {
+    "@neo/relay": "workspace:*",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.18.2"
   }
