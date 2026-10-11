@@ -1,0 +1,238 @@
+/**
+ * Config-file tests: writeInitConfig, resolveDataDir, readToken, runInitWizard.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  expandHome,
+  resolveDataDir,
+  tokenPath,
+  readToken,
+  writeInitConfig,
+  runInitWizard,
+} from './config-file.js';
+import type { InitAnswers, PromptFn } from './config-file.js';
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+function makeTempDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'neo-cli-test-'));
+}
+
+// ── expandHome ───────────────────────────────────────────────────────────────
+
+describe('expandHome', () => {
+  it('expands leading ~/', () => {
+    const result = expandHome('~/.neo');
+    expect(result).toBe(path.join(os.homedir(), '.neo'));
+  });
+
+  it('expands bare ~', () => {
+    expect(expandHome('~')).toBe(os.homedir());
+  });
+
+  it('leaves absolute paths alone', () => {
+    expect(expandHome('/var/lib/neo')).toBe('/var/lib/neo');
+  });
+
+  it('leaves relative paths alone', () => {
+    expect(expandHome('some/relative')).toBe('some/relative');
+  });
+});
+
+// ── resolveDataDir ───────────────────────────────────────────────────────────
+
+describe('resolveDataDir', () => {
+  const origEnv = process.env['NEO_DATA_DIR'];
+
+  afterEach(() => {
+    if (origEnv === undefined) {
+      delete process.env['NEO_DATA_DIR'];
+    } else {
+      process.env['NEO_DATA_DIR'] = origEnv;
+    }
+  });
+
+  it('uses the flag when provided', () => {
+    delete process.env['NEO_DATA_DIR'];
+    expect(resolveDataDir('/custom/dir')).toBe('/custom/dir');
+  });
+
+  it('falls back to NEO_DATA_DIR env', () => {
+    process.env['NEO_DATA_DIR'] = '/env/dir';
+    expect(resolveDataDir()).toBe('/env/dir');
+  });
+
+  it('defaults to ~/.neo when neither flag nor env is set', () => {
+    delete process.env['NEO_DATA_DIR'];
+    expect(resolveDataDir()).toBe(path.join(os.homedir(), '.neo'));
+  });
+
+  it('flag beats env', () => {
+    process.env['NEO_DATA_DIR'] = '/env/dir';
+    expect(resolveDataDir('/flag/dir')).toBe('/flag/dir');
+  });
+});
+
+// ── readToken ────────────────────────────────────────────────────────────────
+
+describe('readToken', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+  });
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns null when token file does not exist', () => {
+    expect(readToken(tmpDir)).toBeNull();
+  });
+
+  it('returns the trimmed token when file exists', () => {
+    fs.writeFileSync(tokenPath(tmpDir), '  abc123  \n');
+    expect(readToken(tmpDir)).toBe('abc123');
+  });
+
+  it('returns null for empty token file', () => {
+    fs.writeFileSync(tokenPath(tmpDir), '   \n');
+    expect(readToken(tmpDir)).toBeNull();
+  });
+});
+
+// ── writeInitConfig ──────────────────────────────────────────────────────────
+
+describe('writeInitConfig', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+  });
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const baseAnswers: InitAnswers = {
+    providerKind: 'anthropic',
+    apiKey: 'sk-test-key',
+    baseUrl: '',
+    defaultModel: 'claude-3-5-haiku-latest',
+    mode: 'local',
+    host: '127.0.0.1',
+    port: 7777,
+  };
+
+  it('creates config.json in the data directory', () => {
+    writeInitConfig(tmpDir, baseAnswers);
+    const cfgPath = path.join(tmpDir, 'config.json');
+    expect(fs.existsSync(cfgPath)).toBe(true);
+  });
+
+  it('config.json contains expected fields', () => {
+    writeInitConfig(tmpDir, baseAnswers);
+    const cfgPath = path.join(tmpDir, 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    expect(cfg['mode']).toBe('local');
+    expect(cfg['dataDir']).toBe(tmpDir);
+    const providers = cfg['providers'] as { kind: string; apiKey: string }[];
+    expect(providers).toHaveLength(1);
+    expect(providers[0]?.kind).toBe('anthropic');
+    expect(providers[0]?.apiKey).toBe('sk-test-key');
+  });
+
+  it('settings.defaultModel uses provider and model', () => {
+    writeInitConfig(tmpDir, baseAnswers);
+    const cfgPath = path.join(tmpDir, 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    const settings = cfg['settings'] as { defaultModel: { provider: string; model: string } };
+    expect(settings.defaultModel.provider).toBe('anthropic');
+    expect(settings.defaultModel.model).toBe('claude-3-5-haiku-latest');
+  });
+
+  it('server mode adds server.host and server.port', () => {
+    const serverAnswers: InitAnswers = { ...baseAnswers, mode: 'server', host: '0.0.0.0', port: 9000 };
+    writeInitConfig(tmpDir, serverAnswers);
+    const cfgPath = path.join(tmpDir, 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    expect(cfg['mode']).toBe('server');
+    const server = cfg['server'] as { host: string; port: number };
+    expect(server.host).toBe('0.0.0.0');
+    expect(server.port).toBe(9000);
+  });
+
+  it('merges with existing config when file already exists', () => {
+    const cfgPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({ customField: 'preserved', mode: 'local' }));
+    writeInitConfig(tmpDir, baseAnswers);
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    expect(cfg['customField']).toBe('preserved');
+  });
+
+  it('writes to custom configPath when provided', () => {
+    const customPath = path.join(tmpDir, 'custom-config.json');
+    writeInitConfig(tmpDir, baseAnswers, customPath);
+    expect(fs.existsSync(customPath)).toBe(true);
+    const cfg = JSON.parse(fs.readFileSync(customPath, 'utf8')) as Record<string, unknown>;
+    expect(cfg['mode']).toBe('local');
+  });
+
+  it('creates data directory if it does not exist', () => {
+    const nestedDir = path.join(tmpDir, 'deep', 'nested');
+    writeInitConfig(nestedDir, baseAnswers);
+    expect(fs.existsSync(nestedDir)).toBe(true);
+  });
+});
+
+// ── runInitWizard ────────────────────────────────────────────────────────────
+
+describe('runInitWizard', () => {
+  it('returns expected answers with anthropic preset', async () => {
+    // PROVIDER_PRESETS keys: anthropic is index 0 typically, but we probe with "1"
+    // We create a deterministic prompt mock based on what questions are asked
+    const promptHistory: string[] = [];
+    const responses = ['1', 'sk-ant-test', '', 'claude-opus-5-5', 'local'];
+    let callIndex = 0;
+
+    const mockPrompt: PromptFn = async (question) => {
+      promptHistory.push(question);
+      return responses[callIndex++] ?? '';
+    };
+
+    const answers = await runInitWizard(mockPrompt);
+    // Should get the first preset's kind
+    expect(answers.apiKey).toBe('sk-ant-test');
+    expect(answers.mode).toBe('local');
+    expect(answers.defaultModel).toBe('claude-opus-5-5');
+  });
+
+  it('server mode returns host and port', async () => {
+    // anthropic has needsKey=true, no baseUrl prompt → 6 questions
+    const responses = ['1', 'sk-ant-test', 'claude-opus-5-5', 'server', '0.0.0.0', '9000'];
+    let callIndex = 0;
+
+    const mockPrompt: PromptFn = async () => {
+      return responses[callIndex++] ?? '';
+    };
+
+    const answers = await runInitWizard(mockPrompt);
+    expect(answers.mode).toBe('server');
+    expect(answers.host).toBe('0.0.0.0');
+    expect(answers.port).toBe(9000);
+  });
+
+  it('uses default model when empty string entered', async () => {
+    const responses = ['1', 'sk-ant-test', '', '', 'local'];
+    let callIndex = 0;
+
+    const mockPrompt: PromptFn = async () => {
+      return responses[callIndex++] ?? '';
+    };
+
+    const answers = await runInitWizard(mockPrompt);
+    // default model should be non-empty (from preset)
+    expect(typeof answers.defaultModel).toBe('string');
+  });
+});

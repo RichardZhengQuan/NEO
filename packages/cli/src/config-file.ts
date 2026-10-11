@@ -1,0 +1,163 @@
+/**
+ * Config file reading and writing for `neo init`.
+ * Injectable prompt functions so the logic can be unit-tested without stdin.
+ */
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { PROVIDER_PRESETS, type ProviderKind, type NeoConfig } from '@neo/protocol';
+
+export type PromptFn = (question: string, options?: { secret?: boolean; choices?: string[] }) => Promise<string>;
+
+export interface InitAnswers {
+  providerKind: ProviderKind;
+  apiKey: string;
+  baseUrl: string;
+  defaultModel: string;
+  mode: 'local' | 'server';
+  host: string;
+  port: number;
+}
+
+/** Expand `~` to the user's home directory. */
+export function expandHome(p: string): string {
+  if (p.startsWith('~/') || p === '~') {
+    return path.join(os.homedir(), p.slice(1));
+  }
+  return p;
+}
+
+/** Resolve the effective data directory (flag → env → default ~/.neo). */
+export function resolveDataDir(dataDirFlag?: string): string {
+  return expandHome(dataDirFlag ?? process.env['NEO_DATA_DIR'] ?? '~/.neo');
+}
+
+/** Resolve the token file path inside a data directory. */
+export function tokenPath(dataDir: string): string {
+  return path.join(dataDir, 'token');
+}
+
+/** Read the owner token from the data directory, returning null if absent. */
+export function readToken(dataDir: string): string | null {
+  try {
+    return fs.readFileSync(tokenPath(dataDir), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read and parse the config file, returning null on any error. */
+export function readConfigFile(filePath: string): Partial<NeoConfig> | null {
+  try {
+    const text = fs.readFileSync(filePath, 'utf8');
+    return JSON.parse(text) as Partial<NeoConfig>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run the interactive init wizard with injected prompt functions.
+ * Returns the answers gathered from the user.
+ */
+export async function runInitWizard(prompt: PromptFn): Promise<InitAnswers> {
+  // 1. Provider preset
+  const presetKeys = Object.keys(PROVIDER_PRESETS) as ProviderKind[];
+  const presetList = presetKeys
+    .map((k, i) => {
+      const p = PROVIDER_PRESETS[k];
+      return `  ${i + 1}. ${p.label} — ${p.description}`;
+    })
+    .join('\n');
+
+  const choiceStr = await prompt(
+    `\nChoose your AI provider:\n${presetList}\n\nEnter number`,
+    { choices: presetKeys.map((_, i) => String(i + 1)) },
+  );
+  const idx = parseInt(choiceStr.trim(), 10) - 1;
+  const providerKind: ProviderKind = presetKeys[idx] ?? 'mock';
+  const preset = PROVIDER_PRESETS[providerKind];
+
+  // 2. API key (hidden for keyed providers)
+  let apiKey = '';
+  if (preset.needsKey) {
+    const keyUrl = preset.keyUrl ? ` (get one at ${preset.keyUrl})` : '';
+    apiKey = await prompt(`\n${preset.label} API key${keyUrl}`, { secret: true });
+  }
+
+  // 3. Base URL (for openai-compatible / ollama)
+  let baseUrl = preset.baseUrl ?? '';
+  if (providerKind === 'openai-compatible' || providerKind === 'ollama') {
+    const defaultUrl = preset.baseUrl ?? '';
+    const entered = await prompt(`\nBase URL [${defaultUrl}]`);
+    baseUrl = entered.trim() || defaultUrl;
+  }
+
+  // 4. Default model
+  const suggestedDefault = preset.defaultModel ?? preset.suggestedModels[0] ?? '';
+  const modelInput = await prompt(`\nDefault model [${suggestedDefault}]`);
+  const defaultModel = modelInput.trim() || suggestedDefault;
+
+  // 5. Mode
+  const modeInput = await prompt(`\nMode — local (on this machine) or server (remote, requires TLS)? [local]`, {
+    choices: ['local', 'server', ''],
+  });
+  const mode: 'local' | 'server' = modeInput.trim() === 'server' ? 'server' : 'local';
+
+  // 6. Host / port (only in server mode)
+  let host = '127.0.0.1';
+  let port = 7777;
+  if (mode === 'server') {
+    const hostInput = await prompt(`\nBind host [0.0.0.0]`);
+    host = hostInput.trim() || '0.0.0.0';
+    const portInput = await prompt(`\nPort [7777]`);
+    port = parseInt(portInput.trim() || '7777', 10);
+  }
+
+  return { providerKind, apiKey, baseUrl, defaultModel, mode, host, port };
+}
+
+/**
+ * Write the config file for `neo init`.
+ * Merges with any existing config and sets mode 0600.
+ */
+export function writeInitConfig(dataDir: string, answers: InitAnswers, configPath?: string): void {
+  const resolvedDir = expandHome(dataDir);
+  fs.mkdirSync(resolvedDir, { recursive: true, mode: 0o700 });
+
+  const cfgPath = configPath ?? path.join(resolvedDir, 'config.json');
+
+  // Load existing config to merge
+  const existing = readConfigFile(cfgPath) ?? {};
+
+  const providerConfig: Record<string, unknown> = {
+    id: answers.providerKind,
+    kind: answers.providerKind,
+    enabled: true,
+  };
+  if (answers.apiKey) providerConfig['apiKey'] = answers.apiKey;
+  if (answers.baseUrl) providerConfig['baseUrl'] = answers.baseUrl;
+  if (answers.defaultModel) providerConfig['defaultModel'] = answers.defaultModel;
+
+  const config: Record<string, unknown> = {
+    ...existing,
+    mode: answers.mode,
+    dataDir: resolvedDir,
+    providers: [providerConfig],
+    settings: {
+      ...((existing as Record<string, unknown>)['settings'] as Record<string, unknown> | undefined ?? {}),
+      defaultModel: { provider: answers.providerKind, model: answers.defaultModel },
+    },
+  };
+
+  if (answers.mode === 'server') {
+    config['server'] = {
+      ...((existing as Record<string, unknown>)['server'] as Record<string, unknown> | undefined ?? {}),
+      host: answers.host,
+      port: answers.port,
+    };
+  }
+
+  const json = JSON.stringify(config, null, 2);
+  fs.writeFileSync(cfgPath, json, { encoding: 'utf8', mode: 0o600 });
+}

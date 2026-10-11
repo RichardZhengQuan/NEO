@@ -1,0 +1,57 @@
+{
+  "name": "@neo/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NEO desktop app (Electron): runs the NEO server on your device and shows the web UI.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "start": "electron .",
+    "dev": "pnpm --filter @neo/web build && pnpm -r --filter @neo/desktop... build && electron ."
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*",
+    "@neo/server": "workspace:*",
+    "@neo/client": "workspace:*"
+  },
+  "devDependencies": {
+    "electron": "^44.0.0"
+  },
+  "build": {
+    "appId": "dev.neo.app",
+    "productName": "NEO",
+    "files": [
+      "dist/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] }
+      ],
+      "icon": "build/icon.icns"
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] }
+      ],
+      "icon": "build/icons"
+    }
+  }
+}

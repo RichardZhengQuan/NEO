@@ -1,0 +1,27 @@
+{
+  "name": "@neo/storage",
+  "version": "0.1.0",
+  "description": "NEO persistence on Node's built-in SQLite: database, migrations, conversation/settings/secret/device stores.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*",
+    "zod": "^4.1.0"
+  }
+}

@@ -1,0 +1,64 @@
+# systemd service unit for NEO (bare-Node / non-Docker deployment).
+#
+# Installation:
+#   1. Copy this file to /etc/systemd/system/neo.service
+#   2. Edit the paths and environment variables below.
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now neo
+#
+# Logs:  journalctl -fu neo
+# Stop:  sudo systemctl stop neo
+
+[Unit]
+Description=NEO personal AI assistant
+Documentation=https://github.com/your-org/neo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=neo
+Group=neo
+WorkingDirectory=/opt/neo
+
+# ── Environment ───────────────────────────────────────────────────────────────
+# Adjust NEO_DATA_DIR and NEO_WEB_DIR to match your deployment layout.
+Environment="NEO_MODE=server"
+Environment="NEO_HOST=127.0.0.1"
+Environment="NEO_PORT=7777"
+Environment="NEO_DATA_DIR=/var/lib/neo"
+Environment="NEO_WEB_DIR=/opt/neo/apps/web/dist"
+Environment="NODE_ENV=production"
+
+# Load API keys and secrets from a protected env file.
+# Create /etc/neo/env and chmod 640 it (owner root, group neo).
+# Example contents:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   OPENAI_API_KEY=sk-...
+EnvironmentFile=-/etc/neo/env
+
+# ── Process ───────────────────────────────────────────────────────────────────
+ExecStart=/usr/bin/node /opt/neo/packages/cli/dist/index.js serve
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=neo
+
+# ── Hardening ─────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/neo
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target

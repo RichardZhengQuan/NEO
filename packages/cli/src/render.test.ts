@@ -1,0 +1,201 @@
+/**
+ * Rendering tests — pure functions only, no I/O.
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { AgentEvent } from '@neo/protocol';
+import { renderEvent, renderEvents, renderBanner } from './render.js';
+
+// Disable ANSI in tests so assertions are clean text
+beforeEach(() => {
+  vi.stubEnv('NO_COLOR', '1');
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe('renderEvent', () => {
+  it('text.delta returns delta line', () => {
+    const ev: AgentEvent = { type: 'text.delta', conversationId: 'c', turnId: 't', messageId: 'm', text: 'hello' };
+    const lines = renderEvent(ev);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ text: 'hello', delta: true });
+  });
+
+  it('reasoning.delta is hidden by default', () => {
+    const ev: AgentEvent = { type: 'reasoning.delta', conversationId: 'c', turnId: 't', messageId: 'm', text: 'thinking…' };
+    expect(renderEvent(ev, {})).toHaveLength(0);
+  });
+
+  it('reasoning.delta shown with showReasoning', () => {
+    const ev: AgentEvent = { type: 'reasoning.delta', conversationId: 'c', turnId: 't', messageId: 'm', text: 'thinking…' };
+    const lines = renderEvent(ev, { showReasoning: true });
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines[0]?.text).toContain('thinking…');
+  });
+
+  it('tool.started returns chip line', () => {
+    const ev: AgentEvent = {
+      type: 'tool.started', conversationId: 'c', turnId: 't', messageId: 'm',
+      toolCallId: 'tc1', name: 'create_reminder', title: 'Create reminder', input: {},
+    };
+    const lines = renderEvent(ev);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines[0]?.text).toContain('Create reminder');
+  });
+
+  it('tool.finished ok returns check chip', () => {
+    const ev: AgentEvent = {
+      type: 'tool.finished', conversationId: 'c', turnId: 't', messageId: 'm',
+      toolCallId: 'tc1', name: 'create_reminder', isError: false, summary: 'Created for 5 PM',
+    };
+    const lines = renderEvent(ev);
+    expect(lines[0]?.text).toContain('Created for 5 PM');
+  });
+
+  it('tool.finished error returns error chip', () => {
+    const ev: AgentEvent = {
+      type: 'tool.finished', conversationId: 'c', turnId: 't', messageId: 'm',
+      toolCallId: 'tc1', name: 'web_fetch', isError: true, summary: 'Network error',
+    };
+    const lines = renderEvent(ev);
+    expect(lines[0]?.text).toContain('Network error');
+  });
+
+  it('memory.recalled returns summary line', () => {
+    const ev: AgentEvent = {
+      type: 'memory.recalled', conversationId: 'c', turnId: 't',
+      items: [{ id: 'mem1', kind: 'fact', label: 'I like cats', score: 0.9, reason: 'query' }],
+    };
+    const lines = renderEvent(ev);
+    expect(lines[0]?.text).toContain('I like cats');
+  });
+
+  it('memory.recalled is empty when no items', () => {
+    const ev: AgentEvent = { type: 'memory.recalled', conversationId: 'c', turnId: 't', items: [] };
+    expect(renderEvent(ev)).toHaveLength(0);
+  });
+
+  it('turn.finished emits usage line', () => {
+    const ev: AgentEvent = {
+      type: 'turn.finished', conversationId: 'c', turnId: 't',
+      stopReason: 'end', usage: { inputTokens: 100, outputTokens: 50 },
+    };
+    const lines = renderEvent(ev);
+    const all = lines.map((l) => l.text).join(' ');
+    expect(all).toContain('100');
+    expect(all).toContain('50');
+  });
+
+  it('turn.failed emits error line', () => {
+    const ev: AgentEvent = {
+      type: 'turn.failed', conversationId: 'c', turnId: 't',
+      error: { code: 'internal', message: 'Something broke' },
+    };
+    const lines = renderEvent(ev);
+    const all = lines.map((l) => l.text).join(' ');
+    expect(all).toContain('Something broke');
+  });
+
+  it('message.completed returns empty', () => {
+    const msg = { id: 'm', conversationId: 'c', role: 'assistant' as const, parts: [], createdAt: 0, status: 'complete' as const };
+    const ev: AgentEvent = { type: 'message.completed', conversationId: 'c', turnId: 't', message: msg };
+    expect(renderEvent(ev)).toHaveLength(0);
+  });
+});
+
+describe('renderEvents', () => {
+  it('renders a full scripted event sequence', () => {
+    const events: AgentEvent[] = [
+      { type: 'turn.started', conversationId: 'c', turnId: 't', assistantMessageId: 'a',
+        model: { provider: 'anthropic', model: 'claude-opus-5-5' },
+        userMessage: { id: 'u', conversationId: 'c', role: 'user', parts: [], createdAt: 0, status: 'complete' } },
+      { type: 'text.delta', conversationId: 'c', turnId: 't', messageId: 'a', text: 'Hello' },
+      { type: 'text.delta', conversationId: 'c', turnId: 't', messageId: 'a', text: ', world!' },
+      { type: 'tool.started', conversationId: 'c', turnId: 't', messageId: 'a',
+        toolCallId: 'tc1', name: 'get_time', title: 'Get current time', input: {} },
+      { type: 'tool.finished', conversationId: 'c', turnId: 't', messageId: 'a',
+        toolCallId: 'tc1', name: 'get_time', isError: false, summary: '2026-10-10 20:15' },
+      { type: 'turn.finished', conversationId: 'c', turnId: 't', stopReason: 'end',
+        usage: { inputTokens: 10, outputTokens: 20 } },
+    ];
+    const text = renderEvents(events);
+    expect(text).toContain('Hello');
+    expect(text).toContain('world!');
+    expect(text).toContain('2026-10-10 20:15');
+    expect(text).toContain('10');
+    expect(text).toContain('20');
+  });
+});
+
+describe('renderBanner', () => {
+  it('includes URL and mode', () => {
+    const banner = renderBanner({
+      url: 'http://127.0.0.1:7777',
+      mode: 'local',
+      dataDir: '/home/user/.neo',
+      ownerToken: 'abc123',
+      showToken: true,
+      webDir: null,
+    });
+    expect(banner).toContain('http://127.0.0.1:7777');
+    expect(banner).toContain('local');
+    expect(banner).toContain('/home/user/.neo');
+    expect(banner).toContain('abc123');
+  });
+
+  it('shows QR info in server mode only with showToken', () => {
+    const banner = renderBanner({
+      url: 'https://neo.example.com',
+      mode: 'server',
+      dataDir: '/data',
+      ownerToken: 'secret',
+      showToken: true,
+      webDir: '/var/web',
+      qrText: '██ QR ██',
+      pairingUrl: 'neo://pair?server=https://neo.example.com&token=secret',
+    });
+    expect(banner).toContain('neo://pair');
+    expect(banner).toContain('QR');
+  });
+
+  it('does not show token in server mode without showToken', () => {
+    const banner = renderBanner({
+      url: 'https://neo.example.com',
+      mode: 'server',
+      dataDir: '/data',
+      ownerToken: 'MY_SECRET_TOKEN',
+      showToken: false,
+      webDir: null,
+    });
+    expect(banner).not.toContain('MY_SECRET_TOKEN');
+  });
+
+  it('suppresses owner pairing links and QR codes in server logs', () => {
+    const banner = renderBanner({
+      url: 'https://neo.example.com',
+      mode: 'server',
+      dataDir: '/data',
+      ownerToken: 'MY_SECRET_TOKEN',
+      showToken: false,
+      webDir: null,
+      qrText: 'OWNER_TOKEN_QR',
+      pairingUrl: 'neo://pair?server=https://neo.example.com&token=MY_SECRET_TOKEN',
+    });
+    expect(banner).not.toContain('MY_SECRET_TOKEN');
+    expect(banner).not.toContain('OWNER_TOKEN_QR');
+    expect(banner).not.toContain('neo://pair');
+    expect(banner).toContain('run `neo pair` to add a device');
+  });
+
+  it('suppresses the owner token in captured local output', () => {
+    const banner = renderBanner({
+      url: 'http://127.0.0.1:7777',
+      mode: 'local',
+      dataDir: '/data',
+      ownerToken: 'MY_SECRET_TOKEN',
+      showToken: false,
+      webDir: null,
+    });
+    expect(banner).not.toContain('MY_SECRET_TOKEN');
+  });
+});

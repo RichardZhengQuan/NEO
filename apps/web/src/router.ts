@@ -1,0 +1,173 @@
+/**
+ * Hash routing. Hashes work everywhere the app runs (served by the NEO
+ * server, file:// in Electron, capacitor:// on phones) without server rewrites.
+ *
+ *   #/chat · #/chat/<conversationId>
+ *   #/memory · #/memory/<tab> · #/memory/<memoryId> · #/memory/<tab>?node=<memoryId>
+ *   #/reminders · #/reminders/<reminderId>
+ *   #/tasks · #/tasks/<listId> · #/tasks/<taskId>
+ *   #/notes · #/notes/<noteId>
+ *   #/settings · #/settings/<section>
+ *   #/connect · #/onboarding · #/pair?token=…&server=…
+ *
+ * `neo://` links (notifications, generative UI) map onto the same routes.
+ */
+import { useSyncExternalStore } from 'react';
+
+export const MEMORY_TABS = ['net', 'list', 'pending', 'journal', 'stats', 'data'] as const;
+export type MemoryTab = (typeof MEMORY_TABS)[number];
+
+export const SETTINGS_SECTIONS = ['ai', 'persona', 'memory', 'tools', 'devices', 'notifications', 'appearance', 'data'] as const;
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
+
+export type Route =
+  | { name: 'chat'; conversationId?: string }
+  | { name: 'memory'; tab: MemoryTab; nodeId?: string }
+  | { name: 'reminders'; reminderId?: string }
+  | { name: 'tasks'; listId?: string; taskId?: string }
+  | { name: 'notes'; noteId?: string }
+  | { name: 'settings'; section?: SettingsSection }
+  | { name: 'connect' }
+  | { name: 'onboarding' }
+  | { name: 'pair'; token?: string; serverUrl?: string };
+
+export type RouteName = Route['name'];
+
+const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const safeId = (s: string | undefined): string | undefined => (s && SAFE_ID.test(s) ? s : undefined);
+
+function isMemoryTab(s: string | undefined): s is MemoryTab {
+  return MEMORY_TABS.includes(s as MemoryTab);
+}
+function isSection(s: string | undefined): s is SettingsSection {
+  return SETTINGS_SECTIONS.includes(s as SettingsSection);
+}
+
+/** Route from path segments + query (shared by hash and neo:// parsing). */
+function routeFrom(segments: string[], query: URLSearchParams): Route {
+  const [first = 'chat', second] = segments;
+  switch (first) {
+    case 'chat':
+      return { name: 'chat', conversationId: safeId(second) };
+    case 'memory': {
+      const node = safeId(query.get('node') ?? undefined);
+      if (isMemoryTab(second)) return node ? { name: 'memory', tab: second, nodeId: node } : { name: 'memory', tab: second };
+      const id = safeId(second);
+      if (id) return { name: 'memory', tab: 'net', nodeId: id };
+      return { name: 'memory', tab: 'net' };
+    }
+    case 'reminders':
+      return { name: 'reminders', reminderId: safeId(second) };
+    case 'tasks': {
+      const id = safeId(second);
+      if (id?.startsWith('task_')) return { name: 'tasks', taskId: id };
+      return { name: 'tasks', listId: id };
+    }
+    case 'notes':
+      return { name: 'notes', noteId: safeId(second) };
+    case 'settings':
+      return { name: 'settings', section: isSection(second) ? second : undefined };
+    case 'connect':
+      return { name: 'connect' };
+    case 'onboarding':
+      return { name: 'onboarding' };
+    case 'pair':
+      return { name: 'pair', token: query.get('token') ?? undefined, serverUrl: query.get('server') ?? query.get('url') ?? undefined };
+    default:
+      return { name: 'chat' };
+  }
+}
+
+/** Parse `#/memory/list?node=mem_1` (a leading `#` and `/` are optional). */
+export function parseRoute(hash: string): Route {
+  const raw = hash.replace(/^#/, '').replace(/^\/+/, '');
+  const q = raw.indexOf('?');
+  const path = q >= 0 ? raw.slice(0, q) : raw;
+  const query = new URLSearchParams(q >= 0 ? raw.slice(q + 1) : '');
+  let segments: string[];
+  try {
+    segments = path.split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    segments = [];
+  }
+  return routeFrom(segments, query);
+}
+
+/** Canonical hash for a route. */
+export function routeToHash(route: Route): string {
+  switch (route.name) {
+    case 'chat':
+      return route.conversationId ? `#/chat/${route.conversationId}` : '#/chat';
+    case 'memory':
+      if (route.nodeId) return route.tab === 'net' ? `#/memory/${route.nodeId}` : `#/memory/${route.tab}?node=${route.nodeId}`;
+      return route.tab === 'net' ? '#/memory' : `#/memory/${route.tab}`;
+    case 'reminders':
+      return route.reminderId ? `#/reminders/${route.reminderId}` : '#/reminders';
+    case 'tasks':
+      if (route.taskId) return `#/tasks/${route.taskId}`;
+      return route.listId ? `#/tasks/${route.listId}` : '#/tasks';
+    case 'notes':
+      return route.noteId ? `#/notes/${route.noteId}` : '#/notes';
+    case 'settings':
+      return route.section ? `#/settings/${route.section}` : '#/settings';
+    case 'connect':
+      return '#/connect';
+    case 'onboarding':
+      return '#/onboarding';
+    case 'pair': {
+      const q = new URLSearchParams();
+      if (route.token) q.set('token', route.token);
+      if (route.serverUrl) q.set('server', route.serverUrl);
+      const s = q.toString();
+      return s ? `#/pair?${s}` : '#/pair';
+    }
+  }
+}
+
+/**
+ * Map a `neo://` link to a route. Parsed by hand: non-special URL schemes are
+ * handled inconsistently by older WebViews.
+ */
+export function neoUrlToRoute(url: string): Route | null {
+  const m = /^neo:\/\/([^/?#]+)(\/[^?#]*)?(\?[^#]*)?/i.exec(url.trim());
+  if (!m) return null;
+  const host = m[1]!.toLowerCase();
+  const known = ['chat', 'memory', 'reminders', 'tasks', 'notes', 'settings', 'pair'];
+  if (!known.includes(host)) return null;
+  let rest: string[];
+  try {
+    rest = (m[2] ?? '').split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    rest = [];
+  }
+  return routeFrom([host, ...rest], new URLSearchParams((m[3] ?? '').slice(1)));
+}
+
+/** Navigate by changing the hash (adds a history entry unless `replace`). */
+export function navigate(route: Route, options: { replace?: boolean } = {}): void {
+  if (typeof window === 'undefined') return;
+  const hash = routeToHash(route);
+  if (window.location.hash === hash) return;
+  if (options.replace) {
+    const url = `${window.location.pathname}${window.location.search}${hash}`;
+    window.history.replaceState(window.history.state, '', url);
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  } else {
+    window.location.hash = hash;
+  }
+}
+
+function subscribe(cb: () => void): () => void {
+  window.addEventListener('hashchange', cb);
+  return () => window.removeEventListener('hashchange', cb);
+}
+
+function getHash(): string {
+  return typeof window === 'undefined' ? '' : window.location.hash;
+}
+
+/** Current route, re-rendering on hash changes. */
+export function useRoute(): Route {
+  const hash = useSyncExternalStore(subscribe, getHash, () => '');
+  return parseRoute(hash);
+}

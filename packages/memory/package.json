@@ -1,0 +1,28 @@
+{
+  "name": "@neo/memory",
+  "version": "0.1.0",
+  "description": "The NEO memory net: graph memory with spreading-activation recall, forgetting curves, reinforcement and consolidation.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*",
+    "@neo/storage": "workspace:*",
+    "zod": "^4.1.0"
+  }
+}

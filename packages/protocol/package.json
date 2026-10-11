@@ -1,0 +1,24 @@
+{
+  "name": "@neo/protocol",
+  "version": "0.1.0",
+  "description": "Shared contracts for NEO: zod schemas, types and pure helpers used by every package and client.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^4.1.0"
+  }
+}

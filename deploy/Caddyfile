@@ -1,0 +1,42 @@
+# Caddy reverse proxy with automatic HTTPS for NEO.
+#
+# Replace "neo.example.com" with your actual domain, then:
+#   docker compose --profile tls up -d
+#
+# Caddy automatically obtains and renews a Let's Encrypt certificate.
+# Make sure ports 80 and 443 are open and the domain resolves to this server.
+
+neo.example.com {
+  # Proxy all traffic to NEO, including WebSocket connections.
+  reverse_proxy neo:7777 {
+    # Forward the real client IP so NEO can use it for rate limiting.
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Proto {scheme}
+
+    # WebSocket upgrade support.
+    transport http {
+      keepalive 30s
+      keepalive_idle_conns 10
+    }
+  }
+
+  # Security headers (the NEO server also sets these; Caddy adds extra depth).
+  header {
+    Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "SAMEORIGIN"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    # Remove the server banner.
+    -Server
+  }
+
+  # Compress text responses.
+  encode zstd gzip
+
+  # Access log (optional).
+  log {
+    output stdout
+    format console
+  }
+}

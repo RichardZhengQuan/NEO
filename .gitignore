@@ -3,3 +3,19 @@
 .env.*
 !.env.example
 !.env.sample
+
+# dependencies & build output
+node_modules/
+dist/
+dist-electron/
+release/
+coverage/
+*.tsbuildinfo
+*.log
+
+# local NEO data (databases, keys, tokens)
+.neo-data/
+
+# generated native projects (run `npx cap add ios|android`)
+apps/mobile/ios/
+apps/mobile/android/

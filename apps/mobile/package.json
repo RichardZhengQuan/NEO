@@ -1,0 +1,27 @@
+{
+  "name": "@neo/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NEO for iOS and Android (Capacitor shell around the web app; connects to your NEO server).",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "add:ios": "cap add ios",
+    "add:android": "cap add android",
+    "open:ios": "cap open ios",
+    "open:android": "cap open android",
+    "sync": "pnpm --filter @neo/web build && cap sync"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/ios": "^8.5.0",
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/local-notifications": "^8.3.0",
+    "@capacitor/app": "^8.1.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.0"
+  }
+}

@@ -1,0 +1,131 @@
+/**
+ * @neo/providers — "you choose the AI".
+ *
+ * FROZEN PUBLIC API (docs/IMPLEMENTATION_PLAN.md, WP-providers). Implementations
+ * may add exports but must not change these signatures.
+ */
+import {
+  NeoError,
+  type ChatRequest,
+  type Logger,
+  type ProviderAdapter,
+  type ProviderConfig,
+  type ProviderRegistry,
+  type StopReason,
+  type Usage,
+} from '@neo/protocol';
+
+export type { Logger };
+
+export interface ProviderOptions {
+  /** Injected for tests; defaults to globalThis.fetch. */
+  fetch?: typeof fetch;
+  /** Resolves ProviderConfig.apiKeySecret names to values (encrypted SecretStore). */
+  resolveSecret?: (name: string) => string | undefined;
+  logger?: Logger;
+  /** Script for `mock` providers; defaults to {@link defaultMockScript}. */
+  mockScript?: MockScript;
+  /** Waits between pre-first-byte retries (default: an abortable timer). Injected by tests. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}
+
+/** What the mock model "says" for one request. */
+export interface MockReply {
+  text?: string;
+  reasoning?: string;
+  toolCalls?: { name: string; input: unknown; id?: string }[];
+  /** Delay before streaming starts. */
+  delayMs?: number;
+  /** Stream text in chunks of this many characters (default 12). */
+  chunkSize?: number;
+  /** Defaults: 'tool_use' when toolCalls are present, else 'end'. */
+  stopReason?: StopReason;
+  usage?: Usage;
+}
+
+/** `callIndex` counts chat() calls on this provider instance, starting at 0. */
+export type MockScript = (request: ChatRequest, callIndex: number) => MockReply | Promise<MockReply>;
+
+export interface SSEMessage {
+  event?: string;
+  data: string;
+  id?: string;
+}
+
+// ---- Implementations ----
+
+import { AnthropicAdapter } from './anthropic.js';
+import { OpenAIAdapter } from './openai.js';
+import { GeminiAdapter } from './gemini.js';
+import { MockProvider, defaultMockScript as _defaultMockScript } from './mock.js';
+export { parseSSE } from './sse.js';
+export { withRetry } from './retry.js';
+export type { RetryOptions } from './retry.js';
+
+/**
+ * Build an adapter for one provider config. Throws NeoError('config_error') for unusable configs.
+ * Never throws for a missing API key: that surfaces as `provider_auth` when the adapter is used,
+ * and `apiKeySecret` is resolved on every call so a key saved later is picked up.
+ * `adapter.config` is the very object passed in (secrets are never copied into it).
+ */
+export function createProvider(config: ProviderConfig, options: ProviderOptions = {}): ProviderAdapter {
+  switch (config.kind) {
+    case 'anthropic':
+      return new AnthropicAdapter(config, options);
+    case 'openai':
+    case 'openai-compatible':
+    case 'ollama':
+      return new OpenAIAdapter(config, options);
+    case 'gemini':
+      return new GeminiAdapter(config, options);
+    case 'mock':
+      return new MockProvider(config, options);
+    default: {
+      const kind: never = config.kind;
+      throw new NeoError('config_error', `Unknown provider kind: ${String(kind)}`);
+    }
+  }
+}
+
+/** Registry over many providers; disabled providers are kept (and listed) but `resolve()` refuses them. */
+export function createProviderRegistry(configs: readonly ProviderConfig[], options: ProviderOptions = {}): ProviderRegistry {
+  const adapters = new Map<string, ProviderAdapter>();
+  for (const cfg of configs) adapters.set(cfg.id, createProvider(cfg, options));
+
+  return {
+    get: (id) => adapters.get(id),
+    list: () => [...adapters.values()],
+    resolve(ref) {
+      const adapter = adapters.get(ref.provider);
+      if (!adapter) throw new NeoError('not_found', `Provider "${ref.provider}" not found.`);
+      if (adapter.config.enabled === false) {
+        throw new NeoError('config_error', `Provider "${adapter.config.label ?? ref.provider}" is disabled. Enable it in Settings → Providers.`);
+      }
+      return { adapter, model: ref.model };
+    },
+    upsert(config) {
+      // Build first: a config that cannot be turned into an adapter leaves the registry unchanged.
+      const adapter = createProvider(config, options);
+      adapters.set(config.id, adapter);
+      return adapter;
+    },
+    remove: (id) => adapters.delete(id),
+  };
+}
+
+/**
+ * The demo brain used by `mock` providers when no script is given (demo-brain.ts):
+ * recognizes reminders, tasks, notes, "remember …", "what do you remember",
+ * "forget …", time, arithmetic, UI demos and URLs in English and Chinese and
+ * answers with the matching tool (only tools offered in the request), confirms
+ * tool results in plain language, serves memory extraction / consolidation /
+ * titles (metadata.purpose), and otherwise explains Demo mode and mentions what
+ * it remembers from the `<neo_context>` block.
+ */
+export const defaultMockScript: MockScript = _defaultMockScript;
+
+// Re-export adapters for advanced usage
+export { AnthropicAdapter } from './anthropic.js';
+export { OpenAIAdapter } from './openai.js';
+export { GeminiAdapter } from './gemini.js';
+export { MockProvider } from './mock.js';
