@@ -13,6 +13,8 @@ import type { StorageDeviceStore } from '@neo/storage';
 import './types.js';
 import { createAuthMiddleware, getClientIp, IpFailureLimiter, ownerOnly } from './auth.js';
 import { registerHealth } from './routes/health.js';
+import { PairingService } from './pairing.js';
+import { registerPairing, registerPairingClaim } from './routes/pairing.js';
 import { registerConversations } from './routes/conversations.js';
 import { registerMemory } from './routes/memory.js';
 import { registerReminders } from './routes/reminders.js';
@@ -44,6 +46,7 @@ export function createApp(services: NeoServices): NeoApp {
   // Set the limit before any socket can be upgraded or buffered.
   wss.options.maxPayload = WS_MAX_PAYLOAD;
   const limiter = new IpFailureLimiter(services.clock);
+  const pairing = new PairingService(services.clock);
   const unsubscribeRevoke = (devices as Partial<StorageDeviceStore>).onRevoke?.(id => revokeDeviceWebSockets(services.events, id));
   if (unsubscribeRevoke) {
     const close = services.close.bind(services);
@@ -91,6 +94,7 @@ export function createApp(services: NeoServices): NeoApp {
   });
 
   registerHealth(app, services);
+  registerPairingClaim(app, services, pairing);
   app.get('/api/ws', upgradeWebSocket(c => createWsHandler(devices, services.events, services.logger, {
     ip: getClientIp(c, config.server.trustProxy), limiter,
   }), { onError: error => services.logger.debug('WebSocket transport error', { error: String(error) }) }));
@@ -111,6 +115,9 @@ export function createApp(services: NeoServices): NeoApp {
   registerTools(app, services);
   app.on('POST', '/api/devices', ownerOnly());
   registerDevices(app, services);
+  app.on('POST', '/api/pairing', ownerOnly());
+  app.on('DELETE', '/api/pairing/:id', ownerOnly());
+  registerPairing(app, services, pairing);
   registerPush(app, services, config.push.vapidPublicKey ?? null);
 
   if (config.server.webDir) {

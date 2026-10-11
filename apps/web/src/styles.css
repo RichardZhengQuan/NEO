@@ -1060,3 +1060,27 @@
     text-overflow: ellipsis;
   }
 }
+
+@layer components {
+  .pairing-disclosure {
+    border-top: 1px solid var(--neo-border);
+    padding-top: 0.875rem;
+  }
+  .pairing-disclosure > summary {
+    color: var(--neo-text-muted);
+    cursor: pointer;
+    font-size: 0.8438rem;
+    border-radius: var(--neo-radius-sm);
+  }
+  .pairing-disclosure > summary:focus-visible {
+    outline: 2px solid var(--neo-accent);
+    outline-offset: 4px;
+  }
+  .pairing-success {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    color: var(--neo-accent-text);
+  }
+}

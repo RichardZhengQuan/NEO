@@ -30,6 +30,14 @@ export interface EventContext {
   debounce(key: string, fn: () => void, ms: number): void;
 }
 
+const serverEventListeners = new Set<(event: ServerEvent) => void>();
+
+/** Observe server events while a screen or dialog is mounted. */
+export function onServerEvent(listener: (event: ServerEvent) => void): () => void {
+  serverEventListeners.add(listener);
+  return () => serverEventListeners.delete(listener);
+}
+
 /** Detects missed events from the monotonic per-process `seq`. */
 export class EventSequencer {
   private last = -1;
@@ -71,6 +79,13 @@ export async function runReminderAction(client: NeoClient, reminderId: string, a
 }
 
 export function handleServerEvent(event: ServerEvent, ctx: EventContext): void {
+  for (const listener of serverEventListeners) {
+    try {
+      listener(event);
+    } catch {
+      // A screen listener must not prevent the shared stores from updating.
+    }
+  }
   const { t } = ctx;
   switch (event.type) {
     // ── conversations & turns ──
@@ -189,6 +204,8 @@ export function handleServerEvent(event: ServerEvent, ctx: EventContext): void {
       return;
     case 'settings.updated':
       setSettings(event.settings);
+      return;
+    case 'device.paired':
       return;
 
     default:

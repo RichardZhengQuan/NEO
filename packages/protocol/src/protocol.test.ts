@@ -7,14 +7,17 @@ import {
   NeoConfigSchema,
   NeoError,
   applySettingsPatch,
+  buildPairingLink,
   buildPairingUrl,
   collectChat,
   defineTool,
   describeRecurrence,
   extractInlineUI,
   hasPrefix,
+  isLanAddress,
   isLocalUrl,
   newId,
+  parsePairingLink,
   parsePairingUrl,
   toChatMessages,
   toolSpec,
@@ -22,6 +25,7 @@ import {
   validateUIBlocks,
   type ChatStreamEvent,
   type Message,
+  type TunnelRoute,
   type UIBlock,
 } from './index.js';
 
@@ -32,6 +36,90 @@ const msg = (role: Message['role'], parts: Message['parts'], i = 0): Message => 
   parts,
   createdAt: i,
   status: 'complete',
+});
+
+describe('pairing links', () => {
+  const code = 'abcdefghijklmnopqrstuvwxyzABCDEF';
+  const tunnel: TunnelRoute = {
+    serverId: '0123456789abcdef0123456789abcdef',
+    publicKey: 'a'.repeat(43),
+    lan: ['192.168.1.20:7778', '[fe80::1]:7778', 'mac.local:7778'],
+    relay: 'wss://relay.example/neo',
+  };
+  const v2 = (fields: Record<string, string>) => `neo://pair?${new URLSearchParams({ v: '2', code, ...fields })}`;
+
+  it('still parses v1 neo and https hash links', () => {
+    expect(parsePairingLink(buildPairingUrl('http://computer.local:7777', 'legacy-token'))).toEqual({
+      version: 1, serverUrl: 'http://computer.local:7777', token: 'legacy-token',
+    });
+    expect(parsePairingLink('https://neo.example/#/pair?token=legacy-token')).toEqual({
+      version: 1, serverUrl: 'https://neo.example', token: 'legacy-token',
+    });
+  });
+
+  it('round-trips a v2 direct server route', () => {
+    const link = buildPairingLink({ code, serverUrl: 'https://neo.example/' });
+    expect(parsePairingLink(link)).toEqual({ version: 2, code, serverUrl: 'https://neo.example', tunnel: null });
+    expect(parsePairingUrl(link)).toBeNull();
+  });
+
+  it.each([
+    { ...tunnel, relay: null },
+    { ...tunnel, lan: [] },
+    tunnel,
+  ])('round-trips a tunnel-only route with LAN and/or relay', (route) => {
+    expect(parsePairingLink(buildPairingLink({ code, tunnel: route }))).toEqual({
+      version: 2, code, serverUrl: null, tunnel: route,
+    });
+  });
+
+  it('round-trips direct and tunnel routes together', () => {
+    expect(parsePairingLink(buildPairingLink({ code, serverUrl: 'https://neo.example', tunnel }))).toEqual({
+      version: 2, code, serverUrl: 'https://neo.example', tunnel,
+    });
+  });
+
+  it('defaults a v2 https pairing hash to its origin', () => {
+    expect(parsePairingLink(`https://neo.example:7777/#/pair?v=2&code=${code}`)).toEqual({
+      version: 2, code, serverUrl: 'https://neo.example:7777', tunnel: null,
+    });
+  });
+
+  it.each<Record<string, string>>([
+    { v: '3', server: 'https://neo.example' },
+    { code: 'short', server: 'https://neo.example' },
+    { code: `${code}!`, server: 'https://neo.example' },
+    { id: tunnel.serverId, lan: 'mac.local:7778' },
+    { id: tunnel.serverId, pk: 'short', lan: 'mac.local:7778' },
+    { id: tunnel.serverId, pk: tunnel.publicKey, lan: 'mac.local' },
+    { id: tunnel.serverId, pk: tunnel.publicKey, lan: 'mac.local:0' },
+    { id: tunnel.serverId, pk: tunnel.publicKey, lan: 'mac.local:70000' },
+    { id: tunnel.serverId, pk: tunnel.publicKey, lan: 'bad host:7778' },
+    { id: tunnel.serverId, pk: tunnel.publicKey, lan: Array.from({ length: 9 }, (_, i) => `host${i}.local:7778`).join(',') },
+    { id: tunnel.serverId, pk: tunnel.publicKey, relay: 'https://relay.example' },
+    {},
+  ])('rejects malformed or unroutable v2 fields: %j', (fields) => {
+    expect(parsePairingLink(v2(fields))).toBeNull();
+  });
+
+  it.each([
+    ['192.168.1.20:7778', true],
+    ['127.0.0.1:1', true],
+    ['mac.local:65535', true],
+    ['localhost:7778', true],
+    ['[fe80::1]:7778', true],
+    ['[::1]:7778', true],
+    ['192.168.1.20', false],
+    ['mac.local:0', false],
+    ['mac.local:70000', false],
+    ['bad host:7778', false],
+    ['http://mac.local:7778', false],
+    ['[not-ipv6]:7778', false],
+    ['fe80::1:7778', false],
+    ['', false],
+  ])('validates LAN address %s as %s', (address, valid) => {
+    expect(isLanAddress(address as string)).toBe(valid);
+  });
 });
 
 describe('ids', () => {

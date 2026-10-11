@@ -1,6 +1,6 @@
 # NEO server API
 
-Base path `/api`. JSON in and out. Types and request schemas live in `@neo/protocol` (api.ts, events.ts). Every route except `GET /api/health` requires `Authorization: Bearer <token>`, where the token is the owner token or a device token. Errors use `ErrorShape` (`{ code, message, details?, retryable? }`) with the status from `httpStatusForCode`. Request bodies are validated with the listed zod schema, and validation failures return `400 bad_request` with `details` = `z.treeifyError`.
+Base path `/api`. JSON in and out. Types and request schemas live in `@neo/protocol` (api.ts, pairing.ts, events.ts). HTTP routes except `GET /api/health` and `POST /api/pairing/claim` require `Authorization: Bearer <token>`, where the token is the owner token or a device token. The WebSocket authenticates with its first message. Errors use `ErrorShape` (`{ code, message, details?, retryable? }`) with the status from `httpStatusForCode`. Request bodies are validated with the listed zod schema, and validation failures return `400 bad_request` with `details` = `z.treeifyError`.
 
 ## Routes
 
@@ -70,6 +70,9 @@ Base path `/api`. JSON in and out. Types and request schemas live in `@neo/proto
 | `GET /api/devices` | | `ListResponse<Device>` |
 | `POST /api/devices` | `CreateDeviceRequestSchema` | `201 CreateDeviceResponse` (owner token only) |
 | `DELETE /api/devices/:id` | | `204` (owner device: 400) |
+| `POST /api/pairing` (owner only) | ignored | `201 PairingSession` |
+| `DELETE /api/pairing/:id` (owner only) | | `204` (unknown or expired: `404 not_found`) |
+| `POST /api/pairing/claim` (public) | `ClaimPairingRequestSchema` (4 KB limit) | `201 ClaimPairingResponse` |
 | `GET /api/push/vapid-public-key` | | `VapidKeyResponse` |
 | `POST /api/push/subscribe` | `PushSubscribeRequestSchema` | `{ ok }` |
 | `POST /api/push/unsubscribe` | `{ endpoint }` | `{ ok }` |
@@ -77,6 +80,18 @@ Base path `/api`. JSON in and out. Types and request schemas live in `@neo/proto
 | `GET /api/ws` (WebSocket upgrade) | first message `{type:'auth', token}` within 10 s | see below |
 
 Query lists such as `kinds=fact,preference` and `status=scheduled,fired` are comma-separated. Booleans are `true`/`false`/`1`/`0`.
+
+## Pairing
+
+On the computer, open **Settings → Devices → Pair a phone**. The owner creates a session with `POST /api/pairing`, which returns `{ id, code, expiresAt, pairingUrl }`. The phone scans the QR and sends `{ code, deviceName, platform }` to the public `POST /api/pairing/claim` route. A successful claim returns the phone's own `{ device, token }` and publishes `{ type: 'device.paired', device, pairingId: id }`, letting the computer close the matching dialog. The phone then uses its token for authenticated requests.
+
+Codes expire after five minutes and work once. The server keeps only SHA-256 code hashes in memory, deletes a code synchronously on claim, prunes expired codes on every operation, and retains at most five unclaimed codes (a sixth creation drops the oldest). Closing the dialog cancels its code with `DELETE /api/pairing/:id`. Restarting the server invalidates all outstanding codes; no database migration is needed.
+
+Unknown, expired, cancelled or used codes return `401 unauthorized` with “This pairing code is invalid or has expired.” Malformed bodies return `400 bad_request`. Claims have a separate per-IP failure limiter: after ten failed claims within sixty seconds, even a valid code receives `429 rate_limited` with `Retry-After: 60` until the window resets. The limiter runs before code lookup and honors `server.trustProxy` when determining the client IP.
+
+New phone links use `neo://pair?v=2&code=<code>&server=<encoded-http(s)-url>`. The v2 contract also accepts a tunnel route (`id`, `pk`, optional comma-separated `lan`, optional ws(s) `relay`), but this phase creates and connects through direct HTTP only. An http(s) `#/pair?v=2&code=…` link without `server` uses its origin. Existing v1 `neo://pair?server=…&token=…` and http(s) `#/pair?token=…` links remain accepted; `POST /api/devices` continues to generate v1 links for advanced access-token setups.
+
+The computer must stay on with NEO running, and its `serverUrl` must be reachable from the phone. An embedded server advertised only at `127.0.0.1` is not reachable from another device; a later tunnel phase addresses that limitation.
 
 ## Tool confirmations
 
@@ -110,5 +125,6 @@ When `server.webDir` is set, the server serves the built web app at `/` with SPA
 ## Auth details
 
 - The owner token comes from `config.server.authToken`, else is read from `<dataDir>/token`, else is generated on first boot and written there (mode 0600). It is registered as the owner device (`owner: true`) so `verify` works uniformly.
-- `POST /api/devices` returns a new token once, plus `pairingUrl = buildPairingUrl(publicUrl ?? requestOrigin, token)`.
-- Failed auth attempts are rate-limited per IP (10/min, then `429`).
+- `GET /api/health` and `POST /api/pairing/claim` are public; the latter validates a single-use code instead of a bearer token.
+- Owner-only `POST /api/pairing` returns a v2 pairing link using `publicUrl ?? requestOrigin`. Owner-only `POST /api/devices` still returns a new token once, plus the advanced v1 `pairingUrl = buildPairingUrl(publicUrl ?? requestOrigin, token)`.
+- Failed bearer authentication and failed pairing claims use separate per-IP limiters (10/min, then `429`).

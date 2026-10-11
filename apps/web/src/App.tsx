@@ -173,7 +173,15 @@ function ReadyApp(): ReactElement {
 
   useEffect(() => {
     if (route.name === 'pair') {
-      if (route.token) openPairLink(`neo://pair?server=${encodeURIComponent(route.serverUrl ?? window.location.origin)}&token=${encodeURIComponent(route.token)}`);
+      if (route.token || route.code) {
+        const q = new URLSearchParams();
+        if (route.version) q.set('v', route.version);
+        if (route.code) q.set('code', route.code);
+        if (route.token) q.set('token', route.token);
+        const server = route.serverUrl ?? (/^https?:$/.test(window.location.protocol) ? window.location.origin : undefined);
+        if (server) q.set('server', server);
+        openPairLink(`neo://pair?${q.toString()}`);
+      }
       navigate({ name: 'chat' }, { replace: true });
     } else if (route.name === 'connect') {
       navigate({ name: 'chat' }, { replace: true });

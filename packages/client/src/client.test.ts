@@ -572,6 +572,37 @@ describe('devices routes', () => {
   });
 });
 
+describe('pairing routes', () => {
+  it('create: POST /api/pairing without a body', async () => {
+    const session = { id: 'pair-1', code: 'a'.repeat(32), expiresAt: 300_000, pairingUrl: 'neo://pair?v=2&code=...' };
+    const { client, requests } = makeClient([{ status: 201, body: session }]);
+    expect(await client.pairing.create()).toEqual(session);
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/pairing');
+    expect(requests[0]!.body).toBeUndefined();
+    expect(requests[0]!.headers['authorization']).toBe('Bearer test-token');
+  });
+
+  it('cancel: DELETE /api/pairing/:id → 204', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    expect(await client.pairing.cancel('pair-1')).toBeUndefined();
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/pairing/pair-1');
+  });
+
+  it('claim: POST /api/pairing/claim without a token', async () => {
+    const response = { device: { id: 'dev-1', name: 'My Phone', platform: 'ios', owner: false }, token: 'phone-token' };
+    const { fetchFn, requests } = makeFetch([{ status: 201, body: response }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', fetch: fetchFn as typeof fetch });
+    const body = { code: 'a'.repeat(32), deviceName: 'My Phone', platform: 'ios' as const };
+    expect(await client.pairing.claim(body)).toEqual(response);
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/pairing/claim');
+    expect(requests[0]!.body).toEqual(body);
+    expect(requests[0]!.headers['authorization']).toBeUndefined();
+  });
+});
+
 describe('push routes', () => {
   it('vapidPublicKey: GET /api/push/vapid-public-key', async () => {
     const { client, requests } = makeClient([{ status: 200, body: { publicKey: 'BLR...' } }]);

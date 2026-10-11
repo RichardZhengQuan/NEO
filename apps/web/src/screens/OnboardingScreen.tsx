@@ -24,6 +24,7 @@ import { ChipInput } from '../components/ChipInput.js';
 import { MemoryNetArt } from '../components/MemoryNetArt.js';
 import { useModelLabel } from '../components/ModelPicker.js';
 import { ProviderSetup } from '../components/ProviderSetup.js';
+import { PairPhoneDialog } from '../components/PairPhoneDialog.js';
 import { errorMessage } from '../lib/errors.js';
 import { STORAGE_KEYS, readString, writeString } from '../lib/storage.js';
 import { getPlatform, type NotificationStatus } from '../platform/index.js';
@@ -338,6 +339,7 @@ function DoneStep({ back, finish }: { back: () => void; finish: () => Promise<vo
   const settings = useSession((s) => s.settings!);
   const model = useModelLabel(settings.defaultModel);
   const [busy, setBusy] = useState(false);
+  const [pairing, setPairing] = useState(false);
   const rows = [
     { icon: 'cpu', label: t('onboarding.done.ai'), value: model || t('onboarding.done.no_ai') },
     { icon: 'brain', label: t('onboarding.done.memory'), value: t(`memoryMode.${settings.memory.mode}.title`) },
@@ -379,6 +381,8 @@ function DoneStep({ back, finish }: { back: () => void; finish: () => Promise<vo
       <p className="neo-help" style={{ marginTop: '1rem' }}>
         {t('onboarding.done.hint')}
       </p>
+      {getPlatform().kind !== 'capacitor' && <Button variant="secondary" icon="qr-code" disabled={busy} onClick={() => setPairing(true)}>{t('devices.pair')}</Button>}
+      {pairing && <PairPhoneDialog onClose={() => setPairing(false)} onPaired={() => undefined} />}
     </StepFrame>
   );
 }

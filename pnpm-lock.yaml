@@ -42,6 +42,9 @@ importers:
       '@capacitor/app':
         specifier: ^8.1.0
         version: 8.1.2(@capacitor/core@8.5.3)
+      '@capacitor/barcode-scanner':
+        specifier: ^3.1.3
+        version: 3.1.3(@capacitor/core@8.5.3)
       '@capacitor/core':
         specifier: ^8.5.0
         version: 8.5.3
@@ -61,6 +64,9 @@ importers:
       '@capacitor/app':
         specifier: ^8.1.0
         version: 8.1.2(@capacitor/core@8.5.3)
+      '@capacitor/barcode-scanner':
+        specifier: ^3.1.3
+        version: 3.1.3(@capacitor/core@8.5.3)
       '@capacitor/core':
         specifier: ^8.5.0
         version: 8.5.3
@@ -387,6 +393,11 @@ packages:
 
   '@capacitor/app@8.1.2':
     resolution: {integrity: sha512-uKBlsrXH0IdvUn69e/KKYbZ32A06pcrUdG8LWuZ/6y33YMXZXLEEdNSwl+jKS/SrsTWqnePs8EqSWaiQM3mUGA==}
+    peerDependencies:
+      '@capacitor/core': '>=8.0.0'
+
+  '@capacitor/barcode-scanner@3.1.3':
+    resolution: {integrity: sha512-ZqM+Z6gMdIyjA2g+S5SgR3dyfIdKA6h6lnkV/rwKa+Q/iZ32rGnbuBATvqwb+HwQqvSGpvIZUlOU51Cw/MAIug==}
     peerDependencies:
       '@capacitor/core': '>=8.0.0'
 
@@ -1528,6 +1539,9 @@ packages:
 
   html-url-attributes@3.0.1:
     resolution: {integrity: sha512-ol6UPyBWqsrO6EJySPz2O7ZSr856WDrEzM5zMqp+FJJLGMW35cLYmmZnl0vztAZxRUoNZJFTCohfjuIJ8I4QBQ==}
+
+  html5-qrcode@2.3.8:
+    resolution: {integrity: sha512-jsr4vafJhwoLVEDW3n1KvPnCCXWaQfRng0/EEYk1vNcQGcG/htAdhJX0be8YyqMoSz7+hZvOZSTAepsabiuhiQ==}
 
   http-proxy-agent@7.0.2:
     resolution: {integrity: sha512-T1gkAiYYDWYx3V5Bmyu7HcfcvL7mUrTWiM6yOfa3PIphViJ/gFPbvidQ+veqSOHci/PxBcDabeUNCzpOODJZig==}
@@ -2679,6 +2693,11 @@ snapshots:
     dependencies:
       '@capacitor/core': 8.5.3
 
+  '@capacitor/barcode-scanner@3.1.3(@capacitor/core@8.5.3)':
+    dependencies:
+      '@capacitor/core': 8.5.3
+      html5-qrcode: 2.3.8
+
   '@capacitor/cli@8.5.3':
     dependencies:
       '@ionic/cli-framework-output': 2.2.8
@@ -3668,6 +3687,8 @@ snapshots:
       whatwg-encoding: 3.1.1
 
   html-url-attributes@3.0.1: {}
+
+  html5-qrcode@2.3.8: {}
 
   http-proxy-agent@7.0.2:
     dependencies:

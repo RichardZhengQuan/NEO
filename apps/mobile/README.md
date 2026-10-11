@@ -35,8 +35,8 @@ npx cap add android
 ```
 
 This creates the `ios/` and `android/` native project directories inside
-`apps/mobile/` (they are gitignored in most projects; commit them if you want
-CI to build the native side).
+`apps/mobile/`. They are not committed here; configure them as described below
+before running on a phone.
 
 ### 3. Sync web assets and plugins
 
@@ -64,20 +64,71 @@ the device) during development.
 
 ---
 
-## Connecting to a self-hosted NEO server
+## Connecting
 
-When the app launches for the first time it shows the **Connect** screen.  Enter
-your server URL and owner token, or scan the **pairing QR code** from
-**Settings → Devices** in any connected NEO client.
+1. On your computer, open NEO → **Settings → Devices → Pair a phone**.
+2. Open NEO on your phone and tap **Scan**. Point the camera at the code on
+   your computer.
+3. Your phone connects and remembers the connection. Your computer must stay
+   on with NEO running.
 
-The pairing link looks like:
+If you cannot scan, expand **Can't scan? Copy the link** on the computer, then
+use **Paste a pairing link instead** on the phone. You can also tap a
+`neo://pair` link to open NEO. Each code works once and expires after five
+minutes; use **Show a new code** if it expires.
 
+This phase connects directly over HTTP/HTTPS. The address in the pairing link
+must be reachable from your phone. A computer address such as `127.0.0.1` is
+local to that computer and cannot be reached from a phone; the encrypted
+tunnel is planned for a later phase.
+
+### Native pairing and camera configuration
+
+The native projects created by `npx cap add` need the `neo://` URL scheme and
+camera access for `@capacitor/barcode-scanner`.
+
+In `ios/App/App/Info.plist`, add the URL scheme and camera usage description:
+
+```xml
+<key>CFBundleURLTypes</key>
+<array>
+  <dict>
+    <key>CFBundleURLSchemes</key>
+    <array><string>neo</string></array>
+  </dict>
+</array>
+<key>NSCameraUsageDescription</key>
+<string>Scan the pairing code on your computer to connect NEO.</string>
 ```
-https://neo.example.com/pair?token=<device-token>
+
+In `android/app/src/main/AndroidManifest.xml`, add the camera permission under
+`<manifest>`:
+
+```xml
+<uses-permission android:name="android.permission.CAMERA" />
 ```
 
-The app saves the server URL and token in the device keychain / encrypted
-storage so you only need to pair once.
+Add this intent filter inside the main activity (which must have
+`android:exported="true"`):
+
+```xml
+<intent-filter>
+  <action android:name="android.intent.action.VIEW" />
+  <category android:name="android.intent.category.DEFAULT" />
+  <category android:name="android.intent.category.BROWSABLE" />
+  <data android:scheme="neo" android:host="pair" />
+</intent-filter>
+```
+
+Run `npx cap sync` after installing plugins and after rebuilding the web app
+so the native projects receive the scanner and deep-link plugin registrations.
+
+The server must allow the native WebView origin in `server.corsOrigins`:
+`https://localhost` for the configured Android scheme, and
+`capacitor://localhost` for iOS. Local mode already allows the iOS origin, but
+its existing localhost allowance covers HTTP rather than Android's HTTPS
+origin. These origins identify the app shell; the pairing link still needs
+the computer's reachable address.
 
 ### Development / LAN server
 
