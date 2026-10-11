@@ -79,6 +79,9 @@ importers:
       '@neo/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@neo/tunnel':
+        specifier: workspace:*
+        version: link:../../packages/tunnel
       '@neo/ui':
         specifier: workspace:*
         version: link:../../packages/ui
@@ -216,12 +219,18 @@ importers:
       '@neo/tools':
         specifier: workspace:*
         version: link:../tools
+      '@neo/tunnel':
+        specifier: workspace:*
+        version: link:../tunnel
       hono:
         specifier: ^4.13.0
         version: 4.13.13
       web-push:
         specifier: ^3.6.7
         version: 3.6.7
+      ws:
+        specifier: ^8.22.0
+        version: 8.22.0
       zod:
         specifier: ^4.1.0
         version: 4.6.5
@@ -229,6 +238,9 @@ importers:
       '@types/web-push':
         specifier: ^3.6.4
         version: 3.6.4
+      '@types/ws':
+        specifier: ^8.18.2
+        version: 8.18.2
 
   packages/storage:
     dependencies:
@@ -1193,6 +1205,9 @@ packages:
 
   '@types/web-push@3.6.4':
     resolution: {integrity: sha512-GnJmSr40H3RAnj0s34FNTcJi1hmWFV5KXugE0mYWnYhgTAHLJ/dJKAwDmvPJYMke0RplY2XE9LnM4hqSqKIjhQ==}
+
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
 
   '@ungap/structured-clone@1.4.0':
     resolution: {integrity: sha512-1mEZtMKPM09vDmQt5y7YvmN2+DFTP7Tg0EWXdic8/C6VRnpb33e4ghisCIE3WZjsE2N8mf+QV1Zqh7ZFYLWInQ==}
@@ -3323,6 +3338,10 @@ snapshots:
   '@types/unist@3.0.3': {}
 
   '@types/web-push@3.6.4':
+    dependencies:
+      '@types/node': 22.20.5
+
+  '@types/ws@8.18.2':
     dependencies:
       '@types/node': 22.20.5
 

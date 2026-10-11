@@ -15,7 +15,8 @@ describe('pairing HTTP API', () => {
   beforeEach(() => { f = routeFixture(); });
   afterEach(async () => { await f.services.close(); });
 
-  const create = async () => json<PairingSession>(await f.request('/api/pairing', 'POST'), 201);
+  // A LAN origin (e.g. a server reached at its network address); loopback origins are never put in a QR code.
+  const create = async () => json<PairingSession>(await f.request('http://192.168.1.20:7777/api/pairing', 'POST'), 201);
   const claim = (code: string, headers: Record<string, string> = {}) => f.request('/api/pairing/claim', 'POST', {
     code, deviceName: 'My phone', platform: 'ios',
   }, null, headers);

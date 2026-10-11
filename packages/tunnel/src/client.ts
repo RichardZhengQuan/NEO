@@ -325,7 +325,10 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         const url = new URL(request.url);
         const excluded = new Set(HOP_HEADERS);
         for (const name of (request.headers.get('connection') ?? '').split(',')) excluded.add(name.trim().toLowerCase());
-        const headers = [...request.headers].filter(([name]) => !excluded.has(name.toLowerCase()));
+        const headers: [string, string][] = [];
+        request.headers.forEach((value, name) => {
+          if (!excluded.has(name.toLowerCase())) headers.push([name, value]);
+        });
         current.channel.send({ type: TunnelFrameType.Request, stream: id, payload: encodeJson({
           method: request.method, path: url.pathname + url.search, headers,
         }) });
@@ -349,10 +352,10 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
     readonly url: string;
     readonly protocol = '';
     readonly extensions = '';
-    binaryType: BinaryType = 'blob';
+    binaryType: 'arraybuffer' | 'blob' = 'blob';
     readyState: number = 0;
     onopen: ((event: Event) => void) | null = null;
-    onmessage: ((event: MessageEvent<string>) => void) | null = null;
+    onmessage: ((event: MessageEvent & { readonly data: string }) => void) | null = null;
     onclose: ((event: SocketCloseEvent) => void) | null = null;
     onerror: ((event: Event) => void) | null = null;
     private current: Session | null = null;
@@ -426,7 +429,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
     private emit(event: Event): void {
       try {
         if (event.type === 'open') this.onopen?.(event);
-        else if (event.type === 'message') this.onmessage?.(event as MessageEvent<string>);
+        else if (event.type === 'message') this.onmessage?.(event as MessageEvent & { readonly data: string });
         else if (event.type === 'close') this.onclose?.(event as SocketCloseEvent);
         else if (event.type === 'error') this.onerror?.(event);
       } catch { /* Application observers cannot interrupt stream cleanup. */ }

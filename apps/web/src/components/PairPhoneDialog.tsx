@@ -106,7 +106,7 @@ export function PairPhoneDialog({ onClose, onPaired }: { onClose: () => void; on
           <Skeleton width={240} height={240} />
         ) : device ? null : error ? (
           <>
-            <p className="neo-error-text" role="alert" style={{ margin: 0 }}>{httpStatus(error) === 403 ? t('devices.owner_only') : errorMessage(error, t)}</p>
+            <p className="neo-error-text" role="alert" style={{ margin: 0 }}>{httpStatus(error) === 403 ? t('devices.owner_only') : httpStatus(error) === 409 ? t('pairing.not_reachable') : errorMessage(error, t)}</p>
             <Button variant="primary" icon="refresh" onClick={() => void create()}>{t('common.retry')}</Button>
           </>
         ) : expired ? (

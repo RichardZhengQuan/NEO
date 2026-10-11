@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_SETTINGS, type Conversation, type Note, type ProvidersResponse } from '@neo/protocol';
 import { NeoClient } from '@neo/client';
+import { tunnelBaseUrl } from '@neo/tunnel';
 import { useConversations } from './conversations.js';
 import { loadNotes, loadTaskLists, refreshPendingMemories, useData } from './data.js';
 import { loadConversationList, refreshAll, startEventStream } from './connection.js';
@@ -82,6 +83,17 @@ afterEach(() => {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 describe('startSession cache reset (F10)', () => {
+  it('keeps full tunnel credentials and gives the session client encrypted transports', () => {
+    const tunnel = { serverId: 'a'.repeat(32), publicKey: 'A'.repeat(43), lan: ['mac.local:7778'], relay: null };
+    const credentials = { serverUrl: tunnelBaseUrl(tunnel.serverId), token: 'phone', tunnel };
+    startSession(credentials, 'pair');
+    expect(useSession.getState().credentials).toEqual(credentials);
+    const options = vi.mocked(NeoClient).mock.calls[0]?.[0];
+    expect(options).toMatchObject({ baseUrl: credentials.serverUrl, token: 'phone' });
+    expect(options?.fetch).toBeTypeOf('function');
+    expect(options?.WebSocket).toBeTypeOf('function');
+  });
+
   it('clears the conversations store when switching servers', () => {
     // Pre-populate server A data.
     useConversations.setState({
@@ -93,7 +105,7 @@ describe('startSession cache reset (F10)', () => {
     useData.setState((s) => ({ ...s, notes: { note_a1: makeNote('note_a1', 'Server A note') }, notesLoaded: true }));
 
     // Switch to server B.
-    startSession('https://server-b.example', 'tok_b', 'manual');
+    startSession({ serverUrl: 'https://server-b.example', token: 'tok_b' }, 'manual');
 
     const convState = useConversations.getState();
     expect(convState.conversations).toEqual({});
@@ -106,9 +118,9 @@ describe('startSession cache reset (F10)', () => {
 
   it('increments sessionEpoch on every switch', () => {
     const epoch0 = useSession.getState().sessionEpoch;
-    startSession('https://server-a.example', 'tok_a', 'manual');
+    startSession({ serverUrl: 'https://server-a.example', token: 'tok_a' }, 'manual');
     const epoch1 = useSession.getState().sessionEpoch;
-    startSession('https://server-b.example', 'tok_b', 'manual');
+    startSession({ serverUrl: 'https://server-b.example', token: 'tok_b' }, 'manual');
     const epoch2 = useSession.getState().sessionEpoch;
     expect(epoch1).toBe(epoch0 + 1);
     expect(epoch2).toBe(epoch0 + 2);
@@ -116,13 +128,13 @@ describe('startSession cache reset (F10)', () => {
 
   it('A→B→A: only the most-recently loaded conversations are visible', async () => {
     // Server A session: loadConversationList returns conv_a1.
-    const clientA = startSession('https://server-a.example', 'tok_a', 'manual');
+    const clientA = startSession({ serverUrl: 'https://server-a.example', token: 'tok_a' }, 'manual');
     vi.mocked(clientA.conversations.list).mockResolvedValueOnce({ items: [makeConversation('conv_a1')] });
     await loadConversationList(clientA);
     expect(Object.keys(useConversations.getState().conversations)).toContain('conv_a1');
 
     // Switch to server B — caches cleared.
-    const clientB = startSession('https://server-b.example', 'tok_b', 'manual');
+    const clientB = startSession({ serverUrl: 'https://server-b.example', token: 'tok_b' }, 'manual');
     expect(useConversations.getState().conversations).toEqual({});
 
     vi.mocked(clientB.conversations.list).mockResolvedValueOnce({ items: [makeConversation('conv_b1')] });
@@ -131,7 +143,7 @@ describe('startSession cache reset (F10)', () => {
     expect(Object.keys(useConversations.getState().conversations)).not.toContain('conv_a1');
 
     // Switch back to server A — caches cleared again.
-    const clientA2 = startSession('https://server-a.example', 'tok_a', 'manual');
+    const clientA2 = startSession({ serverUrl: 'https://server-a.example', token: 'tok_a' }, 'manual');
     expect(useConversations.getState().conversations).toEqual({});
 
     vi.mocked(clientA2.conversations.list).mockResolvedValueOnce({ items: [makeConversation('conv_a2')] });
@@ -142,7 +154,7 @@ describe('startSession cache reset (F10)', () => {
 
   it('late response from the original A session stays discarded through A→B→A', async () => {
     // Start server A session.
-    const clientA = startSession('https://server-a.example', 'tok_a', 'manual');
+    const clientA = startSession({ serverUrl: 'https://server-a.example', token: 'tok_a' }, 'manual');
 
     // Begin a slow notes load for server A (defer the response).
     let resolveA!: (v: { items: Note[] }) => void;
@@ -150,8 +162,8 @@ describe('startSession cache reset (F10)', () => {
     const pendingLoad = loadNotes(clientA);
 
     // Switch to server B before the response arrives.
-    startSession('https://server-b.example', 'tok_b', 'manual');
-    startSession('https://server-a.example', 'tok_a', 'manual');
+    startSession({ serverUrl: 'https://server-b.example', token: 'tok_b' }, 'manual');
+    startSession({ serverUrl: 'https://server-a.example', token: 'tok_a' }, 'manual');
 
     // Now resolve the original server A session's response.
     resolveA({ items: [makeNote('note_a_late', 'Late note from A')] });
@@ -175,18 +187,18 @@ const providers: ProvidersResponse = { items: [], defaultModel: null };
 
 describe('session-scoped async work', () => {
   it('resets provider/settings/model caches, drafts and server toasts', () => {
-    startSession('https://a.example', 'a', 'manual');
+    startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
     useSession.setState({ settings: DEFAULT_SETTINGS, providers, models: { old: [] } });
     useUi.setState({ draft: { model: { provider: 'old', model: 'old' }, incognito: true } });
     useToasts.setState({ toasts: [{ id: 'old', tone: 'reminder', title: 'Server A', duration: null, createdAt: 0 }] });
-    startSession('https://b.example', 'b', 'manual');
+    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     expect(useSession.getState()).toMatchObject({ settings: null, providers: null, models: {} });
     expect(useUi.getState().draft).toEqual({ model: null, incognito: false });
     expect(useToasts.getState().toasts).toEqual([]);
   });
 
   it('discards late provider, model, pending-memory and task-list responses', async () => {
-    const a = startSession('https://a.example', 'a', 'manual');
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
     const p = deferred<ProvidersResponse>();
     const m = deferred<{ items: [] }>();
     const stats = deferred<Awaited<ReturnType<typeof a.memory.stats>>>();
@@ -196,7 +208,7 @@ describe('session-scoped async work', () => {
     vi.mocked(a.memory.stats).mockReturnValueOnce(stats.promise);
     vi.mocked(a.tasks.lists).mockReturnValueOnce(lists.promise);
     const loads = [loadProviders(), loadModels('old'), refreshPendingMemories(a), loadTaskLists(a)];
-    startSession('https://b.example', 'b', 'manual');
+    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     p.resolve(providers);
     m.resolve({ items: [] });
     stats.resolve({ pending: 9 } as Awaited<ReturnType<typeof a.memory.stats>>);
@@ -207,12 +219,12 @@ describe('session-scoped async work', () => {
   });
 
   it.each(['resolve', 'reject'] as const)('a stale optimistic settings %s cannot alter the new session', async (outcome) => {
-    const a = startSession('https://a.example', 'a', 'manual');
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
     useSession.setState({ settings: DEFAULT_SETTINGS });
     const response = deferred<typeof DEFAULT_SETTINGS>();
     vi.mocked(a.settings.update).mockReturnValueOnce(response.promise);
     const update = updateSettings({ theme: 'dark' }).catch(() => undefined);
-    startSession('https://b.example', 'b', 'manual');
+    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     const settingsB = { ...DEFAULT_SETTINGS, theme: 'light' as const };
     useSession.setState({ settings: settingsB });
     if (outcome === 'resolve') response.resolve({ ...DEFAULT_SETTINGS, theme: 'dark' });
@@ -222,13 +234,13 @@ describe('session-scoped async work', () => {
   });
 
   it('stale reconnect settings and memory refreshes cannot repopulate the new session', async () => {
-    const a = startSession('https://a.example', 'a', 'manual');
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
     const settings = deferred<typeof DEFAULT_SETTINGS>();
     vi.mocked(a.settings.get).mockReturnValueOnce(settings.promise);
     vi.mocked(a.conversations.list).mockResolvedValueOnce({ items: [] });
     vi.mocked(a.memory.stats).mockResolvedValueOnce({ pending: 1 } as Awaited<ReturnType<typeof a.memory.stats>>);
     const refresh = refreshAll(a, null);
-    startSession('https://b.example', 'b', 'manual');
+    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     settings.resolve(DEFAULT_SETTINGS);
     await refresh;
     expect(useSession.getState().settings).toBeNull();
@@ -236,12 +248,12 @@ describe('session-scoped async work', () => {
   });
 
   it('closes the old websocket immediately and ignores queued events/status callbacks', () => {
-    const a = startSession('https://a.example', 'a', 'manual');
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
     const context = vi.fn(() => ({} as EventContext));
     const stop = startEventStream({ client: a, context, activeConversationId: () => null });
     const callbacks = vi.mocked(a.connect).mock.calls[0]![0]!;
     const connection = vi.mocked(a.connect).mock.results[0]!.value;
-    startSession('https://b.example', 'b', 'manual');
+    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     expect(connection.close).toHaveBeenCalledTimes(1);
     callbacks.onEvent?.({ seq: 1, at: 0, event: { type: 'conversation.updated', conversation: makeConversation('late_a') } });
     callbacks.onStatus?.('open');
@@ -255,28 +267,28 @@ describe('session-scoped async work', () => {
   });
 
   it('runs all session cleanup callbacks once and permits earlier disposal', () => {
-    startSession('https://a.example', 'a', 'manual');
+    startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
     const cleanup = vi.fn();
     const disposed = vi.fn();
     onSessionEnd(cleanup);
     const unregister = onSessionEnd(disposed);
     unregister();
-    startSession('https://b.example', 'b', 'manual');
+    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     showConnect({ reason: 'none' });
     expect(cleanup).toHaveBeenCalledTimes(1);
     expect(disposed).not.toHaveBeenCalled();
   });
 
   it('a loader invoked with an old client after switching cannot cache its response', async () => {
-    const a = startSession('https://a.example', 'a', 'manual');
-    startSession('https://b.example', 'b', 'manual');
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
+    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     vi.mocked(a.notes.list).mockResolvedValueOnce({ items: [makeNote('old', 'A')] });
     await loadNotes(a);
     expect(useData.getState().notes).toEqual({});
   });
 
   it('disconnect invalidates pending responses and closes the websocket', async () => {
-    const a = startSession('https://a.example', 'a', 'manual');
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
     const response = deferred<{ items: Note[] }>();
     vi.mocked(a.notes.list).mockReturnValueOnce(response.promise);
     const load = loadNotes(a);
@@ -294,8 +306,8 @@ describe('session-scoped async work', () => {
     vi.mocked(NeoClient).mockImplementationOnce(() => ({
       settings: { get: vi.fn(() => response.promise) }, health: vi.fn().mockResolvedValue(null),
     }) as unknown as NeoClient);
-    const connecting = connectWith('https://a.example', 'a', 'manual');
-    const b = startSession('https://b.example', 'b', 'manual');
+    const connecting = connectWith({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
+    const b = startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     response.resolve(DEFAULT_SETTINGS);
     await connecting;
     expect(useSession.getState()).toMatchObject({ client: b, phase: 'booting', settings: null });

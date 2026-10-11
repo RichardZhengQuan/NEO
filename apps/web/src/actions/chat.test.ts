@@ -226,7 +226,7 @@ describe('chat responses are scoped to their session', () => {
     } } } as unknown as NeoClient;
     useSession.setState({ wsStatus: 'idle' });
     await sendMessage(client, 'conv_old', { text: 'Hello' }, t);
-    startSession('https://new.example', 'token', 'manual');
+    startSession({ serverUrl: 'https://new.example', token: 'token' }, 'manual');
     expect(signal?.aborted).toBe(true);
     resolveEvent();
     await finished;

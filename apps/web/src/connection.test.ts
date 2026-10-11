@@ -1,5 +1,27 @@
-import { describe, expect, it, vi } from 'vitest';
-import { bootstrapConnection, claimPairingCode, consumePairingLink, credentialsFromInput, normalizeServerUrl, type BootstrapDeps, type Credentials } from './connection.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { buildPairingLink, type PhoneAccessStatus, type TunnelRoute } from '@neo/protocol';
+import { NeoClient } from '@neo/client';
+import { createElement } from 'react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { I18nProvider } from '@neo/ui';
+import { createTunnelTransport, tunnelBaseUrl } from '@neo/tunnel';
+import { appDictionaries } from './i18n.js';
+import { PhoneAccessCard } from './screens/settings/PhoneAccessCard.js';
+import { useSession } from './state/session.js';
+import { bootstrapConnection, checkHealth, claimPairingCode, consumePairingLink, createServerClient, credentialsFromInput, forgetToken, loadCredentials, normalizeServerUrl, refreshTunnelRoute, saveCredentials, verifyCredentials, type BootstrapDeps, type Credentials } from './connection.js';
+
+vi.mock('@neo/tunnel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@neo/tunnel')>();
+  return { ...actual, createTunnelTransport: vi.fn(({ route }: { route: TunnelRoute }) => ({
+    baseUrl: actual.tunnelBaseUrl(route.serverId),
+    fetch: ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args)) as typeof fetch,
+    WebSocket: class {} as unknown as typeof WebSocket,
+  })) };
+});
+
+const tunnel: TunnelRoute = { serverId: 'a'.repeat(32), publicKey: 'b'.repeat(43), lan: ['mac.local:7778'], relay: null };
+
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.localStorage.clear(); });
 
 const code = 'bootstrap_pairing_code_123456';
 
@@ -93,11 +115,31 @@ describe('bootstrapConnection', () => {
     expect(claim).not.toHaveBeenCalled();
   });
 
-  it('cannot claim a tunnel-only link yet', async () => {
+  it('claims and saves a tunnel-only link with its pinned route', async () => {
     const launchLink = async () => `neo://pair?v=2&code=${code}&id=${'a'.repeat(32)}&pk=${'b'.repeat(43)}&lan=mac.local:7778`;
     const claim = vi.fn(async () => ({ kind: 'ok' as const, token: 't' }));
-    expect(await bootstrapConnection(deps({ launchLink, claim }))).toEqual({ kind: 'connect', reason: 'pair-failed' });
-    expect(claim).not.toHaveBeenCalled();
+    const d = deps({ launchLink, claim });
+    expect(await bootstrapConnection(d)).toEqual({ kind: 'ready', source: 'pair', serverUrl: tunnelBaseUrl(tunnel.serverId), token: 't', tunnel });
+    expect(claim).toHaveBeenCalledWith(tunnelBaseUrl(tunnel.serverId), code, tunnel);
+    expect(d.saved?.tunnel).toEqual(tunnel);
+  });
+
+  it.each([
+    ['https://public.example', false], ['http://192.168.1.20:7777', true],
+  ] as const)('prefers the expected route for %s', async (serverUrl, encrypted) => {
+    const claim = vi.fn(async () => ({ kind: 'ok' as const, token: 't' }));
+    const d = deps({ launchLink: async () => buildPairingLink({ code, serverUrl, tunnel }), claim });
+    await bootstrapConnection(d);
+    expect(d.saved?.serverUrl).toBe(encrypted ? tunnelBaseUrl(tunnel.serverId) : serverUrl);
+    expect(d.saved?.tunnel).toEqual(encrypted ? tunnel : undefined);
+  });
+
+  it('retains and verifies the full saved tunnel credentials when offline', async () => {
+    const verify = vi.fn(async () => 'unreachable' as const);
+    const d = deps({ verify });
+    d.saved = { serverUrl: tunnelBaseUrl(tunnel.serverId), token: 'device', tunnel };
+    expect(await bootstrapConnection(d)).toEqual({ kind: 'offline', source: 'saved', ...d.saved });
+    expect(verify).toHaveBeenCalledWith(d.saved.serverUrl, 'device', tunnel);
   });
 
   it('launch pairing claims before saved credentials', async () => {
@@ -244,5 +286,137 @@ describe('claimPairingCode', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('tunnel credentials and clients', () => {
+  it('stores a validated route, normalizes its base URL and retains it when forgetting a token', () => {
+    saveCredentials({ serverUrl: 'http://old.example', token: 'device', tunnel });
+    expect(loadCredentials()).toEqual({ serverUrl: tunnelBaseUrl(tunnel.serverId), token: 'device', tunnel });
+    forgetToken();
+    expect(loadCredentials()).toEqual({ serverUrl: tunnelBaseUrl(tunnel.serverId), token: '', tunnel });
+  });
+
+  it.each([
+    { ...tunnel, serverId: 'wrong' }, { ...tunnel, publicKey: 'wrong' },
+    { ...tunnel, lan: ['mac.local/no-port'] }, { ...tunnel, lan: Array(9).fill('mac.local:7778') },
+    { ...tunnel, relay: 'https://relay.example' }, { ...tunnel, relay: 'wss://user@relay.example' },
+    { ...tunnel, relay: 'wss://relay.example?secret=yes' }, { ...tunnel, relay: 'wss://relay.example#fragment' },
+    { ...tunnel, relay: 'wss://relay.example?' }, { ...tunnel, relay: 'wss://relay.example#' },
+  ])('drops a malformed saved route without trusting it', (badRoute) => {
+    window.localStorage.setItem('neo.connection', JSON.stringify({ serverUrl: 'https://plain.example', token: 'device', tunnel: badRoute }));
+    expect(loadCredentials()).toEqual({ serverUrl: 'https://plain.example', token: 'device' });
+  });
+
+  it('reuses one transport per pinned identity for health, verification, claim and session clients', async () => {
+    const route = { ...tunnel, serverId: 'c'.repeat(32) };
+    vi.mocked(createTunnelTransport).mockClear();
+    vi.stubGlobal('fetch', vi.fn(async (url) => new Response(JSON.stringify(String(url).endsWith('/health') ? { ok: true, name: 'neo' } : { token: 'phone' }), { headers: { 'Content-Type': 'application/json' } })));
+    const baseUrl = tunnelBaseUrl(route.serverId);
+    expect(await checkHealth(baseUrl, route)).toMatchObject({ ok: true });
+    expect(await verifyCredentials(baseUrl, 'owner', route)).toBe('ok');
+    expect(await claimPairingCode(baseUrl, code, { deviceName: 'Phone', platform: 'ios' }, route)).toEqual({ kind: 'ok', token: 'phone' });
+    const first = createServerClient({ serverUrl: baseUrl, token: 'phone', tunnel: route });
+    const next = createServerClient({ serverUrl: baseUrl, token: 'phone', tunnel: { ...route, lan: ['new.local:7778'] } });
+    expect(first.options.fetch).toBe(next.options.fetch);
+    expect(first.options.WebSocket).toBe(next.options.WebSocket);
+    expect(createTunnelTransport).toHaveBeenCalledOnce();
+    expect(vi.mocked(createTunnelTransport).mock.calls[0]?.[0].route.lan).toEqual(['new.local:7778']);
+    const claim = vi.mocked(globalThis.fetch).mock.calls.find(([url]) => String(url).endsWith('/pairing/claim'));
+    expect(new Headers(claim?.[1]?.headers).has('Authorization')).toBe(false);
+    createServerClient({ serverUrl: baseUrl, token: 'phone', tunnel: { ...route, publicKey: 'd'.repeat(43) } });
+    expect(createTunnelTransport).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('refreshTunnelRoute', () => {
+  const credentials: Credentials = { serverUrl: tunnelBaseUrl(tunnel.serverId), token: 'device', tunnel };
+  const status: PhoneAccessStatus = {
+    enabled: true, serverId: tunnel.serverId, publicKey: tunnel.publicKey,
+    lan: { listening: true, port: 8000, addresses: ['new.local:8000'], error: null },
+    relay: { url: null, status: 'off', error: null }, defaultRelayUrl: '',
+  };
+  const client = (response: PhoneAccessStatus) => ({ phoneAccess: { status: vi.fn(async () => response) } }) as unknown as NeoClient;
+
+  it('updates only addresses under the existing pinned identity', async () => {
+    saveCredentials(credentials);
+    const next = await refreshTunnelRoute(credentials, client(status), () => true);
+    expect(next.tunnel).toEqual({ ...tunnel, lan: ['new.local:8000'] });
+    expect(loadCredentials()).toEqual(next);
+  });
+
+  it.each([{ serverId: 'e'.repeat(32) }, { publicKey: 'f'.repeat(43) }])('ignores a server reporting a different identity', async (identity) => {
+    saveCredentials(credentials);
+    expect(await refreshTunnelRoute(credentials, client({ ...status, ...identity }), () => true)).toBe(credentials);
+    expect(loadCredentials()).toEqual(credentials);
+  });
+
+  it('keeps a reconnecting relay and never saves a route with no way in', async () => {
+    saveCredentials(credentials);
+    const reconnecting = await refreshTunnelRoute(credentials, client({ ...status, relay: { url: 'wss://relay.example', status: 'connecting', error: null } }), () => true);
+    expect(reconnecting.tunnel).toEqual({ ...tunnel, lan: ['new.local:8000'], relay: 'wss://relay.example' });
+    const unreachable = { ...status, lan: { listening: false, port: null, addresses: [], error: null } };
+    expect(await refreshTunnelRoute(reconnecting, client(unreachable), () => true)).toBe(reconnecting);
+    expect(loadCredentials()).toEqual(reconnecting);
+  });
+
+  it('ignores a late response after a session switch', async () => {
+    saveCredentials(credentials);
+    expect(await refreshTunnelRoute(credentials, client(status), () => false)).toBe(credentials);
+    expect(loadCredentials()).toEqual(credentials);
+  });
+
+  it('keeps a newer saved connection when a route refresh completes', async () => {
+    saveCredentials({ serverUrl: 'https://new.example', token: 'new-token' });
+    await refreshTunnelRoute(credentials, client(status), () => true);
+    expect(loadCredentials()).toEqual({ serverUrl: 'https://new.example', token: 'new-token' });
+  });
+});
+
+describe('PhoneAccessCard', () => {
+  const status = (enabled: boolean): PhoneAccessStatus => ({
+    enabled, serverId: tunnel.serverId, publicKey: tunnel.publicKey,
+    lan: { listening: enabled, port: enabled ? 7778 : null, addresses: enabled ? tunnel.lan : [], error: null },
+    relay: { url: null, status: 'off', error: null }, defaultRelayUrl: '',
+  });
+  const card = (refresh = 0, locale = 'en') => createElement(I18nProvider, { locale, messages: appDictionaries, children: createElement(PhoneAccessCard, { refresh }) });
+
+  it('toggles phone access and reloads honest listener status', async () => {
+    const phoneAccess = { status: vi.fn().mockResolvedValueOnce(status(false)).mockResolvedValue(status(true)), update: vi.fn().mockResolvedValue(status(true)) };
+    useSession.setState({ client: { phoneAccess } as unknown as NeoClient, settings: null });
+    render(card());
+    await act(async () => undefined);
+    expect(screen.getByRole('status').textContent).toBe('Off');
+    fireEvent.click(screen.getByRole('switch', { name: 'Phone access' }));
+    await act(async () => undefined);
+    expect(phoneAccess.update).toHaveBeenCalledWith({ enabled: true });
+    expect(phoneAccess.status).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('status').textContent).toBe('On this network: mac.local:7778');
+    expect(screen.getByText(/Keep NEO running in the background/)).toBeTruthy();
+  });
+
+  it('shows owner-only feedback on 403 without changing the switch', async () => {
+    const phoneAccess = { status: vi.fn().mockResolvedValue(status(false)), update: vi.fn().mockRejectedValue({ httpStatus: 403 }) };
+    useSession.setState({ client: { phoneAccess } as unknown as NeoClient });
+    render(card());
+    await act(async () => undefined);
+    fireEvent.click(screen.getByRole('switch', { name: 'Phone access' }));
+    await act(async () => undefined);
+    expect(screen.getByRole('alert').textContent).toBe(appDictionaries.en['devices.owner_only']);
+    expect((screen.getByRole('switch') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole('switch') as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it('refreshes after pairing closes and displays a listener failure in Chinese', async () => {
+    const phoneAccess = { status: vi.fn().mockResolvedValueOnce(status(false)).mockResolvedValue({ ...status(true), lan: { ...status(false).lan, error: 'Port unavailable' } }), update: vi.fn() };
+    useSession.setState({ client: { phoneAccess } as unknown as NeoClient });
+    const view = render(card(0, 'zh-CN'));
+    await act(async () => undefined);
+    expect(screen.getByRole('status').textContent).toBe('已关闭');
+    view.rerender(card(1, 'zh-CN'));
+    await act(async () => undefined);
+    expect(phoneAccess.status).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('status').textContent).toBe('Port unavailable');
+    expect(screen.getByRole('switch', { name: '手机访问' })).toBeTruthy();
   });
 });

@@ -69,12 +69,13 @@ export function ConnectScreen(): ReactElement {
       setError(t('connect.error_fields'));
       return;
     }
+    if (hint?.tunnel && creds.serverUrl === hint.serverUrl) creds.tunnel = hint.tunnel;
     pending.current = true;
     setBusy(true);
     try {
-      const result = await verifyCredentials(creds.serverUrl, creds.token);
+      const result = await verifyCredentials(creds.serverUrl, creds.token, creds.tunnel);
       if (!mounted.current) return;
-      if (result === 'ok') await connectWith(creds.serverUrl, creds.token, 'manual');
+      if (result === 'ok') await connectWith(creds, 'manual');
       else setError(result === 'unauthorized' ? t('connect.error_token') : t('connect.error_unreachable', { url: creds.serverUrl }));
     } finally {
       pending.current = false;
@@ -160,9 +161,9 @@ export function OfflineScreen(): ReactElement {
   const retry = async () => {
     if (!hint?.serverUrl || !hint.token) return;
     setBusy(true);
-    const result = await verifyCredentials(hint.serverUrl, hint.token);
-    if (result === 'ok') await connectWith(hint.serverUrl, hint.token, 'saved');
-    else if (result === 'unauthorized') showConnect({ reason: 'unauthorized', serverUrl: hint.serverUrl });
+    const result = await verifyCredentials(hint.serverUrl, hint.token, hint.tunnel);
+    if (result === 'ok') await connectWith({ serverUrl: hint.serverUrl, token: hint.token, tunnel: hint.tunnel }, 'saved');
+    else if (result === 'unauthorized') showConnect({ reason: 'unauthorized', serverUrl: hint.serverUrl, tunnel: hint.tunnel });
     setBusy(false);
   };
 
@@ -189,12 +190,12 @@ export function OfflineScreen(): ReactElement {
         <p className="neo-help" style={{ fontSize: '0.9063rem', margin: '0 0 0.25rem' }}>
           {t('offline.text')}
         </p>
-        <p style={{ margin: '0 0 1.25rem', fontFamily: 'var(--neo-font-mono)', fontSize: '0.8125rem', overflowWrap: 'anywhere' }}>{hint?.serverUrl}</p>
+        <p style={{ margin: '0 0 1.25rem', fontFamily: 'var(--neo-font-mono)', fontSize: '0.8125rem', overflowWrap: 'anywhere' }}>{hint?.tunnel ? t('dataSettings.source_tunnel') : hint?.serverUrl}</p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           <Button variant="primary" icon="refresh" block loading={busy} onClick={() => void retry()}>
             {t('offline.retry')}
           </Button>
-          <Button variant="ghost" block onClick={() => showConnect({ reason: 'manual', serverUrl: hint?.serverUrl })}>
+          <Button variant="ghost" block onClick={() => showConnect({ reason: 'manual', serverUrl: hint?.serverUrl, tunnel: hint?.tunnel })}>
             {t('offline.change')}
           </Button>
         </div>

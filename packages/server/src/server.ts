@@ -6,13 +6,14 @@ import type { NeoConfig } from '@neo/protocol';
 import { createApp } from './app.js';
 import { createServices } from './services.js';
 import { closeWebSockets } from './ws.js';
-import type { CreateServicesOptions, NeoServer } from './index.js';
+import type { CreateServicesOptions, NeoServer, PhoneAccessManager } from './index.js';
 
 const CONSOLIDATION_INTERVAL_MS = 15 * 60 * 1000;
 
 export async function startServer(config: NeoConfig, options: CreateServicesOptions = {}): Promise<NeoServer> {
   const services = await createServices(config, options);
   let httpServer: Server | undefined;
+  let phoneAccess: PhoneAccessManager | undefined;
   let consolidationTimer: ReturnType<typeof setInterval> | null = null;
   let consolidation: Promise<void> | null = null;
   let closePromise: Promise<void> | null = null;
@@ -30,7 +31,9 @@ export async function startServer(config: NeoConfig, options: CreateServicesOpti
   };
 
   try {
-    const { app, injectWebSocket } = createApp(services);
+    const neoApp = createApp(services);
+    const { app, injectWebSocket } = neoApp;
+    phoneAccess = neoApp.phoneAccess;
     const address = await new Promise<{ port: number }>((resolve, reject) => {
       httpServer = serve({ fetch: app.fetch, port: config.server.port, hostname: config.server.host }, resolve) as Server;
       httpServer.once('error', reject);
@@ -40,6 +43,7 @@ export async function startServer(config: NeoConfig, options: CreateServicesOpti
     const host = config.server.host === '0.0.0.0' ? '127.0.0.1' : config.server.host === '::' ? '::1' : config.server.host;
     const url = `http://${host.includes(':') ? `[${host}]` : host}:${address.port}`;
 
+    await phoneAccess.start();
     services.scheduler.start();
     consolidationTimer = setInterval(() => {
       if (consolidation || closePromise) return;
@@ -65,6 +69,7 @@ export async function startServer(config: NeoConfig, options: CreateServicesOpti
       services,
       stop() {
         if (!stopPromise) stopPromise = (async () => {
+          await phoneAccess!.stop();
           if (consolidationTimer) clearInterval(consolidationTimer);
           consolidationTimer = null;
           services.scheduler.stop();
@@ -88,6 +93,7 @@ export async function startServer(config: NeoConfig, options: CreateServicesOpti
     };
   } catch (error) {
     if (consolidationTimer) clearInterval(consolidationTimer);
+    await phoneAccess?.stop();
     await closeWebSockets(services.events);
     httpServer?.close();
     await services.close();

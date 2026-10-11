@@ -13,6 +13,7 @@ import { getPlatform } from '../../platform/index.js';
 import { pushToast } from '../../state/notifications.js';
 import { requireClient } from '../../state/session.js';
 import { Section } from './common.js';
+import { PhoneAccessCard } from './PhoneAccessCard.js';
 
 const PLATFORM_ICON: Record<Device['platform'], string> = { web: 'globe', desktop: 'laptop', ios: 'smartphone', android: 'smartphone', cli: 'terminal', other: 'cpu' };
 const PLATFORMS: Device['platform'][] = ['ios', 'android', 'desktop', 'web', 'cli', 'other'];
@@ -114,6 +115,7 @@ export function DevicesSection(): ReactElement {
   const loader = useLoader(async () => (await requireClient().devices.list()).items, []);
   const [pairing, setPairing] = useState(false);
   const [accessToken, setAccessToken] = useState(false);
+  const [phoneAccessRefresh, setPhoneAccessRefresh] = useState(0);
   const devices = loader.data;
 
   const revoke = async (device: Device) => {
@@ -145,6 +147,7 @@ export function DevicesSection(): ReactElement {
         ) : undefined
       }
     >
+      {getPlatform().kind !== 'capacitor' && <PhoneAccessCard refresh={phoneAccessRefresh} />}
       {!devices ? (
         loader.error ? (
           <EmptyState icon="alert-circle" title={t('common.error')} />
@@ -175,7 +178,7 @@ export function DevicesSection(): ReactElement {
             ))}
         </ul>
       )}
-      {pairing && <PairPhoneDialog onClose={() => setPairing(false)} onPaired={() => void loader.reload()} />}
+      {pairing && <PairPhoneDialog onClose={() => { setPairing(false); setPhoneAccessRefresh((value) => value + 1); }} onPaired={() => void loader.reload()} />}
       {accessToken && <AccessTokenDialog onClose={() => setAccessToken(false)} onPaired={() => void loader.reload()} />}
     </Section>
   );

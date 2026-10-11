@@ -250,10 +250,12 @@ export function serveTunnel(link: MessageLink, options: {
       await response.body?.cancel().catch(() => {});
       return;
     }
+    const headers: [string, string][] = [];
+    response.headers.forEach((value, name) => headers.push([name, value]));
     if (!send({
       type: TunnelFrameType.Response,
       stream,
-      payload: encodeJson({ status: response.status, headers: [...response.headers.entries()] }),
+      payload: encodeJson({ status: response.status, headers }),
     })) return;
     state.headSent = true;
     if (response.body && state.head.method !== 'HEAD' && !NULL_BODY_STATUSES.has(response.status)) {

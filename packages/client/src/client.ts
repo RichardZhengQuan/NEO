@@ -33,6 +33,8 @@ import type {
   NotePatch,
   Notification,
   PairingSession,
+  PhoneAccessStatus,
+  UpdatePhoneAccessRequest,
   PermissionLevel,
   ProviderTestResult,
   ProviderView,
@@ -328,6 +330,12 @@ export class NeoClientImpl {
   };
 
   // ─── Pairing ──────────────────────────────────────────────────────────────
+
+  readonly phoneAccess = {
+    status: () => this.req<PhoneAccessStatus>('GET', '/phone-access'),
+    update: (body: UpdatePhoneAccessRequest) =>
+      this.req<PhoneAccessStatus>('PATCH', '/phone-access', { body }),
+  };
 
   readonly pairing = {
     create: () => this.req<PairingSession>('POST', '/pairing'),

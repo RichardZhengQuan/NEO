@@ -1,9 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_SETTINGS } from '@neo/protocol';
+import { DEFAULT_SETTINGS, type TunnelRoute } from '@neo/protocol';
+import { createTunnelTransport, tunnelBaseUrl } from '@neo/tunnel';
 import { bootstrapConnection, consumePairingLink, loadCredentials, saveCredentials } from '../connection.js';
 import { useData } from '../state/data.js';
 import { startSession, useSession } from '../state/session.js';
 import { pairWithLink, pairingOutcomeKey } from './pairing.js';
+
+vi.mock('@neo/tunnel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@neo/tunnel')>();
+  return { ...actual, createTunnelTransport: vi.fn(({ route }: { route: TunnelRoute }) => ({
+    baseUrl: actual.tunnelBaseUrl(route.serverId),
+    fetch: ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args)) as typeof fetch,
+    WebSocket: class {} as unknown as typeof WebSocket,
+  })) };
+});
 
 let sequence = 0;
 const link = () => `neo://pair?v=2&code=pairing_action_test_code_${++sequence}&server=https://new.example`;
@@ -20,7 +30,7 @@ function fetchSuccess(url: string | URL | Request): Promise<Response> {
 beforeEach(() => {
   window.localStorage.clear();
   vi.stubGlobal('fetch', vi.fn(fetchSuccess));
-  startSession('https://current.example', 'current-token', 'saved');
+  startSession({ serverUrl: 'https://current.example', token: 'current-token' }, 'saved');
   useSession.setState({ phase: 'ready', settings: DEFAULT_SETTINGS });
   saveCredentials({ serverUrl: 'https://current.example', token: 'current-token' });
 });
@@ -102,7 +112,7 @@ describe('pairWithLink', () => {
     let resolve!: (response: Response) => void;
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((done) => { resolve = done; })));
     const pending = pairWithLink(link());
-    const newer = startSession('https://other.example', 'other-token', 'manual');
+    const newer = startSession({ serverUrl: 'https://other.example', token: 'other-token' }, 'manual');
     resolve(json({ token: 'late-token', device: {} }, 201));
     expect(await pending).toBe('unreachable');
     expect(useSession.getState().client).toBe(newer);
@@ -113,9 +123,16 @@ describe('pairWithLink', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  it('cannot use tunnel-only links in this phase', async () => {
-    expect(await pairWithLink(`neo://pair?v=2&code=tunnel_only_test_code_123&id=${'a'.repeat(32)}&pk=${'b'.repeat(43)}&lan=mac.local:7778`)).toBe('unreachable');
-    expect(globalThis.fetch).not.toHaveBeenCalled();
+  it('claims tunnel-only links and saves their pinned route', async () => {
+    const tunnel = { serverId: 'a'.repeat(32), publicKey: 'b'.repeat(43), lan: ['mac.local:7778'], relay: null };
+    expect(await pairWithLink(`neo://pair?v=2&code=tunnel_only_test_code_123&id=${tunnel.serverId}&pk=${tunnel.publicKey}&lan=mac.local:7778`)).toBe('ok');
+    expect(loadCredentials()).toEqual({ serverUrl: tunnelBaseUrl(tunnel.serverId), token: 'phone-token', tunnel });
+    expect(useSession.getState().credentials?.tunnel).toEqual(tunnel);
+    expect(createTunnelTransport).toHaveBeenCalledOnce();
+    const calls = vi.mocked(globalThis.fetch).mock.calls;
+    const claim = calls.find(([url]) => String(url).endsWith('/pairing/claim'));
+    expect(new Headers(claim?.[1]?.headers).has('Authorization')).toBe(false);
+    expect(calls.some(([url]) => String(url).endsWith('/phone-access'))).toBe(true);
   });
 
   it.each([

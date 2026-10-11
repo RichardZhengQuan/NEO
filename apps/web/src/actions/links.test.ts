@@ -32,7 +32,7 @@ beforeEach(() => {
   window.localStorage.clear();
   platform.kind = 'browser';
   vi.stubGlobal('fetch', vi.fn(fetchSuccess));
-  startSession('https://current.example', 'current-token', 'saved');
+  startSession({ serverUrl: 'https://current.example', token: 'current-token' }, 'saved');
   useSession.setState({ phase: 'ready', settings: { ...DEFAULT_SETTINGS, locale: 'zh-CN' } });
   saveCredentials({ serverUrl: 'https://current.example', token: 'current-token' });
 });

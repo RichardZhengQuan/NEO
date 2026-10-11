@@ -1,6 +1,6 @@
 # NEO server API
 
-Base path `/api`. JSON in and out. Types and request schemas live in `@neo/protocol` (api.ts, pairing.ts, events.ts). HTTP routes except `GET /api/health` and `POST /api/pairing/claim` require `Authorization: Bearer <token>`, where the token is the owner token or a device token. The WebSocket authenticates with its first message. Errors use `ErrorShape` (`{ code, message, details?, retryable? }`) with the status from `httpStatusForCode`. Request bodies are validated with the listed zod schema, and validation failures return `400 bad_request` with `details` = `z.treeifyError`.
+Base path `/api`. JSON in and out. Types and request schemas live in `@neo/protocol` (api.ts, pairing.ts, tunnel.ts, events.ts). HTTP routes except `GET /api/health` and `POST /api/pairing/claim` require `Authorization: Bearer <token>`, where the token is the owner token or a device token. The WebSocket authenticates with its first message. Errors use `ErrorShape` (`{ code, message, details?, retryable? }`) with the status from `httpStatusForCode`. Request bodies are validated with the listed zod schema, and validation failures return `400 bad_request` with `details` = `z.treeifyError`.
 
 ## Routes
 
@@ -63,10 +63,12 @@ Base path `/api`. JSON in and out. Types and request schemas live in `@neo/proto
 | `POST /api/providers/test` | `TestProviderRequestSchema` | `ProviderTestResult` (draft, nothing saved) |
 | **Settings & tools** | | |
 | `GET /api/settings` | | `NeoSettings` |
-| `PATCH /api/settings` | `UpdateSettingsRequestSchema` (deep partial) | `NeoSettings` (publishes `settings.updated`; memory policy and tool permissions apply immediately) |
+| `PATCH /api/settings` | `UpdateSettingsRequestSchema` (deep partial; `phoneAccess` rejected with 400) | `NeoSettings` (publishes `settings.updated`; memory policy and tool permissions apply immediately) |
 | `GET /api/tools` | | `ListResponse<ToolInfo>` |
 | `PUT /api/tools/:name/permission` | `SetToolPermissionRequestSchema` | `ToolInfo` (persists to settings.tools.permissions) |
 | **Devices & push** | | |
+| `GET /api/phone-access` | | `PhoneAccessStatus` (any authenticated device) |
+| `PATCH /api/phone-access` (owner only) | `UpdatePhoneAccessRequestSchema` | `PhoneAccessStatus` after listener settings are applied |
 | `GET /api/devices` | | `ListResponse<Device>` |
 | `POST /api/devices` | `CreateDeviceRequestSchema` | `201 CreateDeviceResponse` (owner token only) |
 | `DELETE /api/devices/:id` | | `204` (owner device: 400) |
@@ -89,9 +91,19 @@ Codes expire after five minutes and work once. The server keeps only SHA-256 cod
 
 Unknown, expired, cancelled or used codes return `401 unauthorized` with “This pairing code is invalid or has expired.” Malformed bodies return `400 bad_request`. Claims have a separate per-IP failure limiter: after ten failed claims within sixty seconds, even a valid code receives `429 rate_limited` with `Retry-After: 60` until the window resets. The limiter runs before code lookup and honors `server.trustProxy` when determining the client IP.
 
-New phone links use `neo://pair?v=2&code=<code>&server=<encoded-http(s)-url>`. The v2 contract also accepts a tunnel route (`id`, `pk`, optional comma-separated `lan`, optional ws(s) `relay`), but this phase creates and connects through direct HTTP only. An http(s) `#/pair?v=2&code=…` link without `server` uses its origin. Existing v1 `neo://pair?server=…&token=…` and http(s) `#/pair?token=…` links remain accepted; `POST /api/devices` continues to generate v1 links for advanced access-token setups.
+New phone links use `neo://pair?v=2&code=<code>` with an optional `server=<encoded-http(s)-url>` and/or a pinned tunnel route. The v2 contract also accepts a tunnel route (`id`, `pk`, optional comma-separated `lan`, optional ws(s) `relay`), and this phase creates and connects through the encrypted LAN tunnel. An http(s) `#/pair?v=2&code=…` link without `server` uses its origin. Existing v1 `neo://pair?server=…&token=…` and http(s) `#/pair?token=…` links remain accepted; `POST /api/devices` continues to generate v1 links for advanced access-token setups.
 
-The computer must stay on with NEO running, and its `serverUrl` must be reachable from the phone. An embedded server advertised only at `127.0.0.1` is not reachable from another device; a later tunnel phase addresses that limitation.
+The computer must stay on with NEO running. Pairing automatically enables phone access when it is off and no public URL is configured. A running LAN tunnel replaces a loopback-only `serverUrl` in the QR; unstarted app fixtures retain their request origin.
+
+## Phone access
+
+`GET /api/phone-access` reports `enabled`, `serverId`, the pinned `publicKey`, LAN listener state (`listening`, actual `port`, `addresses`, `error`), relay state and `defaultRelayUrl`. Relay status is `off` in this phase even when a URL is configured.
+
+Only the owner can use `PATCH /api/phone-access`. Its body accepts optional `enabled` and `relayUrl`: null uses the boot default, an empty string selects no relay, and a nonempty override must be a `ws:`/`wss:` URL without credentials, query or hash. Invalid bodies return 400; paired devices return 403. Disabling closes the listener and its live sessions. `PATCH /api/settings` rejects any `phoneAccess` field with `400 bad_request` and “Use PATCH /api/phone-access”.
+
+## Tunnel
+
+The wire contract is authoritative in `@neo/protocol`'s `packages/protocol/src/tunnel.ts`. The separate LAN listener upgrades only `/v1/tunnel`, carries Noise-encrypted HTTP/SSE and event WebSocket frames, and returns 404 for all plaintext HTTP paths. Decrypted requests enter the normal Hono app with the tunnel peer address; forwarded IP headers are stripped even with proxy trust enabled. Device bearer tokens still authenticate inside the tunnel. Relay peers have a separate `relay:` IP namespace reserved for the next phase.
 
 ## Tool confirmations
 
@@ -126,5 +138,5 @@ When `server.webDir` is set, the server serves the built web app at `/` with SPA
 
 - The owner token comes from `config.server.authToken`, else is read from `<dataDir>/token`, else is generated on first boot and written there (mode 0600). It is registered as the owner device (`owner: true`) so `verify` works uniformly.
 - `GET /api/health` and `POST /api/pairing/claim` are public; the latter validates a single-use code instead of a bearer token.
-- Owner-only `POST /api/pairing` returns a v2 pairing link using `publicUrl ?? requestOrigin`. Owner-only `POST /api/devices` still returns a new token once, plus the advanced v1 `pairingUrl = buildPairingUrl(publicUrl ?? requestOrigin, token)`.
+- Owner-only `POST /api/pairing` returns a v2 pairing link carrying the active tunnel route plus the public URL or non-loopback request origin. Owner-only `POST /api/devices` still returns a new token once, plus the advanced v1 `pairingUrl = buildPairingUrl(publicUrl ?? requestOrigin, token)`.
 - Failed bearer authentication and failed pairing claims use separate per-IP limiters (10/min, then `429`).

@@ -19,6 +19,7 @@
     "@capacitor/local-notifications": "^8.3.0",
     "@neo/client": "workspace:*",
     "@neo/protocol": "workspace:*",
+    "@neo/tunnel": "workspace:*",
     "@neo/ui": "workspace:*",
     "qrcode": "^1.5.4",
     "react": "^19.2.0",

@@ -201,6 +201,15 @@ NEO is configured in three layers (later layers win):
     "maxBodyBytes": 20971520  // 20 MB
   },
 
+  // Separate encrypted LAN listener; starts only while phone access is enabled.
+  "tunnel": {
+    "lan": true,
+    "host": "0.0.0.0",
+    "port": 7778,
+    "advertise": [],          // explicit host:port addresses (for Docker/NAT)
+    "relayUrl": ""            // relay transport arrives in the next phase
+  },
+
   // Boot-time provider list. Providers added via the UI are stored in the DB.
   "providers": [
     { "id": "demo", "kind": "mock", "label": "Demo mode", "enabled": true }
@@ -246,6 +255,11 @@ NEO is configured in three layers (later layers win):
 | `NEO_WEB_DIR` | `server.webDir` |
 | `NEO_TRUST_PROXY` | `server.trustProxy` (`true`/`false`, also `1`/`0`) |
 | `NEO_LOG_LEVEL` | `log.level` |
+| `NEO_TUNNEL_LAN` | `tunnel.lan` (strict `true`/`false`/`1`/`0`) |
+| `NEO_TUNNEL_HOST` | `tunnel.host` (default `0.0.0.0`) |
+| `NEO_TUNNEL_PORT` | `tunnel.port` (default 7778; 0 chooses an available port) |
+| `NEO_TUNNEL_ADVERTISE` | `tunnel.advertise` (comma-separated validated `host:port` addresses) |
+| `NEO_RELAY_URL` | `tunnel.relayUrl` (default empty; relay stays off in this phase) |
 
 Proxy headers are ignored by default. Enable `NEO_TRUST_PROXY=true` or
 `server.trustProxy: true` only when clients cannot reach NEO directly and your
@@ -297,9 +311,28 @@ it automatically. Treat any output captured with that option as secret.
 
 **From the web UI:**
 
-1. Open **Settings → Devices**.
-2. Click **Add device** → choose a name and platform.
-3. A QR code and pairing link appear.
+1. Open **Settings → Devices → Pair a phone**.
+2. A one-time QR code and pairing link appear (valid for five minutes).
+3. Scan with your phone; it receives its own revocable token.
+
+For on-device servers, pairing turns on **Phone access** automatically. You
+can also use the owner-only switch in Devices. Phones on the same network
+connect to the encrypted listener on **7778/TCP** by default, independently of
+the desktop window's loopback HTTP port. macOS or Windows may show a firewall
+prompt the first time phone access is turned on; allow local-network access.
+The computer must stay on and NEO must keep running. Keep it in the menu bar /
+tray and enable opening at login. Turning phone access off closes active LAN
+tunnels. The listener returns 404 for plaintext HTTP, including `/api/*`.
+
+If 7778 is occupied, NEO logs a warning and uses an available port; new QR codes
+carry that actual port. Existing phones may need a fresh pairing link after an
+address or port change. The relay is not active in this phase.
+
+For Docker, publish the tunnel port separately (for example `7778:7778`) and
+set `NEO_TUNNEL_ADVERTISE=192.168.1.20:7778` to the host's reachable address when
+container addresses differ from the host. Explicit advertisements retain their
+configured ports, so match any published-port mapping. Restrict this port to
+the local network; it serves only the encrypted tunnel.
 
 **On mobile:**
 
@@ -352,6 +385,7 @@ The **data directory** (`NEO_DATA_DIR`) contains everything:
 | `key` | 32-byte AES master key (mode 0600) — **keep this secret** |
 | `token` | Owner authentication token |
 | `vapid.json` | Web Push VAPID key pair |
+| `tunnel-identity.json` | Static tunnel / signing keys (mode 0600); preserve to keep paired phones' pinned identity |
 | `plugins/` | Installed plugins (optional) |
 
 **Back up the whole directory**, not just `neo.db` — without the `key` file the

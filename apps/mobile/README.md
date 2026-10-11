@@ -77,10 +77,9 @@ use **Paste a pairing link instead** on the phone. You can also tap a
 `neo://pair` link to open NEO. Each code works once and expires after five
 minutes; use **Show a new code** if it expires.
 
-This phase connects directly over HTTP/HTTPS. The address in the pairing link
-must be reachable from your phone. A computer address such as `127.0.0.1` is
-local to that computer and cannot be reached from a phone; the encrypted
-tunnel is planned for a later phase.
+On the same network, phones use the encrypted LAN tunnel for an on-device
+computer. Self-hosted servers with a public HTTPS address use that address.
+Native network permissions are described in **Reaching your computer** below.
 
 ### Native pairing and camera configuration
 
@@ -127,31 +126,53 @@ The server must allow the native WebView origin in `server.corsOrigins`:
 `https://localhost` for the configured Android scheme, and
 `capacitor://localhost` for iOS. Local mode already allows the iOS origin, but
 its existing localhost allowance covers HTTP rather than Android's HTTPS
-origin. These origins identify the app shell; the pairing link still needs
-the computer's reachable address.
+origin. These origins identify the app shell for direct HTTP connections. The LAN
+tunnel dispatches requests within the encrypted channel without browser CORS
+preflights.
 
-### Development / LAN server
+### Reaching your computer
 
-If your NEO server is running on the same local network without TLS, you need
-to allow cleartext HTTP:
+Turn on **Settings → Devices → Phone access** on the computer, then pair your
+phone while both devices are on the same network. Pairing also turns phone
+access on for an on-device server. The computer must stay on with NEO running.
+The LAN listener uses `ws://` on port 7778 by default, but carries only Noise
+ciphertext: the phone pins the server key from the pairing code. It never
+serves a plaintext API. A relay in the next phase will use `wss://`.
 
-#### Android — `network_security_config.xml`
+The generated native projects need the following network permissions. These
+settings and the LAN tunnel have **not yet been verified on physical devices**.
 
-Capacitor injects a default config that allows localhost.  For LAN servers, add
-a `res/xml/network_security_config.xml` to your Android project:
+#### iOS — local network permission and App Transport Security
+
+Add these entries to `ios/App/App/Info.plist`:
+
+```xml
+<key>NSLocalNetworkUsageDescription</key>
+<string>NEO connects securely to your computer on your local network.</string>
+<key>NSAppTransportSecurity</key>
+<dict>
+  <key>NSAllowsLocalNetworking</key>
+  <true/>
+</dict>
+```
+
+The local-network permission allows discovery and connection to the computer;
+`NSAllowsLocalNetworking` permits the local `ws://` transport. Noise encryption
+and the pinned server key protect everything inside it.
+
+#### Android — network security configuration
+
+Add `android/app/src/main/res/xml/network_security_config.xml`:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-  <!-- Allow cleartext for local network servers during development -->
-  <domain-config cleartextTrafficPermitted="true">
-    <!-- Replace with your server's IP or hostname -->
-    <domain includeSubdomains="false">192.168.1.100</domain>
-  </domain-config>
+  <!-- Cleartext WebSocket transport carries only encrypted tunnel frames. -->
+  <base-config cleartextTrafficPermitted="true" />
 </network-security-config>
 ```
 
-Then reference it in `AndroidManifest.xml`:
+Reference it from `AndroidManifest.xml`:
 
 ```xml
 <application
@@ -159,22 +180,11 @@ Then reference it in `AndroidManifest.xml`:
   ...>
 ```
 
-#### iOS — App Transport Security (ATS)
-
-iOS requires HTTPS by default.  For local development, you can add an ATS
-exception in `ios/App/App/Info.plist`:
-
-```xml
-<key>NSAppTransportSecurity</key>
-<dict>
-  <key>NSAllowsLocalNetworking</key>
-  <true/>
-  <!-- Only add NSAllowsArbitraryLoads if you really need it (not recommended) -->
-</dict>
-```
-
-For production, always serve NEO behind a valid TLS certificate (see
-`docs/DEPLOYMENT.md` for the Caddy reverse-proxy example).
+The Capacitor config enables `android.allowMixedContent` because its WebView
+origin is `https://localhost` while the private LAN address uses `ws://`.
+Cleartext permission applies to the transport; phone requests, tokens and
+responses inside the tunnel remain end-to-end encrypted. Direct public server
+connections should still use HTTPS.
 
 ---
 

@@ -14,8 +14,9 @@
  *
  * Everything external is injected so the order is unit-tested.
  */
-import { parsePairingLink, parsePairingUrl, type Device, type HealthResponse, type PairingLink } from '@neo/protocol';
-import { NeoClient } from '@neo/client';
+import { MAX_PAIRING_LAN_ADDRESSES, ServerIdSchema, TunnelPublicKeySchema, isLanAddress, parsePairingLink, parsePairingUrl, type Device, type HealthResponse, type PairingLink, type TunnelRoute } from '@neo/protocol';
+import { NeoClient, type NeoClientOptions } from '@neo/client';
+import { createTunnelTransport, tunnelBaseUrl, type TunnelTransport } from '@neo/tunnel';
 import { STORAGE_KEYS, readJson, writeJson } from './lib/storage.js';
 import { httpStatus, isNetworkError } from './lib/errors.js';
 import { parseRoute } from './router.js';
@@ -26,6 +27,7 @@ export type ConnectionSource = 'desktop' | 'pair' | 'saved' | 'manual';
 export interface Credentials {
   serverUrl: string;
   token: string;
+  tunnel?: TunnelRoute | null;
 }
 
 export type VerifyResult = 'ok' | 'unauthorized' | 'unreachable';
@@ -37,9 +39,9 @@ export type ClaimResult =
   | { kind: 'unreachable' };
 
 export type BootstrapResult =
-  | { kind: 'ready'; serverUrl: string; token: string; source: ConnectionSource }
-  | { kind: 'offline'; serverUrl: string; token: string; source: ConnectionSource }
-  | { kind: 'connect'; reason: 'none' | 'unauthorized' | 'pair-failed' | 'same-origin'; serverUrl?: string; token?: string };
+  | ({ kind: 'ready'; source: ConnectionSource } & Credentials)
+  | ({ kind: 'offline'; source: ConnectionSource } & Credentials)
+  | { kind: 'connect'; reason: 'none' | 'unauthorized' | 'pair-failed' | 'same-origin'; serverUrl?: string; token?: string; tunnel?: TunnelRoute | null };
 
 export interface DesktopConfigSource {
   getConfig(): Promise<{ serverUrl: string; token: string }>;
@@ -55,8 +57,8 @@ export interface BootstrapDeps {
   save(credentials: Credentials): void;
   /** Forget the token but keep the server URL. */
   forgetToken(): void;
-  verify(serverUrl: string, token: string): Promise<VerifyResult>;
-  claim(serverUrl: string, code: string): Promise<ClaimResult>;
+  verify(serverUrl: string, token: string, tunnel?: TunnelRoute | null): Promise<VerifyResult>;
+  claim(serverUrl: string, code: string, tunnel?: TunnelRoute | null): Promise<ClaimResult>;
   launchLink(): Promise<string | null>;
   /** Share page-lifetime deduplication with pairing actions. */
   consumePairLink?(link: PairingLink): boolean;
@@ -101,6 +103,70 @@ function httpOrigin(origin: string): string | null {
   return /^https?:\/\//i.test(origin) ? origin : null;
 }
 
+/** Public HTTPS first, then the pinned tunnel, then a plain HTTP server. */
+export function pairingConnection(link: PairingLink): Omit<Credentials, 'token'> | null {
+  const serverUrl = link.serverUrl ? normalizeServerUrl(link.serverUrl) : null;
+  if (serverUrl?.startsWith('https://')) return { serverUrl };
+  if (link.version === 2 && link.tunnel) return { serverUrl: tunnelBaseUrl(link.tunnel.serverId), tunnel: link.tunnel };
+  return serverUrl ? { serverUrl } : null;
+}
+
+function validatedTunnel(value: unknown): TunnelRoute | null {
+  if (!value || typeof value !== 'object') return null;
+  const route = value as Partial<TunnelRoute>;
+  if (!ServerIdSchema.safeParse(route.serverId).success || !TunnelPublicKeySchema.safeParse(route.publicKey).success ||
+      !Array.isArray(route.lan) || route.lan.length > MAX_PAIRING_LAN_ADDRESSES ||
+      !route.lan.every(address => typeof address === 'string' && isLanAddress(address))) return null;
+  if (route.relay !== null) {
+    if (typeof route.relay !== 'string' || !route.relay || route.relay.length > 500) return null;
+    try {
+      const url = new URL(route.relay);
+      if (!['ws:', 'wss:'].includes(url.protocol) || url.username || url.password || route.relay.includes('?') || route.relay.includes('#')) return null;
+    } catch { return null; }
+  }
+  return { serverId: route.serverId!, publicKey: route.publicKey!, lan: [...route.lan], relay: route.relay! };
+}
+
+const tunnelTransports = new Map<string, { route: TunnelRoute; transport: TunnelTransport }>();
+
+/** Every server client shares the same pinned transport, including a token-less claim. */
+export function createServerClient(credentials: Credentials, options: Omit<NeoClientOptions, 'baseUrl' | 'token' | 'fetch' | 'WebSocket'> = {}): NeoClient {
+  const tunnel = credentials.tunnel;
+  if (!tunnel) return new NeoClient({ ...options, baseUrl: credentials.serverUrl, token: credentials.token });
+  const key = `${tunnel.serverId}:${tunnel.publicKey}`;
+  let cached = tunnelTransports.get(key);
+  if (!cached) {
+    const route = { ...tunnel, lan: [...tunnel.lan] };
+    cached = { route, transport: createTunnelTransport({ route }) };
+    tunnelTransports.set(key, cached);
+  } else {
+    cached.route.lan = [...tunnel.lan];
+    cached.route.relay = tunnel.relay;
+  }
+  const { baseUrl, fetch, WebSocket } = cached.transport;
+  return new NeoClient({ ...options, baseUrl, token: credentials.token, fetch, WebSocket });
+}
+
+/** Refresh addresses without ever accepting a new identity from the server. */
+export async function refreshTunnelRoute(credentials: Credentials, client: NeoClient, active: () => boolean): Promise<Credentials> {
+  const pinned = credentials.tunnel;
+  if (!pinned) return credentials;
+  try {
+    const status = await client.phoneAccess.status();
+    if (!active() || status.serverId !== pinned.serverId || status.publicKey !== pinned.publicKey) return credentials;
+    // A relay that is only reconnecting is still the way home; a route with no way in at all is never saved.
+    const route = validatedTunnel({ ...pinned, lan: status.lan.addresses, relay: status.relay.url });
+    if (!route || (!route.lan.length && !route.relay)) return credentials;
+    const next = { ...credentials, tunnel: route };
+    const cached = tunnelTransports.get(`${pinned.serverId}:${pinned.publicKey}`);
+    if (cached) { cached.route.lan = [...route.lan]; cached.route.relay = route.relay; }
+    const saved = loadCredentials();
+    if (saved?.serverUrl === credentials.serverUrl && saved.token === credentials.token &&
+        saved.tunnel?.serverId === pinned.serverId && saved.tunnel.publicKey === pinned.publicKey) saveCredentials(next);
+    return next;
+  } catch { return credentials; }
+}
+
 const handledPairingLinks = new Set<string>();
 
 /** Reserve a code/token synchronously before any request, including bootstrap. */
@@ -114,10 +180,11 @@ export function consumePairingLink(link: PairingLink): boolean {
 async function bootstrapPairLink(url: string, deps: BootstrapDeps, fallback?: { serverUrl?: string; token?: string }): Promise<BootstrapResult> {
   const link = parsePairingLink(url);
   if (!link) return { kind: 'connect', reason: 'pair-failed', ...fallback };
-  const serverUrl = link.serverUrl ? normalizeServerUrl(link.serverUrl) : null;
-  if (!serverUrl || (deps.consumePairLink && !deps.consumePairLink(link))) {
-    return { kind: 'connect', reason: 'pair-failed', ...(serverUrl ? { serverUrl } : {}) };
+  const connection = pairingConnection(link);
+  if (!connection || (deps.consumePairLink && !deps.consumePairLink(link))) {
+    return { kind: 'connect', reason: 'pair-failed', ...connection };
   }
+  const { serverUrl, tunnel } = connection;
   if (link.version === 1) {
     const result = await deps.verify(serverUrl, link.token);
     if (result === 'ok') {
@@ -126,10 +193,11 @@ async function bootstrapPairLink(url: string, deps: BootstrapDeps, fallback?: { 
     }
     return { kind: 'connect', reason: 'pair-failed', serverUrl, token: link.token };
   }
-  const result = await deps.claim(serverUrl, link.code);
+  const result = tunnel ? await deps.claim(serverUrl, link.code, tunnel) : await deps.claim(serverUrl, link.code);
   if (result.kind === 'ok') {
-    deps.save({ serverUrl, token: result.token });
-    return { kind: 'ready', serverUrl, token: result.token, source: 'pair' };
+    const credentials = { ...connection, token: result.token };
+    deps.save(credentials);
+    return { kind: 'ready', ...credentials, source: 'pair' };
   }
   return { kind: 'connect', reason: 'pair-failed', serverUrl };
 }
@@ -164,13 +232,13 @@ export async function bootstrapConnection(deps: BootstrapDeps): Promise<Bootstra
   // 4. Saved credentials
   const saved = deps.load();
   if (saved?.serverUrl && saved.token) {
-    const result = await deps.verify(saved.serverUrl, saved.token);
-    if (result === 'ok') return { kind: 'ready', serverUrl: saved.serverUrl, token: saved.token, source: 'saved' };
+    const result = saved.tunnel ? await deps.verify(saved.serverUrl, saved.token, saved.tunnel) : await deps.verify(saved.serverUrl, saved.token);
+    if (result === 'ok') return { kind: 'ready', ...saved, source: 'saved' };
     if (result === 'unauthorized') {
       deps.forgetToken();
-      return { kind: 'connect', reason: 'unauthorized', serverUrl: saved.serverUrl };
+      return { kind: 'connect', reason: 'unauthorized', serverUrl: saved.serverUrl, ...(saved.tunnel ? { tunnel: saved.tunnel } : {}) };
     }
-    return { kind: 'offline', serverUrl: saved.serverUrl, token: saved.token, source: 'saved' };
+    return { kind: 'offline', ...saved, source: 'saved' };
   }
 
   // 5. Same origin
@@ -184,9 +252,9 @@ export async function bootstrapConnection(deps: BootstrapDeps): Promise<Bootstra
 // ───────────────────────────── real dependencies ─────────────────────────────
 
 /** Check credentials with an authenticated call (health is public, so it can't verify a token). */
-export async function verifyCredentials(serverUrl: string, token: string): Promise<VerifyResult> {
+export async function verifyCredentials(serverUrl: string, token: string, tunnel?: TunnelRoute | null): Promise<VerifyResult> {
   try {
-    const client = new NeoClient({ baseUrl: serverUrl, token, timeoutMs: 8000 });
+    const client = createServerClient({ serverUrl, token, tunnel }, { timeoutMs: 8000 });
     await client.settings.get();
     return 'ok';
   } catch (err) {
@@ -198,10 +266,10 @@ export async function verifyCredentials(serverUrl: string, token: string): Promi
 }
 
 /** Exchange a single-use code without sending an existing device token. */
-export async function claimPairingCode(serverUrl: string, code: string, device?: { deviceName: string; platform: Device['platform'] }): Promise<ClaimResult> {
+export async function claimPairingCode(serverUrl: string, code: string, device?: { deviceName: string; platform: Device['platform'] }, tunnel?: TunnelRoute | null): Promise<ClaimResult> {
   try {
     const info = device ?? { deviceName: getPlatform().deviceName(), platform: getPlatform().devicePlatform };
-    const client = new NeoClient({ baseUrl: serverUrl, timeoutMs: 8000 });
+    const client = createServerClient({ serverUrl, token: '', tunnel }, { timeoutMs: 8000 });
     const result = await client.pairing.claim({ code, ...info });
     return { kind: 'ok', token: result.token };
   } catch (err) {
@@ -212,9 +280,9 @@ export async function claimPairingCode(serverUrl: string, code: string, device?:
   }
 }
 
-export async function checkHealth(serverUrl: string): Promise<HealthResponse | null> {
+export async function checkHealth(serverUrl: string, tunnel?: TunnelRoute | null): Promise<HealthResponse | null> {
   try {
-    const client = new NeoClient({ baseUrl: serverUrl, timeoutMs: 4000 });
+    const client = createServerClient({ serverUrl, token: '', tunnel }, { timeoutMs: 4000 });
     const health = await client.health();
     return health.ok && health.name === 'neo' ? health : null;
   } catch {
@@ -225,7 +293,8 @@ export async function checkHealth(serverUrl: string): Promise<HealthResponse | n
 export function loadCredentials(): Credentials | null {
   const c = readJson<Partial<Credentials>>(STORAGE_KEYS.connection);
   if (!c || typeof c.serverUrl !== 'string') return null;
-  return { serverUrl: c.serverUrl, token: typeof c.token === 'string' ? c.token : '' };
+  const tunnel = validatedTunnel(c.tunnel);
+  return { serverUrl: tunnel ? tunnelBaseUrl(tunnel.serverId) : c.serverUrl, token: typeof c.token === 'string' ? c.token : '', ...(tunnel ? { tunnel } : {}) };
 }
 
 export function saveCredentials(c: Credentials): void {
@@ -234,7 +303,7 @@ export function saveCredentials(c: Credentials): void {
 
 export function forgetToken(): void {
   const c = loadCredentials();
-  writeJson(STORAGE_KEYS.connection, c ? { serverUrl: c.serverUrl, token: '' } : null);
+  writeJson(STORAGE_KEYS.connection, c ? { ...c, token: '' } : null);
 }
 
 export function clearCredentials(): void {
@@ -263,7 +332,7 @@ export function browserBootstrapDeps(): BootstrapDeps {
     save: saveCredentials,
     forgetToken,
     verify: verifyCredentials,
-    claim: claimPairingCode,
+    claim: (serverUrl, code, tunnel) => claimPairingCode(serverUrl, code, undefined, tunnel),
     launchLink: () => getPlatform().launchLink?.() ?? Promise.resolve(null),
     consumePairLink: consumePairingLink,
     health: async (url) => (await checkHealth(url)) !== null,

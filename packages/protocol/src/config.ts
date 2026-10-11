@@ -9,6 +9,7 @@ import { ModelRefSchema } from './content.js';
 import { MemoryPolicySchema } from './memory.js';
 import { ProviderConfigSchema, type ProviderConfig } from './providers.js';
 import { PermissionLevelSchema } from './tools.js';
+import { DEFAULT_TUNNEL_PORT } from './tunnel.js';
 
 export const PersonaSchema = z.object({
   name: z.string().min(1).max(60).default('NEO'),
@@ -58,6 +59,17 @@ export const NeoSettingsSchema = z.object({
   locale: z.string().default('en'),
   theme: z.enum(['system', 'light', 'dark']).default('system'),
   onboarded: z.boolean().default(false),
+  /**
+   * Phones reaching this server through the end-to-end-encrypted tunnel (see tunnel.ts).
+   * Only the owner changes it, with PATCH /api/phone-access.
+   */
+  phoneAccess: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** null → the server's default relay (config `tunnel.relayUrl`); '' → no relay; otherwise a ws(s):// URL. */
+      relayUrl: z.string().max(500).nullable().default(null),
+    })
+    .prefault({}),
 });
 export type NeoSettings = z.infer<typeof NeoSettingsSchema>;
 export const DEFAULT_SETTINGS: NeoSettings = NeoSettingsSchema.parse({});
@@ -116,6 +128,20 @@ export const NeoConfigSchema = z.object({
       webDir: z.string().nullable().default(null),
       trustProxy: z.boolean().default(false),
       maxBodyBytes: z.number().int().positive().default(20 * 1024 * 1024),
+    })
+    .prefault({}),
+  /** The encrypted phone tunnel (see tunnel.ts). Active while settings.phoneAccess.enabled is on. */
+  tunnel: z
+    .object({
+      /** Accept direct tunnel connections on the local network (the listener speaks only the encrypted protocol). */
+      lan: z.boolean().default(true),
+      host: z.string().default('0.0.0.0'),
+      /** Kept stable because phones remember the address from the QR code. 0 = any free port. */
+      port: z.number().int().min(0).max(65535).default(DEFAULT_TUNNEL_PORT),
+      /** host:port addresses to advertise instead of the detected ones (Docker, port forwarding). */
+      advertise: z.array(z.string()).default([]),
+      /** Default relay (ws(s)://…). Empty until the NEO project runs a public relay; anyone can self-host one. */
+      relayUrl: z.string().default(''),
     })
     .prefault({}),
   /** Providers from the config file. Providers added in the app are stored in the database. */

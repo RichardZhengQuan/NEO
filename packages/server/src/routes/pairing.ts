@@ -5,6 +5,7 @@ import type { ClaimPairingResponse, PairingSession } from '@neo/protocol';
 import type { NeoServices } from '../index.js';
 import { getClientIp, IpFailureLimiter } from '../auth.js';
 import type { PairingService } from '../pairing.js';
+import type { PhoneAccessManager } from '../tunnel/manager.js';
 import { validateBody } from './helpers.js';
 
 /** Register before authentication: a phone has no device token until it claims a code. */
@@ -35,12 +36,22 @@ export function registerPairingClaim(app: Hono, services: NeoServices, pairing: 
   });
 }
 
-export function registerPairing(app: Hono, services: NeoServices, pairing: PairingService): void {
+export function registerPairing(app: Hono, services: NeoServices, pairing: PairingService, phoneAccess: PhoneAccessManager): void {
   // POST /api/pairing (owner only — enforced in app.ts)
-  app.post('/api/pairing', (c) => {
+  app.post('/api/pairing', async (c) => {
+    if (!services.settings.get().phoneAccess.enabled && !services.config.server.publicUrl) {
+      services.settings.update({ phoneAccess: { enabled: true } });
+    }
+    await phoneAccess.ready();
+    const tunnel = phoneAccess.route();
+    const origin = new URL(c.req.url);
+    // A loopback origin (the desktop app's own window) or the tunnel's synthetic host is never reachable from a phone.
+    const unreachable = origin.hostname === 'localhost' || origin.hostname === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(origin.hostname)
+      || origin.hostname.endsWith('.invalid');
+    const serverUrl = services.config.server.publicUrl ?? (unreachable ? null : origin.origin);
+    if (!serverUrl && !tunnel) throw new NeoError('conflict', "Phones can't reach this computer yet. Turn on phone access and try again.");
     const session = pairing.create();
-    const serverUrl = services.config.server.publicUrl ?? new URL(c.req.url).origin;
-    const result: PairingSession = { ...session, pairingUrl: buildPairingLink({ code: session.code, serverUrl }) };
+    const result: PairingSession = { ...session, pairingUrl: buildPairingLink({ code: session.code, serverUrl, tunnel }) };
     return c.json(result, 201);
   });
 
