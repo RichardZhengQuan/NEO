@@ -81,7 +81,16 @@ export function registerConversations(app: Hono, services: NeoServices): void {
     if (!conv) throw new NeoError('not_found', 'Conversation not found');
     const body = await validateBody(c, SendMessageRequestSchema);
 
-    const parts = body.parts?.length ? body.parts : [{ type: 'text' as const, text: body.text! }];
+    // Build the canonical parts list: prefer body.parts when present, but also
+    // prepend a text part when body.text is given and no text part exists yet
+    // (handles clients that send text+images separately before adopting the
+    // unified parts format).
+    const rawParts = body.parts ?? [];
+    const hasTextPart = rawParts.some((p) => p.type === 'text');
+    const textFromBody = body.text?.trim();
+    const parts = rawParts.length
+      ? (textFromBody && !hasTextPart ? [{ type: 'text' as const, text: textFromBody }, ...rawParts] : rawParts)
+      : [{ type: 'text' as const, text: textFromBody! }];
     // Let the runtime apply conversation/default-model precedence.
     const model = body.model;
 

@@ -161,18 +161,113 @@ describe('sanitizeGeminiSchema', () => {
     });
   });
 
-  it('drops free-form object properties (and their required entries) and untyped empty items', () => {
+  it('drops free-form object properties (and their required entries); arrays with free-form items get a {type:object} fallback', () => {
     const out = sanitizeGeminiSchema({
       type: 'object',
       properties: {
         url: { type: 'string' },
         headers: { type: 'object', additionalProperties: { type: 'string' } },
+        // blocks mirrors render_ui's `blocks: z.array(z.record(z.string(), z.unknown()))` —
+        // items is a free-form object; after sanitization it must still have items (F07 fix).
         blocks: { type: 'array', items: { type: 'object', additionalProperties: {} } },
       },
       required: ['url', 'headers'],
     });
-    expect(out).toEqual({ type: 'object', properties: { url: { type: 'string' }, blocks: { type: 'array' } }, required: ['url'] });
+    expect(out).toEqual({
+      type: 'object',
+      properties: { url: { type: 'string' }, blocks: { type: 'array', items: { type: 'object' } } },
+      required: ['url'],
+    });
   });
+
+  it('arrays without any items declaration also get a {type:object} fallback', () => {
+    const out = sanitizeGeminiSchema({ type: 'array' });
+    expect(out).toEqual({ type: 'array', items: { type: 'object' } });
+  });
+});
+
+// ── Built-in tool schema coverage ──────────────────────────────────────────────
+// These schemas are the JSON Schema representations that toolInputJsonSchema()
+// produces for the actual built-in tools in @neo/tools (inlined here to avoid a
+// package-dep cycle between providers and tools). Every array in the sanitized
+// output must have an `items` key — Gemini's OpenAPI schema contract requires it.
+
+function collectArraysMissingItems(schema: unknown, path = ''): string[] {
+  if (typeof schema !== 'object' || schema === null) return [];
+  const s = schema as Record<string, unknown>;
+  const missing: string[] = [];
+  if (s['type'] === 'array' && s['items'] === undefined) {
+    missing.push(path || '(root)');
+  }
+  for (const [key, value] of Object.entries(s)) {
+    if (key === 'items' || key === 'properties') {
+      if (key === 'items') {
+        missing.push(...collectArraysMissingItems(value, `${path}.items`));
+      } else if (typeof value === 'object' && value !== null) {
+        for (const [prop, propSchema] of Object.entries(value as Record<string, unknown>)) {
+          missing.push(...collectArraysMissingItems(propSchema, `${path}.${prop}`));
+        }
+      }
+    }
+  }
+  return missing;
+}
+
+// Representative inputSchema JSON for every built-in tool that carries arrays.
+// Derived from the Zod definitions in packages/tools/src/builtins/*.ts after
+// running z.toJSONSchema(schema, { io: 'input', unrepresentable: 'any' }).
+const BUILTIN_TOOL_SCHEMAS: Record<string, Record<string, unknown>> = {
+  // render_ui: blocks is z.array(z.record(z.string(), z.unknown())) — free-form object items.
+  render_ui: {
+    type: 'object',
+    properties: {
+      blocks: {
+        type: 'array',
+        items: { type: 'object', additionalProperties: {} },
+        minItems: 1,
+        maxItems: 20,
+        description: 'UI blocks, each an object with a "type".',
+      },
+    },
+    required: ['blocks'],
+  },
+  // web_fetch: headers is additionalProperties — becomes a free-form object (not an array, but kept for completeness).
+  web_fetch: {
+    type: 'object',
+    properties: {
+      url: { type: 'string' },
+      method: { type: 'string' },
+      headers: { type: 'object', additionalProperties: { type: 'string' } },
+    },
+    required: ['url'],
+  },
+  // create_reminder: recurrence.byWeekday is an array of integers.
+  create_reminder: {
+    type: 'object',
+    properties: {
+      title: { type: 'string' },
+      when: { type: 'string' },
+      recurrence: {
+        type: 'object',
+        properties: {
+          freq: { type: 'string' },
+          byWeekday: { type: 'array', items: { type: 'integer' } },
+          byMonthDay: { type: 'array', items: { type: 'integer' } },
+        },
+      },
+    },
+    required: ['title', 'when'],
+  },
+};
+
+describe('built-in tool schemas: every array has items after sanitization (F07)', () => {
+  for (const [toolName, rawSchema] of Object.entries(BUILTIN_TOOL_SCHEMAS)) {
+    it(`${toolName} — no array is missing items`, () => {
+      const sanitized = sanitizeGeminiSchema(rawSchema);
+      const missing = collectArraysMissingItems(sanitized);
+      expect(missing, `Arrays without items in ${toolName}: ${missing.join(', ')}`).toEqual([]);
+    });
+  }
 });
 
 describe('Gemini streaming', () => {

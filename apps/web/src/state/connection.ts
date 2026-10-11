@@ -6,11 +6,13 @@ import type { NeoClient } from '@neo/client';
 import { emptyEntry, mergeFetched, setAllConfirmations, upsertConversations, useConversations } from './conversations.js';
 import { refreshLoadedData } from './data.js';
 import { EventSequencer, handleServerEvent, type EventContext } from './events.js';
-import { setSettings, useSession } from './session.js';
+import { currentSessionEpoch, isCurrentSession, setSettings, useSession } from './session.js';
 
 /** Reload a conversation's newest messages into the cache. */
 export async function loadConversation(client: NeoClient, id: string): Promise<void> {
+  const epoch = currentSessionEpoch();
   const data = await client.conversations.get(id, { limit: 100 });
+  if (!isCurrentSession(epoch)) return;
   useConversations.setState((s) => ({
     conversations: { ...s.conversations, [id]: data.conversation },
     entries: { ...s.entries, [id]: mergeFetched(s.entries[id] ?? emptyEntry(), data) },
@@ -18,12 +20,16 @@ export async function loadConversation(client: NeoClient, id: string): Promise<v
 }
 
 export async function loadConversationList(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const { items } = await client.conversations.list({ limit: 200 });
+  if (!isCurrentSession(epoch)) return;
   upsertConversations(items, { listLoaded: true });
 }
 
 export async function loadPendingConfirmations(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const { items } = await client.confirmations.list();
+  if (!isCurrentSession(epoch)) return;
   setAllConfirmations(items);
 }
 

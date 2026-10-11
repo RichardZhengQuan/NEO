@@ -34,6 +34,8 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
   const latest = useRef({ title, content, tags });
   latest.current = { title, content, tags };
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Incremented on every local edit; flush captures it to detect concurrent changes. */
+  const revRef = useRef(0);
 
   // Remote edits (another device) flow in while we have nothing unsaved.
   useEffect(() => {
@@ -47,17 +49,25 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
   const flush = async () => {
     if (timer.current) clearTimeout(timer.current);
     timer.current = null;
+    // Snapshot revision so we can detect changes that arrive while the request is in flight.
+    const rev = revRef.current;
     const { title: tt, content: cc, tags: tg } = latest.current;
     setState('saving');
     try {
-      upsertNote(await requireClient().notes.update(note.id, { title: tt, content: cc, tags: tg }));
-      setState('saved');
+      const updated = await requireClient().notes.update(note.id, { title: tt, content: cc, tags: tg });
+      // Only apply the response if no new edits arrived during the request.
+      if (revRef.current === rev) {
+        upsertNote(updated);
+        setState('saved');
+      }
+      // If revRef changed, the pending timer (from change()) will trigger another flush.
     } catch {
       setState('error');
     }
   };
 
   const change = () => {
+    revRef.current++;
     setState('dirty');
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => void flush(), 700);

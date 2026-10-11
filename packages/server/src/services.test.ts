@@ -119,6 +119,51 @@ describe('server composition', () => {
     expect(s.events.since(0).filter(e => e.event.type === 'reminder.fired')).toHaveLength(3);
   });
 
+  it('falls back to the built-in embedder when the configured embedding provider is disabled', async () => {
+    // A disabled provider must not be activated for embedding (the enabled check must happen
+    // before providers.resolve() so it throws for disabled providers).
+    const s = await services({
+      providers: [{ id: 'embed-provider', kind: 'mock', enabled: false, defaultModel: 'model' }],
+      settings: { embedding: { provider: 'embed-provider', model: 'text-embedding' } },
+    });
+    // providers.get() would return the adapter; providers.resolve() throws for disabled.
+    expect(s.providers.get('embed-provider')).toBeDefined();
+    expect(() => s.providers.resolve({ provider: 'embed-provider', model: 'any' })).toThrow();
+    // The disabled provider must not have been used for embedding.
+    expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
+    const node = await s.memory.remember({ content: 'Disabled provider must not embed this', source: { by: 'user' } });
+    expect(s.db?.prepare('SELECT model FROM memory_vectors WHERE node_id = ?').get(node.id)).toEqual({ model: 'hash2-512' });
+  });
+
+  it('live-swaps the embedder when the embedding setting changes', async () => {
+    // A saved (here unusable) embedding choice, so switching to null is a real change of setting.
+    const s = await services({ settings: { embedding: { provider: 'deleted-provider', model: 'test-embedding' } } });
+    expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
+
+    // Inject a custom non-local embedder directly to simulate a cloud embedder being active.
+    const embeds: string[][] = [];
+    const fakeEmbedder: import('@neo/protocol').Embedder = {
+      id: 'fake-cloud-embed', dimensions: 512,
+      embed: async (texts) => { embeds.push(texts); return texts.map(() => new Float32Array(512)); },
+    };
+    (s.memory as { setEmbedder?: (e: typeof fakeEmbedder) => void }).setEmbedder?.(fakeEmbedder);
+    expect((await s.memory.stats()).embeddingModel).toBe('fake-cloud-embed');
+
+    // Unrelated settings changes leave the active embedder alone.
+    s.settings.update({ timezone: 'Europe/Paris' });
+    expect((await s.memory.stats()).embeddingModel).toBe('fake-cloud-embed');
+
+    // Patching embedding to null must live-swap back to the built-in offline embedder.
+    s.settings.update({ embedding: null });
+    expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
+
+    // The fake embedder must not be called after the swap.
+    const countBefore = embeds.length;
+    await s.memory.remember({ content: 'No cloud call expected after null swap', source: { by: 'user' } });
+    expect(embeds.length).toBe(countBefore);
+    expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
+  });
+
   it('falls back to the offline embedder when the configured embedding provider cannot embed', async () => {
     // The offline mock has no embeddings endpoint; a missing provider behaves the same way.
     for (const provider of ['demo', 'deleted-provider']) {

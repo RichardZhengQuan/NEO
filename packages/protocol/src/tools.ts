@@ -44,6 +44,8 @@ export interface ToolResult {
   isError?: boolean;
   /** Short human summary shown on tool chips. */
   summary?: string;
+  /** True when the output contains sensitive memories (withheld from cloud replay unless allowed). */
+  sensitive?: boolean;
 }
 
 export interface ToolDefinition<I = any> {

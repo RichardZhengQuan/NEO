@@ -74,6 +74,54 @@ describe('provider credential header security', () => {
     expect(fixture.services.secrets.get('provider:custom:header:x-api-key')).toBe('original-key');
   });
 
+  it('strips apiKeySecret from POST body so a client cannot point it at another providers secret', async () => {
+    fixture = routeFixture();
+    // Seed a secret belonging to another provider.
+    fixture.services.secrets.set('provider:other', 'stolen-api-key');
+    // Try to create a provider whose apiKeySecret points at the other provider's secret.
+    const response = await fixture.request('/api/providers', 'POST', {
+      id: 'attack', kind: 'mock', apiKeySecret: 'provider:other',
+    }, OWNER_TOKEN);
+    // The request is accepted (no crash), but the cross-provider reference was stripped.
+    expect(response.status).toBe(201);
+    const saved = fixture.services.providerConfigs.get('attack');
+    // apiKeySecret must not reference another provider's key — it must be absent.
+    expect(saved?.apiKeySecret).toBeUndefined();
+    // The victim provider's secret must be untouched.
+    expect(fixture.services.secrets.get('provider:other')).toBe('stolen-api-key');
+  });
+
+  it('strips apiKeySecret from PATCH body so credentials cannot be redirected', async () => {
+    fixture = routeFixture();
+    await fixture.request('/api/providers', 'POST', { id: 'victim', kind: 'mock' });
+    fixture.services.secrets.set('provider:attacker', 'attacker-api-key');
+    const response = await fixture.request('/api/providers/victim', 'PATCH', {
+      apiKeySecret: 'provider:attacker',
+    });
+    expect(response.status).toBe(200);
+    const saved = fixture.services.providerConfigs.get('victim');
+    // The patch must not have implanted a foreign secret reference.
+    expect(saved?.apiKeySecret).toBeUndefined();
+    expect(fixture.services.secrets.get('provider:attacker')).toBe('attacker-api-key');
+  });
+
+  it('defense-in-depth: save() rejects an apiKeySecret scoped to a different provider', async () => {
+    // This guards against any future route that bypasses the Zod schema stripping.
+    // We achieve this by manually creating a provider whose config has an out-of-scope
+    // apiKeySecret and then calling PATCH (which calls save()) to trigger the check.
+    fixture = routeFixture();
+    // First create the provider legitimately.
+    await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'mock' });
+    // Manually corrupt the stored config to simulate a direct DB write or a future route bug.
+    const existing = fixture.services.providerConfigs.get('custom')!;
+    fixture.services.providerConfigs.upsert({ ...existing, apiKeySecret: 'provider:other-provider' });
+    // A subsequent save() via PATCH must now reject the out-of-scope reference.
+    const result = await fixture.request('/api/providers/custom', 'PATCH', { label: 'renamed' });
+    expect(result.status).toBe(400);
+    const body = await result.json() as { code: string };
+    expect(body.code).toBe('bad_request');
+  });
+
   it('never resolves user-supplied header references to another provider secret', async () => {
     fixture = routeFixture();
     fixture.services.secrets.set('provider:other:header:x-api-key', 'other-provider-secret');

@@ -89,9 +89,16 @@ export async function sendMessage(client: NeoClient, conversationId: string, bod
 }
 
 export function composeBody(text: string, images: ImagePart[]): SendMessageRequest {
+  if (images.length) {
+    // Include a text part alongside images so the server receives both.
+    const parts: UserInputPart[] = [
+      ...(text.trim() ? ([{ type: 'text', text: text.trim() }] satisfies UserInputPart[]) : []),
+      ...images,
+    ];
+    return { parts };
+  }
   const body: SendMessageRequest = {};
   if (text.trim()) body.text = text.trim();
-  if (images.length) body.parts = images;
   return body;
 }
 

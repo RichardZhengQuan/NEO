@@ -1,15 +1,18 @@
 /**
  * UI actions that need approval (security audit NEO-16) and tool confirmations
  * answered by their server nonce (NEO-04).
+ *
+ * Also includes F09 composeBody tests: text+image submissions must include
+ * both the text and the image in the parts array sent to the server.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NeoClient } from '@neo/client';
-import type { ToolConfirmation, UIAction, UiActionConfirmation, UiActionRequest, UiActionResponse } from '@neo/protocol';
+import type { ImagePart, ToolConfirmation, UIAction, UiActionConfirmation, UiActionRequest, UiActionResponse } from '@neo/protocol';
 import { buildMessages, createTranslator } from '@neo/ui';
 import { appDictionaries } from '../i18n.js';
 import { useConversations } from '../state/conversations.js';
 import { useToasts } from '../state/notifications.js';
-import { respondToConfirmation, runUiAction, UiActionCancelled } from './chat.js';
+import { composeBody, respondToConfirmation, runUiAction, UiActionCancelled } from './chat.js';
 
 const t = createTranslator('en', buildMessages('en', appDictionaries));
 
@@ -99,6 +102,45 @@ describe('runUiAction with server confirmation', () => {
   });
 });
 
+// ── F09: composeBody ─────────────────────────────────────────────────────────
+
+const img: ImagePart = { type: 'image', mediaType: 'image/png', data: 'base64abc' };
+
+describe('composeBody (F09)', () => {
+  it('text-only: uses body.text, no parts array', () => {
+    const body = composeBody('Hello', []);
+    expect(body).toEqual({ text: 'Hello' });
+    expect(body).not.toHaveProperty('parts');
+  });
+
+  it('empty text: returns empty body', () => {
+    const body = composeBody('   ', []);
+    expect(body).toEqual({});
+  });
+
+  it('image-only: parts contains only the image, no text part', () => {
+    const body = composeBody('', [img]);
+    expect(body).not.toHaveProperty('text');
+    expect(body.parts).toEqual([img]);
+  });
+
+  it('text+image: parts contains a text part followed by the image (F09 repro)', () => {
+    const body = composeBody('Describe this', [img]);
+    expect(body).not.toHaveProperty('text');
+    expect(body.parts).toEqual([
+      { type: 'text', text: 'Describe this' },
+      img,
+    ]);
+  });
+
+  it('whitespace-only text with image: omits the text part', () => {
+    const body = composeBody('   ', [img]);
+    expect(body.parts).toEqual([img]);
+  });
+});
+
+// ── respondToConfirmation ─────────────────────────────────────────────────────
+
 describe('respondToConfirmation', () => {
   it('answers with the confirmation id (never the tool call id) and clears it locally', async () => {
     const pending: ToolConfirmation = {
@@ -124,3 +166,4 @@ describe('respondToConfirmation', () => {
     expect(useConversations.getState().entries.conv_1!.confirmations).toHaveLength(0);
   });
 });
+

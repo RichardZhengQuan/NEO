@@ -691,6 +691,11 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
   const writtenIds = new Set(written.map((n) => n.id));
   const touchesSensitive = turnTouchesSensitive(ctx, turn, written);
 
+  // Labels of memories the forget tool deleted in this turn — a create op must not re-create them.
+  const forgottenLabels: string[] = toolOutputs(turn.assistantMessage, 'forget')
+    .flatMap((o) => (Array.isArray(o['forgotten']) ? (o['forgotten'] as unknown[]) : []))
+    .filter((s): s is string => typeof s === 'string' && s.length > 0);
+
   // ── 1. extraction (model, else heuristic) ──
   let plan: ExtractionResult | null = null;
   const llm = ctx.llm();
@@ -733,7 +738,14 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
       switch (op.op) {
         case 'create':
           if (op.validUntil !== undefined && op.validUntil <= now) return false;
-          return allowed.has(op.kind) && !refused(op.label, op.content, ...(op.entities ?? []), ...(op.tags ?? []));
+          if (!allowed.has(op.kind) || refused(op.label, op.content, ...(op.entities ?? []), ...(op.tags ?? []))) return false;
+          // Don't re-create a memory the forget tool just deleted in this same turn.
+          if (forgottenLabels.length > 0) {
+            const dl = dedupeText(op.label);
+            const dc = dedupeText(op.content);
+            if (forgottenLabels.some((fl) => overlaps(dl, dedupeText(fl)) || overlaps(dc, dedupeText(fl)))) return false;
+          }
+          return true;
         case 'update':
           return !refused(op.label, op.content);
         case 'supersede':
@@ -757,7 +769,7 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
   // Every text is embedded where its memory's privacy allows: pending and sensitive memories
   // stay on the device (ctx.keepLocal) unless the main embedder is local anyway.
   const { db } = ctx;
-  const status: WritableStatus = policy.mode === 'approve' ? 'pending' : 'active';
+  let status: WritableStatus = policy.mode === 'approve' ? 'pending' : 'active';
   const sens = (sensitive: boolean): Sensitivity => (sensitive ? 'sensitive' : 'normal');
   // An episode is as sensitive as the turn it records: one that touched a sensitive memory, whose
   // user text (or the episode's own text) looks sensitive, or that produced or revised sensitive
@@ -805,6 +817,21 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
   );
 
   // ── 4. apply in one transaction ──
+  // Recheck policy after the async embedding gap: the user may have turned memory off or switched
+  // to approve-first mode while we were waiting for vectors.
+  {
+    const latestPolicy = ctx.policy();
+    // Critical: if memory was disabled while we were embedding, drop everything.
+    if (latestPolicy.mode === 'off') return nothing('memory was disabled after extraction');
+    // If the mode tightened to approve-first, route everything to pending so nothing lands silently.
+    if (latestPolicy.mode === 'approve') status = 'pending';
+    // Any other policy change (allowed kinds, blocked topics, privacy) invalidates the filters above:
+    // dropping this observation is safer than writing under rules the user just replaced.
+    const { mode: _m1, ...latestRules } = latestPolicy;
+    const { mode: _m2, ...capturedRules } = policy;
+    if (JSON.stringify(latestRules) !== JSON.stringify(capturedRules)) return nothing('memory settings changed during extraction');
+  }
+
   const source: MemorySource = { by: 'extraction', conversationId: turn.conversationId, messageId: turn.userMessage.id };
   return runWrite(ctx, now, (s) => {
     for (const [k, v] of entityVectors) s.entityVectors.set(k, v);

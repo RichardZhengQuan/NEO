@@ -78,4 +78,9 @@ export const storageMigrations: Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    name: 'message sensitivity',
+    up: `ALTER TABLE messages ADD COLUMN sensitive INTEGER;`,
+  },
 ];

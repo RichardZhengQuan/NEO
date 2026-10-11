@@ -84,20 +84,21 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
       ...(options.mockScript ? { mockScript: options.mockScript } : {}),
     });
     const initial = settings.get();
-    const embedding = initial.embedding;
-    // An unusable embedding configuration (provider deleted, or one without embeddings) must never keep
-    // the server from starting: fall back to the offline embedder and say so.
-    const embedder = ((): Embedder => {
+    // An unusable embedding configuration (provider deleted, disabled, or one without embeddings) must
+    // never keep the server from starting: fall back to the offline embedder and say so.
+    // Uses providers.resolve() (not .get()) so that disabled providers are rejected before use.
+    function buildEmbedder(embedding: { provider: string; model: string } | null | undefined): Embedder {
       if (!embedding) return new HashingEmbedder(512);
-      const adapter = providers.get(embedding.provider);
       try {
-        if (!adapter) throw new NeoError('config_error', `Embedding provider "${embedding.provider}" not found.`);
+        const { adapter } = providers.resolve({ provider: embedding.provider, model: embedding.model });
         return createProviderEmbedder(adapter, embedding.model);
       } catch (err) {
         logger.warn('Embedding settings are unusable; using the offline embedder instead.', { error: NeoError.from(err).message });
         return new HashingEmbedder(512);
       }
-    })();
+    }
+    const embedder = buildEmbedder(initial.embedding);
+    let embeddingKey = JSON.stringify(initial.embedding ?? null);
     const llm = (): MemoryLLM | null => {
       try {
         const s = settings.get();
@@ -172,6 +173,12 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
       memory.setPolicy(s.memory);
       for (const [name, permission] of Object.entries(s.tools.permissions)) tools.setPermission(name, permission);
       events.publish({ type: 'settings.updated', settings: s });
+      // A new embedding choice takes effect now, not at the next restart (re-embedding happens in the background).
+      const nextEmbeddingKey = JSON.stringify(s.embedding ?? null);
+      if (nextEmbeddingKey !== embeddingKey) {
+        embeddingKey = nextEmbeddingKey;
+        memory.setEmbedder(buildEmbedder(s.embedding));
+      }
     }));
     subscriptions.push(scheduler.onFire(firing => {
       events.publish({ type: 'reminder.fired', firing });

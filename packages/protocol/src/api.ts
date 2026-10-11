@@ -134,12 +134,17 @@ export const MarkReadRequestSchema = z.object({ ids: z.union([z.array(z.string()
 
 // ───────────────────────────── providers ─────────────────────────────
 
-/** id is generated from kind when omitted. apiKey is moved into the encrypted SecretStore. */
-export const CreateProviderRequestSchema = ProviderConfigSchema.extend({
+/**
+ * id is generated from kind when omitted. apiKey is moved into the encrypted SecretStore.
+ * apiKeySecret is intentionally omitted: clients supply a plaintext apiKey; the server
+ * derives the secret-store reference (provider:<id>) and never accepts one from the client
+ * (prevents cross-provider credential exfiltration via attacker-controlled baseUrl).
+ */
+export const CreateProviderRequestSchema = ProviderConfigSchema.omit({ apiKeySecret: true }).extend({
   id: ProviderConfigSchema.shape.id.optional(),
 });
 export type CreateProviderRequest = z.input<typeof CreateProviderRequestSchema>;
-export const UpdateProviderRequestSchema = ProviderConfigSchema.omit({ id: true, kind: true }).partial();
+export const UpdateProviderRequestSchema = ProviderConfigSchema.omit({ id: true, kind: true, apiKeySecret: true }).partial();
 export type UpdateProviderRequest = z.input<typeof UpdateProviderRequestSchema>;
 
 /** Test either a saved provider (POST /providers/:id/test) or an unsaved draft (POST /providers/test). */

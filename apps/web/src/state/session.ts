@@ -7,6 +7,8 @@ import { deepMerge, type HealthResponse, type ModelInfo, type NeoSettings, type 
 import { NeoClient, type ConnectionStatus } from '@neo/client';
 import type { ConnectionSource } from '../connection.js';
 import { STORAGE_KEYS, writeString } from '../lib/storage.js';
+import { useConversations } from './conversations.js';
+import { useData } from './data.js';
 
 export type Phase = 'booting' | 'connect' | 'offline' | 'ready';
 
@@ -28,6 +30,11 @@ export interface SessionState {
   providers: ProvidersResponse | null;
   /** Model lists per provider id (loaded lazily). */
   models: Record<string, ModelInfo[]>;
+  /**
+   * Incremented each time we switch servers. Lets async operations that
+   * captured the epoch before a switch detect that their response is stale.
+   */
+  sessionEpoch: number;
 }
 
 export const useSession = create<SessionState>(() => ({
@@ -41,7 +48,22 @@ export const useSession = create<SessionState>(() => ({
   wsStatus: 'idle',
   providers: null,
   models: {},
+  sessionEpoch: 0,
 }));
+
+/**
+ * Returns true when the given epoch (captured before an async operation)
+ * still matches the current session. Use to discard in-flight responses from a
+ * server the user has already switched away from.
+ */
+export function isCurrentSession(epoch: number): boolean {
+  return useSession.getState().sessionEpoch === epoch;
+}
+
+/** Returns the current session epoch to pass into async operations. */
+export function currentSessionEpoch(): number {
+  return useSession.getState().sessionEpoch;
+}
 
 /** The client, for code that only runs once connected. */
 export function requireClient(): NeoClient {
@@ -52,7 +74,39 @@ export function requireClient(): NeoClient {
 
 export function startSession(serverUrl: string, token: string, source: ConnectionSource): NeoClient {
   const client = new NeoClient({ baseUrl: serverUrl, token });
-  useSession.setState({ client, serverUrl, source, phase: 'booting', connectHint: null });
+  // Reset all server-scoped caches so stale entries from the previous server
+  // are never shown under the new one.
+  useConversations.setState({
+    conversations: {},
+    entries: {},
+    listLoaded: false,
+    archivedLoaded: false,
+  });
+  useData.setState({
+    reminders: {},
+    remindersLoaded: false,
+    tasks: {},
+    taskLists: [],
+    tasksLoaded: false,
+    notes: {},
+    notesLoaded: false,
+    pendingMemories: 0,
+    notifications: [],
+    unreadNotifications: 0,
+  });
+  useSession.setState((s) => ({
+    client,
+    serverUrl,
+    source,
+    phase: 'booting',
+    connectHint: null,
+    health: null,
+    settings: null,
+    wsStatus: 'idle',
+    providers: null,
+    models: {},
+    sessionEpoch: s.sessionEpoch + 1,
+  }));
   return client;
 }
 

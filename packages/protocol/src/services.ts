@@ -99,7 +99,7 @@ export type ConversationPatch = Partial<
   Pick<Conversation, 'title' | 'model' | 'pinned' | 'archived' | 'systemPrompt' | 'toolset' | 'lastMessageAt' | 'preview'>
 >;
 
-export type MessagePatch = Partial<Pick<Message, 'parts' | 'status' | 'error' | 'usage' | 'model'>>;
+export type MessagePatch = Partial<Pick<Message, 'parts' | 'status' | 'error' | 'usage' | 'model' | 'sensitive'>>;
 
 export interface ConversationStore {
   list(query?: ConversationListQuery): Conversation[];

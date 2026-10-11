@@ -94,7 +94,12 @@ export function createMemoryTools(memory: MemoryService) {
         remember(m.node);
         return { id: m.node.id, kind: m.node.kind, label: m.node.label, content: m.node.content, reason: m.reason };
       });
-      return { output: { memories }, summary: `${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} recalled` };
+      const hasSensitive = result.items.some((m) => m.node.sensitivity === 'sensitive');
+      return {
+        output: { memories },
+        summary: `${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} recalled`,
+        ...(hasSensitive ? { sensitive: true } : {}),
+      };
     },
   });
 

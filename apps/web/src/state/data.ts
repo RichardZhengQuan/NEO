@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import type { Note, Notification, Reminder, Task, TaskList } from '@neo/protocol';
 import type { NeoClient } from '@neo/client';
+import { currentSessionEpoch, isCurrentSession } from './session.js';
 
 export interface DataState {
   reminders: Record<string, Reminder>;
@@ -44,7 +45,9 @@ const byId = <T extends { id: string }>(items: T[]): Record<string, T> => Object
 // ── reminders ──
 
 export async function loadReminders(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const { items } = await client.reminders.list({ limit: MAX_PAGE });
+  if (!isCurrentSession(epoch)) return;
   useData.setState({ reminders: byId(items), remindersLoaded: true });
 }
 
@@ -63,7 +66,9 @@ export function removeReminder(id: string): void {
 // ── tasks ──
 
 export async function loadTasks(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const [lists, tasks] = await Promise.allSettled([client.tasks.lists(), client.tasks.list({ limit: MAX_PAGE })]);
+  if (!isCurrentSession(epoch)) return;
   if (lists.status === 'fulfilled') useData.setState({ taskLists: [...lists.value.items].sort((a, b) => a.order - b.order) });
   if (tasks.status === 'fulfilled') useData.setState({ tasks: byId(tasks.value.items), tasksLoaded: true });
   if (lists.status === 'rejected') throw lists.reason;
@@ -101,7 +106,9 @@ export function removeTaskList(id: string): void {
 // ── notes ──
 
 export async function loadNotes(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const { items } = await client.notes.list({ limit: MAX_PAGE });
+  if (!isCurrentSession(epoch)) return;
   useData.setState({ notes: byId(items), notesLoaded: true });
 }
 
@@ -135,7 +142,9 @@ export async function refreshPendingMemories(client: NeoClient): Promise<void> {
 // ── notifications ──
 
 export async function loadNotifications(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const { items } = await client.notifications.list({ limit: 50 });
+  if (!isCurrentSession(epoch)) return;
   useData.setState({ notifications: items, unreadNotifications: items.filter((n) => !n.readAt).length });
 }
 

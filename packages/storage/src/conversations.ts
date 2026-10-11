@@ -34,7 +34,7 @@ function toConversation(r: Row): Conversation {
 }
 
 function toMessage(r: Row): Message {
-  return {
+  const msg: Message = {
     id: r.id as string,
     conversationId: r.conversation_id as string,
     role: r.role as Message['role'],
@@ -46,6 +46,8 @@ function toMessage(r: Row): Message {
     error: fromJson(r.error, null),
     usage: fromJson(r.usage, null),
   };
+  if (r.sensitive) msg.sensitive = true;
+  return msg;
 }
 
 export function createConversationStore(db: NeoDatabase, options: { clock?: Clock } = {}): ConversationStore {
@@ -188,12 +190,13 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
       if (!current) throw new NeoError('not_found', `Message ${id} not found.`);
       const next: Message = { ...current, ...patch };
       db.transaction(() => {
-        db.prepare('UPDATE messages SET parts = ?, status = ?, error = ?, usage = ?, model = ? WHERE id = ?').run(
+        db.prepare('UPDATE messages SET parts = ?, status = ?, error = ?, usage = ?, model = ?, sensitive = ? WHERE id = ?').run(
           JSON.stringify(next.parts),
           next.status,
           toJson(next.error),
           toJson(next.usage),
           toJson(next.model),
+          next.sensitive ? 1 : null,
           id,
         );
         if (patch.parts) {

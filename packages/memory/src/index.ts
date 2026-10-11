@@ -24,7 +24,7 @@ export { MEMORY_CONSTANTS, BASE_STABILITY_DAYS } from './constants.js';
 export type { MemoryLLM, MemoryServiceOptions } from './constants.js';
 
 /** Create the service and run memory migrations on `db`. */
-export function createMemoryService(options: MemoryServiceOptions): MemoryService {
+export function createMemoryService(options: MemoryServiceOptions): MemoryService & { setEmbedder(embedder: Embedder): void } {
   return createMemoryServiceImpl(options);
 }
 

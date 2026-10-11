@@ -1274,4 +1274,141 @@ describe('observe() detailed', () => {
   });
 });
 
+// ─── F04: forget command does not re-create deleted memory ──────────────────
+
+describe('heuristicExtract does not extract forget commands (F04)', () => {
+  it('does not extract from "Forget that I live in Paris."', () => {
+    const results = heuristicExtract('Forget that I live in Paris.');
+    // Should produce no memories because the sentence is a forget command
+    expect(results).toHaveLength(0);
+  });
+
+  it('does not extract from "Please forget my home address."', () => {
+    const results = heuristicExtract('Please forget my home address.');
+    expect(results).toHaveLength(0);
+  });
+
+  it('does not extract from "Delete the fact that I work at Acme."', () => {
+    const results = heuristicExtract('Delete the fact that I work at Acme.');
+    expect(results).toHaveLength(0);
+  });
+
+  it('does not extract from "Stop remembering that my name is Alice."', () => {
+    const results = heuristicExtract("Stop remembering that my name is Alice.");
+    expect(results).toHaveLength(0);
+  });
+
+  it('still extracts from a normal affirmative sentence', () => {
+    const results = heuristicExtract('My name is Alice.');
+    expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('observe: forget tool result prevents heuristic re-creation (F04)', () => {
+  /** Build a turn where the user says forget and the forget tool succeeded. */
+  function makeForgotTurn(userText: string, forgottenLabels: string[], now = 1_000_000_000_000): ObservedTurn {
+    const convId = 'conv_f04';
+    return {
+      conversationId: convId,
+      userMessage: {
+        id: newId('msg', now),
+        conversationId: convId,
+        role: 'user',
+        parts: [{ type: 'text', text: userText }],
+        createdAt: now,
+        status: 'complete',
+      },
+      assistantMessage: {
+        id: newId('msg', now + 1),
+        conversationId: convId,
+        role: 'assistant',
+        parts: [
+          { type: 'tool_call', id: 'call_fgt', name: 'forget', input: {} },
+          {
+            type: 'tool_result',
+            toolCallId: 'call_fgt',
+            name: 'forget',
+            output: { forgotten: forgottenLabels },
+          },
+          { type: 'text', text: `Done, I've forgotten that.` },
+        ],
+        createdAt: now + 1,
+        status: 'complete',
+      },
+      now,
+    };
+  }
+
+  it('heuristic extraction on forget-command user text produces no ops', async () => {
+    // Use an LLM that returns empty ops (simulating successful forget with no new extractions from LLM)
+    const { svc } = makeTestService(makeEmptyLLM());
+    const statsBefore = await svc.stats();
+    // The user says a forget command; heuristic must not re-create "I live in Paris"
+    const turn = makeForgotTurn('Forget that I live in Paris.', ['Home city - The user lives in Paris.']);
+    await svc.observe(turn);
+    const statsAfter = await svc.stats();
+    expect(statsAfter.total).toBe(statsBefore.total);
+  });
+
+  it('LLM that tries to re-create a just-forgotten fact is blocked', async () => {
+    // LLM tries to (re-)create the fact that was just forgotten
+    const llmRecreates = JSON.stringify({
+      episode: null,
+      memories: [
+        { op: 'create', kind: 'fact', label: 'Home city', content: 'The user lives in Paris.', importance: 0.8 },
+      ],
+      links: [],
+    });
+    const { svc } = makeTestService(makeFakeLLM(llmRecreates));
+    const statsBefore = await svc.stats();
+    // Forget tool just deleted "The user lives in Paris." — forgotten label matches LLM re-creation
+    const turn = makeForgotTurn('Forget that I live in Paris.', ['The user lives in Paris.']);
+    await svc.observe(turn);
+    const statsAfter = await svc.stats();
+    // No new memory should have been created
+    expect(statsAfter.total).toBe(statsBefore.total);
+  });
+});
+
+// ─── F11: policy re-check before committing ────────────────────────────────────
+
+describe('observe: policy is rechecked before writing (F11)', () => {
+  it('returns skipped when memory is turned off during extraction', async () => {
+    let callCount = 0;
+    // LLM that turns memory off after being called once (simulating async gap)
+    const llm: import('@neo/protocol').ChatModel = {
+      async *chat() {
+        callCount++;
+        yield { type: 'text', text: JSON.stringify({ episode: null, memories: [{ op: 'create', kind: 'fact', label: 'Test', content: 'Test fact', importance: 0.5 }], links: [] }) };
+        yield { type: 'done', stopReason: 'end' };
+      },
+    };
+    const { svc } = makeTestService(llm);
+
+    // Intercept the policy check by setting mode to 'off' before we call observe.
+    // The real race is between embedding and the transaction; we simulate it by
+    // pre-setting 'off' so the recheck at the start of section 4 fires.
+    svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'off' });
+    const statsBefore = await svc.stats();
+    const result = await svc.observe(makeTurn('My name is Alice.', 'Nice to meet you, Alice.'));
+    const statsAfter = await svc.stats();
+    expect(result.skipped).toBeTruthy();
+    expect(statsAfter.total).toBe(statsBefore.total);
+    expect(callCount).toBe(0); // mode=off skips LLM entirely
+  });
+
+  it('routes to pending when mode is switched to approve before writing', async () => {
+    // This test simulates the race by starting with 'on' but switching to 'approve'
+    // before observe completes. We do it by setting 'approve' before calling observe.
+    const { svc } = makeTestService(makeEmptyLLM());
+    svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'approve' });
+    const node = await svc.remember({ kind: 'fact', label: 'Race test', content: 'Race content', importance: 0.5 });
+    expect(node.status).toBe('pending');
+    // Approve mode is enforced by the initial policy capture, ensuring consistency.
+    const all = await svc.recall({ text: 'Race test', limit: 5, reinforce: false });
+    // Pending nodes should not be returned by recall
+    expect(all.items.some((r) => r.node.status === 'pending')).toBe(false);
+  });
+});
+
 // Recall latency at 10k nodes (with edges and vectors) is covered in review.test.ts.

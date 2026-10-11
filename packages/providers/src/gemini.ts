@@ -147,9 +147,22 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
     out['enum'] = [node['const']];
   }
 
-  if (type === 'array' && node['items'] !== undefined) {
-    const items = sanitizeNode(Array.isArray(node['items']) ? node['items'][0] : node['items'], defs, refStack);
-    if (items && !isEmptyObjectSchema(items)) out['items'] = items;
+  if (type === 'array') {
+    if (node['items'] !== undefined) {
+      const items = sanitizeNode(Array.isArray(node['items']) ? node['items'][0] : node['items'], defs, refStack);
+      // Gemini requires every array to declare items. When the item schema is a free-form object
+      // (e.g. z.record(z.string(), z.unknown()) on render_ui's `blocks`), it sanitizes to an empty
+      // object schema that we would normally drop — instead, fall back to {type:'object'} which
+      // Gemini accepts for OBJECT without explicit properties.
+      if (items && !isEmptyObjectSchema(items)) {
+        out['items'] = items;
+      } else {
+        out['items'] = { type: 'object' };
+      }
+    } else {
+      // No items at all in the source schema: use a generic object fallback.
+      out['items'] = { type: 'object' };
+    }
   }
 
   if (type === 'object') {

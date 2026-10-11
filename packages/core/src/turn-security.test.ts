@@ -1,6 +1,15 @@
 /** Security regressions for stored memory context and tool approval races. Runs offline. */
 import { describe, expect, it } from 'vitest';
-import { SENSITIVE_CONTEXT_PLACEHOLDER, type ContentPart, type Message, type ToolConfirmation } from '@neo/protocol';
+import {
+  SENSITIVE_CONTEXT_PLACEHOLDER,
+  SENSITIVE_TOOL_PLACEHOLDER,
+  SENSITIVE_ASSISTANT_PLACEHOLDER,
+  toChatMessages,
+  type ContentPart,
+  type Message,
+  type ToolConfirmation,
+} from '@neo/protocol';
+import { z } from 'zod';
 
 import { ConfirmationManager } from './confirmations.js';
 import { EPOCH, ScriptedAdapter, deferred, ev, harness, memoryNode, recalled, runTurn, until } from './fakes.test-utils.js';
@@ -158,6 +167,99 @@ describe('permission revocation after tool approval', () => {
     } finally {
       validationGate.resolve();
     }
+  });
+});
+
+// ─── F02: sensitive recall tool results withheld from cloud replay ─────────────
+
+describe('sensitive recall tool result redaction (F02)', () => {
+  /** Build a minimal Message containing a sensitive tool_result part.
+   * Note: ToolCallPart uses `id`, ToolResultPart uses `toolCallId`. */
+  function msgWithSensitiveToolResult(secret: string): Message {
+    return {
+      id: 'msg_asst',
+      conversationId: 'conv_test',
+      role: 'assistant',
+      parts: [
+        { type: 'tool_call', id: 'call_1', name: 'recall', input: {} },
+        {
+          type: 'tool_result',
+          toolCallId: 'call_1',
+          name: 'recall',
+          output: { memories: [{ label: 'Secret', content: secret }] },
+          sensitive: true,
+        },
+        { type: 'text', text: `I found: ${secret}` },
+      ],
+      createdAt: EPOCH,
+      status: 'complete',
+      sensitive: true,
+    };
+  }
+
+  it('redacts sensitive tool_result output when omitSensitiveContext is true', () => {
+    const msg = msgWithSensitiveToolResult(SECRET);
+    const out = toChatMessages([msg], { omitSensitiveContext: true });
+    const json = JSON.stringify(out);
+    expect(json).not.toContain(SECRET);
+    expect(json).toContain(SENSITIVE_TOOL_PLACEHOLDER);
+  });
+
+  it('passes sensitive tool_result through when omitSensitiveContext is false (local model)', () => {
+    const msg = msgWithSensitiveToolResult(SECRET);
+    const out = toChatMessages([msg], { omitSensitiveContext: false });
+    const json = JSON.stringify(out);
+    expect(json).toContain(SECRET);
+    expect(json).not.toContain(SENSITIVE_TOOL_PLACEHOLDER);
+  });
+
+  it('replaces sensitive assistant text with placeholder when omitSensitiveContext is true', () => {
+    const msg = msgWithSensitiveToolResult(SECRET);
+    const out = toChatMessages([msg], { omitSensitiveContext: true });
+    const json = JSON.stringify(out);
+    expect(json).toContain(SENSITIVE_ASSISTANT_PLACEHOLDER);
+    // The raw assistant text that echoes the secret should not appear
+    expect(json).not.toContain(`I found: ${SECRET}`);
+  });
+
+  it('a tool that returns sensitive:true causes the assistant message to be marked sensitive', async () => {
+    const local = new ScriptedAdapter({ id: 'local', isLocal: true });
+    const cloud = new ScriptedAdapter({ id: 'cloud', isLocal: false });
+    const h = harness({
+      adapters: [local, cloud],
+      settings: { agent: { autoTitle: false } },
+      tools: [
+        {
+          name: 'recall',
+          title: 'Recall',
+          description: 'Recalls memories.',
+          inputSchema: z.object({ msg: z.string() }),
+          risk: 'read',
+          defaultPermission: 'auto',
+          async execute() {
+            return {
+              output: { memories: [{ label: 'Secret', content: SECRET }] },
+              summary: '1 memory recalled',
+              sensitive: true,
+            };
+          },
+        },
+      ],
+    });
+    // Local model calls recall then finishes
+    local.script([ev.call('rc_1', 'recall', { msg: 'secret' }), ev.done('tool_use')], [ev.text('Done'), ev.done()]);
+    const turn = await runTurn(h, 'What do you know?');
+
+    // The stored assistant message should be marked sensitive because the tool result was sensitive
+    const stored = h.conversations.getMessage(turn.message.id);
+    expect(stored?.sensitive).toBe(true);
+
+    // A second turn with a cloud model should NOT see the raw secret in the recall tool result
+    h.conversations.update(h.conv.id, { model: { provider: cloud.id, model: 'cloud-model' } });
+    await runTurn(h, 'Continue');
+    const cloudJson = JSON.stringify(cloud.requests[0]!.messages);
+    expect(cloudJson).not.toContain(SECRET);
+    expect(cloudJson).toContain(SENSITIVE_TOOL_PLACEHOLDER);
   });
 });
 

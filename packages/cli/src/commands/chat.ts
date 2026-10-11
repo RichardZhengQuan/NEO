@@ -50,7 +50,7 @@ export async function runChat(opts: ChatOptions): Promise<void> {
 
   // Get or create conversation
   let conv: Conversation;
-  let incognito = opts.incognito ?? false;
+  const incognito = opts.incognito ?? false;
 
   if (opts.conversation) {
     try {
@@ -68,11 +68,16 @@ export async function runChat(opts: ChatOptions): Promise<void> {
     });
   }
 
+  // Shared mutable session context. Both the line handler and slash commands reference this
+  // object, so that /new can update ctx.conv and the very next message goes to the new
+  // conversation (not the original one that was captured in a closure copy).
+  const ctx: SlashContext = { conv, incognito, opts, embeddedServer };
+
   // Set up readline interface
   const rl = readline.createInterface({ input, output, terminal: true });
 
   process.stdout.write(
-    `\n  ${bold(cyan('NEO chat'))}  ${dim(`conversation ${conv.id.slice(-8)}`)}\n` +
+    `\n  ${bold(cyan('NEO chat'))}  ${dim(`conversation ${ctx.conv.id.slice(-8)}`)}\n` +
     `  ${dim('Type your message. Ctrl+C cancels a running turn (press again to exit).')}\n` +
     `  ${dim('Commands: /help /new /model /memory /remember /forget /reminders /tasks /notes /title /exit')}\n\n`,
   );
@@ -116,7 +121,7 @@ export async function runChat(opts: ChatOptions): Promise<void> {
 
     // Slash commands
     if (text.startsWith('/')) {
-      await handleSlash(text, rl, client, { conv, incognito, opts, embeddedServer });
+      await handleSlash(text, rl, client, ctx);
       rl.prompt();
       return;
     }
@@ -140,9 +145,9 @@ export async function runChat(opts: ChatOptions): Promise<void> {
     rl.pause();
 
     try {
-      const stream = client.conversations.stream(conv.id, {
+      const stream = client.conversations.stream(ctx.conv.id, {
         text,
-        model: opts.model ? (parseModelRef(opts.model) ?? undefined) : undefined,
+        model: ctx.opts.model ? (parseModelRef(ctx.opts.model) ?? undefined) : undefined,
       }, abortController.signal);
 
       let currentText = '';
@@ -218,14 +223,14 @@ async function cleanup(server: NeoServer | null): Promise<void> {
   }
 }
 
-interface SlashContext {
+export interface SlashContext {
   conv: Conversation;
   incognito: boolean;
   opts: ChatOptions;
   embeddedServer: NeoServer | null;
 }
 
-async function handleSlash(
+export async function handleSlash(
   text: string,
   rl: readline.Interface,
   client: NeoClient,
