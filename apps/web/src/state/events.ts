@@ -13,7 +13,7 @@ import { formatTime, type TranslateFn } from '@neo/ui';
 import { applyConversationEvent, findConfirmation } from './conversations.js';
 import { addNotification, bumpMemoryVersion, refreshPendingMemories, removeNote, removeReminder, removeTask, upsertNote, upsertReminder, upsertTask } from './data.js';
 import { dismissToastKey, pushToast } from './notifications.js';
-import { setSettings } from './session.js';
+import { currentSessionEpoch, isCurrentSession, setSettings } from './session.js';
 
 export interface EventContext {
   client: NeoClient;
@@ -57,12 +57,15 @@ export class EventSequencer {
 
 /** Snooze or complete a reminder from a toast, notification button or widget. */
 export async function runReminderAction(client: NeoClient, reminderId: string, action: 'snooze' | 'done', t: TranslateFn, minutes = 10): Promise<void> {
+  const epoch = currentSessionEpoch();
   try {
     const reminder = action === 'snooze' ? await client.reminders.snooze(reminderId, minutes) : await client.reminders.complete(reminderId);
+    if (!isCurrentSession(epoch)) return;
     upsertReminder(reminder);
     dismissToastKey(`reminder:${reminderId}`);
     pushToast({ tone: 'success', title: action === 'snooze' ? t('toast.snoozed', { n: minutes }) : t('toast.reminder_done'), icon: action === 'snooze' ? 'alarm-clock' : 'check-circle' });
   } catch {
+    if (!isCurrentSession(epoch)) return;
     pushToast({ tone: 'error', title: t('toast.reminder_action_failed') });
   }
 }

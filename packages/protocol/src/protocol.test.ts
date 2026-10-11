@@ -264,4 +264,33 @@ describe('privacy helpers', () => {
     expect(redacted).not.toContain('diagnosis');
     expect(redacted).toContain('withheld');
   });
+
+  it('withholds private-derived tool arguments, opaque payloads and summaries while retaining call/result pairing', () => {
+    const secret = 'private-orchid-729';
+    const message: Message = {
+      ...msg('assistant', [
+        { type: 'reasoning', text: secret, data: { signature: secret } },
+        { type: 'tool_call', id: 'private_call', name: 'create_note', input: { body: secret }, data: { private: secret } },
+        { type: 'tool_result', toolCallId: 'private_call', name: 'create_note', output: { body: secret }, summary: `Saved ${secret}` },
+        { type: 'ui', id: 'private_ui', block: { type: 'text', text: secret } },
+        { type: 'text', text: secret },
+      ]),
+      sensitive: true,
+    };
+    const original = structuredClone(message);
+    const projected = toChatMessages([message], { omitSensitiveContext: true });
+    expect(JSON.stringify(projected)).not.toContain(secret);
+    expect(projected[0]).toMatchObject({ role: 'assistant', parts: [{ type: 'tool_call', id: 'private_call', name: 'create_note', input: {} }] });
+    expect(projected[1]).toMatchObject({ role: 'tool', parts: [{ type: 'tool_result', toolCallId: 'private_call', name: 'create_note' }] });
+    expect(toChatMessages([message])[0]?.parts).toContainEqual(message.parts[1]);
+    expect(message).toEqual(original);
+  });
+
+  it('does not retain the summary of a flagged tool result even without a message flag', () => {
+    const message = msg('assistant', [
+      { type: 'tool_call', id: 'recall_call', name: 'recall', input: {} },
+      { type: 'tool_result', toolCallId: 'recall_call', name: 'recall', output: 'private-orchid-729', summary: 'private-orchid-729', sensitive: true },
+    ]);
+    expect(JSON.stringify(toChatMessages([message], { omitSensitiveContext: true }))).not.toContain('private-orchid-729');
+  });
 });

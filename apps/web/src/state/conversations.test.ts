@@ -52,6 +52,21 @@ describe('reduceConversations', () => {
     expect(s.conversations[C]!.lastMessageAt).toBe(100);
   });
 
+  it('preserves optional sensitivity metadata in completed and fetched messages', () => {
+    const sensitive: Message = {
+      id: A, conversationId: C, role: 'assistant', createdAt: 101, status: 'complete', sensitive: true,
+      parts: [
+        { type: 'tool_call', id: 'recall_1', name: 'recall', input: { query: 'health' } },
+        { type: 'tool_result', toolCallId: 'recall_1', name: 'recall', output: { items: [] }, sensitive: true },
+        { type: 'text', text: 'Private reply' },
+      ],
+    };
+    const completed = run([started, { type: 'message.completed', conversationId: C, turnId: T, message: sensitive }]);
+    expect(assistant(completed)).toEqual(sensitive);
+    const fetched = mergeFetched(emptyEntry(), { conversation: conversation(), messages: [userMessage, sensitive], hasMore: false });
+    expect(fetched.messages[1]).toEqual(sensitive);
+  });
+
   it('turn.started is idempotent (202 response + WS event)', () => {
     const s = run([started, started]);
     expect(s.entries[C]!.messages).toHaveLength(2);

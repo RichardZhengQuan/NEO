@@ -1,5 +1,5 @@
 # ─── Stage 1: build ───────────────────────────────────────────────────────────
-# Installs all deps, builds every package, then prunes to production deps.
+# Installs build dependencies, then creates a production deployment bundle.
 FROM node:22-slim AS builder
 
 # Install corepack and pin pnpm version.
@@ -59,44 +59,29 @@ RUN pnpm -r --filter @neo/protocol build \
  && pnpm -r --filter @neo/web       build \
  && pnpm -r --filter @neo/cli       build
 
+# ── Create a self-contained production deployment for the CLI ──
+# pnpm deploy bundles the CLI and all its transitive workspace + external
+# dependencies into /prod, so the runtime stage needs no pnpm or source workspace.
+# Dependency links stay inside the deployed bundle. --legacy because
+# pnpm >=10 only deploys injected workspaces by default.
+RUN pnpm --filter @neo/cli deploy --prod --legacy /prod
+
 # ─── Stage 2: runtime ─────────────────────────────────────────────────────────
-# Slim image: only Node, the built dist files and production node_modules.
+# Slim image: Node + the pnpm-deployed CLI bundle + the web static build.
 FROM node:22-slim AS runtime
 
-# Re-enable corepack so `pnpm` is available for potential future use.
-RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
-
 # Create a non-root user.
-RUN groupadd --system neo && useradd --system --gid neo --home /app neo
+RUN groupadd --system neo && useradd --system --gid neo --home /app neo \
+ && mkdir -p /data && chown neo:neo /data
 
 WORKDIR /app
 
-# ── Copy built artefacts from the builder stage ──
-COPY --from=builder --chown=neo:neo /app/node_modules               ./node_modules
-COPY --from=builder --chown=neo:neo /app/package.json               ./
-COPY --from=builder --chown=neo:neo /app/pnpm-workspace.yaml        ./
-COPY --from=builder --chown=neo:neo /app/packages/protocol/dist     ./packages/protocol/dist
-COPY --from=builder --chown=neo:neo /app/packages/protocol/package.json ./packages/protocol/
-COPY --from=builder --chown=neo:neo /app/packages/storage/dist      ./packages/storage/dist
-COPY --from=builder --chown=neo:neo /app/packages/storage/package.json  ./packages/storage/
-COPY --from=builder --chown=neo:neo /app/packages/providers/dist    ./packages/providers/dist
-COPY --from=builder --chown=neo:neo /app/packages/providers/package.json ./packages/providers/
-COPY --from=builder --chown=neo:neo /app/packages/memory/dist       ./packages/memory/dist
-COPY --from=builder --chown=neo:neo /app/packages/memory/package.json   ./packages/memory/
-COPY --from=builder --chown=neo:neo /app/packages/tools/dist        ./packages/tools/dist
-COPY --from=builder --chown=neo:neo /app/packages/tools/package.json    ./packages/tools/
-COPY --from=builder --chown=neo:neo /app/packages/core/dist         ./packages/core/dist
-COPY --from=builder --chown=neo:neo /app/packages/core/package.json     ./packages/core/
-COPY --from=builder --chown=neo:neo /app/packages/server/dist       ./packages/server/dist
-COPY --from=builder --chown=neo:neo /app/packages/server/package.json   ./packages/server/
-COPY --from=builder --chown=neo:neo /app/packages/client/dist       ./packages/client/dist
-COPY --from=builder --chown=neo:neo /app/packages/client/package.json   ./packages/client/
-COPY --from=builder --chown=neo:neo /app/packages/ui/dist           ./packages/ui/dist
-COPY --from=builder --chown=neo:neo /app/packages/ui/package.json       ./packages/ui/
-COPY --from=builder --chown=neo:neo /app/packages/cli/dist          ./packages/cli/dist
-COPY --from=builder --chown=neo:neo /app/packages/cli/package.json      ./packages/cli/
-COPY --from=builder --chown=neo:neo /app/apps/web/dist              ./apps/web/dist
-COPY --from=builder --chown=neo:neo /app/apps/web/package.json          ./apps/web/
+# ── Copy the self-contained CLI bundle ──
+# /prod contains dist/, node_modules/ (including its dependency links) and package.json.
+COPY --from=builder --chown=neo:neo /prod ./
+
+# ── Copy the web app static build (served via NEO_WEB_DIR) ──
+COPY --from=builder --chown=neo:neo /app/apps/web/dist ./apps/web/dist
 
 # Persistent data volume (neo.db, key, token, vapid.json, plugins/).
 VOLUME /data
@@ -117,4 +102,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
 
 USER neo
 
-CMD ["node", "packages/cli/dist/index.js", "serve"]
+CMD ["node", "dist/index.js", "serve"]

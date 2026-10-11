@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import type { Note, Notification, Reminder, Task, TaskList } from '@neo/protocol';
 import type { NeoClient } from '@neo/client';
+import { currentSessionEpoch, isCurrentSession } from './session.js';
 
 export interface DataState {
   reminders: Record<string, Reminder>;
@@ -44,7 +45,9 @@ const byId = <T extends { id: string }>(items: T[]): Record<string, T> => Object
 // ── reminders ──
 
 export async function loadReminders(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const { items } = await client.reminders.list({ limit: MAX_PAGE });
+  if (!isCurrentSession(epoch, client)) return;
   useData.setState({ reminders: byId(items), remindersLoaded: true });
 }
 
@@ -63,7 +66,9 @@ export function removeReminder(id: string): void {
 // ── tasks ──
 
 export async function loadTasks(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const [lists, tasks] = await Promise.allSettled([client.tasks.lists(), client.tasks.list({ limit: MAX_PAGE })]);
+  if (!isCurrentSession(epoch, client)) return;
   if (lists.status === 'fulfilled') useData.setState({ taskLists: [...lists.value.items].sort((a, b) => a.order - b.order) });
   if (tasks.status === 'fulfilled') useData.setState({ tasks: byId(tasks.value.items), tasksLoaded: true });
   if (lists.status === 'rejected') throw lists.reason;
@@ -71,7 +76,9 @@ export async function loadTasks(client: NeoClient): Promise<void> {
 }
 
 export async function loadTaskLists(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const lists = await client.tasks.lists();
+  if (!isCurrentSession(epoch, client)) return;
   useData.setState({ taskLists: [...lists.items].sort((a, b) => a.order - b.order) });
 }
 
@@ -101,7 +108,9 @@ export function removeTaskList(id: string): void {
 // ── notes ──
 
 export async function loadNotes(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const { items } = await client.notes.list({ limit: MAX_PAGE });
+  if (!isCurrentSession(epoch, client)) return;
   useData.setState({ notes: byId(items), notesLoaded: true });
 }
 
@@ -124,9 +133,10 @@ export function bumpMemoryVersion(): void {
 }
 
 export async function refreshPendingMemories(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   try {
     const stats = await client.memory.stats();
-    useData.setState({ pendingMemories: stats.pending });
+    if (isCurrentSession(epoch, client)) useData.setState({ pendingMemories: stats.pending });
   } catch {
     // Memory may be unavailable; the badge just stays as it was.
   }
@@ -135,7 +145,9 @@ export async function refreshPendingMemories(client: NeoClient): Promise<void> {
 // ── notifications ──
 
 export async function loadNotifications(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const { items } = await client.notifications.list({ limit: 50 });
+  if (!isCurrentSession(epoch, client)) return;
   useData.setState({ notifications: items, unreadNotifications: items.filter((n) => !n.readAt).length });
 }
 
@@ -145,6 +157,7 @@ export function addNotification(n: Notification): void {
 
 /** Everything loaded is refetched (reconnect / seq gap). */
 export async function refreshLoadedData(client: NeoClient): Promise<void> {
+  const epoch = currentSessionEpoch();
   const s = useData.getState();
   await Promise.allSettled([
     s.remindersLoaded ? loadReminders(client) : Promise.resolve(),
@@ -152,5 +165,5 @@ export async function refreshLoadedData(client: NeoClient): Promise<void> {
     s.notesLoaded ? loadNotes(client) : Promise.resolve(),
     refreshPendingMemories(client),
   ]);
-  bumpMemoryVersion();
+  if (isCurrentSession(epoch, client)) bumpMemoryVersion();
 }

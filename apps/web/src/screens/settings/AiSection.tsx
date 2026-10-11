@@ -10,7 +10,7 @@ import { Menu } from '../../components/Menu.js';
 import { PRESET_ICON, ProviderSetup } from '../../components/ProviderSetup.js';
 import { errorMessage, httpStatus } from '../../lib/errors.js';
 import { pushToast } from '../../state/notifications.js';
-import { loadModels, loadProviders, requireClient, updateSettings, useSession } from '../../state/session.js';
+import { currentSessionEpoch, isCurrentSession, loadModels, loadProviders, requireClient, updateSettings, useSession } from '../../state/session.js';
 import { Section, SettingRow } from './common.js';
 
 function reportProviderError(err: unknown, t: TranslateFn): void {
@@ -25,6 +25,7 @@ function ProviderEditor({ provider, onClose }: { provider: ProviderView; onClose
   const [defaultModel, setDefaultModel] = useState(provider.defaultModel ?? '');
   const [saving, setSaving] = useState(false);
   const save = async () => {
+    const epoch = currentSessionEpoch();
     setSaving(true);
     try {
       await requireClient().providers.update(provider.id, {
@@ -33,7 +34,9 @@ function ProviderEditor({ provider, onClose }: { provider: ProviderView; onClose
         ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
         ...(defaultModel.trim() ? { defaultModel: defaultModel.trim() } : {}),
       });
+      if (!isCurrentSession(epoch)) return;
       await loadProviders();
+      if (!isCurrentSession(epoch)) return;
       void loadModels(provider.id, true);
       pushToast({ tone: 'success', title: t('ai.provider_saved') });
       onClose();
@@ -96,21 +99,25 @@ function ProviderRow({ provider }: { provider: ProviderView }): ReactElement {
     }
   };
   const setEnabled = async (enabled: boolean) => {
+    const epoch = currentSessionEpoch();
     try {
       await requireClient().providers.update(provider.id, { enabled });
-      await loadProviders();
+      if (isCurrentSession(epoch)) await loadProviders();
     } catch (err) {
       reportProviderError(err, t);
     }
   };
   const remove = async () => {
+    const epoch = currentSessionEpoch();
     const ok = await confirm({ title: t('ai.remove_title'), message: t('ai.remove_text', { name: providerLabel(provider) }), confirmLabel: t('common.remove'), danger: true });
-    if (!ok) return;
+    if (!ok || !isCurrentSession(epoch)) return;
     try {
       await requireClient().providers.delete(provider.id);
+      if (!isCurrentSession(epoch)) return;
       await loadProviders();
+      if (!isCurrentSession(epoch)) return;
       const settings = await requireClient().settings.get();
-      useSession.setState({ settings });
+      if (isCurrentSession(epoch)) useSession.setState({ settings });
     } catch (err) {
       reportProviderError(err, t);
     }

@@ -24,6 +24,16 @@ function isQuestion(sentence: string): boolean {
   return HAN.test(s) ? ZH_QUESTION.test(s) : EN_QUESTION_START.test(s);
 }
 
+/** An imperative delete/forget request: never extract memories from these ("Forget that I live in Paris"). */
+const EN_FORGET_START = /^(?:please\s+)?(?:forget|delete|remove|stop\s+remembering|don't\s+remember|do\s+not\s+remember)\b/i;
+const ZH_FORGET_START = /^(?:请\s*)?(?:忘记|忘掉|刪除|删除|不要记|不用记)/u;
+
+function isForgetCommand(sentence: string): boolean {
+  const s = sentence.trim();
+  if (!s) return false;
+  return ZH_FORGET_START.test(s) || EN_FORGET_START.test(s);
+}
+
 /** Sentences of a text (split after . ! ? and their CJK forms). */
 function sentences(text: string): string[] {
   return text
@@ -32,10 +42,10 @@ function sentences(text: string): string[] {
     .filter(Boolean);
 }
 
-/** The statements of a user text, questions removed: a question never becomes a fact. */
+/** The statements of a user text, questions and forget commands removed: neither ever becomes a fact. */
 function statementsOf(text: string): string {
   return sentences(text)
-    .filter((t) => !isQuestion(t))
+    .filter((t) => !isQuestion(t) && !isForgetCommand(t))
     .join(' ');
 }
 

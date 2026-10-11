@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NeoConfigSchema, silentLogger } from '@neo/protocol';
 import type { Message, ServerEvent } from '@neo/protocol';
 import { createServices, environmentLocale } from './services.js';
+import { createApp } from './app.js';
 import type { NeoServices } from './index.js';
 
 const resources: NeoServices[] = [];
@@ -33,9 +34,106 @@ afterEach(async () => {
   for (const service of resources.splice(0)) await service.close();
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
+async function liveEmbeddingFixture(raw: unknown = {}) {
+  const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+    const input = JSON.parse(String(init?.body)) as { input: string[] };
+    return Response.json({ data: input.input.map((_text, index) => ({ index, embedding: [1, 0, 0] })) });
+  });
+  vi.stubGlobal('fetch', fetch);
+  const s = await services({ providers: [], plugins: { enabled: false }, ...raw as object });
+  const { app } = createApp(s);
+  const request = (path: string, method: string, body?: unknown) => app.request(path, {
+    method, headers: { Authorization: `Bearer ${s.ownerToken}`, 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const addProvider = () => request('/api/providers', 'POST', {
+    id: 'remote', kind: 'openai', baseUrl: 'https://embeddings.example/v1', apiKey: 'embedding-fixture-key',
+  });
+  return { s, fetch, request, addProvider };
+}
+
 describe('server composition', () => {
+  it('stops real remote embedding requests after the settings route selects offline embeddings', async () => {
+    const live = await liveEmbeddingFixture({
+      providers: [{ id: 'remote', kind: 'openai', baseUrl: 'https://embeddings.example/v1', apiKey: 'embedding-fixture-key' }],
+      settings: { embedding: { provider: 'remote', model: 'text-embedding-fixture' } },
+    });
+    await live.s.memory.remember({ content: 'Remote embedding before the switch' });
+    expect(live.fetch).toHaveBeenCalled();
+    expect(live.fetch.mock.calls.every(([url]) => String(url) === 'https://embeddings.example/v1/embeddings')).toBe(true);
+    expect((await live.s.memory.stats()).embeddingModel).toBe('remote:text-embedding-fixture');
+    expect((await live.request('/api/settings', 'PATCH', { embedding: null })).status).toBe(200);
+    live.fetch.mockClear();
+    const node = await live.s.memory.remember({ content: 'Offline embedding after the switch' });
+    expect(live.fetch).not.toHaveBeenCalled();
+    expect((await live.s.memory.stats()).embeddingModel).toBe('hash2-512');
+    expect(live.s.db?.prepare('SELECT model FROM memory_vectors WHERE node_id = ?').get(node.id)).toEqual({ model: 'hash2-512' });
+  });
+
+  it('refreshes a selected embedding provider when it is created, disabled, and enabled through routes', async () => {
+    const live = await liveEmbeddingFixture({ settings: { embedding: { provider: 'remote', model: 'text-embedding-fixture' } } });
+    expect((await live.s.memory.stats()).embeddingModel).toBe('hash2-512');
+    expect((await live.addProvider()).status).toBe(201);
+    expect((await live.s.memory.stats()).embeddingModel).toBe('remote:text-embedding-fixture');
+    await live.s.memory.remember({ content: 'Enabled provider embeds this' });
+    expect(live.fetch).toHaveBeenCalled();
+    expect((await live.request('/api/providers/remote', 'PATCH', { enabled: false })).status).toBe(200);
+    live.fetch.mockClear();
+    await live.s.memory.remember({ content: 'Disabled provider keeps this offline' });
+    expect(live.fetch).not.toHaveBeenCalled();
+    expect((await live.s.memory.stats()).embeddingModel).toBe('hash2-512');
+    expect((await live.request('/api/providers/remote', 'PATCH', { enabled: true })).status).toBe(200);
+    await live.s.memory.remember({ content: 'Re-enabled provider embeds this' });
+    expect(live.fetch).toHaveBeenCalled();
+    expect((await live.s.memory.stats()).embeddingModel).toBe('remote:text-embedding-fixture');
+  });
+
+  it('refreshes live embedding credentials and URL after provider changes while unrelated changes leave it alone', async () => {
+    const live = await liveEmbeddingFixture();
+    expect((await live.addProvider()).status).toBe(201);
+    expect((await live.request('/api/settings', 'PATCH', { embedding: { provider: 'remote', model: 'text-embedding-fixture' } })).status).toBe(200);
+    await live.s.memory.remember({ content: 'First credential request' });
+    expect(new Headers(live.fetch.mock.calls[0]?.[1]?.headers).get('authorization')).toBe('Bearer embedding-fixture-key');
+    expect((await live.request('/api/providers/remote', 'PATCH', { apiKey: 'replacement-embedding-key', headers: { 'x-api-key': 'first-header-key' } })).status).toBe(200);
+    live.fetch.mockClear();
+    await live.s.memory.remember({ content: 'Replacement API and header credential request' });
+    expect(live.fetch.mock.calls.length).toBeGreaterThan(0);
+    for (const [, init] of live.fetch.mock.calls) {
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer replacement-embedding-key');
+      expect(new Headers(init?.headers).get('x-api-key')).toBe('first-header-key');
+    }
+    expect((await live.request('/api/providers/remote', 'PATCH', { baseUrl: 'https://replacement.example/v1', headers: { 'x-api-key': 'replacement-header-key' } })).status).toBe(200);
+    live.fetch.mockClear();
+    await live.s.memory.remember({ content: 'Replacement host and header request' });
+    for (const [url, init] of live.fetch.mock.calls) {
+      expect(String(url)).toBe('https://replacement.example/v1/embeddings');
+      expect(new Headers(init?.headers).get('x-api-key')).toBe('replacement-header-key');
+    }
+    const swap = vi.spyOn(live.s.memory as import('@neo/protocol').MemoryService & { setEmbedder: (embedder: import('@neo/protocol').Embedder) => void }, 'setEmbedder');
+    expect((await live.request('/api/providers', 'POST', { id: 'unrelated', kind: 'mock' })).status).toBe(201);
+    expect((await live.request('/api/providers/unrelated', 'PATCH', { label: 'renamed' })).status).toBe(200);
+    expect(swap).not.toHaveBeenCalled();
+  });
+
+  it('falls back immediately after deleting the embedding provider and recovers when that provider is recreated', async () => {
+    const live = await liveEmbeddingFixture();
+    expect((await live.addProvider()).status).toBe(201);
+    expect((await live.request('/api/settings', 'PATCH', { embedding: { provider: 'remote', model: 'text-embedding-fixture' } })).status).toBe(200);
+    await live.s.memory.remember({ content: 'Before provider deletion' });
+    expect((await live.request('/api/providers/remote', 'DELETE')).status).toBe(204);
+    live.fetch.mockClear();
+    await live.s.memory.remember({ content: 'After provider deletion' });
+    expect(live.fetch).not.toHaveBeenCalled();
+    expect((await live.s.memory.stats()).embeddingModel).toBe('hash2-512');
+    expect((await live.addProvider()).status).toBe(201);
+    await live.s.memory.remember({ content: 'After provider recreation' });
+    expect(live.fetch).toHaveBeenCalled();
+    expect((await live.s.memory.stats()).embeddingModel).toBe('remote:text-embedding-fixture');
+  });
+
   // WP-providers regression: isLocalUrl(undefined) is false, so the stock
   // MockProvider's `?? true` fallback never marks its offline endpoint local.
   it('stock offline mock is treated as local for sensitive-memory policy', async () => {
@@ -117,6 +215,51 @@ describe('server composition', () => {
     expect(fire('Medicine', 'Daily', 1_000_000)).toMatchObject({ title: 'Medicine', body: 'Missed while you were away: Medicine' });
     expect(s.stores.notifications.list().every(n => n.data?.['url'] === `neo://reminders/${n.data?.['reminderId']}`)).toBe(true);
     expect(s.events.since(0).filter(e => e.event.type === 'reminder.fired')).toHaveLength(3);
+  });
+
+  it('falls back to the built-in embedder when the configured embedding provider is disabled', async () => {
+    // A disabled provider must not be activated for embedding (the enabled check must happen
+    // before providers.resolve() so it throws for disabled providers).
+    const s = await services({
+      providers: [{ id: 'embed-provider', kind: 'mock', enabled: false, defaultModel: 'model' }],
+      settings: { embedding: { provider: 'embed-provider', model: 'text-embedding' } },
+    });
+    // providers.get() would return the adapter; providers.resolve() throws for disabled.
+    expect(s.providers.get('embed-provider')).toBeDefined();
+    expect(() => s.providers.resolve({ provider: 'embed-provider', model: 'any' })).toThrow();
+    // The disabled provider must not have been used for embedding.
+    expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
+    const node = await s.memory.remember({ content: 'Disabled provider must not embed this', source: { by: 'user' } });
+    expect(s.db?.prepare('SELECT model FROM memory_vectors WHERE node_id = ?').get(node.id)).toEqual({ model: 'hash2-512' });
+  });
+
+  it('live-swaps the embedder when the embedding setting changes', async () => {
+    // A saved (here unusable) embedding choice, so switching to null is a real change of setting.
+    const s = await services({ settings: { embedding: { provider: 'deleted-provider', model: 'test-embedding' } } });
+    expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
+
+    // Inject a custom non-local embedder directly to simulate a cloud embedder being active.
+    const embeds: string[][] = [];
+    const fakeEmbedder: import('@neo/protocol').Embedder = {
+      id: 'fake-cloud-embed', dimensions: 512,
+      embed: async (texts) => { embeds.push(texts); return texts.map(() => new Float32Array(512)); },
+    };
+    (s.memory as { setEmbedder?: (e: typeof fakeEmbedder) => void }).setEmbedder?.(fakeEmbedder);
+    expect((await s.memory.stats()).embeddingModel).toBe('fake-cloud-embed');
+
+    // Unrelated settings changes leave the active embedder alone.
+    s.settings.update({ timezone: 'Europe/Paris' });
+    expect((await s.memory.stats()).embeddingModel).toBe('fake-cloud-embed');
+
+    // Patching embedding to null must live-swap back to the built-in offline embedder.
+    s.settings.update({ embedding: null });
+    expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
+
+    // The fake embedder must not be called after the swap.
+    const countBefore = embeds.length;
+    await s.memory.remember({ content: 'No cloud call expected after null swap', source: { by: 'user' } });
+    expect(embeds.length).toBe(countBefore);
+    expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
   });
 
   it('falls back to the offline embedder when the configured embedding provider cannot embed', async () => {

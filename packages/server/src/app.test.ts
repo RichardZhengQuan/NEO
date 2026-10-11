@@ -101,6 +101,46 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     expect(vi.mocked(f.services.runtime.send).mock.calls.at(-1)?.[0]).not.toHaveProperty('signal');
   });
 
+  it('F09: text+image parts — merges body.text into parts when no text part exists', async () => {
+    const conv = f.services.conversations.create();
+    const img = { type: 'image', mediaType: 'image/png', data: 'base64abc' };
+    // Client sends text alongside image parts (the fixed composeBody format).
+    const res = await json<{ userMessage: Message }>(
+      await f.request(`/api/conversations/${conv.id}/messages`, 'POST', {
+        parts: [{ type: 'text', text: 'Describe this' }, img],
+      }),
+      202,
+    );
+    expect(res.userMessage.parts).toEqual([{ type: 'text', text: 'Describe this' }, img]);
+    expect(f.services.runtime.send).toHaveBeenLastCalledWith(
+      expect.objectContaining({ parts: [{ type: 'text', text: 'Describe this' }, img] }),
+    );
+  });
+
+  it('F09: legacy body.text + image parts — server prepends text part (backward compat)', async () => {
+    const conv = f.services.conversations.create();
+    const img = { type: 'image', mediaType: 'image/png', data: 'base64legacy' };
+    // Old client sends text separately; server must merge them.
+    const res = await json<{ userMessage: Message }>(
+      await f.request(`/api/conversations/${conv.id}/messages`, 'POST', {
+        text: 'Describe this',
+        parts: [img],
+      }),
+      202,
+    );
+    expect(res.userMessage.parts).toEqual([{ type: 'text', text: 'Describe this' }, img]);
+  });
+
+  it('F09: image-only parts — no body.text means no extra text part is prepended', async () => {
+    const conv = f.services.conversations.create();
+    const img = { type: 'image', mediaType: 'image/png', data: 'base64img' };
+    const res = await json<{ userMessage: Message }>(
+      await f.request(`/api/conversations/${conv.id}/messages`, 'POST', { parts: [img] }),
+      202,
+    );
+    expect(res.userMessage.parts).toEqual([img]);
+  });
+
   it('does not cancel a turn in another conversation using its turnId', async () => {
     const conv = f.services.conversations.create();
     vi.mocked(f.services.runtime.activeTurns).mockReturnValue([{ conversationId: 'other', turnId: 'turn-other', startedAt: f.time.now }]);

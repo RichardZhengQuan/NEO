@@ -34,7 +34,7 @@ function toConversation(r: Row): Conversation {
 }
 
 function toMessage(r: Row): Message {
-  return {
+  const msg: Message = {
     id: r.id as string,
     conversationId: r.conversation_id as string,
     role: r.role as Message['role'],
@@ -46,6 +46,8 @@ function toMessage(r: Row): Message {
     error: fromJson(r.error, null),
     usage: fromJson(r.usage, null),
   };
+  if (r.sensitive) msg.sensitive = true;
+  return msg;
 }
 
 export function createConversationStore(db: NeoDatabase, options: { clock?: Clock } = {}): ConversationStore {
@@ -158,8 +160,8 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
       return db.transaction(() => {
         const conv = mustGet(message.conversationId);
         db.prepare(
-          `INSERT INTO messages (id, conversation_id, role, parts, created_at, turn_id, model, status, error, usage)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO messages (id, conversation_id, role, parts, created_at, turn_id, model, status, error, usage, sensitive)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           message.id,
           message.conversationId,
@@ -171,6 +173,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
           message.status,
           toJson(message.error),
           toJson(message.usage),
+          message.sensitive ? 1 : null,
         );
         const preview = previewOf(message.parts) || conv.preview;
         db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ?, preview = ? WHERE id = ?').run(
@@ -188,12 +191,13 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
       if (!current) throw new NeoError('not_found', `Message ${id} not found.`);
       const next: Message = { ...current, ...patch };
       db.transaction(() => {
-        db.prepare('UPDATE messages SET parts = ?, status = ?, error = ?, usage = ?, model = ? WHERE id = ?').run(
+        db.prepare('UPDATE messages SET parts = ?, status = ?, error = ?, usage = ?, model = ?, sensitive = ? WHERE id = ?').run(
           JSON.stringify(next.parts),
           next.status,
           toJson(next.error),
           toJson(next.usage),
           toJson(next.model),
+          next.sensitive ? 1 : null,
           id,
         );
         if (patch.parts) {

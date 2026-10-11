@@ -23,7 +23,7 @@ import { emptyEntry, prependOlder, setEntry, useConversations } from '../state/c
 import { loadConversation } from '../state/connection.js';
 import { useData } from '../state/data.js';
 import { pushToast } from '../state/notifications.js';
-import { requireClient, useSession } from '../state/session.js';
+import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from '../state/session.js';
 import { registerComposer, useUi } from '../state/ui.js';
 import { ChatHeader } from './chat/ChatHeader.js';
 import { EmptyChat } from './chat/EmptyChat.js';
@@ -83,11 +83,13 @@ export function ChatScreen({ conversationId }: { conversationId?: string }): Rea
     const body = composeBody(text, images);
     if (!body.text && !body.parts) return;
     const client = requireClient();
+    const epoch = currentSessionEpoch();
     setSending(true);
     try {
       let id = conversationId;
       if (!id) {
         const conv = await createConversation(client, { incognito: draft.incognito, model: draft.model });
+        if (!isCurrentSession(epoch, client)) return;
         id = conv.id;
         setEntry(id, (e) => ({ ...e, loaded: true }));
         navigate({ name: 'chat', conversationId: id }, { replace: true });
@@ -110,8 +112,10 @@ export function ChatScreen({ conversationId }: { conversationId?: string }): Rea
   const onLoadOlder = async () => {
     const first = entry.messages[0];
     if (!conversationId || !first) return;
-    const data = await requireClient().conversations.get(conversationId, { limit: 50, before: first.createdAt });
-    setEntry(conversationId, (e) => prependOlder(e, data));
+    const client = requireClient();
+    const epoch = currentSessionEpoch();
+    const data = await client.conversations.get(conversationId, { limit: 50, before: first.createdAt });
+    if (isCurrentSession(epoch, client)) setEntry(conversationId, (e) => prependOlder(e, data));
   };
 
   const composerEl = (

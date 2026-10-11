@@ -8,7 +8,7 @@
  *  - fake LLMs implementing ChatModel
  */
 import { describe, it, expect } from 'vitest';
-import type { ChatRequest, ChatStreamEvent, ChatModel, ObservedTurn, RememberInput } from '@neo/protocol';
+import type { ChatRequest, ChatStreamEvent, ChatModel, ObservedTurn, RememberInput, ToolDefinition } from '@neo/protocol';
 import { silentLogger, newId, DEFAULT_MEMORY_POLICY } from '@neo/protocol';
 import { openNeoDatabase } from '@neo/storage';
 import {
@@ -21,6 +21,7 @@ import {
 } from './index.js';
 import { reinforceStability } from './utils.js';
 import { parseLenientJson } from './extract.js';
+import { createMemoryTools } from '../../tools/src/builtins/memory.js';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -1271,6 +1272,247 @@ describe('observe() detailed', () => {
     expect(result.skipped).toBeTruthy();
     const statsAfter = await svc.stats();
     expect(statsAfter.total).toBe(statsBefore.total);
+  });
+});
+
+// ─── F04: forget command does not re-create deleted memory ──────────────────
+
+describe('heuristicExtract does not extract forget commands (F04)', () => {
+  it('does not extract from "Forget that I live in Paris."', () => {
+    const results = heuristicExtract('Forget that I live in Paris.');
+    // Should produce no memories because the sentence is a forget command
+    expect(results).toHaveLength(0);
+  });
+
+  it('does not extract from "Please forget my home address."', () => {
+    const results = heuristicExtract('Please forget my home address.');
+    expect(results).toHaveLength(0);
+  });
+
+  it('does not extract from "Delete the fact that I work at Acme."', () => {
+    const results = heuristicExtract('Delete the fact that I work at Acme.');
+    expect(results).toHaveLength(0);
+  });
+
+  it('does not extract from "Stop remembering that my name is Alice."', () => {
+    const results = heuristicExtract("Stop remembering that my name is Alice.");
+    expect(results).toHaveLength(0);
+  });
+
+  it('still extracts from a normal affirmative sentence', () => {
+    const results = heuristicExtract('My name is Alice.');
+    expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('observe: forget tool result prevents heuristic re-creation (F04)', () => {
+  it.each([
+    'Forget that I live in Paris.',
+    "Don't remember that I live in Paris.",
+    'Delete the fact that I live in Paris.',
+    '忘掉我住在Paris。',
+    '请忘掉我住在Paris。',
+    '忘掉我住在巴黎。',
+    'Forget that I live in Paris（巴黎）.',
+  ])('does not restore a fact deleted by the real forget tool: %s', async (text) => {
+    const { svc, db } = makeTestService();
+    try {
+      const node = await svc.remember({ kind: 'fact', content: 'The user lives in Paris.' });
+      const tools: ToolDefinition[] = createMemoryTools(svc);
+      const forget = tools.find((tool) => tool.name === 'forget')!;
+      const result = await forget.execute({ ids: [node.id] }, {
+        toolCallId: 'call_fgt', conversationId: 'conv_f04', signal: new AbortController().signal,
+        now: () => 1_000_000_000_000, timezone: 'UTC', locale: 'en', allowSensitive: true,
+        origin: 'model', logger: silentLogger,
+      });
+      const turn = makeForgotTurn(text, []);
+      turn.assistantMessage.parts[1] = { type: 'tool_result', toolCallId: 'call_fgt', name: 'forget', ...result };
+      await svc.observe(turn);
+      expect(await svc.search({ query: 'Paris' })).toMatchObject({ items: [], total: 0 });
+      expect(await svc.search({ query: '巴黎' })).toMatchObject({ items: [], total: 0 });
+      expect((await svc.stats()).total).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps ordinary statements using forget in offline extraction', async () => {
+    const { svc, db } = makeTestService();
+    try {
+      const result = await svc.observe(makeTurn('I often forget my keys.', 'I can help with reminders.'));
+      expect(result.created).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'episode', content: 'User: I often forget my keys.' }),
+      ]));
+      expect(heuristicExtract('I often forget my keys. I live in Oslo.')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'fact', content: 'The user lives in Oslo.' }),
+      ]));
+    } finally {
+      db.close();
+    }
+  });
+
+  /** Build a turn where the user says forget and the forget tool succeeded. */
+  function makeForgotTurn(userText: string, forgottenLabels: string[], now = 1_000_000_000_000): ObservedTurn {
+    const convId = 'conv_f04';
+    return {
+      conversationId: convId,
+      userMessage: {
+        id: newId('msg', now),
+        conversationId: convId,
+        role: 'user',
+        parts: [{ type: 'text', text: userText }],
+        createdAt: now,
+        status: 'complete',
+      },
+      assistantMessage: {
+        id: newId('msg', now + 1),
+        conversationId: convId,
+        role: 'assistant',
+        parts: [
+          { type: 'tool_call', id: 'call_fgt', name: 'forget', input: {} },
+          {
+            type: 'tool_result',
+            toolCallId: 'call_fgt',
+            name: 'forget',
+            output: { forgotten: forgottenLabels },
+          },
+          { type: 'text', text: `Done, I've forgotten that.` },
+        ],
+        createdAt: now + 1,
+        status: 'complete',
+      },
+      now,
+    };
+  }
+
+  it('heuristic extraction on forget-command user text produces no ops', async () => {
+    // Use an LLM that returns empty ops (simulating successful forget with no new extractions from LLM)
+    const { svc } = makeTestService(makeEmptyLLM());
+    const statsBefore = await svc.stats();
+    // The user says a forget command; heuristic must not re-create "I live in Paris"
+    const turn = makeForgotTurn('Forget that I live in Paris.', ['Home city - The user lives in Paris.']);
+    await svc.observe(turn);
+    const statsAfter = await svc.stats();
+    expect(statsAfter.total).toBe(statsBefore.total);
+  });
+
+  it('LLM that tries to re-create a just-forgotten fact is blocked', async () => {
+    // LLM tries to (re-)create the fact that was just forgotten
+    const llmRecreates = JSON.stringify({
+      episode: null,
+      memories: [
+        { op: 'create', kind: 'fact', label: 'Home city', content: 'The user lives in Paris.', importance: 0.8 },
+      ],
+      links: [],
+    });
+    const { svc } = makeTestService(makeFakeLLM(llmRecreates));
+    const statsBefore = await svc.stats();
+    // The forget tool reports node labels (not content), as the real tool does for this memory.
+    const turn = makeForgotTurn('Forget that I live in Paris.', ['Home city']);
+    await svc.observe(turn);
+    const statsAfter = await svc.stats();
+    // No new memory should have been created
+    expect(statsAfter.total).toBe(statsBefore.total);
+  });
+});
+
+// ─── F11: policy re-check before committing ────────────────────────────────────
+
+describe('observe: policy is rechecked before writing (F11)', () => {
+  async function pausedObservation() {
+    const db = openNeoDatabase(':memory:');
+    const hashing = new HashingEmbedder(256);
+    let entered!: () => void;
+    let release!: () => void;
+    const embeddingStarted = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const embedder = {
+      id: hashing.id, dimensions: hashing.dimensions, isLocal: true,
+      async embed(texts: string[]) {
+        if (texts.some((text) => text.startsWith('fact: Race test.'))) {
+          entered();
+          await gate;
+        }
+        return hashing.embed(texts);
+      },
+    };
+    const svc = createMemoryService({
+      db, embedder,
+      llm: () => ({ model: makeFakeLLM(JSON.stringify({
+        episode: { label: 'Meeting Mira', summary: 'The user met Mira.' },
+        memories: [{ op: 'create', kind: 'fact', label: 'Race test', content: 'The user met Mira.', entities: ['Mira'] }],
+        links: [],
+      })), name: 'fake', isLocal: true }),
+      logger: silentLogger,
+    });
+    const pending = svc.observe(makeTurn('I met Mira yesterday.', 'How was your meeting?'));
+    await embeddingStarted;
+    expect((await svc.stats()).total).toBe(0);
+    return { svc, db, pending, release };
+  }
+
+  it('drops an observation when memory is turned off during embedding', async () => {
+    const { svc, db, pending, release } = await pausedObservation();
+    try {
+      svc.setPolicy({ ...svc.getPolicy(), mode: 'off' });
+      release();
+      expect((await pending).skipped).toBe('memory was disabled after extraction');
+      expect((await svc.stats()).total).toBe(0);
+    } finally { release(); await pending; db.close(); }
+  });
+
+  it('makes the episode, fact and entity pending when approve mode is selected during embedding', async () => {
+    const { svc, db, pending, release } = await pausedObservation();
+    try {
+      svc.setPolicy({ ...svc.getPolicy(), mode: 'approve' });
+      release();
+      const result = await pending;
+      expect(result.created).toEqual([]);
+      expect(result.pending.map((node) => node.kind).sort()).toEqual(['episode', 'fact']);
+      expect(result.pending.every((node) => node.status === 'pending')).toBe(true);
+      const stored = (await svc.search({})).items;
+      expect(stored.map((node) => node.kind).sort()).toEqual(['entity', 'episode', 'fact']);
+      expect(stored.every((node) => node.status === 'pending')).toBe(true);
+      expect((await svc.recall({ text: 'Mira', reinforce: false })).items).toEqual([]);
+    } finally { release(); await pending; db.close(); }
+  });
+
+  it.each([
+    { blockedTopics: ['Mira'] },
+    { allowedKinds: ['preference'] as const },
+    { sendSensitiveToCloud: true },
+  ])('drops an observation when extraction rules change during embedding: %j', async (change) => {
+    const { svc, db, pending, release } = await pausedObservation();
+    try {
+      svc.setPolicy({ ...svc.getPolicy(), ...change, allowedKinds: [...(change.allowedKinds ?? svc.getPolicy().allowedKinds)] });
+      release();
+      expect((await pending).skipped).toBe('memory settings changed during extraction');
+      expect((await svc.stats()).total).toBe(0);
+    } finally { release(); await pending; db.close(); }
+  });
+});
+
+describe('observe: private replay metadata protects cloud extraction (F02)', () => {
+  it.each(['user', 'assistant', 'tool_result'] as const)('keeps a flagged %s on the device without a surviving source memory', async (flag) => {
+    const db = openNeoDatabase(':memory:');
+    let calls = 0;
+    const model: ChatModel = {
+      async *chat() {
+        calls++;
+        yield { type: 'text', text: JSON.stringify({ episode: null, memories: [], links: [] }) };
+        yield { type: 'done', stopReason: 'end' };
+      },
+    };
+    const svc = createMemoryService({ db, llm: () => ({ model, name: 'cloud', isLocal: false }), logger: silentLogger });
+    try {
+      const turn = makeTurn('Tell me a little more about yesterday.', 'The private word was orchid.');
+      if (flag === 'user') turn.userMessage.sensitive = true;
+      else if (flag === 'assistant') turn.assistantMessage.sensitive = true;
+      else turn.assistantMessage.parts.push({ type: 'tool_result', toolCallId: 'forgotten', name: 'forget', sensitive: true, output: { forgotten: ['Orchid'] } });
+      const result = await svc.observe(turn);
+      expect(calls).toBe(0);
+      expect(result.created).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'episode', sensitivity: 'sensitive' })]));
+    } finally { db.close(); }
   });
 });
 

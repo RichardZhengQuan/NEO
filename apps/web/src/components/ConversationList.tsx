@@ -9,7 +9,7 @@ import { deleteConversation, setConversationFlags } from '../actions/chat.js';
 import { useDebounced } from '../hooks/useLoader.js';
 import { navigate } from '../router.js';
 import { sortConversations, upsertConversations, useConversations } from '../state/conversations.js';
-import { requireClient, useSession } from '../state/session.js';
+import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from '../state/session.js';
 import { setDrawer } from '../state/ui.js';
 import { Menu } from './Menu.js';
 
@@ -86,12 +86,13 @@ export function ConversationList({ activeId }: { activeId: string | undefined })
       setRemote(null);
       return;
     }
+    const epoch = currentSessionEpoch();
     let cancelled = false;
     setSearching(true);
     requireClient()
       .conversations.list({ query: debounced, limit: 50 })
       .then(({ items }) => {
-        if (cancelled) return;
+        if (cancelled || !isCurrentSession(epoch)) return;
         upsertConversations(items);
         setRemote(items.map((c) => c.id));
       })
@@ -106,9 +107,10 @@ export function ConversationList({ activeId }: { activeId: string | undefined })
 
   useEffect(() => {
     if (!showArchived || archivedLoaded) return;
+    const epoch = currentSessionEpoch();
     requireClient()
       .conversations.list({ archived: true, limit: 200 })
-      .then(({ items }) => upsertConversations(items, { archivedLoaded: true }))
+      .then(({ items }) => { if (isCurrentSession(epoch)) upsertConversations(items, { archivedLoaded: true }); })
       .catch(() => undefined);
   }, [showArchived, archivedLoaded]);
 

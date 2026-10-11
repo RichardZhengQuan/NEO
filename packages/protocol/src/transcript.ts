@@ -9,6 +9,9 @@ import type { ContentPart, Message, ToolCallPart, ToolResultPart } from './conte
 import { describeUiEvent } from './content.js';
 import type { ChatMessage } from './providers.js';
 
+export const SENSITIVE_TOOL_PLACEHOLDER = '<neo_tool_result>(This tool result contained private memories and is withheld from this model.)</neo_tool_result>';
+export const SENSITIVE_ASSISTANT_PLACEHOLDER = '<neo_assistant>(This assistant turn referenced private memories and is withheld from this model.)</neo_assistant>';
+
 export interface ToChatOptions {
   /** Drop reasoning parts entirely (e.g. when switching to a model that cannot read them). Default false. */
   dropReasoning?: boolean;
@@ -48,7 +51,7 @@ export function toChatMessages(messages: readonly Message[], options: ToChatOpti
 
   for (const msg of messages) {
     if (msg.role === 'assistant') {
-      for (const entry of splitAssistant(msg.parts, options)) pushEntry(entry);
+      for (const entry of splitAssistant(msg.parts, options, msg.sensitive)) pushEntry(entry);
       continue;
     }
     const parts: ContentPart[] = [];
@@ -76,7 +79,9 @@ export function toChatMessages(messages: readonly Message[], options: ToChatOpti
   return out;
 }
 
-function splitAssistant(parts: readonly ContentPart[], options: ToChatOptions): ChatMessage[] {
+function splitAssistant(parts: readonly ContentPart[], options: ToChatOptions, msgSensitive?: boolean): ChatMessage[] {
+  const omit = options.omitSensitiveContext === true;
+  const omitAssistant = omit && msgSensitive === true;
   const entries: ChatMessage[] = [];
   let assistant: ContentPart[] = [];
   let results: ToolResultPart[] = [];
@@ -86,9 +91,14 @@ function splitAssistant(parts: readonly ContentPart[], options: ToChatOptions): 
     if (assistant.length) entries.push({ role: 'assistant', parts: assistant });
     // Close every call of this step, in call order.
     const byId = new Map(results.map((r) => [r.toolCallId, r]));
-    const closed: ToolResultPart[] = pendingCalls.map(
-      (c) => byId.get(c.id) ?? { type: 'tool_result', toolCallId: c.id, name: c.name, output: CANCELLED_RESULT, isError: true },
-    );
+    const closed: ToolResultPart[] = pendingCalls.map((c) => {
+      const r = byId.get(c.id) ?? { type: 'tool_result', toolCallId: c.id, name: c.name, output: CANCELLED_RESULT, isError: true };
+      // Arguments, summaries and other outputs of a private-derived turn may quote the same memory.
+      if (omitAssistant || (omit && r.sensitive)) {
+        return { type: 'tool_result', toolCallId: r.toolCallId, name: r.name, output: SENSITIVE_TOOL_PLACEHOLDER, ...(r.isError ? { isError: true } : {}) };
+      }
+      return r;
+    });
     // Results without a matching call in this step (should not happen) are dropped: they would be rejected by providers.
     if (closed.length) entries.push({ role: 'tool', parts: closed });
     assistant = [];
@@ -96,19 +106,31 @@ function splitAssistant(parts: readonly ContentPart[], options: ToChatOptions): 
     pendingCalls = [];
   };
 
+  let assistantPlaceholderEmitted = false;
   for (const p of parts) {
     switch (p.type) {
       case 'reasoning':
         if (results.length) flush();
-        if (!options.dropReasoning) assistant.push(p);
+        // Reasoning from a sensitive-derived turn may quote private memories too.
+        if (!options.dropReasoning && !omitAssistant) assistant.push(p);
         break;
       case 'text':
         if (results.length) flush();
-        if (p.text) assistant.push(p);
+        if (p.text) {
+          // Replace all text from a sensitive-derived assistant turn with one placeholder.
+          if (omitAssistant) {
+            if (!assistantPlaceholderEmitted) {
+              assistant.push({ type: 'text', text: SENSITIVE_ASSISTANT_PLACEHOLDER });
+              assistantPlaceholderEmitted = true;
+            }
+          } else {
+            assistant.push(p);
+          }
+        }
         break;
       case 'tool_call':
         if (results.length) flush();
-        assistant.push(p);
+        assistant.push(omitAssistant ? { type: 'tool_call', id: p.id, name: p.name, input: {} } : p);
         pendingCalls.push(p);
         break;
       case 'tool_result':

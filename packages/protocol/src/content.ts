@@ -97,6 +97,8 @@ export const ToolResultPartSchema = z.object({
   isError: z.boolean().optional(),
   /** Short human summary for tool chips ("Created reminder for 5:00 PM"). */
   summary: z.string().optional(),
+  /** True when the output contains sensitive memories (withheld from cloud replay unless allowed). */
+  sensitive: z.boolean().optional(),
 });
 
 /** A rendered generative-UI block. `id` addresses it for UI actions. */
@@ -175,6 +177,8 @@ export const MessageSchema = z.object({
   status: MessageStatusSchema,
   error: ErrorShapeSchema.nullable().optional(),
   usage: UsageSchema.nullable().optional(),
+  /** True when this assistant message was generated in a turn that involved sensitive memories. */
+  sensitive: z.boolean().optional(),
 });
 export type Message = z.infer<typeof MessageSchema>;
 

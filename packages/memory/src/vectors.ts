@@ -186,9 +186,11 @@ export class VectorCache {
     const run = async (): Promise<number> => {
       let embedded = 0;
       let cursor = '';
+      const isCurrent = () => !this.routing || this.routing.main === embedder;
       try {
         this.all(embedder.id);
         for (;;) {
+          if (!isCurrent()) break;
           const page = this.db
             .prepare(
               `SELECT id, kind, label, content, aliases, sensitivity, status, embedding_model FROM memory_nodes
@@ -208,8 +210,11 @@ export class VectorCache {
             groups.set(target, group);
           }
           for (const [target, rows] of groups) {
+            if (!isCurrent()) return embedded;
             const texts = rows.map((r) => nodeEmbedText(r.kind, r.label, r.content, fromJson<string[]>(r.aliases, [])));
             const vectors = await target.embed(texts);
+            // A live swap retires this adapter, including any batch already in flight.
+            if (!isCurrent()) return embedded;
             if (vectors.length !== rows.length) throw new Error(`embedder returned ${vectors.length} vectors for ${rows.length} texts`);
             const written: [string, Float32Array][] = [];
             this.db.transaction(() => {
@@ -240,7 +245,7 @@ export class VectorCache {
       if (this.reembedding === pass) this.reembedding = null;
       if (this.rerun) {
         this.rerun = false;
-        void this.reembedStale(embedder);
+        void this.reembedStale(this.routing?.main ?? embedder);
       }
     });
     this.reembedding = pass;

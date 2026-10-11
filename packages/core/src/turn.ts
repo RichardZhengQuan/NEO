@@ -232,6 +232,10 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
   };
 }
 
+function containsSensitive(message: Message): boolean {
+  return message.sensitive === true || message.parts.some((p) => (p.type === 'context' || p.type === 'tool_result') && p.sensitive === true);
+}
+
 /** Text the user contributed in this turn (text parts + ui_event descriptions). */
 function inputText(parts: readonly ContentPart[]): string {
   return parts
@@ -255,7 +259,8 @@ async function recallMemories(
   // so NEO's own wording can't pull memories in.
   const text = inputText(parts).trim();
   if (!text) return [];
-  const previousReply = textOf([...history].reverse().find((m) => m.role === 'assistant')?.parts ?? []).trim();
+  const previousMessage = [...history].reverse().find((m) => m.role === 'assistant');
+  const previousReply = previousMessage && !(containsSensitive(previousMessage) && !allowSensitive) ? textOf(previousMessage.parts).trim() : '';
   const context = previousReply.slice(-RECALL_PREVIOUS_REPLY_CHARS).trim();
   try {
     const result = await services.memory.recall({
@@ -308,6 +313,8 @@ class TurnRunner {
   private parts: ContentPart[] = [];
   private usage: Usage | null = null;
   private stopReason: StopReason = 'end';
+  /** Set once a request to the model included sensitive content. */
+  private sawSensitive = false;
   private dirty = false;
   private lastPersistAt: number;
   /** Reasoning placeholders of the current step that await their reasoning_part. */
@@ -408,14 +415,19 @@ class TurnRunner {
     const { plan, caps, systemPrompt } = this.init;
     const agent = plan.settings.agent;
     const stored = this.services.conversations.messages(this.conversationId);
-    const current: Message = { ...this.init.assistantMessage, parts: [...this.parts] };
+    const current: Message = {
+      ...this.init.assistantMessage,
+      parts: [...this.parts],
+      ...(this.sawSensitive || this.parts.some((p) => p.type === 'tool_result' && p.sensitive) ? { sensitive: true } : {}),
+    };
     const history = stored.some((m) => m.id === this.messageId)
       ? stored.map((m) => (m.id === this.messageId ? current : m))
       : [...stored, current];
-    const messages = toChatMessages(trimHistory(history, agent.contextTokenBudget), {
-      dropReasoning: !caps.reasoning,
-      omitSensitiveContext: !plan.adapter.isLocal && !this.services.settings.get().memory.sendSensitiveToCloud,
-    });
+    const omitSensitiveContext = !plan.adapter.isLocal && !this.services.settings.get().memory.sendSensitiveToCloud;
+    const trimmed = trimHistory(history, agent.contextTokenBudget);
+    // What this model reads shapes its answer: if it was shown anything sensitive, the answer is sensitive too.
+    if (!omitSensitiveContext && trimmed.some(containsSensitive)) this.sawSensitive = true;
+    const messages = toChatMessages(trimmed, { dropReasoning: !caps.reasoning, omitSensitiveContext });
     const maxTokens = caps.maxOutputTokens > 0 ? Math.min(agent.maxOutputTokens, caps.maxOutputTokens) : agent.maxOutputTokens;
     const request: ChatRequest = {
       model: plan.model,
@@ -727,6 +739,7 @@ class TurnRunner {
       output,
       ...(isError ? { isError: true } : {}),
       ...(summary ? { summary } : {}),
+      ...(result.sensitive ? { sensitive: true } : {}),
     };
     this.addPart(part);
     this.emit({
@@ -798,11 +811,17 @@ class TurnRunner {
     }
 
     let final = this.snapshot(status, failure);
+    // An answer written after seeing sensitive memories (or carrying a sensitive tool result) is itself
+    // sensitive: replay to a cloud model without sharing withholds it (toChatMessages omitSensitiveContext).
+    const msgSensitive = this.sawSensitive || this.parts.some((p) => p.type === 'tool_result' && p.sensitive === true);
+    if (msgSensitive) final.sensitive = true;
+
     try {
       final = conversations.updateMessage(this.messageId, {
         parts: final.parts,
         status,
         usage: this.usage,
+        ...(msgSensitive ? { sensitive: true } : {}),
         ...(failure ? { error: failure.toJSON() } : {}),
       });
     } catch (err) {
@@ -873,6 +892,7 @@ class TurnRunner {
   private async autoTitle(final: Message): Promise<void> {
     const { conversations } = this.services;
     const { adapter, model, conversation } = this.init.plan;
+    if (final.sensitive && !adapter.isLocal && !this.services.settings.get().memory.sendSensitiveToCloud) return;
     try {
       const title = await generateTitle(adapter, model, inputText(this.init.userMessage.parts), textOf(final.parts));
       // Respect a rename (or deletion) that happened while the turn or the title request ran.

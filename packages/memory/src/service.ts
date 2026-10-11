@@ -126,11 +126,11 @@ function badRequest(message: string, issues: { path: PropertyKey[]; message: str
   return new NeoError('bad_request', `${message}: ${issues.map((i) => `${i.path.map(String).join('.') || 'input'}: ${i.message}`).join('; ')}`);
 }
 
-export function createMemoryServiceImpl(options: MemoryServiceOptions): MemoryService {
+export function createMemoryServiceImpl(options: MemoryServiceOptions): MemoryService & { setEmbedder(embedder: Embedder): void } {
   const { db } = options;
   const clock: Clock = options.clock ?? (() => Date.now());
   const logger: Logger = options.logger ?? silentLogger;
-  const embedder: Embedder = options.embedder ?? new HashingEmbedder(512);
+  let embedder: Embedder = options.embedder ?? new HashingEmbedder(512);
   const llmGetter: () => MemoryLLM | null = options.llm ?? (() => null);
 
   migrate(db, 'memory', memoryMigrations);
@@ -138,8 +138,8 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
   const vectors = new VectorCache(db, logger);
   let policy: MemoryPolicy = parsePolicy(options.policy ?? DEFAULT_MEMORY_POLICY);
   // Text that must not leave the device is embedded on the device (its vectors keep their own model id).
-  const localEmbedder: Embedder = isLocalEmbedder(embedder) ? embedder : new LocalFallbackEmbedder(512);
-  const keepLocal = (node: { sensitivity: string; status: string }): boolean =>
+  let localEmbedder: Embedder = isLocalEmbedder(embedder) ? embedder : new LocalFallbackEmbedder(512);
+  let keepLocal = (node: { sensitivity: string; status: string }): boolean =>
     localEmbedder !== embedder && ((node.sensitivity === 'sensitive' && !policy.sendSensitiveToCloud) || node.status === 'pending');
   vectors.setRouting({ main: embedder, local: localEmbedder, keepLocal });
   const listeners = new Set<(event: MemoryChangeEvent) => void>();
@@ -283,7 +283,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
     };
   }
 
-  const svc: MemoryService = {
+  const svc: MemoryService & { setEmbedder(embedder: Embedder): void } = {
     recall: recallImpl,
 
     observe(turn: ObservedTurn): Promise<MemoryWriteResult> {
@@ -641,6 +641,22 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
         for (const id of imported) s.created.add(id);
       });
       return report;
+    },
+
+    /** Live-swap the embedder without restarting the service.
+     *  Updates the routing table and re-embeds any stale vectors in the background. */
+    setEmbedder(newEmbedder: Embedder): void {
+      const newLocalEmbedder: Embedder = isLocalEmbedder(newEmbedder) ? newEmbedder : new LocalFallbackEmbedder(512);
+      const newKeepLocal = (node: { sensitivity: string; status: string }): boolean =>
+        newLocalEmbedder !== newEmbedder && ((node.sensitivity === 'sensitive' && !policy.sendSensitiveToCloud) || node.status === 'pending');
+      embedder = newEmbedder;
+      localEmbedder = newLocalEmbedder;
+      keepLocal = newKeepLocal;
+      ctx.embedder = newEmbedder;
+      ctx.localEmbedder = newLocalEmbedder;
+      ctx.keepLocal = newKeepLocal;
+      vectors.setRouting({ main: newEmbedder, local: newLocalEmbedder, keepLocal: newKeepLocal });
+      void vectors.reembedStale(newEmbedder);
     },
 
     getPolicy(): MemoryPolicy {

@@ -7,6 +7,10 @@ import { deepMerge, type HealthResponse, type ModelInfo, type NeoSettings, type 
 import { NeoClient, type ConnectionStatus } from '@neo/client';
 import type { ConnectionSource } from '../connection.js';
 import { STORAGE_KEYS, writeString } from '../lib/storage.js';
+import { useConversations } from './conversations.js';
+import { useData } from './data.js';
+import { useToasts } from './notifications.js';
+import { resetDraft, setDrawer } from './ui.js';
 
 export type Phase = 'booting' | 'connect' | 'offline' | 'ready';
 
@@ -28,6 +32,11 @@ export interface SessionState {
   providers: ProvidersResponse | null;
   /** Model lists per provider id (loaded lazily). */
   models: Record<string, ModelInfo[]>;
+  /**
+   * Incremented each time we switch servers. Lets async operations that
+   * captured the epoch before a switch detect that their response is stale.
+   */
+  sessionEpoch: number;
 }
 
 export const useSession = create<SessionState>(() => ({
@@ -41,7 +50,23 @@ export const useSession = create<SessionState>(() => ({
   wsStatus: 'idle',
   providers: null,
   models: {},
+  sessionEpoch: 0,
 }));
+
+/**
+ * Returns true when the given epoch (captured before an async operation)
+ * still matches the current session. Use to discard in-flight responses from a
+ * server the user has already switched away from.
+ */
+export function isCurrentSession(epoch: number, client?: NeoClient): boolean {
+  const session = useSession.getState();
+  return session.sessionEpoch === epoch && (client === undefined || session.client === client);
+}
+
+/** Returns the current session epoch to pass into async operations. */
+export function currentSessionEpoch(): number {
+  return useSession.getState().sessionEpoch;
+}
 
 /** The client, for code that only runs once connected. */
 export function requireClient(): NeoClient {
@@ -50,14 +75,52 @@ export function requireClient(): NeoClient {
   return client;
 }
 
+const sessionCleanups = new Set<() => void>();
+
+/** Close live subscriptions synchronously when their session ends. */
+export function onSessionEnd(cleanup: () => void): () => void {
+  sessionCleanups.add(cleanup);
+  return () => { sessionCleanups.delete(cleanup); };
+}
+
+function resetSessionData(): void {
+  for (const cleanup of [...sessionCleanups]) cleanup();
+  sessionCleanups.clear();
+  useConversations.setState({ conversations: {}, entries: {}, listLoaded: false, archivedLoaded: false });
+  useData.setState({
+    reminders: {}, remindersLoaded: false,
+    tasks: {}, taskLists: [], tasksLoaded: false,
+    notes: {}, notesLoaded: false,
+    memoryVersion: 0, pendingMemories: 0,
+    notifications: [], unreadNotifications: 0,
+  });
+  useToasts.setState({ toasts: [] });
+  resetDraft();
+  setDrawer(false);
+}
+
 export function startSession(serverUrl: string, token: string, source: ConnectionSource): NeoClient {
   const client = new NeoClient({ baseUrl: serverUrl, token });
-  useSession.setState({ client, serverUrl, source, phase: 'booting', connectHint: null });
+  resetSessionData();
+  useSession.setState((s) => ({
+    client,
+    serverUrl,
+    source,
+    phase: 'booting',
+    connectHint: null,
+    health: null,
+    settings: null,
+    wsStatus: 'idle',
+    providers: null,
+    models: {},
+    sessionEpoch: s.sessionEpoch + 1,
+  }));
   return client;
 }
 
 export function showConnect(hint: ConnectHint): void {
-  useSession.setState({ phase: 'connect', connectHint: hint, client: null, settings: null, health: null, wsStatus: 'idle', providers: null, models: {} });
+  resetSessionData();
+  useSession.setState((s) => ({ phase: 'connect', connectHint: hint, client: null, settings: null, health: null, wsStatus: 'idle', providers: null, models: {}, sessionEpoch: s.sessionEpoch + 1 }));
 }
 
 export function setSettings(settings: NeoSettings): void {
@@ -72,30 +135,31 @@ export function setSettings(settings: NeoSettings): void {
  * take the server's merged result. Reverts and rethrows on failure.
  */
 export async function updateSettings(patch: NeoSettingsPatch): Promise<NeoSettings> {
-  const { client, settings } = useSession.getState();
+  const { client, settings, sessionEpoch } = useSession.getState();
   if (!client || !settings) throw new Error('Not connected');
   setSettings(deepMerge(settings, patch));
   try {
     const next = await client.settings.update(patch);
-    setSettings(next);
+    if (isCurrentSession(sessionEpoch, client)) setSettings(next);
     return next;
   } catch (err) {
-    setSettings(settings);
+    if (isCurrentSession(sessionEpoch, client)) setSettings(settings);
     throw err;
   }
 }
 
 export async function loadProviders(): Promise<ProvidersResponse | null> {
-  const client = useSession.getState().client;
+  const { client, sessionEpoch } = useSession.getState();
   if (!client) return null;
   const providers = await client.providers.list();
+  if (!isCurrentSession(sessionEpoch, client)) return null;
   useSession.setState({ providers });
   return providers;
 }
 
 /** Models for a provider (cached; falls back to its configured models). */
 export async function loadModels(providerId: string, force = false): Promise<ModelInfo[]> {
-  const { client, models, providers } = useSession.getState();
+  const { client, models, providers, sessionEpoch } = useSession.getState();
   if (!client) return [];
   if (!force && models[providerId]) return models[providerId]!;
   let list: ModelInfo[];
@@ -106,6 +170,7 @@ export async function loadModels(providerId: string, force = false): Promise<Mod
     const ids = [...new Set([...(p?.defaultModel ? [p.defaultModel] : []), ...(p?.models ?? [])])];
     list = ids.map((id) => ({ id, provider: providerId, capabilities: { tools: true, vision: false, reasoning: false, embeddings: false, contextWindow: 32_000, maxOutputTokens: 4096 } }));
   }
+  if (!isCurrentSession(sessionEpoch, client)) return [];
   useSession.setState((s) => ({ models: { ...s.models, [providerId]: list } }));
   return list;
 }

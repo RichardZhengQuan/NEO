@@ -25,7 +25,7 @@ import { navigate } from '../router.js';
 import { applyConversationEvent, removeConversation, resolveNoticeItem, upsertConversation, useConversations } from '../state/conversations.js';
 import { bumpMemoryVersion, refreshPendingMemories } from '../state/data.js';
 import { dismissToastKey, pushToast } from '../state/notifications.js';
-import { useSession } from '../state/session.js';
+import { currentSessionEpoch, isCurrentSession, onSessionEnd, useSession } from '../state/session.js';
 import { openLink } from './links.js';
 
 function reportError(err: unknown, t: TranslateFn, title?: string): void {
@@ -58,8 +58,9 @@ export function applyTurnResponse(conversationId: string, res: Pick<SendMessageR
 }
 
 export async function createConversation(client: NeoClient, options: { incognito?: boolean; model?: ModelRef | null } = {}): Promise<Conversation> {
+  const epoch = currentSessionEpoch();
   const conv = await client.conversations.create({ incognito: options.incognito ?? false, model: options.model ?? null });
-  upsertConversation(conv);
+  if (isCurrentSession(epoch)) upsertConversation(conv);
   return conv;
 }
 
@@ -68,30 +69,45 @@ export async function createConversation(client: NeoClient, options: { incognito
  * streams this turn over SSE so the reply still appears live.
  */
 export async function sendMessage(client: NeoClient, conversationId: string, body: SendMessageRequest, t: TranslateFn): Promise<void> {
+  const epoch = currentSessionEpoch();
   if (useSession.getState().wsStatus === 'open') {
     try {
       const res = await client.conversations.send(conversationId, body);
-      applyTurnResponse(conversationId, res);
+      if (isCurrentSession(epoch)) applyTurnResponse(conversationId, res);
     } catch (err) {
-      reportError(err, t, httpStatus(err) === 409 ? t('chat.busy') : undefined);
+      if (isCurrentSession(epoch)) reportError(err, t, httpStatus(err) === 409 ? t('chat.busy') : undefined);
       throw err;
     }
     return;
   }
-  const stream = client.conversations.stream(conversationId, body);
+  const controller = new AbortController();
+  const unregister = onSessionEnd(() => controller.abort());
+  const stream = client.conversations.stream(conversationId, body, controller.signal);
   void (async () => {
     try {
-      for await (const event of stream) applyConversationEvent(event);
+      for await (const event of stream) {
+        if (!isCurrentSession(epoch)) break;
+        applyConversationEvent(event);
+      }
     } catch (err) {
-      reportError(err, t);
+      if (isCurrentSession(epoch)) reportError(err, t);
+    } finally {
+      unregister();
     }
   })();
 }
 
 export function composeBody(text: string, images: ImagePart[]): SendMessageRequest {
+  if (images.length) {
+    // Include a text part alongside images so the server receives both.
+    const parts: UserInputPart[] = [
+      ...(text.trim() ? ([{ type: 'text', text: text.trim() }] satisfies UserInputPart[]) : []),
+      ...images,
+    ];
+    return { parts };
+  }
   const body: SendMessageRequest = {};
   if (text.trim()) body.text = text.trim();
-  if (images.length) body.parts = images;
   return body;
 }
 
@@ -151,30 +167,36 @@ export async function runUiAction(
   t: TranslateFn,
   askConfirm?: AskUiActionConfirm,
 ): Promise<void> {
+  const epoch = currentSessionEpoch();
   const request: UiActionRequest = { messageId: input.messageId, uiId: input.uiId, actionId: input.action.id };
   if (input.values) request.values = input.values;
   const send = async (body: UiActionRequest): Promise<UiActionResponse> => {
     try {
       return await client.conversations.uiAction(conversationId, body);
     } catch (err) {
-      reportError(err, t);
+      if (isCurrentSession(epoch)) reportError(err, t);
       throw err;
     }
   };
 
   let res = await send(request);
+  if (!isCurrentSession(epoch)) return;
   let freshAttempts = 0;
   while (res.kind === 'confirm') {
     const approved = askConfirm ? await askConfirm(res.confirmation) : false;
+    if (!isCurrentSession(epoch)) return;
     if (!approved) throw new UiActionCancelled();
     try {
       res = await client.conversations.uiAction(conversationId, { ...request, confirmationToken: res.confirmation.token });
+      if (!isCurrentSession(epoch)) return;
     } catch (err) {
+      if (!isCurrentSession(epoch)) return;
       const status = httpStatus(err);
       if ((status === 400 || status === 409) && freshAttempts < 1) {
         freshAttempts++;
         pushToast({ tone: 'warning', title: t('chat.action_confirm_expired') });
         res = await send(request);
+        if (!isCurrentSession(epoch)) return;
         continue;
       }
       reportError(err, t);
@@ -219,10 +241,13 @@ export async function performClientAction(action: UIAction, t: TranslateFn): Pro
 
 /** Answer a tool confirmation by its server nonce (`ToolConfirmation.id`), never by tool call id. */
 export async function respondToConfirmation(client: NeoClient, conversationId: string, confirmationId: string, decision: ConfirmationDecision, t: TranslateFn): Promise<void> {
+  const epoch = currentSessionEpoch();
   const confirmation = useConversations.getState().entries[conversationId]?.confirmations.find((c) => c.id === confirmationId);
   try {
     await client.confirmations.respond(confirmationId, decision);
+    if (!isCurrentSession(epoch)) return;
   } catch (err) {
+    if (!isCurrentSession(epoch)) return;
     if (httpStatus(err) === 404) pushToast({ tone: 'warning', title: t('chat.confirmation_expired') });
     else {
       reportError(err, t);
@@ -237,9 +262,11 @@ export async function respondToConfirmation(client: NeoClient, conversationId: s
 
 export async function decidePendingMemories(client: NeoClient, conversationId: string, turnId: string, ids: string[], decision: 'approved' | 'rejected', t: TranslateFn): Promise<void> {
   if (!ids.length) return;
+  const epoch = currentSessionEpoch();
   try {
     if (decision === 'approved') await client.memory.approve(ids);
     else await client.memory.reject(ids);
+    if (!isCurrentSession(epoch)) return;
     for (const id of ids) resolveNoticeItem(conversationId, turnId, id, decision);
     bumpMemoryVersion();
     void refreshPendingMemories(client);
@@ -249,36 +276,44 @@ export async function decidePendingMemories(client: NeoClient, conversationId: s
 }
 
 export async function renameConversation(client: NeoClient, id: string, title: string, t: TranslateFn): Promise<void> {
+  const epoch = currentSessionEpoch();
   try {
-    upsertConversation(await client.conversations.update(id, { title }));
+    const updated = await client.conversations.update(id, { title });
+    if (isCurrentSession(epoch)) upsertConversation(updated);
   } catch (err) {
-    reportError(err, t);
+    if (isCurrentSession(epoch)) reportError(err, t);
   }
 }
 
 export async function setConversationModel(client: NeoClient, id: string, model: ModelRef | null, t: TranslateFn): Promise<void> {
+  const epoch = currentSessionEpoch();
   try {
-    upsertConversation(await client.conversations.update(id, { model }));
+    const updated = await client.conversations.update(id, { model });
+    if (isCurrentSession(epoch)) upsertConversation(updated);
   } catch (err) {
-    reportError(err, t);
+    if (isCurrentSession(epoch)) reportError(err, t);
   }
 }
 
 export async function setConversationFlags(client: NeoClient, id: string, flags: { pinned?: boolean; archived?: boolean }, t: TranslateFn): Promise<void> {
+  const epoch = currentSessionEpoch();
   try {
-    upsertConversation(await client.conversations.update(id, flags));
+    const updated = await client.conversations.update(id, flags);
+    if (isCurrentSession(epoch)) upsertConversation(updated);
   } catch (err) {
-    reportError(err, t);
+    if (isCurrentSession(epoch)) reportError(err, t);
   }
 }
 
 export async function deleteConversation(client: NeoClient, id: string, t: TranslateFn): Promise<boolean> {
+  const epoch = currentSessionEpoch();
   try {
     await client.conversations.delete(id);
+    if (!isCurrentSession(epoch)) return false;
     removeConversation(id);
     return true;
   } catch (err) {
-    reportError(err, t);
+    if (isCurrentSession(epoch)) reportError(err, t);
     return false;
   }
 }

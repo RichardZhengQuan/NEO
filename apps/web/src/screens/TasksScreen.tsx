@@ -29,7 +29,7 @@ import { fromDateInputValue, toDateInputValue } from '../lib/time.js';
 import { navigate } from '../router.js';
 import { loadTasks, removeTask, removeTaskList, upsertTask, upsertTaskList, useData } from '../state/data.js';
 import { pushToast } from '../state/notifications.js';
-import { requireClient, useSession } from '../state/session.js';
+import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from '../state/session.js';
 
 function listName(list: TaskList | undefined, t: (k: string) => string): string {
   if (!list) return t('tasks.inbox');
@@ -37,12 +37,15 @@ function listName(list: TaskList | undefined, t: (k: string) => string): string 
 }
 
 async function patchTask(task: Task, patch: Parameters<ReturnType<typeof requireClient>['tasks']['update']>[1], t: (k: string) => string): Promise<void> {
+  const epoch = currentSessionEpoch();
   const optimistic: Task = { ...task, ...(patch as Partial<Task>), updatedAt: Date.now() };
   if (patch.done !== undefined) optimistic.doneAt = patch.done ? Date.now() : null;
   upsertTask(optimistic);
   try {
-    upsertTask(await requireClient().tasks.update(task.id, patch));
+    const saved = await requireClient().tasks.update(task.id, patch);
+    if (isCurrentSession(epoch)) upsertTask(saved);
   } catch (err) {
+    if (!isCurrentSession(epoch)) return;
     upsertTask(task);
     pushToast({ tone: 'error', title: errorMessage(err, t) });
   }
@@ -50,6 +53,7 @@ async function patchTask(task: Task, patch: Parameters<ReturnType<typeof require
 
 function TaskDetails({ task, lists, onClose }: { task: Task; lists: TaskList[]; onClose: () => void }): ReactElement {
   const t = useT();
+  const epoch = currentSessionEpoch();
   const confirm = useConfirm();
   const tz = useSession((s) => s.settings?.timezone);
   const [title, setTitle] = useState(task.title);
@@ -89,10 +93,10 @@ function TaskDetails({ task, lists, onClose }: { task: Task; lists: TaskList[]; 
           icon="trash"
           onClick={() =>
             void confirm({ message: t('tasks.delete_confirm', { title: task.title }), danger: true, confirmLabel: t('common.delete') }).then(async (ok) => {
-              if (!ok) return;
+              if (!ok || !isCurrentSession(epoch)) return;
               try {
                 await requireClient().tasks.delete(task.id);
-                removeTask(task.id);
+                if (isCurrentSession(epoch)) removeTask(task.id);
               } catch (err) {
                 pushToast({ tone: 'error', title: errorMessage(err, t) });
               }
@@ -164,11 +168,13 @@ function ListEditor({ list, open, onClose }: { list: TaskList | null; open: bool
   const [name, setName] = useState(list?.name ?? '');
   const [saving, setSaving] = useState(false);
   const save = async () => {
+    const epoch = currentSessionEpoch();
     if (!name.trim()) return;
     setSaving(true);
     try {
       const client = requireClient();
       const saved = list ? await client.tasks.updateList(list.id, { name: name.trim() }) : await client.tasks.createList({ name: name.trim() });
+      if (!isCurrentSession(epoch)) return;
       upsertTaskList(saved);
       if (!list) navigate({ name: 'tasks', listId: saved.id });
       onClose();
@@ -244,12 +250,14 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
 
   // Clears the field right away so several tasks can be typed in a row.
   const add = async () => {
+    const epoch = currentSessionEpoch();
     const title = draft.trim();
     if (!title) return;
     setDraft('');
     setAdding((n) => n + 1);
     try {
-      upsertTask(await requireClient().tasks.create({ title, listId: currentId }));
+      const saved = await requireClient().tasks.create({ title, listId: currentId });
+      if (isCurrentSession(epoch)) upsertTask(saved);
     } catch (err) {
       setDraft((current) => current || title);
       pushToast({ tone: 'error', title: errorMessage(err, t) });
@@ -259,10 +267,12 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
   };
 
   const deleteList = async (list: TaskList) => {
+    const epoch = currentSessionEpoch();
     const ok = await confirm({ title: t('tasks.delete_list_title'), message: t('tasks.delete_list_text', { name: list.name }), confirmLabel: t('common.delete'), danger: true });
-    if (!ok) return;
+    if (!ok || !isCurrentSession(epoch)) return;
     try {
       await requireClient().tasks.deleteList(list.id);
+      if (!isCurrentSession(epoch)) return;
       removeTaskList(list.id);
       navigate({ name: 'tasks' });
     } catch (err) {

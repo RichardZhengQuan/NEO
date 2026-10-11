@@ -33,7 +33,7 @@ import { getPlatform, type NotificationStatus } from '../platform/index.js';
 import { loadReminders, removeReminder, upsertReminder, useData } from '../state/data.js';
 import { runReminderAction } from '../state/events.js';
 import { pushToast } from '../state/notifications.js';
-import { requireClient, useSession } from '../state/session.js';
+import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from '../state/session.js';
 
 const ACTIVE = new Set<Reminder['status']>(['scheduled', 'fired']);
 
@@ -60,6 +60,7 @@ function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder | null
   const now = Date.now();
 
   const save = async () => {
+    const epoch = currentSessionEpoch();
     if (!title.trim() || dueAt === null) {
       setError(t('reminders.error_required'));
       return;
@@ -70,6 +71,7 @@ function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder | null
       const client = requireClient();
       const body = { title: title.trim(), notes: notes.trim() || null, dueAt, timezone, recurrence };
       const saved = reminder ? await client.reminders.update(reminder.id, { ...body, ...(reminder.status !== 'scheduled' && dueAt > Date.now() ? { status: 'scheduled' as const } : {}) }) : await client.reminders.create(body);
+      if (!isCurrentSession(epoch)) return;
       upsertReminder(saved);
       void getPlatform().syncReminders(client);
       pushToast({ tone: 'success', title: reminder ? t('reminders.saved') : t('reminders.created', { when: formatRelative(saved.dueAt, locale) }) });
@@ -182,10 +184,12 @@ function ReminderRow({ reminder, highlight, onEdit }: { reminder: Reminder; high
     setBusy(false);
   };
   const remove = async () => {
+    const epoch = currentSessionEpoch();
     const ok = await confirm({ title: t('reminders.delete_title'), message: t('reminders.delete_text', { title: reminder.title }), confirmLabel: t('common.delete'), danger: true });
-    if (!ok) return;
+    if (!ok || !isCurrentSession(epoch)) return;
     try {
       await requireClient().reminders.delete(reminder.id);
+      if (!isCurrentSession(epoch)) return;
       removeReminder(reminder.id);
       void getPlatform().syncReminders(requireClient());
     } catch (err) {

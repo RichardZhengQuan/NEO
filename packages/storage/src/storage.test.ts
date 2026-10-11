@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { newId, type Message } from '@neo/protocol';
+import { newId, toChatMessages, type Message } from '@neo/protocol';
 import {
   blobToVector,
   createConversationStore,
@@ -14,7 +14,9 @@ import {
   ftsQuery,
   loadOrCreateKey,
   migrate,
+  openDatabase,
   openNeoDatabase,
+  storageMigrations,
   vectorToBlob,
   type NeoDatabase,
 } from './index.js';
@@ -67,6 +69,148 @@ describe('database', () => {
 });
 
 describe('conversation store', () => {
+  it('backfills private-derived legacy answers from flagged context and results without changing transcript parts', () => {
+    db = openDatabase(':memory:');
+    migrate(db, 'storage', storageMigrations.filter((m) => m.version === 1));
+    const store = createConversationStore(db);
+    const contextConversation = store.create();
+    const toolConversation = store.create();
+    const normalConversation = store.create();
+    const secret = 'private-orchid-729';
+    const messages: Message[] = [
+      { id: 'old_context', conversationId: contextConversation.id, role: 'user', createdAt: 1, status: 'complete', parts: [{ type: 'context', text: secret, sensitive: true }] },
+      { id: 'old_answer', conversationId: contextConversation.id, role: 'assistant', createdAt: 2, status: 'complete', parts: [{ type: 'text', text: `I remember ${secret}` }, { type: 'reasoning', text: secret }] },
+      { id: 'old_tool', conversationId: toolConversation.id, role: 'assistant', createdAt: 1, status: 'complete', parts: [{ type: 'tool_call', id: 'old_call', name: 'recall', input: {} }, { type: 'tool_result', toolCallId: 'old_call', name: 'recall', output: secret, sensitive: true }] },
+      { id: 'later_answer', conversationId: toolConversation.id, role: 'assistant', createdAt: 2, status: 'complete', parts: [{ type: 'text', text: secret }] },
+      { id: 'normal_answer', conversationId: normalConversation.id, role: 'assistant', createdAt: 1, status: 'complete', parts: [{ type: 'text', text: 'A normal answer' }] },
+    ];
+    for (const message of messages) {
+      db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(message.id, message.conversationId, message.role, JSON.stringify(message.parts), message.createdAt, message.status);
+    }
+    migrate(db, 'storage', storageMigrations);
+    for (const id of ['old_answer', 'old_tool', 'later_answer']) expect(store.getMessage(id)?.sensitive).toBe(true);
+    for (const message of messages) expect(store.getMessage(message.id)?.parts).toEqual(message.parts);
+    expect(store.getMessage('normal_answer')?.sensitive).toBeUndefined();
+    expect(JSON.stringify(toChatMessages(store.messages(contextConversation.id), { omitSensitiveContext: true }))).not.toContain(secret);
+    expect(JSON.stringify(toChatMessages(store.messages(toolConversation.id), { omitSensitiveContext: true }))).not.toContain(secret);
+  });
+
+  it('backfills databases that already added the sensitivity column before the backfill existed', () => {
+    db = openDatabase(':memory:');
+    migrate(db, 'storage', storageMigrations.filter((m) => m.version <= 2));
+    const store = createConversationStore(db);
+    const conversation = store.create();
+    const secret = 'private-orchid-729';
+    db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('v2_context', conversation.id, 'user', JSON.stringify([{ type: 'context', text: secret, sensitive: true }]), 1, 'complete');
+    db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('v2_answer', conversation.id, 'assistant', JSON.stringify([{ type: 'text', text: `I remember ${secret}` }]), 2, 'complete');
+    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([3]);
+    expect(store.getMessage('v2_answer')?.sensitive).toBe(true);
+    expect(JSON.stringify(toChatMessages(store.messages(conversation.id), { omitSensitiveContext: true }))).not.toContain(secret);
+  });
+
+  it('infers legacy recall sensitivity from existing memory ids while retaining ordinary recall history', () => {
+    db = openDatabase(':memory:');
+    migrate(db, 'storage', storageMigrations.filter((m) => m.version === 1));
+    db.exec("CREATE TABLE memory_nodes (id TEXT PRIMARY KEY, sensitivity TEXT); INSERT INTO memory_nodes VALUES ('private_node', 'sensitive'), ('normal_node', 'normal');");
+    const store = createConversationStore(db);
+    const privateConversation = store.create();
+    const normalConversation = store.create();
+    for (const [conversation, id, content] of [[privateConversation, 'private_node', 'private-orchid-729'], [normalConversation, 'normal_node', 'Likes tea']] as const) {
+      const parts: Message['parts'] = [
+        { type: 'tool_call', id: `call_${id}`, name: 'recall', input: { query: 'memories' } },
+        { type: 'tool_result', toolCallId: `call_${id}`, name: 'recall', output: { memories: [{ id, content }] } },
+        { type: 'text', text: content },
+      ];
+      db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(`msg_${id}`, conversation.id, 'assistant', JSON.stringify(parts), 1, 'complete');
+    }
+    migrate(db, 'storage', storageMigrations);
+    expect(store.getMessage('msg_private_node')?.sensitive).toBe(true);
+    expect(store.getMessage('msg_normal_node')?.sensitive).toBeUndefined();
+    expect(JSON.stringify(toChatMessages(store.messages(privateConversation.id), { omitSensitiveContext: true }))).not.toContain('private-orchid-729');
+    expect(JSON.stringify(toChatMessages(store.messages(normalConversation.id), { omitSensitiveContext: true }))).toContain('Likes tea');
+  });
+
+  it.each([
+    { scenario: 'missing recall id', name: 'recall', output: { memories: [{ id: 'missing_node', content: 'private-orchid-729' }] } },
+    { scenario: 'deleted remember id', name: 'remember', output: { id: 'deleted_node', label: 'private-orchid-729' } },
+    { scenario: 'successful forget labels', name: 'forget', output: { forgotten: ['private-orchid-729'] } },
+  ])('withholds legacy memory output with unknown provenance: $scenario', ({ name, output }) => {
+    db = openDatabase(':memory:');
+    migrate(db, 'storage', storageMigrations.filter((m) => m.version === 1));
+    db.exec("CREATE TABLE memory_nodes (id TEXT PRIMARY KEY, sensitivity TEXT); INSERT INTO memory_nodes VALUES ('deleted_node', 'sensitive'); DELETE FROM memory_nodes WHERE id = 'deleted_node';");
+    const store = createConversationStore(db);
+    const conversation = store.create();
+    const parts: Message['parts'] = [
+      { type: 'tool_call', id: 'legacy_call', name, input: {} },
+      { type: 'tool_result', toolCallId: 'legacy_call', name, output },
+      { type: 'text', text: 'I found private-orchid-729' },
+    ];
+    db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('legacy_msg', conversation.id, 'assistant', JSON.stringify(parts), 1, 'complete');
+    migrate(db, 'storage', storageMigrations);
+    expect(store.getMessage('legacy_msg')?.sensitive).toBe(true);
+    expect(store.getMessage('legacy_msg')?.parts).toEqual(parts);
+    expect(JSON.stringify(toChatMessages(store.messages(conversation.id), { omitSensitiveContext: true }))).not.toContain('private-orchid-729');
+  });
+
+  it('retains legacy empty and generic no-memory results without sensitivity flags', () => {
+    db = openDatabase(':memory:');
+    migrate(db, 'storage', storageMigrations.filter((m) => m.version === 1));
+    const store = createConversationStore(db);
+    const conversation = store.create();
+    const parts: Message['parts'] = [
+      { type: 'tool_call', id: 'empty_recall', name: 'recall', input: {} },
+      { type: 'tool_result', toolCallId: 'empty_recall', name: 'recall', output: { memories: [], note: 'Memory recall is turned off' } },
+      { type: 'tool_call', id: 'empty_forget', name: 'forget', input: {} },
+      { type: 'tool_result', toolCallId: 'empty_forget', name: 'forget', output: { forgotten: [], note: 'No memories match' } },
+      { type: 'text', text: 'Nothing to recall or forget' },
+    ];
+    db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('empty_msg', conversation.id, 'assistant', JSON.stringify(parts), 1, 'complete');
+    migrate(db, 'storage', storageMigrations);
+    expect(store.getMessage('empty_msg')?.sensitive).toBeUndefined();
+    expect(JSON.stringify(toChatMessages(store.messages(conversation.id), { omitSensitiveContext: true }))).toContain('Nothing to recall or forget');
+  });
+
+  it.each([false, true])('round-trips sensitive messages and tool results (upgraded=%s)', (upgraded) => {
+    db = upgraded ? openDatabase(':memory:') : openNeoDatabase(':memory:');
+    if (upgraded) {
+      migrate(db, 'storage', storageMigrations.filter((m) => m.version === 1));
+      db.prepare('INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)').run('old_conv', 'Old', 1, 1);
+      db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
+        .run('old_msg', 'old_conv', 'assistant', JSON.stringify([{ type: 'text', text: 'Old answer' }]), 1, 'complete');
+      expect(migrate(db, 'storage', storageMigrations).applied).toEqual([2, 3]);
+    }
+    const store = createConversationStore(db);
+    if (upgraded) {
+      expect(store.getMessage('old_msg')).toMatchObject({ parts: [{ type: 'text', text: 'Old answer' }] });
+      expect(store.getMessage('old_msg')?.sensitive).toBeUndefined();
+      expect(migrate(db, 'storage', storageMigrations).applied).toEqual([]);
+    }
+    const c = store.create();
+    const message: Message = {
+      id: 'private_msg', conversationId: c.id, role: 'assistant', createdAt: 2, status: 'complete', sensitive: true,
+      parts: [
+        { type: 'tool_call', id: 'recall_call', name: 'recall', input: { query: 'private' } },
+        { type: 'tool_result', toolCallId: 'recall_call', name: 'recall', output: { memories: ['private fact'] }, sensitive: true },
+        { type: 'text', text: 'A private answer' },
+      ],
+    };
+    store.appendMessage(message);
+    expect(store.getMessage(message.id)).toMatchObject(message);
+    expect(createConversationStore(db).messages(c.id)[0]).toMatchObject(message);
+    store.updateMessage(message.id, { status: 'error' });
+    expect(store.getMessage(message.id)).toMatchObject({ sensitive: true, parts: message.parts, status: 'error' });
+    store.updateMessage(message.id, { sensitive: false, parts: [{ type: 'text', text: 'A normal answer' }] });
+    expect(store.getMessage(message.id)?.sensitive).not.toBe(true);
+    store.updateMessage(message.id, { sensitive: true });
+    expect(createConversationStore(db).getMessage(message.id)?.sensitive).toBe(true);
+  });
+
   it('creates, appends, paginates, searches and deletes', () => {
     db = openNeoDatabase(':memory:');
     let t = 1000;

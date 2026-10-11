@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ChatMessage, ChatRequest, ProviderConfig } from '@neo/protocol';
+import { toolInputJsonSchema, type ChatMessage, type ChatRequest, type ProviderConfig, type MemoryService, type ProductivityStores } from '@neo/protocol';
+import { createBuiltinTools } from '../../tools/src/builtins/index.js';
 import { GeminiAdapter, sanitizeGeminiSchema } from './gemini.js';
 import { collect, dataFrames, fakeFetch, jsonResponse, ofType, recordingSleep, sseResponse, textOfEvents, type FakeResponder } from './testing/http.js';
 
@@ -161,17 +162,71 @@ describe('sanitizeGeminiSchema', () => {
     });
   });
 
-  it('drops free-form object properties (and their required entries) and untyped empty items', () => {
+  it('drops free-form object properties (and their required entries); arrays with free-form items get a {type:object} fallback', () => {
     const out = sanitizeGeminiSchema({
       type: 'object',
       properties: {
         url: { type: 'string' },
         headers: { type: 'object', additionalProperties: { type: 'string' } },
+        // blocks mirrors render_ui's `blocks: z.array(z.record(z.string(), z.unknown()))` —
+        // items is a free-form object; after sanitization it must still have items (F07 fix).
         blocks: { type: 'array', items: { type: 'object', additionalProperties: {} } },
       },
       required: ['url', 'headers'],
     });
-    expect(out).toEqual({ type: 'object', properties: { url: { type: 'string' }, blocks: { type: 'array' } }, required: ['url'] });
+    expect(out).toEqual({
+      type: 'object',
+      properties: { url: { type: 'string' }, blocks: { type: 'array', items: { type: 'object' } } },
+      required: ['url'],
+    });
+  });
+
+  it('arrays without any items declaration also get a {type:object} fallback', () => {
+    const out = sanitizeGeminiSchema({ type: 'array' });
+    expect(out).toEqual({ type: 'array', items: { type: 'object' } });
+  });
+});
+
+// ── Built-in tool schema coverage ──────────────────────────────────────────────
+
+function checkDeclaration(schema: unknown, path: string): void {
+  expect(schema, path).toBeTypeOf('object');
+  expect(schema, path).not.toBeNull();
+  const node = schema as Record<string, unknown>;
+  const supported = new Set([
+    'type', 'title', 'description', 'nullable', 'format', 'enum', 'properties', 'required', 'items', 'anyOf',
+    'minItems', 'maxItems', 'minProperties', 'maxProperties', 'minLength', 'maxLength', 'pattern', 'minimum', 'maximum',
+  ]);
+  for (const key of Object.keys(node)) expect(supported.has(key), `${path}.${key}`).toBe(true);
+  if (node['type'] === 'array') {
+    expect(node['items'], `${path}.items`).toBeDefined();
+    checkDeclaration(node['items'], `${path}.items`);
+  }
+  for (const [name, child] of Object.entries((node['properties'] ?? {}) as Record<string, unknown>)) {
+    checkDeclaration(child, `${path}.properties.${name}`);
+  }
+  if (Array.isArray(node['anyOf'])) node['anyOf'].forEach((child, i) => checkDeclaration(child, `${path}.anyOf.${i}`));
+}
+
+describe('built-in Gemini declarations (F07)', () => {
+  it('emits every real built-in schema with items on every array and only supported keywords', async () => {
+    // Schema generation never executes a tool; enable web_search to include the optional built-in too.
+    const builtins = createBuiltinTools({
+      stores: {} as ProductivityStores,
+      memory: {} as MemoryService,
+      webSearch: { provider: 'brave', apiKey: 'fixture' },
+    });
+    const tools = builtins.map((tool) => ({
+      name: tool.name, description: tool.description, inputSchema: toolInputJsonSchema(tool.inputSchema),
+    }));
+    const { a, f } = make(okReply);
+    await collect(a.chat(req({ tools })));
+    const declarations = (f.calls[0]!.body!['tools'] as { functionDeclarations: { name: string; parameters?: unknown }[] }[])[0]!.functionDeclarations;
+    expect(declarations.map((d) => d.name)).toEqual(builtins.map((tool) => tool.name));
+    expect(declarations.map((d) => d.name)).toContain('web_search');
+    for (const declaration of declarations) {
+      if (declaration.parameters !== undefined) checkDeclaration(declaration.parameters, declaration.name);
+    }
   });
 });
 

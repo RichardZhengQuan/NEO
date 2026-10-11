@@ -12,7 +12,7 @@ import { errorMessage } from '../lib/errors.js';
 import { navigate } from '../router.js';
 import { loadNotes, removeNote, upsertNote, useData } from '../state/data.js';
 import { pushToast } from '../state/notifications.js';
-import { requireClient } from '../state/session.js';
+import { currentSessionEpoch, isCurrentSession, requireClient } from '../state/session.js';
 
 function titleOf(note: Pick<Note, 'title' | 'content'>, fallback: string): string {
   if (note.title.trim()) return note.title.trim();
@@ -29,11 +29,20 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
   const [title, setTitle] = useState(note.title);
   const [content, setContent] = useState(note.content);
   const [tags, setTags] = useState(note.tags);
+  const [pinned, setPinned] = useState(note.pinned);
   const [mode, setMode] = useState<'write' | 'preview'>(note.content ? 'preview' : 'write');
   const [state, setState] = useState<SaveState>('saved');
-  const latest = useRef({ title, content, tags });
-  latest.current = { title, content, tags };
+  const latest = useRef({ title, content, tags, pinned });
+  latest.current = { title, content, tags, pinned };
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const revRef = useRef(0);
+  const savedRev = useRef(0);
+  const inFlight = useRef(false);
+  const pending = useRef(false);
+  const deleted = useRef(false);
+  const alive = useRef(false);
+  const [client] = useState(requireClient);
+  const epoch = useRef(currentSessionEpoch());
 
   // Remote edits (another device) flow in while we have nothing unsaved.
   useEffect(() => {
@@ -41,49 +50,62 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
     setTitle(note.title);
     setContent(note.content);
     setTags(note.tags);
+    setPinned(note.pinned);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [note.updatedAt]);
 
   const flush = async () => {
     if (timer.current) clearTimeout(timer.current);
     timer.current = null;
-    const { title: tt, content: cc, tags: tg } = latest.current;
-    setState('saving');
+    if (deleted.current || !isCurrentSession(epoch.current)) return;
+    if (inFlight.current) {
+      pending.current = true;
+      return;
+    }
+    if (savedRev.current === revRef.current) return;
+    const rev = revRef.current;
+    const patch = { ...latest.current };
+    inFlight.current = true;
+    if (alive.current) setState('saving');
     try {
-      upsertNote(await requireClient().notes.update(note.id, { title: tt, content: cc, tags: tg }));
-      setState('saved');
+      const updated = await client.notes.update(note.id, patch);
+      if (!deleted.current && isCurrentSession(epoch.current) && revRef.current === rev) {
+        savedRev.current = rev;
+        upsertNote(updated);
+        if (alive.current) setState('saved');
+      }
     } catch {
-      setState('error');
+      if (alive.current && isCurrentSession(epoch.current) && revRef.current === rev) setState('error');
+    } finally {
+      inFlight.current = false;
+      if (pending.current) {
+        pending.current = false;
+        void flush();
+      }
     }
   };
 
-  const change = () => {
+  const change = (patch: Partial<typeof latest.current>) => {
+    latest.current = { ...latest.current, ...patch };
+    revRef.current++;
     setState('dirty');
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => void flush(), 700);
   };
 
-  // Save on leave; drop notes that were never written. The check runs a tick
-  // later so a StrictMode remount (dev) doesn't count as leaving.
-  const alive = useRef(false);
+  // Save on leave through the same queue. A StrictMode remount is not leaving.
   useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
       setTimeout(() => {
-        if (alive.current) return;
+        if (alive.current || deleted.current || !isCurrentSession(epoch.current)) return;
         const { title: tt, content: cc } = latest.current;
-        if (timer.current) {
-          clearTimeout(timer.current);
-          timer.current = null;
-          void requireClient()
-            .notes.update(note.id, latest.current)
-            .then(upsertNote)
-            .catch(() => undefined);
+        if (savedRev.current !== revRef.current) {
+          void flush();
         } else if (!tt.trim() && !cc.trim() && useData.getState().notes[note.id]) {
-          void requireClient()
-            .notes.delete(note.id)
-            .then(() => removeNote(note.id))
+          void client.notes.delete(note.id)
+            .then(() => { if (isCurrentSession(epoch.current)) removeNote(note.id); })
             .catch(() => undefined);
         }
       }, 0);
@@ -91,24 +113,26 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [note.id]);
 
-  const togglePin = async () => {
-    try {
-      upsertNote(await requireClient().notes.update(note.id, { pinned: !note.pinned }));
-    } catch (err) {
-      pushToast({ tone: 'error', title: errorMessage(err, t) });
-    }
+  const togglePin = () => {
+    setPinned(!pinned);
+    change({ pinned: !pinned });
+    void flush();
   };
 
   const remove = async () => {
     const ok = await confirm({ title: t('notes.delete_title'), message: t('notes.delete_text', { title: titleOf(note, t('notes.untitled')) }), confirmLabel: t('common.delete'), danger: true });
-    if (!ok) return;
+    if (!ok || !isCurrentSession(epoch.current)) return;
     if (timer.current) clearTimeout(timer.current);
     timer.current = null;
+    deleted.current = true;
+    pending.current = false;
     try {
-      await requireClient().notes.delete(note.id);
+      await client.notes.delete(note.id);
+      if (!isCurrentSession(epoch.current)) return;
       removeNote(note.id);
       navigate({ name: 'notes' }, { replace: true });
     } catch (err) {
+      deleted.current = false;
       pushToast({ tone: 'error', title: errorMessage(err, t) });
     }
   };
@@ -125,8 +149,8 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
               {status}
             </span>
             {state === 'error' && <IconButton icon="refresh" label={t('common.retry')} onClick={() => void flush()} />}
-            <span className={note.pinned ? 'neo-pin neo-pin--on' : 'neo-pin'}>
-              <IconButton icon="pin" label={note.pinned ? t('common.unpin') : t('common.pin')} pressed={note.pinned} onClick={() => void togglePin()} />
+            <span className={pinned ? 'neo-pin neo-pin--on' : 'neo-pin'}>
+              <IconButton icon="pin" label={pinned ? t('common.unpin') : t('common.pin')} pressed={pinned} onClick={() => void togglePin()} />
             </span>
             <IconButton icon="trash" label={t('common.delete')} onClick={() => void remove()} />
           </>
@@ -145,7 +169,7 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
             maxLength={300}
             onChange={(e) => {
               setTitle(e.target.value);
-              change();
+              change({ title: e.target.value });
             }}
           />
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -170,7 +194,7 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
               autoFocus={!note.content}
               onChange={(e) => {
                 setContent(e.target.value);
-                change();
+                change({ content: e.target.value });
               }}
             />
           ) : content.trim() ? (
@@ -185,7 +209,7 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
             values={tags}
             onChange={(v) => {
               setTags(v);
-              latest.current = { ...latest.current, tags: v };
+              change({ tags: v });
               void flush();
             }}
             max={30}
@@ -217,9 +241,11 @@ export function NotesScreen({ noteId }: { noteId?: string }): ReactElement {
   const current = noteId ? notes[noteId] : undefined;
 
   const create = async () => {
+    const epoch = currentSessionEpoch();
     setCreating(true);
     try {
       const note = await requireClient().notes.create({ title: '', content: '', ...(tag ? { tags: [tag] } : {}) });
+      if (!isCurrentSession(epoch)) return;
       upsertNote(note);
       navigate({ name: 'notes', noteId: note.id });
     } catch (err) {
