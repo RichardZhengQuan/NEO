@@ -24,9 +24,8 @@ export const AVATAR_CSS = `
 .neo-av-head{transition:transform .6s cubic-bezier(.34,1.3,.64,1)}
 .neo-av-lid{transform-box:fill-box;transform-origin:50% 0%;transform:scaleY(0);animation:neo-av-blink 5.2s infinite}
 /* The mouth is drawn in its own frame with (0, 0) on the painted smile, so it opens from there. */
-.neo-av-mouth-open{opacity:0;transform-box:view-box;transform-origin:0 0;transform:scaleY(.15)}
+.neo-av-mouth-open{opacity:0;transform-box:view-box;transform-origin:0 0}
 .neo-av-mouth--grow{transform:scale(.15)}
-.neo-av-mouth--flap{transform:none}
 .neo-av-flap{opacity:0}
 .neo-av-halo{opacity:.2;animation:neo-av-glow 2.8s ease-in-out infinite}
 .neo-av-thought{opacity:0;transform-box:fill-box;transform-origin:0% 100%;transform:scale(.4);transition:opacity .25s ease,transform .45s cubic-bezier(.34,1.56,.64,1)}
@@ -48,10 +47,9 @@ export const AVATAR_CSS = `
 
 /* speaking: the mouth opens from the painted smile, small nods; the robot's eyes flicker */
 .neo-av[data-state=speaking] .neo-av-nod{animation:neo-av-nod 2.6s ease-in-out infinite}
-.neo-av[data-state=speaking] .neo-av-mouth-open{opacity:1;animation:neo-av-jaw 1.15s ease-in-out infinite}
-.neo-av[data-state=speaking] .neo-av-mouth--grow{animation-name:neo-av-jaw-grow}
+.neo-av[data-state=speaking] .neo-av-mouth-open{opacity:1}
+.neo-av[data-state=speaking] .neo-av-mouth--grow{animation:neo-av-jaw-grow 1.15s ease-in-out infinite}
 /* lip flaps: closed, open, half, open, closed, half, open, half, closed, half (0.12s each) */
-.neo-av[data-state=speaking] .neo-av-mouth--flap{animation:none}
 .neo-av[data-state=speaking] .neo-av-flap-half{animation:neo-av-flap-half 1.2s step-end infinite}
 .neo-av[data-state=speaking] .neo-av-flap-open{animation:neo-av-flap-open 1.2s step-end infinite}
 .neo-av[data-state=speaking] .neo-av-halo{animation:neo-av-glow .42s ease-in-out infinite alternate}
@@ -59,7 +57,6 @@ export const AVATAR_CSS = `
 @keyframes neo-av-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.012)}}
 @keyframes neo-av-blink{0%,91%,97%,100%{transform:scaleY(0)}93%,95%{transform:scaleY(1)}}
 @keyframes neo-av-nod{0%,100%{transform:rotate(0)}30%{transform:rotate(-.8deg)}70%{transform:rotate(.6deg)}}
-@keyframes neo-av-jaw{0%,100%{transform:scaleY(.15)}16%{transform:scaleY(1)}32%{transform:scaleY(.4)}50%{transform:scaleY(.9)}66%{transform:scaleY(.2)}82%{transform:scaleY(.75)}}
 @keyframes neo-av-flap-half{0%,30%,60%,80%{opacity:0}20%,50%,70%,90%{opacity:1}}
 @keyframes neo-av-flap-open{0%,20%,40%,70%{opacity:0}10%,30%,60%{opacity:1}}
 @keyframes neo-av-jaw-grow{0%,100%{transform:scale(.15)}16%{transform:scale(1)}32%{transform:scale(.4)}50%{transform:scale(.9)}66%{transform:scale(.2)}82%{transform:scale(.75)}}
