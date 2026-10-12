@@ -15,6 +15,12 @@ And because it's *your* assistant, **you control all of it**. You can see the wh
 
 Public API: `MemoryService` in `@neo/protocol` (`memory.ts`). Implementation: `@neo/memory` (`packages/memory/src`). Constants: `MEMORY_CONSTANTS` and `BASE_STABILITY_DAYS`, defined in `constants.ts` and re-exported from `index.ts`; names below refer to them, and [Constants](#constants) lists every value.
 
+## Viewing the net
+
+Memory's Net tab places memories in 3D around a stable vertical time spine: a memory's height comes from `createdAt`, with newest at the top. Empty periods are compressed and marked with `≈`; date ticks preserve the timeline. The optional `mem_self` entity is the selectable spine, with `about` links drawn as horizontal spokes. Other entities keep their first-mention height and have faint threads up to their latest access.
+
+Drag horizontally to turn, drag vertically or scroll to move through time, and pinch or Ctrl-scroll to zoom. Fit to view shows the whole net; Jump to now returns to the top. Up/Down steps through memories in time, Left/Right turns, +/− zooms, Enter opens the focused memory, and Escape clears selection. Size shows importance, faintness shows retention, rings mark pinned or highlighted memories, and archived memories are hollow. Reduced motion disables idle rotation and camera animation; devices without WebGL use the 2D view.
+
 ## Data model (SQLite, migration namespace `memory`)
 
 Migrations in `schema.ts`:

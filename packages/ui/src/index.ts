@@ -84,6 +84,7 @@ export { Composer } from './composer.js';
 
 export type { MemoryGraphViewProps } from './memory-graph.js';
 export { MemoryGraphView, GraphLegend, memoryKindColor, MEMORY_KIND_ORDER } from './memory-graph.js';
+export { MemoryNet3D } from './memory-net-3d.js';
 
 export type { MemoryNodeCardProps } from './memory-card.js';
 export { MemoryNodeCard } from './memory-card.js';

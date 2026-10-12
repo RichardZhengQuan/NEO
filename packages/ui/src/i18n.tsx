@@ -172,6 +172,9 @@ const en: Messages = {
   'memory.graph_zoom_in': 'Zoom in',
   'memory.graph_zoom_out': 'Zoom out',
   'memory.graph_fit': 'Fit to view',
+  'memory.graph_now': 'Now',
+  'memory.graph_jump_now': 'Jump to now',
+  'memory.graph_3d_aria': 'Memory net with {nodes} memories and {edges} links. Up and Down move through time; Left and Right rotate. Enter opens the focused memory; Escape clears.',
 
   // countdown
   'countdown.days': '{n}d',
@@ -334,6 +337,9 @@ const zhCN: Messages = {
   'memory.graph_zoom_in': '放大',
   'memory.graph_zoom_out': '缩小',
   'memory.graph_fit': '适应窗口',
+  'memory.graph_now': '现在',
+  'memory.graph_jump_now': '回到现在',
+  'memory.graph_3d_aria': '记忆网络，共 {nodes} 条记忆、{edges} 条关联。上下键穿梭时间，左右键旋转。回车打开当前记忆，Esc 清除选择。',
 
   'countdown.days': '{n}天',
   'countdown.hours': '{n}小时',

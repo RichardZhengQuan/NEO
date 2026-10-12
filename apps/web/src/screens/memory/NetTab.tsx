@@ -4,7 +4,7 @@
  */
 import { useMemo, useState, type ReactElement } from 'react';
 import { MEMORY_KINDS, type MemoryKind } from '@neo/protocol';
-import { Button, Chip, EmptyState, GraphLegend, IconButton, MemoryGraphView, Skeleton, Switch, TextField, useT } from '@neo/ui';
+import { Button, Chip, EmptyState, GraphLegend, IconButton, MemoryNet3D, Skeleton, Switch, TextField, useT } from '@neo/ui';
 import { useDebounced, useLoader } from '../../hooks/useLoader.js';
 import { useIsDesktop } from '../../hooks/useMediaQuery.js';
 import { useData } from '../../state/data.js';
@@ -80,13 +80,13 @@ export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId:
         graph.error ? (
           <EmptyState icon="alert-circle" title={t('common.error')} action={<Button onClick={() => void graph.reload()}>{t('common.retry')}</Button>} />
         ) : (
-          <Skeleton height={desktop ? 540 : 420} style={{ borderRadius: 20 }} />
+          <Skeleton className="neo-memory-net-viewport" height={desktop ? 640 : 420} style={{ borderRadius: 20 }} />
         )
       ) : graph.data.nodes.length === 0 ? (
         <EmptyState icon="network" title={t('memoryNet.empty_title')} description={t('memoryNet.empty_text')} />
       ) : (
         <>
-          <MemoryGraphView graph={graph.data} selectedId={selectedId} highlightIds={highlight} onSelect={onSelect} height={desktop ? 540 : 420} showLegend={false} />
+          <MemoryNet3D graph={graph.data} selectedId={selectedId} highlightIds={q ? highlight : undefined} onSelect={onSelect} height={desktop ? 640 : 420} showLegend={false} className="neo-memory-net-viewport" />
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
             <GraphLegend />
             <span className="neo-help">{t('memoryNet.counts', { nodes: graph.data.nodes.length, edges: graph.data.edges.length })}</span>
