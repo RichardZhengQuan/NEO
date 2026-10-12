@@ -32,12 +32,14 @@ import {
   MemoryNodePatchSchema,
   MemoryPolicySchema,
   NeoError,
+  SELF_MEMORY_ID,
   silentLogger,
   summarizeNode,
 } from '@neo/protocol';
 import type { Clock, Embedder, Logger } from '@neo/protocol';
 import { blobToVector, fromJson, migrate, toNum, vectorToBlob, type SqlValue } from '@neo/storage';
 import { MEMORY_CONSTANTS, type MemoryLLM, type MemoryServiceOptions } from './constants.js';
+import { linkSelf } from './self.js';
 import { lastConsolidationAt, runConsolidation } from './consolidate.js';
 import type { MemoryContext } from './context.js';
 import {
@@ -380,6 +382,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
       const p = parsed.data;
       const node = getNode(db, id);
       if (!node) throw new NeoError('not_found', `Memory ${id} not found`);
+      if (id === SELF_MEMORY_ID) throw new NeoError('bad_request', 'The centre of the memory net (you) cannot be edited.');
       const texts = [p.label, p.content, ...(p.aliases ?? []), ...(p.tags ?? [])].filter((t): t is string => typeof t === 'string');
       if (texts.some(hasCredentials)) throw new NeoError('bad_request', 'That looks like a password, key or card number. NEO never stores secrets in memory.');
 
@@ -421,6 +424,8 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
         } else {
           s.syncVectorPlace(updated);
         }
+        // An edit can make a memory about the user (links are only ever added).
+        if (updated.status !== 'superseded') linkSelf(db, updated, now);
         s.updated.add(id);
         return updated;
       });
@@ -432,13 +437,15 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
       const text = query.trim();
       if (!text) return [];
       const max = Math.max(1, Math.min(500, limit));
-      const where: Where = (alias = '') => ({ sql: `${alias ? `${alias}.` : ''}status IN ('active', 'archived')`, params: [] });
+      // Never the self node: "forget everything about me" must not reach every memory through it.
+      const where: Where = (alias = '') => ({ sql: `${alias ? `${alias}.` : ''}status IN ('active', 'archived') AND ${alias ? `${alias}.` : ''}id != ?`, params: [SELF_MEMORY_ID] });
       const scored = new Map<string, number>();
       const add = (id: string, score: number) => scored.set(id, Math.max(scored.get(id) ?? 0, score));
 
       // Entities named in the request, and everything that is about them.
       const normQuery = normalizeText(text);
-      const entityRows = db.prepare(`SELECT id, label, aliases FROM memory_nodes WHERE kind = 'entity' AND ${where().sql}`).all() as { id: string; label: string; aliases: string }[];
+      const w = where();
+      const entityRows = db.prepare(`SELECT id, label, aliases FROM memory_nodes WHERE kind = 'entity' AND ${w.sql}`).all(...w.params) as { id: string; label: string; aliases: string }[];
       for (const row of entityRows) {
         const terms = [row.label, ...fromJson<string[]>(row.aliases, [])].map(normalizeText);
         if (!terms.some((t) => (hasCJK(t) || t.length >= 2) && containsTerm(normQuery, t))) continue;
@@ -480,6 +487,8 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
         for (let hop = 0; hop < depth && frontier.length; hop++) {
           const nextIds: string[] = [];
           for (const id of frontier) {
+            // Through the self node every memory is two hops away: it ends a path unless it is the centre.
+            if (id === SELF_MEMORY_ID && id !== center.id) continue;
             for (const e of edgeStmt.all(id, id) as { src: string; dst: string }[]) {
               const other = e.src === id ? e.dst : e.src;
               if (seen.has(other)) continue;
@@ -563,15 +572,16 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
     async stats(): Promise<MemoryStats> {
       const count = (sql: string) => Number((db.prepare(sql).get() as { n: number | bigint }).n);
       const byKind: Record<MemoryKind, number> = { episode: 0, fact: 0, entity: 0, preference: 0, skill: 0, goal: 0, summary: 0 };
-      for (const r of db.prepare('SELECT kind, COUNT(*) AS n FROM memory_nodes GROUP BY kind').all() as { kind: MemoryKind; n: number | bigint }[]) {
+      // The self node is the net's centre, not a memory: it is not counted.
+      for (const r of db.prepare('SELECT kind, COUNT(*) AS n FROM memory_nodes WHERE id != ? GROUP BY kind').all(SELF_MEMORY_ID) as { kind: MemoryKind; n: number | bigint }[]) {
         if (r.kind in byKind) byKind[r.kind] = toNum(r.n);
       }
       const byStatus: Record<MemoryStatus, number> = { active: 0, archived: 0, superseded: 0 };
-      for (const r of db.prepare('SELECT status, COUNT(*) AS n FROM memory_nodes GROUP BY status').all() as { status: MemoryStatus; n: number | bigint }[]) {
+      for (const r of db.prepare('SELECT status, COUNT(*) AS n FROM memory_nodes WHERE id != ? GROUP BY status').all(SELF_MEMORY_ID) as { status: MemoryStatus; n: number | bigint }[]) {
         if (r.status in byStatus) byStatus[r.status] = toNum(r.n);
       }
       return {
-        total: count('SELECT COUNT(*) AS n FROM memory_nodes'),
+        total: Number((db.prepare('SELECT COUNT(*) AS n FROM memory_nodes WHERE id != ?').get(SELF_MEMORY_ID) as { n: number | bigint }).n),
         byKind,
         byStatus,
         edges: count('SELECT COUNT(*) AS n FROM memory_edges'),
@@ -642,6 +652,8 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
           ).run(edge.id, edge.from, edge.to, edge.type, edge.weight, edge.createdAt, edge.updatedAt, edge.lastReinforcedAt, edge.coactivations);
           report.edges++;
         }
+        // Memories from an export made before the self node existed hang on it too (not counted as imported edges).
+        for (const node of getNodes(db, imported)) linkSelf(db, node, s.now);
         for (const id of imported) s.created.add(id);
       });
       return report;

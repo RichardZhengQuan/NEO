@@ -5,7 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createRef, type ReactElement } from 'react';
 import type { Message, MemoryNode, ToolConfirmation, UIAction, UIBlock, UiActionConfirmation } from '@neo/protocol';
-import { FORM_SUBMIT_ACTION_ID } from '@neo/protocol';
+import { FORM_SUBMIT_ACTION_ID, SELF_MEMORY_ID } from '@neo/protocol';
 import { I18nProvider, buildMessages, createTranslator, dictionaries, useT } from './i18n.js';
 import { BlockList, BlockRenderer, formatCell, validateFormField, type OnUIAction } from './blocks.js';
 import { ConfirmationCard, MessageView, humanizeToolName, uiActionConfirmOptions, useUiActionConfirm } from './message.js';
@@ -819,6 +819,35 @@ describe('MemoryGraphView', () => {
     expect(onSelect).toHaveBeenCalledWith('mem_2');
   });
 
+  it('shows the self node as "You"', () => {
+    const onSelect = vi.fn();
+    const withSelf = {
+      nodes: [...graph.nodes, { ...node, id: SELF_MEMORY_ID, kind: 'entity' as const, label: 'placeholder', content: '', importance: 1, pinned: true, retention: 1 }],
+      edges: [...graph.edges, { ...graph.edges[0]!, id: 'edge_2', to: SELF_MEMORY_ID, weight: 0.3 }],
+    };
+    wrap(<MemoryGraphView graph={withSelf} onSelect={onSelect} />);
+    expect(screen.queryByText('placeholder')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^You/ }));
+    expect(onSelect).toHaveBeenCalledWith(SELF_MEMORY_ID);
+  });
+
+  it('does not count the self node as a memory in the canvas description', () => {
+    // A do-nothing 2D context, so the canvas (not the list fallback) renders.
+    const ctx = new Proxy({}, { get: (_t, key) => (key === 'measureText' ? () => ({ width: 0 }) : () => undefined), set: () => true });
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = (() => ctx) as unknown as HTMLCanvasElement['getContext'];
+    try {
+      const withSelf = {
+        nodes: [...graph.nodes, { ...node, id: SELF_MEMORY_ID, kind: 'entity' as const, label: 'placeholder', content: '', importance: 1, pinned: true, retention: 1 }],
+        edges: [...graph.edges, { ...graph.edges[0]!, id: 'edge_2', to: SELF_MEMORY_ID, weight: 0.3 }],
+      };
+      wrap(<MemoryGraphView graph={withSelf} />);
+      expect(screen.getByRole('img', { name: /Memory net with 2 memories and 2 links/ })).toBeTruthy();
+    } finally {
+      HTMLCanvasElement.prototype.getContext = original;
+    }
+  });
+
   it('shows the kind legend', () => {
     wrap(<MemoryGraphView graph={graph} />);
     const legend = document.querySelector('.neo-legend')!;
@@ -854,6 +883,16 @@ describe('MemoryNodeCard', () => {
     expect(pin.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(pin);
     expect(onTogglePin).toHaveBeenCalled();
+  });
+
+  it('labels the self node "You", in the reader\'s language', () => {
+    const self: MemoryNode = { ...node, id: SELF_MEMORY_ID, kind: 'entity', label: 'placeholder', content: '' };
+    const { unmount } = wrap(<MemoryNodeCard node={self} />);
+    expect(screen.getByText('You')).toBeTruthy();
+    expect(screen.queryByText('placeholder')).toBeNull();
+    unmount();
+    wrap(<MemoryNodeCard node={self} />, 'zh-CN');
+    expect(screen.getByText('你')).toBeTruthy();
   });
 
   it('compact mode keeps the label', () => {

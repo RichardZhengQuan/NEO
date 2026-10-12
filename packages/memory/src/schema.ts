@@ -5,6 +5,7 @@
 import type { Migration } from '@neo/storage';
 import { deleteNodes } from './db-helpers.js';
 import { redactJournal } from './journal.js';
+import { backfillSelf } from './self.js';
 
 export const memoryMigrations: Migration[] = [
   {
@@ -83,6 +84,13 @@ export const memoryMigrations: Migration[] = [
       const nodes = db.prepare("SELECT id, label FROM memory_nodes WHERE status = 'pending'").all() as { id: string; label: string }[];
       deleteNodes(db, nodes.map((node) => node.id));
       redactJournal(db, nodes);
+    },
+  },
+  {
+    version: 3,
+    name: 'self node',
+    up(db) {
+      backfillSelf(db, Date.now());
     },
   },
 ];

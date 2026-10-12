@@ -1,7 +1,8 @@
 /**
- * Reminders: due now, upcoming by day, done. Snooze / complete / edit /
- * delete, a quick editor that understands the user's timezone and repeats,
- * and a nudge to turn on notifications.
+ * Reminders NEO set for you: due now, upcoming by day, done. Snooze /
+ * complete / edit / delete, an editor that understands the user's timezone
+ * and repeats, and a nudge to turn on notifications. There is no manual add:
+ * you ask NEO ("remind me to stretch in 30 minutes").
  */
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { RecurrenceInput, Reminder } from '@neo/protocol';
@@ -37,18 +38,16 @@ import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from
 
 const ACTIVE = new Set<Reminder['status']>(['scheduled', 'fired']);
 
-function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder | null; open: boolean; onClose: () => void }): ReactElement {
+function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder; open: boolean; onClose: () => void }): ReactElement {
   const t = useT();
   const locale = useLocale();
-  const defaultTz = useSession((s) => s.settings?.timezone ?? 'UTC');
-  const tz = reminder?.timezone ?? defaultTz;
-  const [timezone, setTimezone] = useState(tz);
-  const [title, setTitle] = useState(reminder?.title ?? '');
-  const [notes, setNotes] = useState(reminder?.notes ?? '');
-  const [due, setDue] = useState(() => toLocalInputValue(reminder?.dueAt ?? nextTimeOfDay(wallTimeOf(Date.now(), tz).hour + 1, 0, Date.now(), tz), tz));
-  const [preset, setPreset] = useState<RepeatPreset>(presetOf(reminder?.recurrence));
-  const [interval, setInterval] = useState(reminder?.recurrence?.interval ?? 1);
-  const [weekdays, setWeekdays] = useState<number[]>(reminder?.recurrence?.byWeekday ?? []);
+  const [timezone, setTimezone] = useState(reminder.timezone);
+  const [title, setTitle] = useState(reminder.title);
+  const [notes, setNotes] = useState(reminder.notes ?? '');
+  const [due, setDue] = useState(() => toLocalInputValue(reminder.dueAt, reminder.timezone));
+  const [preset, setPreset] = useState<RepeatPreset>(presetOf(reminder.recurrence));
+  const [interval, setInterval] = useState(reminder.recurrence?.interval ?? 1);
+  const [weekdays, setWeekdays] = useState<number[]>(reminder.recurrence?.byWeekday ?? []);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const zones = useMemo(() => listTimeZones(), []);
@@ -70,11 +69,11 @@ function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder | null
     try {
       const client = requireClient();
       const body = { title: title.trim(), notes: notes.trim() || null, dueAt, timezone, recurrence };
-      const saved = reminder ? await client.reminders.update(reminder.id, { ...body, ...(reminder.status !== 'scheduled' && dueAt > Date.now() ? { status: 'scheduled' as const } : {}) }) : await client.reminders.create(body);
+      const saved = await client.reminders.update(reminder.id, { ...body, ...(reminder.status !== 'scheduled' && dueAt > Date.now() ? { status: 'scheduled' as const } : {}) });
       if (!isCurrentSession(epoch)) return;
       upsertReminder(saved);
       void getPlatform().syncReminders(client);
-      pushToast({ tone: 'success', title: reminder ? t('reminders.saved') : t('reminders.created', { when: formatRelative(saved.dueAt, locale) }) });
+      pushToast({ tone: 'success', title: t('reminders.saved') });
       onClose();
     } catch (err) {
       setError(errorMessage(err, t));
@@ -87,14 +86,14 @@ function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder | null
     <Modal
       open={open}
       onClose={onClose}
-      title={reminder ? t('reminders.edit') : t('reminders.new')}
+      title={t('reminders.edit')}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
             {t('common.cancel')}
           </Button>
           <Button variant="primary" icon="check" onClick={() => void save()} loading={saving} disabled={!title.trim() || dueAt === null}>
-            {reminder ? t('common.save') : t('reminders.create')}
+            {t('common.save')}
           </Button>
         </>
       }
@@ -282,7 +281,7 @@ export function RemindersScreen({ highlightId }: { highlightId?: string }): Reac
   const reminders = useData((s) => s.reminders);
   const loaded = useData((s) => s.remindersLoaded);
   const timeZone = useSession((s) => s.settings?.timezone);
-  const [editing, setEditing] = useState<Reminder | 'new' | null>(null);
+  const [editing, setEditing] = useState<Reminder | null>(null);
   const [showDone, setShowDone] = useState(false);
   const [, setTick] = useState(0);
 
@@ -319,14 +318,7 @@ export function RemindersScreen({ highlightId }: { highlightId?: string }): Reac
 
   return (
     <div className="page">
-      <PageHeader
-        title={t('nav.reminders')}
-        actions={
-          <Button variant="primary" size="sm" icon="plus" onClick={() => setEditing('new')}>
-            {t('reminders.new')}
-          </Button>
-        }
-      />
+      <PageHeader title={t('nav.reminders')} />
       <div className="page-body">
         <div className="page-inner">
           <NotificationNudge />
@@ -337,7 +329,7 @@ export function RemindersScreen({ highlightId }: { highlightId?: string }): Reac
               <Skeleton height={64} />
             </div>
           ) : due.length === 0 && upcoming.length === 0 && done.length === 0 ? (
-            <EmptyState icon="bell" title={t('reminders.empty_title')} description={t('reminders.empty_text')} action={<Button variant="primary" icon="plus" onClick={() => setEditing('new')}>{t('reminders.new')}</Button>} />
+            <EmptyState icon="bell" title={t('reminders.empty_title')} description={t('reminders.empty_text')} />
           ) : (
             <>
               {due.length > 0 && (
@@ -366,7 +358,7 @@ export function RemindersScreen({ highlightId }: { highlightId?: string }): Reac
           )}
         </div>
       </div>
-      {editing && <ReminderEditor key={editing === 'new' ? 'new' : editing.id} reminder={editing === 'new' ? null : editing} open onClose={() => setEditing(null)} />}
+      {editing && <ReminderEditor key={editing.id} reminder={editing} open onClose={() => setEditing(null)} />}
     </div>
   );
 }

@@ -4,7 +4,7 @@
  * `db.transaction()`.
  */
 import type { EdgeType, MemoryEdge, MemoryKind, MemoryNode, MemorySource, MemoryStatus, Sensitivity } from '@neo/protocol';
-import { newId } from '@neo/protocol';
+import { newId, SELF_MEMORY_ID } from '@neo/protocol';
 import { fromJson, toBool, toNum, toNumOrNull, type NeoDatabase } from '@neo/storage';
 import { normalizeText } from './text.js';
 import { isSymmetric } from './utils.js';
@@ -252,22 +252,23 @@ export function deleteNodes(db: NeoDatabase, ids: readonly string[]): string[] {
  * The entity called `name` (normalized label or alias), preferring active over
  * archived and older over newer. Superseded entities never match.
  */
+/** A named entity (by label, then alias). Never the self node: a song called "You" is not the user. */
 export function findEntityByName(db: NeoDatabase, name: string): MemoryNode | null {
   const norm = normalizeText(name);
   if (!norm) return null;
   const byLabel = db
     .prepare(
-      `SELECT * FROM memory_nodes WHERE kind = 'entity' AND norm_label = ? AND status != 'superseded'
+      `SELECT * FROM memory_nodes WHERE kind = 'entity' AND norm_label = ? AND status != 'superseded' AND id != ?
        ORDER BY (status = 'active') DESC, created_at ASC LIMIT 1`,
     )
-    .get(norm) as NodeRow | undefined;
+    .get(norm, SELF_MEMORY_ID) as NodeRow | undefined;
   if (byLabel) return rowToNode(byLabel);
   const withAliases = db
     .prepare(
-      `SELECT * FROM memory_nodes WHERE kind = 'entity' AND aliases != '[]' AND status != 'superseded'
+      `SELECT * FROM memory_nodes WHERE kind = 'entity' AND aliases != '[]' AND status != 'superseded' AND id != ?
        ORDER BY (status = 'active') DESC, created_at ASC`,
     )
-    .all() as unknown as NodeRow[];
+    .all(SELF_MEMORY_ID) as unknown as NodeRow[];
   for (const row of withAliases) {
     const aliases = fromJson<string[]>(row.aliases, []);
     if (aliases.some((a) => normalizeText(a) === norm)) return rowToNode(row);
