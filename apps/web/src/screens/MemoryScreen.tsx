@@ -1,10 +1,11 @@
 /**
  * Memory: the net, a list, the dream journal, statistics
  * and data (export / import / forget). Opening a memory shows its details in a
- * side panel on wide screens and a sheet on phones.
+ * side panel on wide screens and a sheet on phones. There is no manual add:
+ * NEO remembers what you tell it, the way a person does.
  */
 import { useState, type ReactElement } from 'react';
-import { Button, IconButton, Modal, Tabs, tabPanelProps, useT } from '@neo/ui';
+import { IconButton, Modal, Tabs, tabPanelProps, useT } from '@neo/ui';
 import { PageHeader } from '../components/PageHeader.js';
 import { useMediaQuery } from '../hooks/useMediaQuery.js';
 import { navigate, type MemoryTab } from '../router.js';
@@ -12,7 +13,6 @@ import { DataTab } from './memory/DataTab.js';
 import { JournalTab } from './memory/JournalTab.js';
 import { ListTab } from './memory/ListTab.js';
 import { MemoryDetail } from './memory/MemoryDetail.js';
-import { MemoryEditor } from './memory/MemoryEditor.js';
 import { NetTab } from './memory/NetTab.js';
 import { StatsTab } from './memory/StatsTab.js';
 
@@ -21,7 +21,6 @@ const TAB_ICON: Record<MemoryTab, string> = { net: 'network', list: 'list', jour
 export function MemoryScreen({ tab, nodeId }: { tab: MemoryTab; nodeId?: string }): ReactElement {
   const t = useT();
   const wide = useMediaQuery('(min-width: 1180px)');
-  const [creating, setCreating] = useState(false);
   const [focusId, setFocusId] = useState<string | null>(null);
   const selected = nodeId ?? null;
 
@@ -36,14 +35,7 @@ export function MemoryScreen({ tab, nodeId }: { tab: MemoryTab; nodeId?: string 
 
   return (
     <div className="page">
-      <PageHeader
-        title={t('nav.memory')}
-        actions={
-          <Button variant="primary" size="sm" icon="plus" onClick={() => setCreating(true)}>
-            {t('memoryScreen.add')}
-          </Button>
-        }
-      />
+      <PageHeader title={t('nav.memory')} />
       <div style={{ padding: '0 1rem', flexShrink: 0 }}>
         <Tabs
           idPrefix="memory"
@@ -80,7 +72,6 @@ export function MemoryScreen({ tab, nodeId }: { tab: MemoryTab; nodeId?: string 
           {detail}
         </Modal>
       )}
-      {creating && <MemoryEditor node={null} open={creating} onClose={() => setCreating(false)} onSaved={(n) => select(n.id)} />}
     </div>
   );
 }

@@ -1,9 +1,10 @@
 /**
- * Create or edit a memory: label, content, kind, importance, pinned,
- * sensitivity (+ tags, entity type and aliases where they apply).
+ * Edit a memory NEO formed: label, content, kind, importance, pinned,
+ * sensitivity (+ tags, entity type and aliases where they apply). Memories
+ * are never added by hand; you tell NEO and it remembers.
  */
 import { useState, type ReactElement } from 'react';
-import { MEMORY_KINDS, type MemoryKind, type MemoryNode, type MemoryNodePatch, type RememberInput } from '@neo/protocol';
+import { MEMORY_KINDS, type MemoryKind, type MemoryNode, type MemoryNodePatch } from '@neo/protocol';
 import { Button, Modal, Select, Switch, TextArea, TextField, useT } from '@neo/ui';
 import { ChipInput } from '../../components/ChipInput.js';
 import { errorMessage } from '../../lib/errors.js';
@@ -23,66 +24,49 @@ interface Draft {
   aliases: string[];
 }
 
-function toDraft(node: MemoryNode | null): Draft {
+function toDraft(node: MemoryNode): Draft {
   return {
-    label: node?.label ?? '',
-    content: node?.content ?? '',
-    kind: node?.kind ?? 'fact',
-    importance: node?.importance ?? 0.7,
-    pinned: node?.pinned ?? false,
-    sensitive: node?.sensitivity === 'sensitive',
-    tags: node?.tags ?? [],
-    entityType: node?.entityType ?? '',
-    aliases: node?.aliases ?? [],
+    label: node.label,
+    content: node.content,
+    kind: node.kind,
+    importance: node.importance,
+    pinned: node.pinned,
+    sensitive: node.sensitivity === 'sensitive',
+    tags: node.tags,
+    entityType: node.entityType ?? '',
+    aliases: node.aliases,
   };
 }
 
-export function MemoryEditor({ node, open, onClose, onSaved }: { node: MemoryNode | null; open: boolean; onClose: () => void; onSaved?: (node: MemoryNode) => void }): ReactElement {
+export function MemoryEditor({ node, open, onClose, onSaved }: { node: MemoryNode; open: boolean; onClose: () => void; onSaved?: (node: MemoryNode) => void }): ReactElement {
   const t = useT();
   const [draft, setDraft] = useState<Draft>(() => toDraft(node));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
-  const creating = node === null;
-  const valid = draft.content.trim().length > 0 && (creating || draft.label.trim().length > 0);
+  const valid = draft.content.trim().length > 0 && draft.label.trim().length > 0;
 
   const save = async () => {
     if (!valid) return;
     setSaving(true);
     setError(null);
     try {
-      const client = requireClient();
-      let saved: MemoryNode;
-      if (creating) {
-        const input: RememberInput = {
-          content: draft.content.trim(),
-          kind: draft.kind,
-          importance: draft.importance,
-          pinned: draft.pinned,
-          sensitivity: draft.sensitive ? 'sensitive' : 'normal',
-          ...(draft.label.trim() ? { label: draft.label.trim() } : {}),
-          ...(draft.tags.length ? { tags: draft.tags } : {}),
-          ...(draft.kind === 'entity' && draft.entityType.trim() ? { entityType: draft.entityType.trim() } : {}),
-        };
-        saved = await client.memory.create(input);
-      } else {
-        const patch: MemoryNodePatch = {
-          label: draft.label.trim(),
-          content: draft.content.trim(),
-          kind: draft.kind,
-          importance: draft.importance,
-          pinned: draft.pinned,
-          sensitivity: draft.sensitive ? 'sensitive' : 'normal',
-          tags: draft.tags,
-        };
-        if (draft.kind === 'entity') {
-          patch.entityType = draft.entityType.trim() || null;
-          patch.aliases = draft.aliases;
-        }
-        saved = await client.memory.update(node.id, patch);
+      const patch: MemoryNodePatch = {
+        label: draft.label.trim(),
+        content: draft.content.trim(),
+        kind: draft.kind,
+        importance: draft.importance,
+        pinned: draft.pinned,
+        sensitivity: draft.sensitive ? 'sensitive' : 'normal',
+        tags: draft.tags,
+      };
+      if (draft.kind === 'entity') {
+        patch.entityType = draft.entityType.trim() || null;
+        patch.aliases = draft.aliases;
       }
+      const saved = await requireClient().memory.update(node.id, patch);
       bumpMemoryVersion();
-      pushToast({ tone: 'success', title: creating ? t('memoryEdit.created') : t('memoryEdit.saved') });
+      pushToast({ tone: 'success', title: t('memoryEdit.saved') });
       onSaved?.(saved);
       onClose();
     } catch (err) {
@@ -96,7 +80,7 @@ export function MemoryEditor({ node, open, onClose, onSaved }: { node: MemoryNod
     <Modal
       open={open}
       onClose={onClose}
-      title={creating ? t('memoryEdit.create_title') : t('memoryEdit.edit_title')}
+      title={t('memoryEdit.edit_title')}
       size="md"
       footer={
         <>
@@ -104,7 +88,7 @@ export function MemoryEditor({ node, open, onClose, onSaved }: { node: MemoryNod
             {t('common.cancel')}
           </Button>
           <Button variant="primary" icon="check" onClick={() => void save()} loading={saving} disabled={!valid}>
-            {creating ? t('memoryEdit.remember') : t('common.save')}
+            {t('common.save')}
           </Button>
         </>
       }
@@ -116,8 +100,8 @@ export function MemoryEditor({ node, open, onClose, onSaved }: { node: MemoryNod
           void save();
         }}
       >
-        <TextArea label={t('memoryEdit.content')} value={draft.content} onChange={(v) => set('content', v)} rows={3} required maxLength={10000} placeholder={t('memoryEdit.content_placeholder')} help={t('memoryEdit.content_help')} autoFocus={creating} />
-        <TextField label={creating ? t('memoryEdit.label_optional') : t('memoryEdit.label')} value={draft.label} onChange={(v) => set('label', v)} maxLength={300} required={!creating} />
+        <TextArea label={t('memoryEdit.content')} value={draft.content} onChange={(v) => set('content', v)} rows={3} required maxLength={10000} help={t('memoryEdit.content_help')} />
+        <TextField label={t('memoryEdit.label')} value={draft.label} onChange={(v) => set('label', v)} maxLength={300} required />
         <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(12rem, 1fr))' }}>
           <Select label={t('memoryEdit.kind')} value={draft.kind} onChange={(v) => set('kind', v as MemoryKind)} options={MEMORY_KINDS.map((k) => ({ value: k, label: t(`memory.kind.${k}`) }))} />
           {draft.kind === 'entity' && <TextField label={t('memoryEdit.entity_type')} value={draft.entityType} onChange={(v) => set('entityType', v)} maxLength={40} placeholder={t('memoryEdit.entity_type_placeholder')} />}
