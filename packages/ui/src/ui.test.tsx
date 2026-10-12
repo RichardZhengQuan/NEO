@@ -369,10 +369,14 @@ describe('block actions', () => {
   it('reminder widget snooze and done use the reserved ids', async () => {
     const { calls, onAction } = capture();
     wrap(<BlockRenderer block={{ type: 'reminder', reminderId: 'rem_1', title: 'Stretch', dueAt: Date.now() + 60_000, status: 'scheduled' }} uiId="ui_r" onAction={onAction} />);
+    // While one action runs the other buttons are disabled, and React re-enables them only once it has settled
+    // and re-rendered, which can land after a waitFor on `calls` has returned. A click on a still-disabled
+    // button would be lost, so wait for the next button itself.
+    const enabled = (name: string) => waitFor(() => expect(screen.getByRole('button', { name })).toHaveProperty('disabled', false));
     fireEvent.click(screen.getByText('Snooze 10 min'));
-    await waitFor(() => expect(calls).toHaveLength(1));
+    await enabled('Snooze 1 h');
     fireEvent.click(screen.getByText('Snooze 1 h'));
-    await waitFor(() => expect(calls).toHaveLength(2));
+    await enabled('Done');
     fireEvent.click(screen.getByText('Done'));
     await waitFor(() => expect(calls).toHaveLength(3));
     expect(calls.map((c) => c.action.id)).toEqual(['reminder.snooze:10', 'reminder.snooze:60', 'reminder.complete']);
@@ -401,15 +405,16 @@ describe('block actions', () => {
         onAction={onAction}
       />,
     );
+    // A row swaps its buttons for the result only once the action has settled and React has re-rendered,
+    // which on a busy machine can land after a waitFor on `calls` has already returned. Waiting for each
+    // result before the next click guarantees the previous row's buttons are gone.
     fireEvent.click(screen.getAllByText('Remember')[0]!);
-    await waitFor(() => expect(calls).toHaveLength(1));
-    fireEvent.click(screen.getAllByText("Don't remember")[0]!);
-    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(await screen.findByText('Remembered')).toBeTruthy();
+    fireEvent.click(screen.getByText("Don't remember"));
+    expect(await screen.findByText('Not remembered')).toBeTruthy();
     fireEvent.click(screen.getByText('Forget'));
-    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(await screen.findByText('Forgotten')).toBeTruthy();
     expect(calls.map((c) => c.action.id)).toEqual(['memory.approve:mem_a', 'memory.reject:mem_b', 'memory.forget:mem_c']);
-    expect(screen.getByText('Remembered')).toBeTruthy();
-    expect(screen.getByText('Forgotten')).toBeTruthy();
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
   });

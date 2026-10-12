@@ -38,6 +38,7 @@ Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In short:
 - The memory recall benchmark ("recall stays fast" in `packages/memory/src/review.test.ts`) asserts a median wall-clock time, so by default it only fails above 1 s: parallel suites (`pnpm -r test`, CI) slow it several-fold. When you change recall or the memory schema, check the real 200 ms budget on an otherwise idle machine with `NEO_PERF_STRICT=1 pnpm --filter @neo/memory test -t "recall stays fast"`.
 - Keep transcripts append-only. Per-turn context goes into the user message's `context` part, never into the system prompt (see "Context assembly" in the architecture doc).
 - Privacy is a feature: anything touching memory must respect the policy table at the end of [docs/MEMORY.md](docs/MEMORY.md).
+- For performance, assert the property itself rather than a wall-clock time where you can: the recurrence catch-up test counts the candidates `nextOccurrence` checks, and the `htmlToText` linearity test compares equal amounts of work at two input sizes. Parallel suites (`pnpm -r test`, CI) slow every timing sample several-fold, so tests that do time things take the median of several runs after a warm-up and by default only fail on a gross regression. `NEO_PERF_STRICT=1` applies the tight bounds, for an otherwise idle machine: `NEO_PERF_STRICT=1 pnpm --filter @neo/tools test -t "is linear"`.
 
 ## Pull requests
 
