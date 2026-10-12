@@ -5,7 +5,7 @@
  * contract below, so the agent loop never knows which AI it is talking to.
  */
 import { z } from 'zod';
-import type { ContentPart, ReasoningPart, Usage } from './content.js';
+import type { ContentPart, ProviderPart, ReasoningPart, Source, Usage } from './content.js';
 
 export const ProviderKindSchema = z.enum(['anthropic', 'openai', 'chatgpt', 'openai-compatible', 'gemini', 'ollama', 'mock']);
 export type ProviderKind = z.infer<typeof ProviderKindSchema>;
@@ -41,6 +41,7 @@ export const ModelCapabilitiesSchema = z.object({
   textToSpeech: z.boolean().optional(),
   image: z.boolean().optional(),
   video: z.boolean().optional(),
+  nativeWebSearch: z.boolean().optional(),
   tools: z.boolean(),
   vision: z.boolean(),
   reasoning: z.boolean(),
@@ -51,6 +52,7 @@ export const ModelCapabilitiesSchema = z.object({
 export type ModelCapabilities = z.infer<typeof ModelCapabilitiesSchema>;
 
 export const DEFAULT_CAPABILITIES: ModelCapabilities = {
+  nativeWebSearch: false,
   tools: true,
   vision: false,
   reasoning: false,
@@ -100,6 +102,8 @@ export interface ChatRequest {
   responseFormat?: 'text' | 'json';
   /** Reasoning depth hint; adapters map it to provider knobs (Anthropic effort, OpenAI reasoning_effort…). */
   reasoning?: ReasoningEffort;
+  /** Provider-hosted search; set only on user-facing chat turns. */
+  webSearch?: { maxUses?: number };
   signal?: AbortSignal;
   /** Free-form tags for logging/mock scripting, e.g. { purpose: 'memory-extract' }. */
   metadata?: Record<string, string>;
@@ -120,6 +124,8 @@ export type ChatStreamEvent =
   | { type: 'reasoning'; text: string }
   | { type: 'reasoning_part'; part: ReasoningPart }
   | { type: 'tool_call'; id: string; name: string; input: unknown; data?: unknown }
+  | { type: 'sources'; items: Source[] }
+  | { type: 'provider_part'; part: ProviderPart }
   | { type: 'usage'; usage: Usage }
   | { type: 'done'; stopReason: StopReason };
 
@@ -177,13 +183,14 @@ export interface CollectedChat {
   reasoning: string;
   reasoningParts: ReasoningPart[];
   toolCalls: { id: string; name: string; input: unknown; data?: unknown }[];
+  sources: Source[];
   usage: Usage | null;
   stopReason: StopReason;
 }
 
 /** Drain a stream into one result (non-streaming callers, memory extraction, tests). */
 export async function collectChat(stream: AsyncIterable<ChatStreamEvent>): Promise<CollectedChat> {
-  const out: CollectedChat = { text: '', reasoning: '', reasoningParts: [], toolCalls: [], usage: null, stopReason: 'end' };
+  const out: CollectedChat = { text: '', reasoning: '', reasoningParts: [], toolCalls: [], sources: [], usage: null, stopReason: 'end' };
   for await (const ev of stream) {
     switch (ev.type) {
       case 'text':
@@ -203,6 +210,9 @@ export async function collectChat(stream: AsyncIterable<ChatStreamEvent>): Promi
       }
       case 'usage':
         out.usage = ev.usage;
+        break;
+      case 'sources':
+        out.sources.push(...ev.items);
         break;
       case 'done':
         out.stopReason = ev.stopReason;

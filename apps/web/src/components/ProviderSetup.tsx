@@ -21,6 +21,7 @@ import { getPlatform } from '../platform/index.js';
 import { currentSessionEpoch, isCurrentSession, requireClient, setSettings, updateSettings, useSession } from '../state/session.js';
 import { providerLabel } from './ModelLabel.js';
 import { ProviderConnectionEditor } from './ProviderConnectionEditor.js';
+import { SearchSettings } from './SearchSettings.js';
 
 type KeyProvider = 'anthropic' | 'openai' | 'gemini' | 'openrouter';
 type ConnectionSummary = { provider: ProviderView; capabilities: AiSettings['capabilities'] | null };
@@ -38,10 +39,11 @@ export function ProviderSetup(props: {
   onCancel?: () => void;
   /** Use Continue for onboarding instead of dismissing the connection summary. */
   offerExisting?: boolean;
+  configureSearch?: boolean;
 }): ReactElement {
   const t = useT();
   const id = useId();
-  const { existing, onDone, onCancel, offerExisting = false } = props;
+  const { existing, onDone, onCancel, offerExisting = false, configureSearch = false } = props;
   const settings = useSession((s) => s.settings);
   const models = useSession((s) => s.models);
   const epoch = useSession((s) => s.sessionEpoch);
@@ -460,6 +462,7 @@ export function ProviderSetup(props: {
                 </div>
               );
             })}
+            {configureSearch && <SearchSettings disabled={busy} />}
             <div><Button size="sm" variant="secondary" icon="plus" onClick={() => setCustom(!custom)} disabled={busy}>{t('provider.add_custom')}</Button></div>
             {custom && (
               <div className="neo-card ai-setup__section">

@@ -22,6 +22,7 @@ Fresh installs have no providers. The **Connect an AI** state and typed `no_prov
 ```json
 {
   "mode": "simple",
+  "search": { "mode": "auto", "engine": null },
   "capabilities": {
     "text": { "provider": "openai", "model": "gpt-5" },
     "embedding": { "provider": "openai", "model": "text-embedding-3-small" },
@@ -75,9 +76,31 @@ Weekly sharing limits, temporary unavailability and Plus/Pro eligibility errors 
 
 Sign-in is disabled in `mode: 'server'`: **Available when NEO runs on this computer; use an API key or OpenRouter on a remote server.** A loopback callback reaches the browser's computer, so credential transfer to a VM or remote host is out of scope. Live OpenAI sign-in, account eligibility, actual model availability, refresh timestamp format and plan-token function tools need a manual test; automated coverage uses local fake services only.
 
+## Native web search
+
+Search defaults to `ai.search: { mode: 'auto', engine: null }`, in Simple and Advanced mode. Auto uses the current Text model's `capabilities.nativeWebSearch`, then a configured engine, then no search. Advanced exposes Search settings; Simple needs no extra setup. `engine` forces the configured engine, and `off` disables both paths. An app-configured engine overrides the boot `webSearch` engine; null retains that boot default. Keys entered in settings are encrypted and never returned.
+
+| Text provider/model | Native search | Upstream request field |
+|---|---|---|
+| Anthropic supported Claude 3.5/3.7 and 4/5 families, official endpoint | Supported | Append `{ type: 'web_search_20250305', name: 'web_search', max_uses? }` to `tools`; `max_uses` is sent when `request.webSearch.maxUses` is provided |
+| OpenAI `*-search-*` models, official Chat Completions endpoint | Supported | `web_search_options: {}` |
+| Other OpenAI Chat Completions models (including general GPT models) | None | No search field |
+| ChatGPT sign-in, Responses API | **Unverified for plan tokens** | Append `{ type: 'web_search' }` to `tools` |
+| Gemini 2.x and newer text models, official endpoint | Supported | Append `{ google_search: {} }` to `tools` |
+| OpenRouter (`openai-compatible`, `https://openrouter.ai/api/v1`) | Supported | `plugins: [{ id: 'web' }]` |
+| Other compatible/custom endpoints, Ollama, internal mocks | None | No search field |
+
+Supported describes the implemented API contract and offline fake coverage, not a live API certification. Native search, citations, grounding, model eligibility and combinations with function tools have not been tested against live APIs. Custom base URLs do not inherit hosted-search support. OpenAI model eligibility lives in the documented `supportsOpenAIWebSearch()` predicate in `packages/providers/src/openai.ts`; update that function when Chat Completions support changes.
+
+Only chat turns set `request.webSearch`; title, memory extraction and consolidation calls never do. Adapters normalize Anthropic server search results/text citations, Responses `web_search_call`/`url_citation`, Chat Completions URL annotations and Gemini `groundingChunks` to `sources` events. Hosted search is never dispatched as a NEO function tool. Anthropic and Responses retain hidden, model-scoped `provider_part` data for append-only replay; source link rows are presentation data and are not added to user context or the system prompt.
+
+A search-specific ChatGPT HTTP or stream rejection throws the nonretryable typed `search_unavailable` error once. That adapter then reports native search unavailable for its lifetime and omits hosted search on subsequent requests; Auto can fall back to an engine. Authentication, subscription limits and transient failures keep their existing error guidance and do not disable search.
+
+The official OpenAI `gpt-4o-search-preview` and `gpt-4o-mini-search-preview` families (including dated variants) advertise `tools: false` and omit function tools, tool choice, temperature and `response_format`. JSON callers retain a textual JSON instruction. This narrow compatibility guard has offline fake coverage; it is also unverified against the live API. General GPT, OpenRouter and custom endpoint behavior is preserved.
+
 ## Streaming contract (all adapters)
 
-- `chat()` yields `text` and `reasoning` deltas as they arrive. It accumulates tool-call argument JSON internally and yields **one** complete `tool_call` per call, with `input` parsed. When the JSON is invalid or truncated, the adapter yields `input: { __invalid_json: "<raw>" }` so the registry rejects it and the model retries. It yields `reasoning_part` once per finished reasoning block that carries replay data, then optional `usage`, then exactly one `done`.
+- `chat()` yields `text` and `reasoning` deltas as they arrive, optional normalized `sources`, and scoped `provider_part` replay data. It accumulates tool-call argument JSON internally and yields **one** complete `tool_call` per call, with `input` parsed. When the JSON is invalid or truncated, the adapter yields `input: { __invalid_json: "<raw>" }` so the registry rejects it and the model retries. It yields `reasoning_part` once per finished reasoning block that carries replay data, then optional `usage`, then exactly one `done`.
 - Failures throw `NeoError`: `provider_auth` (401/403), `rate_limited` (429, `retryable`, `details.retryAfterMs`), `provider_error` (5xx/network, `retryable`), `cancelled` (abort), `bad_request`-like 4xx → `provider_error` with the provider's message.
 - API-key adapters retry `429/5xx/network` before the first byte up to 2 times (backoff 0.5 s, 1.5 s; honor `retry-after` ≤ 10 s). The ChatGPT plan adapter surfaces its specific limit/auth/availability guidance immediately. Never retry mid-stream.
 - `request.signal` aborts the HTTP request and ends the iterator with `NeoError('cancelled')`.

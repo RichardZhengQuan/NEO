@@ -17,6 +17,7 @@ import type {
   ProviderAdapter,
   ProviderConfig,
   ProviderTestResult,
+  Source,
   StopReason,
   Usage,
 } from '@neo/protocol';
@@ -25,6 +26,7 @@ import { withRetry } from './retry.js';
 import { parseSSE } from './sse.js';
 import {
   REFUSAL_NOTE,
+  addSource,
   asCancelled,
   describeNetworkError,
   effortFor,
@@ -73,6 +75,18 @@ const CONTEXT_TABLE: [RegExp, number][] = [
 function baseModelName(model: string): string {
   return (model.split('/').pop() ?? model).toLowerCase();
 }
+
+/** Chat Completions supports hosted search only on dedicated `*-search-*` models.
+ * General GPT models require Responses; update this one predicate when support changes.
+ */
+export function supportsOpenAIWebSearch(model: string): boolean {
+  return /^[a-z0-9][a-z0-9.-]*-search-[a-z0-9.-]+$/i.test(model);
+}
+
+/** Search-preview families use hosted search without function tools, sampling or JSON mode.
+ * Keep this conservative compatibility guard specific to the official OpenAI endpoint.
+ */
+const SEARCH_PREVIEW_MODEL_RE = /^gpt-4o(?:-mini)?-search-preview(?:-|$)/i;
 
 function isReasoningModel(model: string): boolean {
   return REASONING_MODEL_RE.test(baseModelName(model));
@@ -162,6 +176,18 @@ export class OpenAIAdapter implements ProviderAdapter {
   private readonly ollamaRoot: string;
   private readonly listedCapabilities = new Map<string, ModelCapabilities>();
 
+  private get openRouter(): boolean {
+    return this.kind === 'openai-compatible' && this.baseUrl === 'https://openrouter.ai/api/v1';
+  }
+
+  private supportsWebSearch(model: string): boolean {
+    return this.openRouter || (this.kind === 'openai' && this.baseUrl === 'https://api.openai.com/v1' && supportsOpenAIWebSearch(model));
+  }
+
+  private isSearchPreview(model: string): boolean {
+    return this.kind === 'openai' && this.baseUrl === 'https://api.openai.com/v1' && SEARCH_PREVIEW_MODEL_RE.test(model);
+  }
+
   constructor(config: ProviderConfig, options: ProviderOptions = {}) {
     if (config.kind !== 'openai' && config.kind !== 'openai-compatible' && config.kind !== 'ollama') {
       throw new NeoError('config_error', `OpenAIAdapter cannot serve provider kind "${config.kind}".`);
@@ -192,11 +218,12 @@ export class OpenAIAdapter implements ProviderAdapter {
     const text = !embeddings && !speechToText && !textToSpeech && !image && !video && !NON_CHAT_MODEL_RE.test(name);
     return {
       text,
+      nativeWebSearch: text && this.supportsWebSearch(model),
       speechToText,
       textToSpeech,
       image,
       video,
-      tools: text,
+      tools: text && !this.isSearchPreview(model),
       vision: text && VISION_MODEL_RE.test(model),
       reasoning: text && reasoning,
       embeddings,
@@ -215,6 +242,7 @@ export class OpenAIAdapter implements ProviderAdapter {
 
     const tools: ToolAccumulator[] = [];
     const byIndex = new Map<number, ToolAccumulator>();
+    const sources: Source[] = [];
     let finishReason: string | null = null;
     let sawText = false;
     let refused = false;
@@ -240,7 +268,9 @@ export class OpenAIAdapter implements ProviderAdapter {
         if (!choice) continue;
         if (typeof choice['finish_reason'] === 'string' && choice['finish_reason']) finishReason = choice['finish_reason'];
         const delta = choice['delta'];
+        if (isPlainObject(choice['message'])) collectAnnotations(sources, choice['message']['annotations']);
         if (!isPlainObject(delta)) continue;
+        collectAnnotations(sources, delta['annotations']);
 
         const reasoning = delta['reasoning_content'] ?? delta['reasoning'];
         if (typeof reasoning === 'string' && reasoning) yield { type: 'reasoning', text: reasoning };
@@ -283,12 +313,14 @@ export class OpenAIAdapter implements ProviderAdapter {
     else stopReason = 'end';
 
     if (stopReason === 'refusal' && !sawText) yield { type: 'text', text: REFUSAL_NOTE };
+    if (sources.length) yield { type: 'sources', items: sources };
     if (usage) yield { type: 'usage', usage };
     yield { type: 'done', stopReason };
   }
 
   private buildBody(request: ChatRequest): Record<string, unknown> {
     const reasoningModel = isReasoningModel(request.model);
+    const searchPreview = this.isSearchPreview(request.model);
     const json = request.responseFormat === 'json';
     const messages: WireMessage[] = toOpenAIMessages(request.messages);
     const system = systemWithJsonInstruction(request.system, json);
@@ -300,15 +332,19 @@ export class OpenAIAdapter implements ProviderAdapter {
     if (reasoningModel) {
       const effort = effortFor(request.reasoning);
       if (effort) body['reasoning_effort'] = effort;
-    } else if (request.temperature !== undefined) {
+    } else if (request.temperature !== undefined && !searchPreview) {
       body['temperature'] = request.temperature;
     }
-    if (request.tools?.length) {
+    if (request.tools?.length && !searchPreview) {
       body['tools'] = request.tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
       // tool_choice is only valid together with tools; forced choice is never sent.
       if (request.toolChoice) body['tool_choice'] = request.toolChoice;
     }
-    if (json && this.kind !== 'openai-compatible') body['response_format'] = { type: 'json_object' };
+    if (request.webSearch && this.capabilities(request.model).nativeWebSearch) {
+      if (this.openRouter) body['plugins'] = [{ id: 'web' }];
+      else body['web_search_options'] = {};
+    }
+    if (json && this.kind !== 'openai-compatible' && !searchPreview) body['response_format'] = { type: 'json_object' };
     return body;
   }
 
@@ -352,7 +388,8 @@ export class OpenAIAdapter implements ProviderAdapter {
     return {
       ...caps,
       text,
-      tools: !!text && (parameters ? parameters.includes('tools') : caps.tools),
+      nativeWebSearch: !!text && this.supportsWebSearch(id),
+      tools: !!text && !this.isSearchPreview(id) && (parameters ? parameters.includes('tools') : caps.tools),
       vision: !!text && (inputs ? inputs.includes('image') : caps.vision),
       reasoning: !!text && (parameters ? parameters.includes('reasoning') || parameters.includes('reasoning_effort') : caps.reasoning),
       embeddings: outputs ? outputs.includes('embedding') || outputs.includes('embeddings') : caps.embeddings,
@@ -470,6 +507,16 @@ export class OpenAIAdapter implements ProviderAdapter {
   private streamError(error: unknown): NeoError {
     const message = isPlainObject(error) && typeof error['message'] === 'string' ? error['message'] : typeof error === 'string' ? error : JSON.stringify(error);
     return new NeoError('provider_error', this.clean(`${this.label()} error: ${message}`), { retryable: true });
+  }
+}
+
+/** OpenAI and OpenRouter share the Chat Completions URL-citation annotation shape. */
+function collectAnnotations(sources: Source[], annotations: unknown): void {
+  if (!Array.isArray(annotations)) return;
+  for (const annotation of annotations) {
+    if (!isPlainObject(annotation) || annotation['type'] !== 'url_citation') continue;
+    const citation = isPlainObject(annotation['url_citation']) ? annotation['url_citation'] : annotation;
+    addSource(sources, citation['url'], citation['title'], citation['content']);
   }
 }
 

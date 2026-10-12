@@ -16,9 +16,32 @@ export const AiCapabilitiesSchema = z.object({
 });
 export type AiCapabilities = z.infer<typeof AiCapabilitiesSchema>;
 
+export const SearchEngineSchema = z.object({
+  provider: z.enum(['searxng', 'brave', 'tavily']),
+  baseUrl: z.string().url().optional(),
+  /** Server-owned encrypted secret reference; never exposed to clients. */
+  apiKeySecret: z.string().nullable().optional(),
+  hasApiKey: z.boolean().optional(),
+});
+export type SearchEngine = z.infer<typeof SearchEngineSchema>;
+
+export const AiSearchSchema = z.object({
+  mode: z.enum(['auto', 'engine', 'off']).default('auto'),
+  /** null uses the boot config's default engine, when configured. */
+  engine: SearchEngineSchema.nullable().default(null),
+});
+export type AiSearch = z.infer<typeof AiSearchSchema>;
+
+export function resolveSearchMode(search: AiSearch, nativeWebSearch: boolean, hasEngine: boolean): 'native' | 'engine' | 'off' {
+  if (search.mode === 'off') return 'off';
+  if (search.mode === 'auto' && nativeWebSearch) return 'native';
+  return hasEngine ? 'engine' : 'off';
+}
+
 export const AiSettingsSchema = z.object({
   mode: z.enum(['simple', 'advanced']).default('simple'),
   capabilities: AiCapabilitiesSchema.prefault({}),
+  search: AiSearchSchema.prefault({}),
 });
 export type AiSettings = z.infer<typeof AiSettingsSchema>;
 

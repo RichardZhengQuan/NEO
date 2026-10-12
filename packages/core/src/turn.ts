@@ -31,6 +31,7 @@
  */
 import {
   NeoError,
+  SourceSchema,
   addUsage,
   describeUiEvent,
   newId,
@@ -63,6 +64,7 @@ import {
   type ReasoningPart,
   type RecalledMemory,
   type SettingsStore,
+  type Source,
   type StopReason,
   type ToolCallPart,
   type ToolConfirmation,
@@ -114,6 +116,8 @@ export interface TurnServices {
   providers: ProviderRegistry;
   memory: MemoryService;
   tools: ToolRegistry;
+  searchMode(settings: NeoSettings, adapter: ProviderAdapter, model: string): 'native' | 'engine' | 'off';
+  searchTool(): ToolDefinition | undefined;
   confirmations: ConfirmationManager;
   logger: Logger;
   clock: Clock;
@@ -138,6 +142,7 @@ export interface TurnPlan {
   adapter: ProviderAdapter;
   model: string;
   settings: NeoSettings;
+  searchMode: 'native' | 'engine' | 'off';
   /** Preflight context is rendered once and used both for budget checks and persistence. */
   context?: ContentPart;
   recalled?: RecalledMemory[];
@@ -160,7 +165,8 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
   let systemPrompt = conv.systemPrompt;
   let toolset = conv.toolset;
   if (systemPrompt === null || toolset === null) {
-    const specs = caps.tools ? tools.specs().filter((s) => !((conv.offRecord ?? conv.incognito) && MEMORY_WRITE_TOOLS.has(s.name))) : [];
+    const specs = caps.tools ? tools.specs().filter((s) =>
+      !(s.name === 'web_search' && plan.searchMode !== 'engine') && !((conv.offRecord ?? conv.incognito) && MEMORY_WRITE_TOOLS.has(s.name))) : [];
     systemPrompt ??= buildSystemPrompt({ tools: specs, nativeTools: caps.tools });
     toolset ??= specs.map((s) => s.name);
     conversations.update(conversationId, { systemPrompt, toolset });
@@ -351,6 +357,9 @@ class TurnRunner {
   private stopReason: StopReason = 'end';
   /** Set once a request to the model included sensitive content. */
   private sawSensitive = false;
+  /** A grounded answer is external context, never evidence of what the user authored. */
+  private sawWebContent = false;
+  private readonly sourceUrls = new Set<string>();
   private dirty = false;
   private lastPersistAt: number;
   /** Reasoning placeholders of the current step that await their reasoning_part. */
@@ -471,7 +480,7 @@ class TurnRunner {
   private buildToolSpecs(): ToolSpec[] {
     const specs: ToolSpec[] = [];
     for (const name of this.init.toolset) {
-      const def = this.services.tools.get(name);
+      const def = this.services.tools.get(name) ?? (name === 'web_search' ? this.services.searchTool() : undefined);
       if (!def || def.uiOnly) continue;
       try {
         specs.push(toolSpec(def));
@@ -515,6 +524,10 @@ class TurnRunner {
       request.toolChoice = finalStep ? 'none' : 'auto';
     }
     if (agent.temperature !== null) request.temperature = agent.temperature;
+    if (this.services.searchMode(this.services.settings.get(), plan.adapter, plan.model) === 'native') {
+      request.webSearch = {};
+      this.sawWebContent = true;
+    }
     return request;
   }
 
@@ -530,6 +543,12 @@ class TurnRunner {
         break;
       case 'reasoning_part':
         this.onReasoningPart(event.part);
+        break;
+      case 'provider_part':
+        this.addPart(event.part);
+        break;
+      case 'sources':
+        this.addSources(event.items);
         break;
       case 'tool_call': {
         const part: ToolCallPart = {
@@ -635,6 +654,9 @@ class TurnRunner {
     const { tools } = this.services;
     const def = tools.get(call.name);
     if (finalStep) return this.refuse(call, MSG.finalStep, 'Not run');
+    if (call.name === 'web_search' && this.services.searchMode(this.services.settings.get(), this.init.plan.adapter, this.init.plan.model) !== 'engine') {
+      return this.refuse(call, 'Web search is unavailable with the current search settings.', 'Not available');
+    }
     if (!def) return this.refuse(call, MSG.unknown(call.name), 'Unknown tool');
     if (this.offRecord() && MEMORY_WRITE_TOOLS.has(call.name)) return this.refuse(call, 'Memory writes are unavailable off the record.', 'Not available');
     if (!this.toolset.has(call.name) || def.uiOnly || !this.init.caps.tools) return this.refuse(call, MSG.unavailable(call.name), 'Not available');
@@ -666,7 +688,8 @@ class TurnRunner {
     if (MEMORY_WRITE_TOOLS.has(call.name)) this.memoryExecutions.add(executionController);
     const executionSignal = AbortSignal.any([this.signal, executionController.signal]);
     const revokeIfDenied = (settings: NeoSettings): void => {
-      if (settings.tools.permissions[call.name] === 'deny' || tools.permissionFor(call.name) === 'deny') executionController.abort();
+      if (settings.tools.permissions[call.name] === 'deny' || tools.permissionFor(call.name) === 'deny' ||
+        (call.name === 'web_search' && this.services.searchMode(settings, this.init.plan.adapter, this.init.plan.model) !== 'engine')) executionController.abort();
     };
     const unsubscribe = this.services.settings.onChange(revokeIfDenied);
     let result: ToolResult;
@@ -689,6 +712,7 @@ class TurnRunner {
       // Check again at the execution boundary, without another await in between.
       revokeIfDenied(this.services.settings.get());
       if (executionController.signal.aborted) return this.refuse(call, MSG.declined, 'Declined');
+      if (def.untrustedOutput) this.sawWebContent = true;
       result = await raceAbort(
         tools.execute({ id: call.id, name: call.name, input: call.input }, this.toolContext(call, executionSignal)),
         executionSignal,
@@ -822,6 +846,7 @@ class TurnRunner {
       ...(result.sensitive ? { sensitive: true } : {}),
     };
     this.addPart(part);
+    if (result.sources?.length) this.addSources(result.sources);
     this.emit({
       type: 'tool.finished',
       conversationId: this.conversationId,
@@ -835,6 +860,20 @@ class TurnRunner {
   }
 
   // ───────────────────────────── parts & persistence ─────────────────────────────
+
+  private addSources(items: readonly Source[]): void {
+    const sources: Source[] = [];
+    for (const item of items) {
+      if (this.sourceUrls.size >= 100) break;
+      const parsed = SourceSchema.safeParse(item);
+      if (!parsed.success || this.sourceUrls.has(parsed.data.url)) continue;
+      this.sourceUrls.add(parsed.data.url);
+      sources.push(parsed.data);
+    }
+    if (!sources.length) return;
+    this.sawWebContent = true;
+    this.addPart({ type: 'sources', items: sources });
+  }
 
   /** Append a finished (non-delta) part, announce it and persist. Returns its index. */
   private addPart(part: ContentPart): number {
@@ -953,7 +992,9 @@ class TurnRunner {
       const result = await this.services.memory.observe({
         conversationId: this.conversationId,
         userMessage: this.init.userMessage,
-        assistantMessage: final,
+        assistantMessage: this.sawWebContent
+          ? { ...final, parts: final.parts.filter((part) => part.type !== 'text' && part.type !== 'sources' && part.type !== 'provider_part') }
+          : final,
         model: { provider: adapter.id, model },
         now: this.services.clock(),
       });

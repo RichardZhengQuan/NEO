@@ -2,13 +2,14 @@ import type { Hono } from 'hono';
 import { AI_CAPABILITIES, NeoError, UpdateSettingsRequestSchema, applySettingsPatch } from '@neo/protocol';
 import type { NeoServices } from '../index.js';
 import { validateBody } from './helpers.js';
+import { prepareSearchPatch, settingsView } from '../search-settings.js';
 
 export function registerSettings(app: Hono, services: NeoServices): void {
   const { settings } = services;
 
   // GET /api/settings
   app.get('/api/settings', (c) => {
-    return c.json(settings.get());
+    return c.json(settingsView(settings.get(), services.secrets));
   });
 
   // PATCH /api/settings
@@ -22,7 +23,8 @@ export function registerSettings(app: Hono, services: NeoServices): void {
     // Deep partial patch: update settings (validate + merge done inside)
     let updated;
     try {
-      const next = applySettingsPatch(settings.get(), body);
+      const prepared = prepareSearchPatch(settings.get(), body, services.secrets);
+      const next = applySettingsPatch(settings.get(), prepared.patch);
       for (const capability of AI_CAPABILITIES) {
         const legacyKey = capability === 'text' ? ('defaultModel' in body || 'memoryModel' in body) : capability === 'embedding' && 'embedding' in body;
         if (!body.ai && !legacyKey) continue;
@@ -34,12 +36,13 @@ export function registerSettings(app: Hono, services: NeoServices): void {
         if (configured?.kind === 'mock') throw new NeoError('bad_request', 'Mock providers are reserved for internal tests. Connect an AI provider instead.');
         if (configured?.kind === 'chatgpt' && capability !== 'text') throw new NeoError('bad_request', 'ChatGPT plan connections support text generation only.');
       }
-      updated = settings.update(body);
+      const commit = () => { prepared.commit(); return settings.update(prepared.patch); };
+      updated = services.db ? services.db.transaction(commit) : commit();
     } catch (err) {
       throw NeoError.from(err, 'bad_request');
     }
 
     // Composition subscribes once, so API and tool-driven updates behave alike.
-    return c.json(updated);
+    return c.json(settingsView(updated, services.secrets));
   });
 }

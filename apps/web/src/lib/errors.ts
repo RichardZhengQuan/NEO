@@ -48,6 +48,8 @@ export function errorMessage(err: unknown, t: TranslateFn): string {
       return t('error.rate_limited');
     case 'provider_auth':
       return t('error.provider_auth');
+    case 'search_unavailable':
+      return t('error.search_unavailable');
     case 'config_error':
       return err instanceof Error && err.message ? err.message : t('error.config');
     default:

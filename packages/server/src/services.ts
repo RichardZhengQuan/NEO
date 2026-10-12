@@ -2,7 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AI_CAPABILITIES, createConsoleLogger, NeoError, randomToken, systemClock } from '@neo/protocol';
+import { AI_CAPABILITIES, applySettingsPatch, createConsoleLogger, NeoError, randomToken, systemClock } from '@neo/protocol';
 import type { Embedder, NeoConfig } from '@neo/protocol';
 import {
   createConversationStore, createDeviceStore, createProviderConfigStore,
@@ -15,7 +15,7 @@ import { createMemoryService, createProviderEmbedder, HashingEmbedder, memoryMig
 import type { MemoryLLM } from '@neo/memory';
 import {
   createBuiltinTools, createProductivityStores, createReminderScheduler,
-  createToolRegistry, loadPlugins, toolsMigrations,
+  createToolRegistry, createWebSearchTool, loadPlugins, toolsMigrations,
 } from '@neo/tools';
 import { createAgentRuntime } from '@neo/core';
 import { clearDemoSettings, expandTilde, removeLegacyDemo } from './config.js';
@@ -25,6 +25,7 @@ import type { CreateServicesOptions, NeoServices } from './index.js';
 import { pushAllowedHosts } from './push-policy.js';
 import { migratePersonaSettings, storedPersona } from './persona-migration.js';
 import { createChatGPTTokenManager } from './chatgpt-auth.js';
+import { prepareSearchPatch, resolveSearchEngine, settingsView } from './search-settings.js';
 
 /** POSIX locale names become canonical BCP-47 tags; C/POSIX has no language. */
 export function environmentLocale(env: Record<string, string | undefined> = process.env): string {
@@ -84,11 +85,14 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
     if (!db.prepare('SELECT 1 FROM settings WHERE key = ?').get('settings')) {
       legacyPersona = config.settings?.persona;
       db.transaction(() => {
-        const saved = settings.update({
+        const prepared = prepareSearchPatch(settings.get(), {
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           locale: environmentLocale(),
           ...config.settings,
-        });
+        }, secrets);
+        applySettingsPatch(settings.get(), prepared.patch);
+        prepared.commit();
+        const saved = settings.update(prepared.patch);
         if (legacyPersona && typeof legacyPersona === 'object' && !Array.isArray(legacyPersona)) {
           db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(
             JSON.stringify({ ...saved, persona: { ...legacyPersona, avatar: saved.persona.avatar } }), 'settings',
@@ -157,7 +161,7 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
     };
     const stores = createProductivityStores(db, { clock, defaultTimezone: initial.timezone });
     const tools = createToolRegistry({ permissions: initial.tools.permissions, logger });
-    for (const tool of createBuiltinTools({ stores, memory, webSearch: config.webSearch, allowPrivateNetwork: config.mode === 'local', clock })) {
+    for (const tool of createBuiltinTools({ stores, memory, allowPrivateNetwork: config.mode === 'local', clock })) {
       tools.register(tool, 'builtin');
     }
     if (config.plugins.enabled) {
@@ -165,7 +169,12 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
         for (const tool of plugin.tools ?? []) tools.register(tool, 'plugin');
       }
     }
-    const runtime = createAgentRuntime({ conversations, settings, providers, memory, tools, logger, clock });
+    const runtime = createAgentRuntime({ conversations, settings, providers, memory, tools, logger, clock,
+      resolveSearchTool: current => {
+        const engine = resolveSearchEngine(current, config.webSearch, secrets);
+        return engine ? createWebSearchTool(engine) : undefined;
+      },
+    });
     // Core starts observation after the reply; keep that work alive until shutdown.
     const pending = new Set<Promise<unknown>>();
     const track = <T>(promise: Promise<T>): Promise<T> => {
@@ -227,7 +236,7 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
     subscriptions.push(settings.onChange(s => {
       memory.setPolicy(s.memory);
       for (const [name, permission] of Object.entries(s.tools.permissions)) tools.setPermission(name, permission);
-      events.publish({ type: 'settings.updated', settings: s });
+      events.publish({ type: 'settings.updated', settings: settingsView(s, secrets) });
       // A new embedding choice takes effect now, not at the next restart (re-embedding happens in the background).
       const nextEmbeddingKey = JSON.stringify(s.ai.capabilities.embedding ?? null);
       if (nextEmbeddingKey !== embeddingKey) {

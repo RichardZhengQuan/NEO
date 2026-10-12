@@ -104,7 +104,7 @@ export function registerChatGPT(app: Hono, services: NeoServices): void {
     const capabilities = pickDefaultCapabilities(config, models);
     if (!capabilities.text) throw new NeoError('provider_error', 'ChatGPT did not offer a text model. Try signing in again later.');
     const current = services.settings.get().ai;
-    const ai = current.mode === 'simple' ? { mode: 'simple' as const, capabilities } : undefined;
+    const ai = current.mode === 'simple' ? { mode: 'simple' as const, capabilities, search: current.search } : undefined;
     const secretName = chatGPTSecretName(id);
     const oldSecret = services.secrets.get(secretName);
     try {

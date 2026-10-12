@@ -6,7 +6,7 @@
  */
 import { z } from 'zod';
 import { ModelRefSchema } from './content.js';
-import { AiSettingsSchema } from './ai.js';
+import { AiSettingsSchema, type SearchEngine } from './ai.js';
 import { MemoryPolicySchema } from './memory.js';
 import { ProviderConfigSchema } from './providers.js';
 import { PermissionLevelSchema } from './tools.js';
@@ -84,7 +84,9 @@ export type DeepPartial<T> = T extends readonly unknown[]
     ? { [K in keyof T]?: DeepPartial<T[K]> | undefined }
     : T;
 
-export type NeoSettingsPatch = DeepPartial<NeoSettings>;
+export type NeoSettingsPatch = DeepPartial<NeoSettings> & {
+  ai?: { search?: { engine?: (DeepPartial<SearchEngine> & { apiKey?: string | null }) | null } };
+};
 
 /** Upgrade legacy refs before overlaying defaults, which already contain an empty ai object. */
 export function migrateSettings(input: unknown): unknown {
@@ -121,7 +123,13 @@ export function applySettingsPatch(base: NeoSettings, patch: NeoSettingsPatch): 
     if (patch.embedding !== undefined) capabilities.embedding = patch.embedding;
     if (Object.keys(capabilities).length) compatiblePatch = { ...patch, ai: { capabilities } };
   }
-  return NeoSettingsSchema.parse(deepMerge(base, compatiblePatch));
+  const merged = deepMerge(base, compatiblePatch);
+  const engine = compatiblePatch.ai?.search?.engine;
+  if (engine?.provider && engine.provider !== base.ai.search.engine?.provider) {
+    // Endpoint-specific fields and credentials must not follow a provider switch.
+    return NeoSettingsSchema.parse({ ...merged, ai: { ...merged.ai, search: { ...merged.ai.search, engine } } });
+  }
+  return NeoSettingsSchema.parse(merged);
 }
 
 // ───────────────────────────── boot config ─────────────────────────────

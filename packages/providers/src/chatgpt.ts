@@ -9,12 +9,13 @@ import {
   type ProviderAdapter,
   type ProviderConfig,
   type ProviderTestResult,
+  type Source,
   type StopReason,
   type Usage,
 } from '@neo/protocol';
 import type { ProviderOptions } from './index.js';
 import { parseSSE } from './sse.js';
-import { asCancelled, effortFor, isPlainObject, makeUsage, parseToolInput, readModelData, systemWithJsonInstruction, testByListingModels, throwIfAborted } from './shared.js';
+import { addSource, asCancelled, effortFor, isPlainObject, makeUsage, parseToolInput, readModelData, systemWithJsonInstruction, testByListingModels, throwIfAborted } from './shared.js';
 
 interface FunctionCall {
   id: string;
@@ -27,6 +28,7 @@ interface FunctionCall {
 function toInput(request: ChatRequest, provider: string): Record<string, unknown>[] {
   const input: Record<string, unknown>[] = [];
   for (const message of request.messages) {
+    const start = input.length;
     let text = '';
     const flush = () => {
       if (!text) return;
@@ -46,6 +48,20 @@ function toInput(request: ChatRequest, provider: string): Record<string, unknown
       } else if (part.type === 'tool_result') {
         flush();
         input.push({ type: 'function_call_output', call_id: part.toolCallId, output: typeof part.output === 'string' ? part.output : JSON.stringify(part.output ?? null) });
+      } else if (part.type === 'provider_part' && part.provider === provider && part.model === request.model && isPlainObject(part.data)) {
+        if (part.data['type'] === 'native_search_response' && Array.isArray(part.data['output'])) {
+          text = '';
+          input.splice(start, input.length - start, ...part.data['output'].filter(isPlainObject));
+        } else if (part.data['type'] === 'message') {
+          const original = outputText(part.data);
+          if (!original || !text.endsWith(original)) continue;
+          text = text.slice(0, text.length - original.length);
+          flush();
+          input.push(part.data);
+        } else if (part.data['type'] === 'web_search_call') {
+          flush();
+          input.push(part.data);
+        }
       }
     }
     flush();
@@ -68,6 +84,39 @@ function summaryText(item: Record<string, unknown>): string {
   return Array.isArray(item['summary']) ? item['summary'].filter(isPlainObject).map(part => typeof part['text'] === 'string' ? part['text'] : '').join('') : '';
 }
 
+function outputText(item: Record<string, unknown>): string {
+  return Array.isArray(item['content']) ? item['content'].filter(isPlainObject).map(part =>
+    part['type'] === 'output_text' && typeof part['text'] === 'string' ? part['text']
+      : part['type'] === 'refusal' && typeof part['refusal'] === 'string' ? part['refusal'] : '').join('') : '';
+}
+
+function collectCitations(sources: Source[], value: unknown): void {
+  if (!Array.isArray(value)) return;
+  for (const annotation of value) {
+    if (!isPlainObject(annotation) || annotation['type'] !== 'url_citation') continue;
+    addSource(sources, annotation['url'], annotation['title']);
+  }
+}
+
+function collectItemSources(sources: Source[], item: Record<string, unknown>): void {
+  if (Array.isArray(item['content'])) for (const content of item['content'].filter(isPlainObject)) collectCitations(sources, content['annotations']);
+  const action = item['action'];
+  if (item['type'] === 'web_search_call' && isPlainObject(action) && Array.isArray(action['sources'])) {
+    for (const source of action['sources'].filter(isPlainObject)) addSource(sources, source['url'], source['title']);
+  }
+}
+
+/** Only search-specific rejections disable search; limits/auth/transient failures keep their normal guidance. */
+function isSearchRejection(value: unknown, status?: number): boolean {
+  if (!isPlainObject(value) || (status !== undefined && ![400, 403, 422].includes(status))) return false;
+  const code = typeof value['code'] === 'string' ? value['code'] : '';
+  const param = typeof value['param'] === 'string' ? value['param'] : '';
+  const message = typeof value['message'] === 'string' ? value['message'] : '';
+  if (/^subscription_|invalid_grant/.test(code)) return false;
+  return /web_search|web search/i.test(`${code} ${param} ${message}`) || code === 'unsupported_tool'
+    || (/^tools(?:\.|\[|$)/.test(param) && /unsupported|not supported|not allowed|invalid tool/i.test(`${code} ${message}`));
+}
+
 export class ChatGPTAdapter implements ProviderAdapter {
   readonly id: string;
   readonly kind = 'chatgpt';
@@ -77,6 +126,8 @@ export class ChatGPTAdapter implements ProviderAdapter {
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: string;
   private readonly accessTokens = new Set<string>();
+  /** Plan-token hosted tools are unverified; a rejection disables search for this adapter session. */
+  private searchDisabled = false;
 
   constructor(config: ProviderConfig, options: ProviderOptions = {}) {
     if (config.kind !== 'chatgpt') throw new NeoError('config_error', `ChatGPTAdapter cannot serve provider kind "${config.kind}".`);
@@ -95,6 +146,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
   capabilities(model: string): ModelCapabilities {
     return {
       text: true, tools: true, vision: false, reasoning: /^(?:gpt-[5-9]|o[1-9])/.test(model), embeddings: false,
+      nativeWebSearch: !this.searchDisabled,
       speechToText: false, textToSpeech: false, image: false, video: false,
       contextWindow: 128_000, maxOutputTokens: 16_384,
     };
@@ -120,12 +172,16 @@ export class ChatGPTAdapter implements ProviderAdapter {
       body['tools'] = request.tools.map(tool => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.inputSchema, strict: false }));
       if (request.toolChoice) body['tool_choice'] = request.toolChoice;
     }
+    const nativeSearch = !!request.webSearch && !this.searchDisabled;
+    if (nativeSearch) body['tools'] = [...(Array.isArray(body['tools']) ? body['tools'] : []), { type: 'web_search' }];
     // Plan tokens reject temperature and max_output_tokens, so neither is sent.
-    const { response, token } = await this.request('/responses', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', accept: 'text/event-stream' } }, request.signal);
+    const { response, token } = await this.request('/responses', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', accept: 'text/event-stream' } }, request.signal, nativeSearch);
     if (!response.body) throw new NeoError('provider_error', 'ChatGPT returned an empty response.', { retryable: true });
 
     const calls = new Map<string, FunctionCall>();
     const finished = new Set<string>();
+    const replayed = new Set<string>();
+    const sources: Source[] = [];
     let usage: Usage | undefined;
     let stopReason: StopReason | undefined;
     let refused = false;
@@ -148,6 +204,14 @@ export class ChatGPTAdapter implements ProviderAdapter {
       finished.add(call.id);
       return { type: 'tool_call', id: call.id, name: call.name, input: parseToolInput(call.args), ...(call.data ? { data: call.data } : {}) };
     };
+    const rememberItem = (item: Record<string, unknown>): ChatStreamEvent | undefined => {
+      collectItemSources(sources, item);
+      if (!nativeSearch || (item['type'] !== 'web_search_call' && item['type'] !== 'message')) return undefined;
+      const id = typeof item['id'] === 'string' ? item['id'] : JSON.stringify(item);
+      if (replayed.has(id)) return undefined;
+      replayed.add(id);
+      return { type: 'provider_part', part: { type: 'provider_part', provider: this.kind, model: request.model, data: item } };
+    };
     try {
       for await (const frame of parseSSE(response.body, request.signal)) {
         if (frame.data === '[DONE]') break;
@@ -157,11 +221,15 @@ export class ChatGPTAdapter implements ProviderAdapter {
         const type = typeof event['type'] === 'string' ? event['type'] : frame.event;
         if (type === 'response.failed' || type === 'error') {
           const result = isPlainObject(event['response']) ? event['response'] : event;
-          throw this.error(result['error'] ?? result, undefined, token);
+          const error = result['error'] ?? result;
+          if (nativeSearch && isSearchRejection(error)) throw this.disableSearch();
+          throw this.error(error, undefined, token);
         }
         if (type === 'response.output_text.delta' || type === 'response.refusal.delta') {
           if (type === 'response.refusal.delta') refused = true;
           if (typeof event['delta'] === 'string' && event['delta']) yield { type: 'text', text: event['delta'] };
+        } else if (type === 'response.output_text.annotation.added') {
+          collectCitations(sources, [event['annotation']]);
         } else if (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') {
           if (typeof event['delta'] === 'string' && event['delta']) yield { type: 'reasoning', text: event['delta'] };
         } else if (type === 'response.output_item.added' || type === 'response.output_item.done') {
@@ -175,6 +243,9 @@ export class ChatGPTAdapter implements ProviderAdapter {
             }
           } else if (item['type'] === 'reasoning' && type === 'response.output_item.done') {
             yield { type: 'reasoning_part', part: { type: 'reasoning', text: summaryText(item), provider: this.kind, model: request.model, data: item } };
+          } else if (type === 'response.output_item.done') {
+            const replay = rememberItem(item);
+            if (replay) yield replay;
           }
         } else if (type === 'response.function_call_arguments.delta') {
           const key = typeof event['item_id'] === 'string' ? event['item_id'] : String(event['output_index']);
@@ -193,6 +264,8 @@ export class ChatGPTAdapter implements ProviderAdapter {
                 const complete = finishCall(remember(item, String(calls.size)));
                 if (complete) yield complete;
               }
+              const replay = rememberItem(item);
+              if (replay) yield replay;
             }
           }
           for (const call of calls.values()) {
@@ -205,6 +278,12 @@ export class ChatGPTAdapter implements ProviderAdapter {
           }
           stopReason = details['reason'] === 'max_output_tokens' ? 'max_tokens'
             : details['reason'] === 'content_filter' || refused ? 'refusal' : finished.size ? 'tool_use' : 'end';
+          if (nativeSearch && Array.isArray(result['output']) && result['output'].length) {
+            // Item completion events can be interleaved. The final output array
+            // is the authoritative order for the next stateless Responses call.
+            yield { type: 'provider_part', part: { type: 'provider_part', provider: this.kind, model: request.model,
+              data: { type: 'native_search_response', output: result['output'] } } };
+          }
           break;
         }
       }
@@ -216,6 +295,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
     }
     throwIfAborted(request.signal);
     if (!stopReason) throw new NeoError('provider_error', 'The connection to ChatGPT closed before the response finished.', { retryable: true });
+    if (sources.length) yield { type: 'sources', items: sources };
     if (usage) yield { type: 'usage', usage };
     yield { type: 'done', stopReason };
   }
@@ -236,7 +316,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
     return testByListingModels(() => this.listModels(signal));
   }
 
-  private async request(path: string, init: RequestInit, signal?: AbortSignal): Promise<{ response: Response; token: string }> {
+  private async request(path: string, init: RequestInit, signal?: AbortSignal, nativeSearch = false): Promise<{ response: Response; token: string }> {
     throwIfAborted(signal);
     if (!this.options.getChatGPTAccessToken) throw chatgptSubscriptionError('subscription_sharing_invalid_user');
     let token: string;
@@ -257,9 +337,17 @@ export class ChatGPTAdapter implements ProviderAdapter {
     if (!response.ok) {
       let value: unknown;
       try { value = await response.json(); } catch { /* upstream body is never reflected */ }
+      if (nativeSearch && isPlainObject(value) && isSearchRejection(value['error'], response.status)) throw this.disableSearch();
       throw this.error(isPlainObject(value) ? value['error'] : undefined, response.status, token);
     }
     return { response, token };
+  }
+
+  private disableSearch(): NeoError {
+    this.searchDisabled = true;
+    return new NeoError('search_unavailable', 'Your ChatGPT connection does not support web search. Search is disabled for this session; add a search engine or switch AI.', {
+      details: { provider: this.id, capability: 'nativeWebSearch' }, retryable: false,
+    });
   }
 
   private error(value: unknown, status: number | undefined, token: string): NeoError {

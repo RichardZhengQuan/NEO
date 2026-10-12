@@ -3,8 +3,8 @@
  * cancellation, retry-after parsing, tool-input parsing and request ids.
  */
 import { randomUUID } from 'node:crypto';
-import { NeoError, PROVIDER_PRESETS, isAbortError } from '@neo/protocol';
-import type { ChatRequest, ProviderConfig, ProviderTestResult, Usage } from '@neo/protocol';
+import { NeoError, PROVIDER_PRESETS, SourceSchema, isAbortError } from '@neo/protocol';
+import type { ChatRequest, ProviderConfig, ProviderTestResult, Source, Usage } from '@neo/protocol';
 import type { ProviderOptions } from './index.js';
 
 /** `config.apiKey ?? resolveSecret(config.apiKeySecret)`, resolved on every call so a key saved later is picked up. */
@@ -182,6 +182,22 @@ export async function readModelData(response: Response, label: string, field: 'd
 /** Plain JSON object check (tool inputs must be objects for most providers). */
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Bound and validate untrusted upstream links before they become timeline sources. */
+export function addSource(sources: Source[], url: unknown, title: unknown, snippet?: unknown): void {
+  if (typeof url !== 'string' || sources.length >= 100) return;
+  const result = SourceSchema.safeParse({
+    url,
+    title: typeof title === 'string' && title.trim() ? title.slice(0, 1000) : url.slice(0, 1000),
+    ...(typeof snippet === 'string' && snippet ? { snippet: snippet.slice(0, 4000) } : {}),
+  });
+  if (!result.success) return;
+  const existing = sources.find(source => source.url === result.data.url);
+  if (existing) {
+    if (existing.title === existing.url && result.data.title !== result.data.url) existing.title = result.data.title;
+    if (!existing.snippet && result.data.snippet) existing.snippet = result.data.snippet;
+  } else sources.push(result.data);
 }
 
 /** Hostname of a URL for messages ("Can't reach api.example.com"); falls back to the raw string. */

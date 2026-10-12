@@ -18,6 +18,7 @@ import type {
   ProviderAdapter,
   ProviderConfig,
   ProviderTestResult,
+  Source,
   StopReason,
   Usage,
 } from '@neo/protocol';
@@ -26,6 +27,7 @@ import { retryBeforeFirstByte } from './retry.js';
 import { parseSSE } from './sse.js';
 import {
   REFUSAL_NOTE,
+  addSource,
   asCancelled,
   describeNetworkError,
   hasHeader,
@@ -282,6 +284,7 @@ export class GeminiAdapter implements ProviderAdapter {
     const text = !embeddings && !textToSpeech && !video && !/^(?:models\/)?imagen-/i.test(model);
     return {
       text,
+      nativeWebSearch: text && !image && /gemini-(?:2\.[0-9]|[3-9])/.test(model) && this.baseUrl === DEFAULT_BASE,
       speechToText: false,
       textToSpeech,
       image,
@@ -326,6 +329,7 @@ export class GeminiAdapter implements ProviderAdapter {
     let blocked = false;
     let usage: Usage | null = null;
     const calls: ChatStreamEvent[] = [];
+    const sources: Source[] = [];
 
     try {
       for await (const msg of parseSSE(response.body, request.signal)) {
@@ -341,6 +345,7 @@ export class GeminiAdapter implements ProviderAdapter {
 
         const candidate = Array.isArray(chunk['candidates']) ? (chunk['candidates'][0] as Record<string, unknown> | undefined) : undefined;
         if (!candidate) continue;
+        collectGrounding(sources, candidate['groundingMetadata']);
         if (typeof candidate['finishReason'] === 'string' && candidate['finishReason']) finish = candidate['finishReason'];
         const content = candidate['content'];
         const parts = isPlainObject(content) && Array.isArray(content['parts']) ? (content['parts'] as unknown[]) : [];
@@ -396,6 +401,7 @@ export class GeminiAdapter implements ProviderAdapter {
     else stopReason = calls.length ? 'tool_use' : 'end';
 
     if (stopReason === 'refusal' && !sawText) yield { type: 'text', text: REFUSAL_NOTE };
+    if (sources.length) yield { type: 'sources', items: sources };
     if (usage) yield { type: 'usage', usage };
     yield { type: 'done', stopReason };
   }
@@ -423,6 +429,10 @@ export class GeminiAdapter implements ProviderAdapter {
       ];
       body['toolConfig'] = { functionCallingConfig: { mode: request.toolChoice === 'none' ? 'NONE' : 'AUTO' } };
     }
+    if (request.webSearch && this.capabilities(request.model).nativeWebSearch) {
+      const tools = Array.isArray(body['tools']) ? body['tools'] : [];
+      body['tools'] = [...tools, { google_search: {} }];
+    }
     return body;
   }
 
@@ -447,6 +457,7 @@ export class GeminiAdapter implements ProviderAdapter {
         const capabilities = {
           ...caps,
           text,
+          nativeWebSearch: !!text && caps.nativeWebSearch === true,
           tools: !!text && caps.tools,
           vision: !!text && caps.vision,
           reasoning: !!text && caps.reasoning,
@@ -543,6 +554,16 @@ export class GeminiAdapter implements ProviderAdapter {
   private streamError(error: unknown): NeoError {
     const message = isPlainObject(error) && typeof error['message'] === 'string' ? error['message'] : JSON.stringify(error);
     return new NeoError('provider_error', this.clean(`Gemini error: ${message}`), { retryable: true });
+  }
+}
+
+/** Grounding metadata contains web chunks even when the final text has no inline marker. */
+function collectGrounding(sources: Source[], metadata: unknown): void {
+  if (!isPlainObject(metadata) || !Array.isArray(metadata['groundingChunks'])) return;
+  for (const chunk of metadata['groundingChunks']) {
+    if (!isPlainObject(chunk) || !isPlainObject(chunk['web'])) continue;
+    const web = chunk['web'];
+    addSource(sources, web['uri'], web['title']);
   }
 }
 

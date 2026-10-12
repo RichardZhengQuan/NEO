@@ -53,7 +53,7 @@ import {
   type TurnHandle,
 } from '@neo/protocol';
 
-import { AgentRuntime } from './runtime.js';
+import { AgentRuntime, type AgentRuntimeDeps } from './runtime.js';
 
 const clone = <T>(v: T): T => structuredClone(v);
 
@@ -568,7 +568,7 @@ export interface Harness {
 }
 
 export function harness(
-  opts: { settings?: NeoSettingsPatch; adapters?: ScriptedAdapter[]; tools?: ToolDefinition[]; conv?: NewConversation } = {},
+  opts: { settings?: NeoSettingsPatch; adapters?: ScriptedAdapter[]; tools?: ToolDefinition[]; conv?: NewConversation; resolveSearchTool?: AgentRuntimeDeps['resolveSearchTool'] } = {},
 ): Harness {
   const { clock, advance } = fakeClock();
   const conversations = new MemConversationStore(clock);
@@ -585,7 +585,7 @@ export function harness(
     error: (msg, data) => void warnings.push({ msg, data }),
     child: () => logger,
   };
-  const runtime = new AgentRuntime({ conversations, settings, providers, memory, tools, logger, clock });
+  const runtime = new AgentRuntime({ conversations, settings, providers, memory, tools, logger, clock, ...(opts.resolveSearchTool ? { resolveSearchTool: opts.resolveSearchTool } : {}) });
   const events: AgentEvent[] = [];
   runtime.subscribe((e) => void events.push(e));
   const conv = conversations.create(opts.conv ?? {});

@@ -114,6 +114,10 @@ function splitAssistant(parts: readonly ContentPart[], options: ToChatOptions, m
         // Reasoning from a sensitive-derived turn may quote private memories too.
         if (!options.dropReasoning && !omitAssistant) assistant.push(p);
         break;
+      case 'provider_part':
+        if (results.length) flush();
+        if (!omitAssistant) assistant.push(p);
+        break;
       case 'text':
         if (results.length) flush();
         if (p.text) {
@@ -180,6 +184,9 @@ export function estimateMessageTokens(msg: Message): number {
         n += 40;
         break;
       case 'ui':
+        break;
+      case 'provider_part':
+        n += estimateTokens(JSON.stringify(p.data ?? null));
         break;
     }
   }

@@ -25,4 +25,11 @@ describe('ChatGPT plan error guidance', () => {
     const t = createTranslator('en', buildMessages('en', appDictionaries));
     expect(errorMessage(new NeoError('provider_error', 'Models are unavailable'), t)).toBe('Models are unavailable');
   });
+
+  it.each(['en', 'zh-CN'] as const)('explains an unavailable native search connection in %s', (locale) => {
+    const t = createTranslator(locale, buildMessages(locale, appDictionaries));
+    const error = new NeoError('search_unavailable', 'Built-in search is unavailable');
+    expect(errorMessage(error, t)).toBe(appDictionaries[locale]['error.search_unavailable']);
+    expect(errorMessage(error.toJSON(), t)).toBe(appDictionaries[locale]['error.search_unavailable']);
+  });
 });

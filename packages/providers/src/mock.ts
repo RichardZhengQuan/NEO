@@ -34,7 +34,7 @@ export class MockProvider implements ProviderAdapter {
   }
 
   capabilities(_model: string): ModelCapabilities {
-    return { tools: true, vision: false, reasoning: false, embeddings: false, contextWindow: 128_000, maxOutputTokens: 8192 };
+    return { nativeWebSearch: false, tools: true, vision: false, reasoning: false, embeddings: false, contextWindow: 128_000, maxOutputTokens: 8192 };
   }
 
   async *chat(request: ChatRequest): AsyncIterable<ChatStreamEvent> {
