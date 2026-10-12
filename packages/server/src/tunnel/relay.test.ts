@@ -130,10 +130,14 @@ describe('server relay connector', () => {
     connect(relay.url);
     await vi.waitFor(() => expect(relay.registrations).toHaveLength(1));
     const ws = relay.peers[0]!;
+    // Each accepted Open generates a Noise ephemeral key synchronously, so this burst can hold the event
+    // loop past any polling deadline; await the relay's first reply instead of racing a vi.waitFor timeout.
+    const replied = new Promise<void>(resolve => relay.receive(() => resolve()));
     for (let connection = 1; connection <= 257; connection++) {
       ws.send(encodeRelayFrame({ op: RelayOp.Open, connection, payload: utf8('127.0.0.1') }));
     }
-    await vi.waitFor(() => expect(relay.frames).toContainEqual({ op: RelayOp.Close, connection: 257, payload: new Uint8Array() }));
+    await replied;
+    expect(relay.frames).toEqual([{ op: RelayOp.Close, connection: 257, payload: new Uint8Array() }]);
     ws.send(encodeRelayFrame({ op: RelayOp.Close, connection: 1, payload: new Uint8Array() }));
     ws.send(encodeRelayFrame({ op: RelayOp.Open, connection: 258, payload: utf8('127.0.0.1') }));
     // A duplicate open closes the whole relay rather than replacing a live link.
