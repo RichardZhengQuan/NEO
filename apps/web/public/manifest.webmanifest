@@ -3,7 +3,7 @@
   "short_name": "NEO",
   "description": "Your personal AI assistant. You choose the AI, what it remembers and where it runs.",
   "id": "./",
-  "start_url": "./#/chat",
+  "start_url": "./#/",
   "scope": "./",
   "display": "standalone",
   "orientation": "any",
@@ -16,7 +16,7 @@
   ],
   "categories": ["productivity", "utilities"],
   "shortcuts": [
-    { "name": "New chat", "url": "./#/chat", "description": "Start a new conversation" },
+    { "name": "NEO", "url": "./#/", "description": "Open your timeline" },
     { "name": "Reminders", "url": "./#/reminders", "description": "See what's coming up" },
     { "name": "Memory", "url": "./#/memory", "description": "Explore what NEO remembers" }
   ]

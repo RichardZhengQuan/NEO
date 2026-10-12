@@ -1,13 +1,13 @@
 /**
  * Model providers ("you choose the AI"). Every adapter — Anthropic, OpenAI,
  * OpenAI-compatible servers (Ollama, LM Studio, vLLM, llama.cpp, OpenRouter,
- * Groq…), Gemini and the offline mock — normalizes to the same streaming
+ * Groq…), Gemini and internal test doubles — normalize to the same streaming
  * contract below, so the agent loop never knows which AI it is talking to.
  */
 import { z } from 'zod';
 import type { ContentPart, ReasoningPart, Usage } from './content.js';
 
-export const ProviderKindSchema = z.enum(['anthropic', 'openai', 'openai-compatible', 'gemini', 'ollama', 'mock']);
+export const ProviderKindSchema = z.enum(['anthropic', 'openai', 'chatgpt', 'openai-compatible', 'gemini', 'ollama', 'mock']);
 export type ProviderKind = z.infer<typeof ProviderKindSchema>;
 
 export const ProviderConfigSchema = z.object({
@@ -33,9 +33,14 @@ export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type ProviderConfigInput = z.input<typeof ProviderConfigSchema>;
 
 /** ProviderConfig as returned by the API: secrets are never sent to clients. */
-export type ProviderView = Omit<ProviderConfig, 'apiKey' | 'apiKeySecret'> & { hasApiKey: boolean; isLocal: boolean };
+export type ProviderView = Omit<ProviderConfig, 'apiKey' | 'apiKeySecret'> & { hasApiKey: boolean; isLocal: boolean; needsReauthorization?: boolean };
 
 export const ModelCapabilitiesSchema = z.object({
+  text: z.boolean().optional(),
+  speechToText: z.boolean().optional(),
+  textToSpeech: z.boolean().optional(),
+  image: z.boolean().optional(),
+  video: z.boolean().optional(),
   tools: z.boolean(),
   vision: z.boolean(),
   reasoning: z.boolean(),
@@ -245,14 +250,24 @@ export interface ProviderPreset {
 }
 
 /** Onboarding presets ("choose your AI"). Pure data so every client can show them. */
-export const PROVIDER_PRESETS: Record<ProviderKind, ProviderPreset> = {
+export const OPENROUTER_PRESET: ProviderPreset = {
+  kind: 'openai-compatible',
+  label: 'OpenRouter',
+  description: 'One account for Claude, GPT, Gemini and more.',
+  baseUrl: 'https://openrouter.ai/api/v1',
+  suggestedModels: [],
+  needsKey: true,
+  local: false,
+};
+
+export const PROVIDER_PRESETS: Record<Exclude<ProviderKind, 'mock' | 'chatgpt'>, ProviderPreset> & Partial<Record<'mock' | 'chatgpt', never>> = {
   anthropic: {
     kind: 'anthropic',
     label: 'Anthropic Claude',
     description: 'Claude models via the Anthropic API.',
     baseUrl: 'https://api.anthropic.com',
-    defaultModel: 'claude-opus-5-5',
-    suggestedModels: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'],
+    defaultModel: 'claude-sonnet-5-5',
+    suggestedModels: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'],
     needsKey: true,
     local: false,
     keyUrl: 'https://console.anthropic.com/settings/keys',
@@ -302,14 +317,5 @@ export const PROVIDER_PRESETS: Record<ProviderKind, ProviderPreset> = {
     suggestedModels: [],
     needsKey: false,
     local: false,
-  },
-  mock: {
-    kind: 'mock',
-    label: 'Demo mode (offline)',
-    description: 'A scripted stand-in for an AI so you can explore NEO without any model.',
-    defaultModel: 'neo-demo',
-    suggestedModels: ['neo-demo'],
-    needsKey: false,
-    local: true,
   },
 };

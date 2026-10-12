@@ -22,7 +22,6 @@ interface StaleRow {
   content: string;
   aliases: string;
   sensitivity: string;
-  status: string;
 }
 
 /** The embedding model each vector in memory came from (vectors of different models are never compared). */
@@ -47,15 +46,14 @@ export function sameSpace(a: Float32Array, b: Float32Array): boolean {
 
 /**
  * Where a memory's text may be embedded (docs/MEMORY.md, privacy): text that must
- * stay on the device (sensitive memories unless sendSensitiveToCloud, and pending
- * ones until approved) only ever goes to the local embedder, and its vector is
- * stored under the local embedder's model id.
+ * stay on the device (sensitive memories unless sendSensitiveToCloud) only ever
+ * goes to the local embedder, and its vector is stored under that model id.
  */
 export interface EmbeddingRouting {
   main: Embedder;
   /** === main when the main embedder runs locally. */
   local: Embedder;
-  keepLocal(node: { sensitivity: string; status: string }): boolean;
+  keepLocal(node: { sensitivity: string }): boolean;
 }
 
 export class VectorCache {
@@ -76,7 +74,7 @@ export class VectorCache {
   }
 
   /** The embedder a node's text may go to: the local one when it must stay on the device. */
-  embedderFor(main: Embedder, node: { sensitivity: string; status: string }): Embedder {
+  embedderFor(main: Embedder, node: { sensitivity: string }): Embedder {
     const r = this.routing;
     return r && r.main === main && r.local !== main && r.keepLocal(node) ? r.local : main;
   }
@@ -193,7 +191,7 @@ export class VectorCache {
           if (!isCurrent()) break;
           const page = this.db
             .prepare(
-              `SELECT id, kind, label, content, aliases, sensitivity, status, embedding_model FROM memory_nodes
+              `SELECT id, kind, label, content, aliases, sensitivity, embedding_model FROM memory_nodes
                WHERE (embedding_model IS NULL OR embedding_model != ?) AND id > ?
                ORDER BY id LIMIT ${REEMBED_BATCH}`,
             )
@@ -221,7 +219,7 @@ export class VectorCache {
               rows.forEach((row, i) => {
                 // The node may have been edited, re-embedded, made sensitive or deleted while we waited.
                 const current = this.db
-                  .prepare('SELECT kind, label, content, aliases, sensitivity, status, embedding_model FROM memory_nodes WHERE id = ?')
+                  .prepare('SELECT kind, label, content, aliases, sensitivity, embedding_model FROM memory_nodes WHERE id = ?')
                   .get(row.id) as (StaleRow & { embedding_model: string | null }) | undefined;
                 if (!current || current.embedding_model === target.id || this.embedderFor(embedder, current) !== target) return;
                 const text = nodeEmbedText(current.kind, current.label, current.content, fromJson<string[]>(current.aliases, []));

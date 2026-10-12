@@ -127,25 +127,14 @@ function makeFakeMemory(): MemoryService {
       for (const id of ids) { if (store.delete(id)) deleted++; }
       return deleted;
     },
+    async findBySource() { return []; },
+    async forgetBySource() { return 0; },
     async findForForget(query: string, _limit?: number): Promise<MemoryNode[]> {
       return [...store.values()].filter((n) => n.content.includes(query));
     },
-    async approve(ids: string[]): Promise<number> {
-      let count = 0;
-      for (const id of ids) {
-        const n = store.get(id);
-        if (n) { store.set(id, { ...n, status: 'active' }); count++; }
-      }
-      return count;
-    },
-    async reject(ids: string[]): Promise<number> {
-      let count = 0;
-      for (const id of ids) { if (store.delete(id)) count++; }
-      return count;
-    },
     // Unused stubs — typed for interface compliance:
     async observe(_turn: ObservedTurn): Promise<MemoryWriteResult> {
-      return { created: [], updated: [], superseded: [], pending: [], linked: 0 };
+      return { created: [], updated: [], superseded: [], linked: 0 };
     },
     async search(_query: MemorySearchQuery): Promise<{ items: MemoryNode[]; total: number }> {
       return { items: [], total: 0 };
@@ -173,7 +162,6 @@ function makeFakeMemory(): MemoryService {
         byStatus: {} as Record<import('@neo/protocol').MemoryStatus, number>,
         byKind: {} as Record<import('@neo/protocol').MemoryKind, number>,
         edges: 0,
-        pending: 0,
         lastConsolidationAt: null,
         embeddingModel: 'fake',
       };
@@ -440,7 +428,7 @@ describe('ReminderStore', () => {
       timezone: 'UTC',
       recurrence: null,
       notes: null,
-      conversationId: null,
+      messageId: null,
     });
     expect(r.id).toMatch(/^rem_/);
     expect(r.title).toBe('Test reminder');
@@ -452,8 +440,8 @@ describe('ReminderStore', () => {
 
   it('list by status', () => {
     const stores = makeStores(db, clock.fn);
-    stores.reminders.create({ title: 'A', dueAt: clock.now + 60_000, timezone: 'UTC', recurrence: null, notes: null, conversationId: null });
-    stores.reminders.create({ title: 'B', dueAt: clock.now + 120_000, timezone: 'UTC', recurrence: null, notes: null, conversationId: null });
+    stores.reminders.create({ title: 'A', dueAt: clock.now + 60_000, timezone: 'UTC', recurrence: null, notes: null, messageId: null });
+    stores.reminders.create({ title: 'B', dueAt: clock.now + 120_000, timezone: 'UTC', recurrence: null, notes: null, messageId: null });
 
     const scheduled = stores.reminders.list({ status: ['scheduled'] });
     expect(scheduled.length).toBe(2);
@@ -461,9 +449,9 @@ describe('ReminderStore', () => {
 
   it('due returns overdue items in order', () => {
     const stores = makeStores(db, clock.fn);
-    stores.reminders.create({ title: 'First', dueAt: clock.now - 2000, timezone: 'UTC', recurrence: null, notes: null, conversationId: null });
-    stores.reminders.create({ title: 'Second', dueAt: clock.now - 1000, timezone: 'UTC', recurrence: null, notes: null, conversationId: null });
-    stores.reminders.create({ title: 'Future', dueAt: clock.now + 1000, timezone: 'UTC', recurrence: null, notes: null, conversationId: null });
+    stores.reminders.create({ title: 'First', dueAt: clock.now - 2000, timezone: 'UTC', recurrence: null, notes: null, messageId: null });
+    stores.reminders.create({ title: 'Second', dueAt: clock.now - 1000, timezone: 'UTC', recurrence: null, notes: null, messageId: null });
+    stores.reminders.create({ title: 'Future', dueAt: clock.now + 1000, timezone: 'UTC', recurrence: null, notes: null, messageId: null });
 
     const due = stores.reminders.due(clock.now);
     expect(due.length).toBe(2);
@@ -479,7 +467,7 @@ describe('ReminderStore', () => {
       // Note: RecurrenceInput allows interval to be optional
       recurrence: { freq: 'daily' },
       notes: null,
-      conversationId: null,
+      messageId: null,
     });
     expect(r.recurrence?.interval).toBe(1);
   });
@@ -685,7 +673,7 @@ describe('ReminderScheduler (fake timers)', () => {
       timezone: 'UTC',
       recurrence: null,
       notes: null,
-      conversationId: null,
+      messageId: null,
     });
 
     const firings: import('@neo/protocol').ReminderFiring[] = [];
@@ -714,7 +702,7 @@ describe('ReminderScheduler (fake timers)', () => {
       timezone: 'UTC',
       recurrence: null,
       notes: null,
-      conversationId: null,
+      messageId: null,
     });
 
     const firings: import('@neo/protocol').ReminderFiring[] = [];
@@ -748,7 +736,7 @@ describe('ReminderScheduler (fake timers)', () => {
       timezone: 'UTC',
       recurrence: null,
       notes: null,
-      conversationId: null,
+      messageId: null,
     });
 
     const firings: import('@neo/protocol').ReminderFiring[] = [];

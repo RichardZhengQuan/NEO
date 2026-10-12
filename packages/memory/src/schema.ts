@@ -3,6 +3,8 @@
  * Namespace: 'memory'.
  */
 import type { Migration } from '@neo/storage';
+import { deleteNodes } from './db-helpers.js';
+import { redactJournal } from './journal.js';
 
 export const memoryMigrations: Migration[] = [
   {
@@ -73,5 +75,14 @@ export const memoryMigrations: Migration[] = [
         value TEXT NOT NULL
       );
     `,
+  },
+  {
+    version: 2,
+    name: 'remove unapproved memories',
+    up(db) {
+      const nodes = db.prepare("SELECT id, label FROM memory_nodes WHERE status = 'pending'").all() as { id: string; label: string }[];
+      deleteNodes(db, nodes.map((node) => node.id));
+      redactJournal(db, nodes);
+    },
   },
 ];

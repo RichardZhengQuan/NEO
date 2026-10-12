@@ -205,7 +205,7 @@ export function browserBootstrapDeps(): BootstrapDeps {
     verify: verifyCredentials,
     health: async (url) => (await checkHealth(url)) !== null,
     clearPairHash: () => {
-      window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#/chat`);
+      window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#/`);
     },
   };
 }

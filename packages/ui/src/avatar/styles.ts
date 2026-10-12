@@ -92,4 +92,30 @@ export const AVATAR_CSS = `
 .neo-avp--compact .neo-avp-kinds{justify-content:space-between}
 .neo-avp--compact .neo-avp-swatches{gap:6px}
 .neo-avp--compact .neo-avp-swatch{width:24px;height:24px}
+
+/* Each orbit item shares the figure's stacking context, so the rear half is occluded. */
+.neo-avp--orbit{--neo-avp-orbit-coral:#F87567;--neo-avp-orbit-bone:#F1E9D2;--neo-avp-portrait-size:60px;--neo-avp-portrait-target:64px;position:absolute;inset:0;display:block;pointer-events:none;color:var(--neo-avp-orbit-bone)}
+.neo-avp--orbit .neo-avp-character-choices,.neo-avp--orbit .neo-avp-kinds{display:contents}
+.neo-avp--orbit .neo-avp-label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+.neo-avp--orbit .neo-avp-orbit-node{position:absolute;left:0;top:0;pointer-events:auto;will-change:transform,opacity}
+/* The frame loop owns transform, opacity and z-index. Never delay its paints. */
+.neo-avp--orbit :is(.neo-avp-orbit-node,[data-orbit]){transition:none;animation:none}
+.neo-avp--orbit .neo-avp-orbit-visual{position:relative;display:flex;align-items:center;justify-content:center;width:100%;height:100%;pointer-events:none}
+.neo-avp--orbit .neo-avp-kind{display:flex;align-items:center;justify-content:center;gap:0;width:var(--neo-avp-portrait-target);height:var(--neo-avp-portrait-target);padding:0;border:0;border-radius:50%;background:transparent;color:var(--neo-avp-orbit-bone)}
+.neo-avp--orbit .neo-avp-kind .neo-av{position:relative;z-index:1;box-sizing:border-box;width:var(--neo-avp-portrait-size)!important;height:var(--neo-avp-portrait-size)!important;border:1.5px solid var(--neo-avp-orbit-coral);pointer-events:none}
+.neo-avp--orbit .neo-avp-kind[aria-checked=true] .neo-av{border-width:3px}
+.neo-avp--orbit .neo-avp-kind[aria-checked=true]>.neo-avp-orbit-visual::before{content:"";position:absolute;right:0;bottom:0;width:40%;height:40%;background:var(--neo-avp-orbit-coral);pointer-events:none}
+.neo-avp--orbit .neo-avp-kind:hover{background:transparent}
+.neo-avp--orbit .neo-avp-kind:focus-visible{outline:2px solid var(--neo-avp-orbit-bone);outline-offset:4px}
+.neo-avp-orbit-area{position:absolute;left:0;top:0;z-index:0;pointer-events:auto}
+.neo-avp-orbit-path{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;fill:none;color:var(--neo-avp-orbit-bone)}
+.neo-avp-orbit-path path{stroke:currentColor;stroke-width:1;stroke-dasharray:4 7;vector-effect:non-scaling-stroke}
+.neo-avp-orbit-path--back{z-index:1;opacity:.6}
+.neo-avp-orbit-path--front{z-index:3}
+@media(max-width:899px){
+.neo-avp--orbit{--neo-avp-portrait-size:44px;--neo-avp-portrait-target:56px}
+}
+@media(prefers-reduced-motion:reduce){.neo-avp--orbit .neo-avp-orbit-node{will-change:auto}}
+.neo-avp--orbit[data-orbit-motion=reduced] .neo-avp-orbit-visual{animation:none!important;transition:none!important}
+@media(prefers-reduced-motion:reduce){.neo-avp--orbit .neo-avp-orbit-visual{animation:none!important;transition:none!important}}
 `;

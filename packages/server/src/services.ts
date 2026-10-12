@@ -2,13 +2,13 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createConsoleLogger, NeoError, randomToken, systemClock } from '@neo/protocol';
+import { AI_CAPABILITIES, createConsoleLogger, NeoError, randomToken, systemClock } from '@neo/protocol';
 import type { Embedder, NeoConfig } from '@neo/protocol';
 import {
   createConversationStore, createDeviceStore, createProviderConfigStore,
   createPushSubscriptionStore, createSecretStore, createSettingsStore,
   loadOrCreateKey, migrate, openNeoDatabase,
-  protectProviderHeaders, resolveStoredProviderHeaders,
+  protectProviderHeaders, resolveStoredProviderHeaders, retireLegacyDemoProvider,
 } from '@neo/storage';
 import { createProviderRegistry } from '@neo/providers';
 import { createMemoryService, createProviderEmbedder, HashingEmbedder, memoryMigrations } from '@neo/memory';
@@ -18,11 +18,13 @@ import {
   createToolRegistry, loadPlugins, toolsMigrations,
 } from '@neo/tools';
 import { createAgentRuntime } from '@neo/core';
-import { expandTilde } from './config.js';
+import { clearDemoSettings, expandTilde, removeLegacyDemo } from './config.js';
 import { EventHub } from './events.js';
 import { createNotifier, loadOrCreateVapidKeys } from './notifier.js';
 import type { CreateServicesOptions, NeoServices } from './index.js';
 import { pushAllowedHosts } from './push-policy.js';
+import { migratePersonaSettings, storedPersona } from './persona-migration.js';
+import { createChatGPTTokenManager } from './chatgpt-auth.js';
 
 /** POSIX locale names become canonical BCP-47 tags; C/POSIX has no language. */
 export function environmentLocale(env: Record<string, string | undefined> = process.env): string {
@@ -38,7 +40,15 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
     server: { ...input.server, webDir: input.server.webDir === null ? null : expandTilde(input.server.webDir) },
     push: { ...input.push },
     plugins: { ...input.plugins, ...(input.plugins.dir ? { dir: expandTilde(input.plugins.dir) } : {}) },
+    settings: structuredClone(input.settings),
   };
+  removeLegacyDemo(config);
+  // Mock adapters are an explicit test dependency, never a user-configured AI.
+  config.providers = config.providers.filter(provider => provider.kind !== 'mock');
+  const mockProviders = options.mockProviders ?? [];
+  if (mockProviders.some(provider => provider.kind !== 'mock') || (mockProviders.length && !options.mockScript)) {
+    throw new NeoError('config_error', 'Internal mock providers require an explicit script and kind mock.');
+  }
   const logger = options.logger ?? createConsoleLogger(config.log.level);
   const clock = options.clock ?? systemClock;
   const inMemory = options.inMemory ?? false;
@@ -55,19 +65,41 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
     migrate(db, 'memory', memoryMigrations);
     migrate(db, 'tools', toolsMigrations);
     const secrets = createSecretStore(db, inMemory ? randomBytes(32) : loadOrCreateKey(join(dataDir, 'key')));
+    const providerConfigs = createProviderConfigStore(db, secrets);
+    if (![...config.providers, ...providerConfigs.list()].some(provider => provider.id === 'demo' && provider.kind !== 'mock')) {
+      retireLegacyDemoProvider(db, true);
+      if (config.settings) clearDemoSettings(config.settings);
+    }
+    let legacyPersona = storedPersona(db);
     const settings = createSettingsStore(db);
+    if (![...config.providers, ...providerConfigs.list()].some(provider => provider.id === 'demo' && provider.kind !== 'mock')) {
+      const capabilities = { ...settings.get().ai.capabilities };
+      let retired = false;
+      for (const capability of AI_CAPABILITIES) {
+        if (capabilities[capability]?.provider === 'demo') { capabilities[capability] = null; retired = true; }
+      }
+      if (retired) settings.update({ ai: { capabilities } });
+    }
     // Existence of the row, rather than onboarding state, defines first boot.
     if (!db.prepare('SELECT 1 FROM settings WHERE key = ?').get('settings')) {
-      settings.update({
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        locale: environmentLocale(),
-        ...config.settings,
+      legacyPersona = config.settings?.persona;
+      db.transaction(() => {
+        const saved = settings.update({
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          locale: environmentLocale(),
+          ...config.settings,
+        });
+        if (legacyPersona && typeof legacyPersona === 'object' && !Array.isArray(legacyPersona)) {
+          db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(
+            JSON.stringify({ ...saved, persona: { ...legacyPersona, avatar: saved.persona.avatar } }), 'settings',
+          );
+        }
       });
     }
     const conversations = createConversationStore(db, { clock });
+    conversations.purgeOffRecord(clock() - 12 * 60 * 60_000);
     const devices = createDeviceStore(db);
     const push = createPushSubscriptionStore(db);
-    const providerConfigs = createProviderConfigStore(db, secrets);
     config.providers = config.providers.map(provider => protectProviderHeaders(provider, secrets));
 
     const tokenPath = join(dataDir, 'token');
@@ -79,8 +111,11 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
     }
     if (!devices.verify(ownerToken)?.owner) devices.replaceOwner(ownerToken);
 
-    const providers = createProviderRegistry([...config.providers, ...providerConfigs.list()].map(provider => resolveStoredProviderHeaders(provider, secrets)), {
+    const chatGPTTokens = createChatGPTTokenManager(secrets, options.chatGPT, clock);
+    const providers = createProviderRegistry([...config.providers, ...providerConfigs.list().filter(provider => provider.kind !== 'mock'), ...mockProviders].map(provider => resolveStoredProviderHeaders(provider, secrets)), {
       resolveSecret: (name) => secrets.get(name), logger,
+      getChatGPTAccessToken: (id) => chatGPTTokens.accessToken(id),
+      onChatGPTUnauthorized: (id, token) => chatGPTTokens.markNeedsReauthorization(id, token),
       ...(options.mockScript ? { mockScript: options.mockScript } : {}),
     });
     const initial = settings.get();
@@ -97,26 +132,27 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
         return new HashingEmbedder(512);
       }
     }
-    const embedder = buildEmbedder(initial.embedding);
-    let embeddingKey = JSON.stringify(initial.embedding ?? null);
+    const embedder = buildEmbedder(initial.ai.capabilities.embedding);
+    let embeddingKey = JSON.stringify(initial.ai.capabilities.embedding ?? null);
     const llm = (): MemoryLLM | null => {
       try {
         const s = settings.get();
-        const ref = s.memoryModel ?? s.defaultModel;
+        const ref = s.ai.capabilities.text;
         if (ref) {
           const { adapter, model } = providers.resolve(ref);
           return { model: adapter, name: model, isLocal: adapter.isLocal };
         }
         // Use persisted/config enabled flags: some adapters normalize disabled config.
-        const enabled = [...config.providers, ...providerConfigs.list()].find(p => p.enabled && p.defaultModel);
+        const enabled = [...config.providers, ...providerConfigs.list().filter(provider => provider.kind !== 'mock'), ...mockProviders].find(p => p.enabled && p.defaultModel);
         if (!enabled?.defaultModel) return null;
         const { adapter, model } = providers.resolve({ provider: enabled.id, model: enabled.defaultModel });
         return { model: adapter, name: model, isLocal: adapter.isLocal };
       } catch { return null; }
     };
     const memory = createMemoryService({ db, embedder, llm, policy: initial.memory, clock, logger });
+    await migratePersonaSettings(db, memory, settings, legacyPersona, clock, logger);
     const refreshEmbeddingProvider = (providerId: string): void => {
-      const embedding = settings.get().embedding;
+      const embedding = settings.get().ai.capabilities.embedding;
       if (embedding?.provider === providerId) memory.setEmbedder(buildEmbedder(embedding));
     };
     const stores = createProductivityStores(db, { clock, defaultTimezone: initial.timezone });
@@ -150,6 +186,21 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
       if (closing) runtime.cancel(turn.turnId);
       return turn;
     };
+    const sendTimeline = runtime.sendTimeline.bind(runtime);
+    runtime.sendTimeline = async input => {
+      if (closing) throw new NeoError('cancelled', 'The server is stopping.');
+      const turn = await track(sendTimeline(input));
+      track(turn.done);
+      if (closing) runtime.cancel(turn.turnId);
+      return turn;
+    };
+    const purgeTimer = setInterval(() => {
+      if (!closing) void track(runtime.purgeOffRecord(clock() - 12 * 60 * 60_000)).catch(error => {
+        logger.warn('Off-record cleanup failed', { error: String(error) });
+      });
+    }, 60_000);
+    purgeTimer.unref();
+    subscriptions.push(() => clearInterval(purgeTimer));
     const events = new EventHub(clock);
     let vapidKeys: ReturnType<typeof loadOrCreateVapidKeys> | null = null;
     try {
@@ -157,7 +208,7 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
       config.push.vapidPublicKey = vapidKeys.publicKey;
       config.push.vapidPrivateKey = vapidKeys.privateKey;
     } catch (err) { logger.warn('Failed to load VAPID keys', { error: String(err) }); }
-    const notifier = createNotifier({ notifications: stores.notifications, push, devices, events, logger, clock, vapidKeys, pushSubject: config.push.subject, allowedHosts: pushAllowedHosts(config) });
+    const notifier = createNotifier({ notifications: stores.notifications, push, devices, conversations, events, logger, clock, vapidKeys, pushSubject: config.push.subject, allowedHosts: pushAllowedHosts(config) });
     const notify = notifier.notify.bind(notifier);
     notifier.notify = input => track(notify(input));
     scheduler = createReminderScheduler({ reminders: stores.reminders, clock, logger });
@@ -178,10 +229,10 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
       for (const [name, permission] of Object.entries(s.tools.permissions)) tools.setPermission(name, permission);
       events.publish({ type: 'settings.updated', settings: s });
       // A new embedding choice takes effect now, not at the next restart (re-embedding happens in the background).
-      const nextEmbeddingKey = JSON.stringify(s.embedding ?? null);
+      const nextEmbeddingKey = JSON.stringify(s.ai.capabilities.embedding ?? null);
       if (nextEmbeddingKey !== embeddingKey) {
         embeddingKey = nextEmbeddingKey;
-        memory.setEmbedder(buildEmbedder(s.embedding));
+        memory.setEmbedder(buildEmbedder(s.ai.capabilities.embedding));
       }
     }));
     subscriptions.push(scheduler.onFire(firing => {
@@ -189,7 +240,11 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
       void notifier.notify({
         kind: 'reminder', title: firing.reminder.title,
         body: firing.missed ? `Missed while you were away: ${firing.reminder.title}` : (firing.reminder.notes || "It's time"),
-        data: { reminderId: firing.reminder.id, url: `neo://reminders/${firing.reminder.id}` },
+        data: {
+          reminderId: firing.reminder.id,
+          ...(firing.reminder.messageId ? { messageId: firing.reminder.messageId, url: `neo://timeline/${encodeURIComponent(firing.reminder.messageId)}` }
+            : { url: `neo://reminders/${firing.reminder.id}` }),
+        },
       }).catch(err => { logger.warn('Reminder notification failed', { error: String(err) }); });
     }));
 
@@ -201,13 +256,14 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
         for (const turn of runtime.activeTurns()) runtime.cancel(turn.turnId);
         closePromise = (async () => {
           while (pending.size) await Promise.allSettled([...pending]);
+          await chatGPTTokens.close();
           for (const unsubscribe of subscriptions) unsubscribe();
           db.close();
         })();
       }
       return closePromise;
     }
-    return { config, logger, clock, ownerToken, db, conversations, settings, secrets, devices, push, providerConfigs, providers, refreshEmbeddingProvider, memory, tools, stores, scheduler, runtime, events, notifier, close };
+    return { config, ...(options.openRouter ? { openRouter: options.openRouter } : {}), ...(options.chatGPT ? { chatGPT: options.chatGPT } : {}), chatGPTTokens, logger, clock, ownerToken, db, conversations, settings, secrets, devices, push, providerConfigs, providers, refreshEmbeddingProvider, memory, tools, stores, scheduler, runtime, events, notifier, close };
   } catch (err) {
     scheduler?.stop();
     for (const unsubscribe of subscriptions) unsubscribe();

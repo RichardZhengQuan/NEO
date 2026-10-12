@@ -1,5 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import { bootstrapConnection, credentialsFromInput, normalizeServerUrl, type BootstrapDeps, type Credentials } from './connection.js';
+import { bootstrapConnection, browserBootstrapDeps, credentialsFromInput, normalizeServerUrl, type BootstrapDeps, type Credentials } from './connection.js';
+
+it('clears a consumed pairing link into the home timeline without adding history', () => {
+  const oldHash = window.location.hash;
+  window.history.replaceState(null, '', '#/pair?token=paired-token');
+  const historyLength = window.history.length;
+  try {
+    browserBootstrapDeps().clearPairHash();
+    expect(window.location.hash).toBe('#/');
+    expect(window.history.length).toBe(historyLength);
+  } finally {
+    window.history.replaceState(null, '', oldHash || '#/');
+  }
+});
 
 function deps(over: Partial<BootstrapDeps> = {}): BootstrapDeps & { saved: Credentials | null } {
   const state = { saved: null as Credentials | null };

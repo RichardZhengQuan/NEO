@@ -6,6 +6,8 @@
  */
 import {
   ContentPartSchema,
+  episodeOf,
+  estimateMessageTokens,
   NeoError,
   modelRefToString,
   newId,
@@ -25,9 +27,11 @@ import {
   type Message,
   type ModelRef,
   type NeoSettings,
+  type OffRecordState,
   type ProviderAdapter,
   type ProviderRegistry,
   type SendInput,
+  type SendTimelineInput,
   type SettingsStore,
   type ToolConfirmation,
   type ToolContext,
@@ -42,7 +46,9 @@ import {
 } from '@neo/protocol';
 
 import { ConfirmationManager } from './confirmations.js';
-import { startTurn, type TurnRecord, type TurnServices } from './turn.js';
+import { raceAbort } from './abort.js';
+import { prepareTurnContext, startTurn, type TurnPlan, type TurnRecord, type TurnServices } from './turn.js';
+import { buildRecentContext } from './prompt.js';
 import { describeUiToolCall, findUiPart, patchWidgetBlock, resolveStoredAction, uiActionBinding, uiActionIdentity } from './ui-actions.js';
 
 export interface AgentRuntimeDeps {
@@ -84,6 +90,11 @@ export class AgentRuntime implements AgentRuntimeApi {
   private readonly uiPermissionVersions = new Map<string, number>();
   /** Running turns by turnId. */
   private readonly turns = new Map<string, TurnRecord>();
+  private readonly turnDone = new Map<string, Promise<Message>>();
+  private readonly uiTools = new Map<AbortController, { done: Promise<void>; enterOffRecord(): void; tool: string }>();
+  private pendingTimeline: { done: Promise<void>; resolve(): void; cancelled: boolean; offRecord: boolean } | undefined;
+  private mutatingTimeline = false;
+  private privateEpoch = 0;
   /** conversationId → turnId of the turn holding it (reserved synchronously in send()). */
   private readonly busy = new Map<string, string>();
   private readonly listeners = new Set<(event: AgentEvent) => void>();
@@ -100,6 +111,7 @@ export class AgentRuntime implements AgentRuntimeApi {
     this.services = {
       conversations: this.conversations,
       settings: this.settingsStore,
+      providers: this.providers,
       memory: this.memory,
       tools: this.tools,
       confirmations: this.confirmations,
@@ -124,10 +136,103 @@ export class AgentRuntime implements AgentRuntimeApi {
   async send(input: SendInput): Promise<TurnHandle> {
     const conv = this.conversations.get(input.conversationId);
     if (!conv) throw new NeoError('not_found', `Conversation ${input.conversationId} not found.`);
+    if (this.offRecordState().active) return this.sendTimeline({ parts: input.parts });
     if (this.busy.has(conv.id)) throw new NeoError('conflict', 'A turn is already running in this conversation.');
     const parts = validateUserParts(input.parts);
     const settings = this.settingsStore.get();
-    const { adapter, model } = this.resolveModel(input.model, conv, settings);
+    const { adapter, model } = this.resolveModel(settings);
+    return this.beginTurn(conv, parts, adapter, model, settings);
+  }
+
+  /** Choose the storage episode while keeping the public relationship a single timeline. */
+  async sendTimeline(input: SendTimelineInput): Promise<TurnHandle> {
+    if (this.pendingTimeline || this.mutatingTimeline) throw new NeoError('conflict', 'The timeline is busy. Try again after the current operation finishes.');
+    const parts = validateUserParts(input.parts);
+    if (input.offRecord === true && !this.offRecordState().active) this.enterOffRecord();
+    const settings = this.settingsStore.get();
+    let resolve!: () => void;
+    const pending = { done: new Promise<void>((done) => { resolve = done; }), resolve: () => resolve(), cancelled: false, offRecord: this.offRecordState().active };
+    this.pendingTimeline = pending;
+    let created: Conversation | undefined;
+    try {
+      const offRecord = this.offRecordState().active;
+      let current = this.conversations.currentEpisode();
+      if (this.turns.size) throw new NeoError('conflict', 'A turn is already running in the timeline.');
+      if (pending.cancelled) throw new NeoError('cancelled', 'The turn was cancelled.');
+      const { adapter, model } = this.resolveModel(settings);
+
+      let history = current ? this.conversations.messages(current.id) : [];
+      let previous = offRecord && current && !history.length
+        ? this.conversations.list().filter((episode) => !episode.offRecord && !episode.incognito && episode.id !== current!.id).sort((a, b) => (b.startedAt ?? b.createdAt) - (a.startedAt ?? a.createdAt))[0] ?? null
+        : current ?? this.conversations.latestEpisode();
+      const now = this.clock();
+      const lastAt = current?.lastMessageAt ?? history.at(-1)?.createdAt;
+      const gap = lastAt !== undefined && lastAt !== null && now - lastAt >= settings.timeline.episodeGapMinutes * 60_000;
+      if (current && (gap || (current.offRecord ?? current.incognito) !== offRecord)) {
+        this.conversations.closeEpisode(current.id);
+        current = null;
+      }
+      if (!current) {
+        created = this.conversations.createEpisode({ offRecord });
+        current = created;
+        if (offRecord) this.conversations.setOffRecordState({ ...this.offRecordState(), episodeId: current.id });
+        history = [];
+      }
+      const allowSensitive = adapter.isLocal || settings.memory.sendSensitiveToCloud;
+      const continuity = (episode: Conversation | null, tokenBudget: number): ContentPart | undefined => {
+        if (!episode || episode.id === current!.id || episode.offRecord || episode.incognito) return undefined;
+        const messages = this.conversations.messages(episode.id);
+        const endedAt = episode.lastMessageAt ?? messages.at(-1)?.createdAt;
+        if (endedAt === undefined || endedAt === null || now - endedAt >= 24 * 60 * 60_000) return undefined;
+        return buildRecentContext(messages, allowSensitive, tokenBudget);
+      };
+      const recalledHistory = history.length ? history : previous && !(previous.offRecord ?? previous.incognito) ? this.conversations.messages(previous.id) : [];
+      const preview = history.length > 0;
+      let prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive, preview ? false : undefined);
+      if (pending.cancelled) throw new NeoError('cancelled', 'The turn was cancelled.');
+      const incoming = (): Message => ({
+        id: '', conversationId: current!.id, role: 'user', status: 'complete', createdAt: now,
+        parts: [prepared.context, ...parts],
+      });
+      const exceedsBudget = () => history.length > 0 && history.reduce((total, message) => total + estimateMessageTokens(message), 0) + estimateMessageTokens(incoming()) > settings.agent.contextTokenBudget;
+      const breakForBudget = async () => {
+        previous = this.conversations.closeEpisode(current!.id);
+        created = this.conversations.createEpisode({ offRecord });
+        current = created;
+        if (offRecord) this.conversations.setOffRecordState({ ...this.offRecordState(), episodeId: current.id });
+        history = [];
+        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive);
+      };
+      if (exceedsBudget()) {
+        await breakForBudget();
+      } else if (preview && !offRecord) {
+        // The budget preview cannot strengthen memories. Recall once against the final
+        // episode, so its own summary exclusion and reinforcement have the right source.
+        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive);
+        if (exceedsBudget()) await breakForBudget();
+      }
+      if (pending.cancelled) throw new NeoError('cancelled', 'The turn was cancelled.');
+      const recentContext = continuity(previous, settings.agent.contextTokenBudget - estimateMessageTokens(incoming()));
+      if (created) this.broadcast({ type: 'episode.started', episodeId: current.id, episode: episodeOf(current) });
+      return await this.beginTurn(current, parts, adapter, model, settings, { ...prepared, ...(recentContext ? { recentContext } : {}), timeline: true });
+    } catch (err) {
+      if (created && !this.conversations.messages(created.id).length && !offRecordEpisode(this.offRecordState(), created.id)) this.conversations.delete(created.id);
+      throw err;
+    } finally {
+      if (this.pendingTimeline === pending) this.pendingTimeline = undefined;
+      pending.resolve();
+    }
+  }
+
+  private async beginTurn(
+    conv: Conversation,
+    parts: ContentPart[],
+    adapter: ProviderAdapter,
+    model: string,
+    settings: NeoSettings,
+    context: Partial<Pick<TurnPlan, 'context' | 'recalled' | 'recentContext' | 'timeline'>> = {},
+  ): Promise<TurnHandle> {
+    if (this.busy.has(conv.id)) throw new NeoError('conflict', 'A turn is already running in this episode.');
 
     // Reserve the conversation before the first await, so concurrent sends conflict.
     const record: TurnRecord = { turnId: newId('turn'), conversationId: conv.id, startedAt: this.clock(), controller: new AbortController() };
@@ -138,19 +243,25 @@ export class AgentRuntime implements AgentRuntimeApi {
       if (released) return;
       released = true;
       this.turns.delete(record.turnId);
-      if (this.busy.get(conv.id) === record.turnId) this.busy.delete(conv.id);
+      if (this.busy.get(record.conversationId) === record.turnId) this.busy.delete(record.conversationId);
     };
     try {
-      return await startTurn(this.services, { record, conversation: conv, parts, adapter, model, settings, release });
+      const handle = await startTurn(this.services, { record, conversation: conv, parts, adapter, model, settings, release, ...context });
+      this.turnDone.set(record.turnId, handle.done);
+      void handle.done.then(() => this.turnDone.delete(record.turnId));
+      return handle;
     } catch (err) {
       release();
       throw err;
     }
   }
 
-  /** input.model → conversation model → settings.defaultModel → first enabled provider with a default model. */
-  private resolveModel(override: ModelRef | undefined, conv: Conversation, settings: NeoSettings): { adapter: ProviderAdapter; model: string } {
-    const ref = override ?? conv.model ?? settings.defaultModel ?? this.firstAvailableModel();
+  /** Every turn follows the global Text capability, with a provider default for legacy settings. */
+  private resolveModel(settings: NeoSettings): { adapter: ProviderAdapter; model: string } {
+    if (!this.providers.list().some((adapter) => adapter.config.enabled)) {
+      throw new NeoError('no_provider', 'Connect an AI to start chatting. Open Settings → AI to add a provider.');
+    }
+    const ref = settings.ai.capabilities.text ?? this.firstAvailableModel();
     try {
       return this.providers.resolve(ref);
     } catch (err) {
@@ -164,9 +275,9 @@ export class AgentRuntime implements AgentRuntimeApi {
 
   private firstAvailableModel(): ModelRef {
     for (const adapter of this.providers.list()) {
-      if (adapter.config.enabled && adapter.config.defaultModel) return { provider: adapter.id, model: adapter.config.defaultModel };
+      if (adapter.config.enabled && adapter.config.defaultModel?.trim()) return { provider: adapter.id, model: adapter.config.defaultModel };
     }
-    throw new NeoError('config_error', 'No AI configured — add one in Settings.');
+    throw new NeoError('no_provider', 'Connect an AI to start chatting. Open Settings → AI to add a provider.');
   }
 
   // ── cancel ─────────────────────────────────────────────────────────────────
@@ -184,6 +295,130 @@ export class AgentRuntime implements AgentRuntimeApi {
     return turnId ? this.cancel(turnId) : false;
   }
 
+  cancelTimeline(turnId?: string): boolean {
+    if (turnId) return this.cancel(turnId);
+    let cancelled = false;
+    if (this.pendingTimeline) {
+      this.pendingTimeline.cancelled = true;
+      cancelled = true;
+    }
+    for (const id of this.turns.keys()) cancelled = this.cancel(id) || cancelled;
+    return cancelled;
+  }
+
+  async waitForIdle(episodeIds?: string[]): Promise<void> {
+    if (this.pendingTimeline) await this.pendingTimeline.done;
+    await this.waitForTurns(episodeIds);
+  }
+
+  private async waitForTurns(episodeIds?: string[]): Promise<void> {
+    const ids = new Set(episodeIds);
+    const done = [...this.turnDone].filter(([id]) => !episodeIds || ids.has(this.turns.get(id)?.conversationId ?? '')).map(([, promise]) => promise);
+    await Promise.all(done);
+  }
+
+  /** Hold the send boundary while a user deletion selects and removes its messages. */
+  async mutateTimeline<T>(mutation: () => Promise<T>): Promise<T> {
+    return this.withTimelineMutation(mutation, true);
+  }
+
+  private async withTimelineMutation<T>(mutation: () => Promise<T>, cancelNormalPreflight: boolean): Promise<T> {
+    if (this.mutatingTimeline) throw new NeoError('conflict', 'The timeline is being changed. Try again after the current operation finishes.');
+    this.mutatingTimeline = true;
+    try {
+      if (this.pendingTimeline) {
+        if (cancelNormalPreflight || this.pendingTimeline.offRecord) this.pendingTimeline.cancelled = true;
+        await this.pendingTimeline.done;
+      }
+      return await mutation();
+    } finally {
+      this.mutatingTimeline = false;
+    }
+  }
+
+  offRecordState(): OffRecordState {
+    return this.conversations.offRecordState();
+  }
+
+  async startOffRecord(): Promise<OffRecordState> {
+    if (this.offRecordState().active) return this.offRecordState();
+    return this.withTimelineMutation(async () => this.enterOffRecord(), true);
+  }
+
+  private enterOffRecord(): OffRecordState {
+    const existing = this.offRecordState();
+    if (existing.active) return existing;
+    const episode = this.conversations.createEpisode({ offRecord: true });
+    const state = { active: true, episodeId: episode.id, startedAt: this.clock() };
+    this.conversations.setOffRecordState(state);
+    this.privateEpoch++;
+    for (const [controller, run] of this.uiTools) {
+      run.enterOffRecord();
+      if (run.tool === 'remember' || run.tool === 'forget') controller.abort();
+    }
+    this.broadcast({ type: 'episode.started', episodeId: episode.id, episode: episodeOf(episode) });
+    for (const turn of this.turns.values()) {
+      const previous = turn.conversationId;
+      turn.enterOffRecord?.(episode);
+      if (this.busy.get(previous) === turn.turnId) this.busy.delete(previous);
+      this.busy.set(turn.conversationId, turn.turnId);
+    }
+    this.broadcast({ type: 'timeline.off_record', active: true });
+    return this.offRecordState();
+  }
+
+  private privateEpisode(): Conversation {
+    const state = this.offRecordState();
+    const current = state.episodeId ? this.conversations.get(state.episodeId) : null;
+    if (current?.offRecord && current.closedAt === null) return current;
+    const episode = this.conversations.createEpisode({ offRecord: true });
+    this.conversations.setOffRecordState({ ...state, episodeId: episode.id });
+    this.broadcast({ type: 'episode.started', episodeId: episode.id, episode: episodeOf(episode) });
+    return episode;
+  }
+
+  async endOffRecord(): Promise<{ deleted: number }> {
+    return this.withTimelineMutation(async () => {
+      if (!this.offRecordState().active) return { deleted: 0 };
+      const active = [...this.turns.values()].filter((turn) => this.conversations.get(turn.conversationId)?.ephemeral);
+      for (const turn of active) this.cancel(turn.turnId);
+      await this.waitForTurns(active.map((turn) => turn.conversationId));
+      await this.settleUiTools();
+      const deleted = this.deleteOffRecord(Number.MAX_SAFE_INTEGER);
+      this.conversations.setOffRecordState({ active: false, episodeId: null, startedAt: null });
+      this.broadcast({ type: 'timeline.off_record', active: false });
+      return { deleted };
+    }, false);
+  }
+
+  async purgeOffRecord(before: number): Promise<number> {
+    if (this.pendingTimeline || this.mutatingTimeline) return 0;
+    return this.mutateTimeline(async () => {
+      const state = this.offRecordState();
+      const expires = state.active && state.startedAt !== null && state.startedAt < before;
+      const expired = [...this.turns.values()].filter((turn) => {
+        const episode = this.conversations.get(turn.conversationId);
+        return episode?.offRecord && episode.ephemeral && (expires || (episode.startedAt ?? episode.createdAt) < before);
+      });
+      for (const turn of expired) this.cancel(turn.turnId);
+      await this.waitForTurns(expired.map((turn) => turn.conversationId));
+      if (expires) await this.settleUiTools();
+      const deleted = this.deleteOffRecord(expires ? Number.MAX_SAFE_INTEGER : before);
+      if (expires) {
+        this.conversations.setOffRecordState({ active: false, episodeId: null, startedAt: null });
+        this.broadcast({ type: 'timeline.off_record', active: false });
+      }
+      return deleted;
+    });
+  }
+
+  private deleteOffRecord(before: number): number {
+    const episodes = this.conversations.offRecordEpisodes(before);
+    const deleted = this.conversations.purgeOffRecord(before);
+    for (const episode of episodes) this.broadcast({ type: 'conversation.deleted', conversationId: episode.id, episodeId: episode.id });
+    return deleted;
+  }
+
   // ── confirmations ──────────────────────────────────────────────────────────
 
   confirm(confirmationId: string, decision: ConfirmationDecision): boolean {
@@ -196,7 +431,15 @@ export class AgentRuntime implements AgentRuntimeApi {
 
   // ── handleUiAction ─────────────────────────────────────────────────────────
 
-  async handleUiAction(input: UiActionInput): Promise<UiActionResult> {
+  async handleTimelineUiAction(input: Omit<UiActionInput, 'conversationId'>): Promise<UiActionResult> {
+    const message = this.conversations.getMessage(input.messageId);
+    if (!message) throw new NeoError('not_found', `Message ${input.messageId} not found.`);
+    return this.handleUiAction({ ...input, conversationId: message.conversationId }, true);
+  }
+
+  async handleUiAction(input: UiActionInput, timeline = false): Promise<UiActionResult> {
+    const modeVersion = this.privateEpoch;
+    const privateAction = this.offRecordState().active;
     const approval = input.confirmationToken === undefined ? undefined : this.consumeUiConfirmation(input.confirmationToken);
     if (approval && approval.identity !== uiActionIdentity(input)) throw new NeoError('conflict', 'The UI confirmation token does not match this action.');
     const { conversationId, messageId, uiId, actionId } = input;
@@ -213,14 +456,16 @@ export class AgentRuntime implements AgentRuntimeApi {
 
     switch (action.kind) {
       case 'message':
-        return { kind: 'turn', turn: await this.send({ conversationId, parts: [{ type: 'text', text: action.text }] }) };
+        return { kind: 'turn', turn: await (timeline ? this.sendTimeline({ parts: [{ type: 'text', text: action.text }], offRecord: this.offRecordState().active }) : this.send({ conversationId, parts: [{ type: 'text', text: action.text }] })) };
       case 'event': {
         const event: UIEventPart = { type: 'ui_event', messageId, uiId, actionId, label: action.label };
         if (action.payload !== undefined) event.payload = action.payload;
         if (values && Object.keys(values).length) event.values = values;
-        return { kind: 'turn', turn: await this.send({ conversationId, parts: [event] }) };
+        return { kind: 'turn', turn: await (timeline ? this.sendTimeline({ parts: [event], offRecord: this.offRecordState().active }) : this.send({ conversationId, parts: [event] })) };
       }
       case 'tool': {
+        const source = this.conversations.get(conversationId);
+        if (((source?.offRecord ?? source?.incognito) || this.offRecordState().active) && (action.tool === 'remember' || action.tool === 'forget')) throw new NeoError('forbidden', 'Memory writes are unavailable off the record.');
         const permission = this.tools.permissionFor(action.tool);
         if (permission === 'deny') throw new NeoError('tool_denied', `The tool "${action.tool}" is turned off.`);
         const def = this.tools.get(action.tool);
@@ -246,12 +491,10 @@ export class AgentRuntime implements AgentRuntimeApi {
           }
           if (approval.expiresAt <= this.clock()) throw new NeoError('conflict', 'The UI confirmation token has expired; request a new confirmation.');
           // Execute the exact data covered by the approval, without a second schema transform.
-          const result = await this.runUiTool(message, action.tool, parsed.data, def);
-          if (!result.isError) this.patchWidgets(message, result);
+          const result = await this.runUiTool(message, action.tool, parsed.data, privateAction || this.privateEpoch !== modeVersion, def);
           return { kind: 'tool', result };
         }
-        const result = await this.runUiTool(message, action.tool, action.input ?? {});
-        if (!result.isError) this.patchWidgets(message, result);
+        const result = await this.runUiTool(message, action.tool, action.input ?? {}, privateAction || this.privateEpoch !== modeVersion);
         return { kind: 'tool', result };
       }
       case 'link':
@@ -277,24 +520,65 @@ export class AgentRuntime implements AgentRuntimeApi {
     for (const [token, approval] of this.uiConfirmations) if (approval.expiresAt <= now) this.uiConfirmations.delete(token);
   }
 
-  private async runUiTool(message: Message, tool: string, input: unknown, validatedDef?: ToolDefinition): Promise<ToolResult> {
+  private async settleUiTools(): Promise<void> {
+    const pending = [...this.uiTools];
+    for (const [controller] of pending) controller.abort();
+    await Promise.all(pending.map(([, run]) => run.done));
+  }
+
+  private async runUiTool(message: Message, tool: string, input: unknown, privateAction: boolean, validatedDef?: ToolDefinition): Promise<ToolResult> {
+    if (this.mutatingTimeline) throw new NeoError('conflict', 'The timeline is being changed. Try again after the current operation finishes.');
+    const source = this.conversations.get(message.conversationId);
+    let privateRun = privateAction || (source?.offRecord ?? source?.incognito ?? false) || this.offRecordState().active;
+    if (privateRun && !this.offRecordState().active && !(source?.offRecord ?? source?.incognito)) {
+      throw new NeoError('conflict', this.settingsStore.get().locale.startsWith('zh') ? '此操作执行前，不留记录会话已结束。' : 'The off-record session ended before this action could run.');
+    }
+    const offRecord = () => privateRun ||= this.offRecordState().active;
+    if (privateRun && this.offRecordState().active) this.privateEpisode();
+    const controller = new AbortController();
+    let resolve!: () => void;
+    this.uiTools.set(controller, { done: new Promise<void>((done) => { resolve = done; }), enterOffRecord: () => { privateRun = true; }, tool });
+    try {
+      const result = await this.executeUiTool(message, tool, input, controller, offRecord, validatedDef);
+      if (!result.isError && !controller.signal.aborted) this.patchWidgets(message, result, offRecord());
+      return result;
+    } finally {
+      this.uiTools.delete(controller);
+      resolve();
+    }
+  }
+
+  private async executeUiTool(message: Message, tool: string, input: unknown, controller: AbortController, offRecord: () => boolean, validatedDef?: ToolDefinition): Promise<ToolResult> {
     if (this.tools.permissionFor(tool) === 'deny') throw new NeoError('tool_denied', `The tool "${tool}" is turned off.`);
+    const checkMemoryWrite = () => {
+      if (offRecord() && (tool === 'remember' || tool === 'forget')) throw new NeoError('forbidden', 'Memory writes are unavailable off the record.');
+    };
+    checkMemoryWrite();
     const settings = this.settingsStore.get();
     const toolCallId = newId('tc');
+    const runtime = this;
     const ctx: ToolContext = {
       toolCallId,
-      conversationId: message.conversationId,
+      get conversationId() { return offRecord() ? runtime.offRecordState().episodeId ?? message.conversationId : message.conversationId; },
       messageId: message.id,
-      signal: AbortSignal.timeout(UI_TOOL_TIMEOUT_MS),
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(UI_TOOL_TIMEOUT_MS)]),
       now: this.clock,
       timezone: settings.timezone,
       locale: settings.locale,
       // The result goes to the user's screen, not to a model; stay conservative anyway.
       allowSensitive: false,
+      // Registries may await validation; memory tools read the current mode at execution.
+      get offRecord() { return offRecord(); },
       origin: 'ui',
       logger: this.logger.child({ tool, toolCallId }),
     };
-    if (!validatedDef) return this.tools.execute({ id: toolCallId, name: tool, input }, ctx);
+    if (!validatedDef) {
+      try {
+        return await raceAbort(this.tools.execute({ id: toolCallId, name: tool, input }, ctx), ctx.signal);
+      } catch (err) {
+        return { isError: true, output: { error: NeoError.from(err).message } };
+      }
+    }
 
     // Protected calls were already validated for the token binding. Preserve the registry's
     // result/error handling while executing that data directly, with no asynchronous re-parse.
@@ -305,7 +589,8 @@ export class AgentRuntime implements AgentRuntimeApi {
     if (this.tools.permissionFor(tool) === 'deny') throw new NeoError('tool_denied', `The tool "${tool}" is turned off.`);
     try {
       if (ctx.signal.aborted) return errorResult('The operation was cancelled.', 'cancelled');
-      const result = await validatedDef.execute(input, ctx);
+      checkMemoryWrite();
+      const result = await raceAbort(validatedDef.execute(input, ctx), ctx.signal);
       if (typeof result !== 'object' || result === null || !('output' in result)) {
         this.logger.error('tool returned an invalid result', { tool });
         return errorResult(`The tool "${tool}" returned an invalid result.`);
@@ -327,7 +612,7 @@ export class AgentRuntime implements AgentRuntimeApi {
    * with the tool result, and tell clients via part.added. Skipped while the
    * message's turn is running (the turn owns its parts until it ends).
    */
-  private patchWidgets(message: Message, result: ToolResult): void {
+  private patchWidgets(message: Message, result: ToolResult, offRecord = false): void {
     try {
       const fresh = this.conversations.getMessage(message.id);
       if (!fresh || (fresh.turnId && this.turns.has(fresh.turnId))) return;
@@ -341,10 +626,19 @@ export class AgentRuntime implements AgentRuntimeApi {
         return part;
       });
       if (!changed.length) return;
+      if (offRecord && !(this.conversations.get(fresh.conversationId)?.offRecord ?? false)) {
+        const state = this.offRecordState();
+        if (!state.active || !state.episodeId) return;
+        const now = this.clock();
+        const turnId = newId('turn', now);
+        const privateMessage = this.conversations.appendMessage({ ...fresh, id: newId('msg', now), conversationId: state.episodeId, episodeId: state.episodeId, parts, createdAt: now, turnId });
+        this.broadcast({ type: 'message.completed', conversationId: state.episodeId, episodeId: state.episodeId, turnId, message: privateMessage });
+        return;
+      }
       this.conversations.updateMessage(fresh.id, { parts });
       if (!fresh.turnId) return;
       for (const { index, part } of changed) {
-        this.broadcast({ type: 'part.added', conversationId: fresh.conversationId, turnId: fresh.turnId, messageId: fresh.id, index, part });
+        this.broadcast({ type: 'part.added', conversationId: fresh.conversationId, episodeId: fresh.conversationId, turnId: fresh.turnId, messageId: fresh.id, index, part });
       }
     } catch (err) {
       this.logger.warn('could not update the stored widget', { messageId: message.id, error: String(err) });
@@ -395,4 +689,8 @@ function validateUserParts(parts: readonly unknown[] | undefined): ContentPart[]
 
 export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
   return new AgentRuntime(deps);
+}
+
+function offRecordEpisode(state: OffRecordState, episodeId: string): boolean {
+  return state.active && state.episodeId === episodeId;
 }

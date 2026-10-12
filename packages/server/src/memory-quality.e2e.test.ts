@@ -1,7 +1,7 @@
 /**
- * Memory quality, end to end: a replay of a real Demo-mode session against the
- * real server, storage, memory net, tools, runtime and the stock demo brain
- * (no scripted model). It guards what a user actually notices: NEO learns only
+ * Memory quality, end to end: a replay of a real scripted test session against the
+ * real server, storage, memory net, tools, runtime and the scripted test fixture
+ * (explicitly injected test model). It guards what a user actually notices: NEO learns only
  * from what the user said, writes clean memories once, recalls the right ones
  * across conversations, leaves the current conversation's own episodes out,
  * and does not flood the context for short or non-English messages.
@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseConfig, silentLogger } from '@neo/protocol';
 import type { AgentEvent, Conversation, MemoryNode, MemoryService, Message } from '@neo/protocol';
 import { startServer } from './server.js';
+import { scriptedProviderOptions } from './testing/mock-options.js';
 import type { NeoServer } from './index.js';
 
 const epoch = Date.UTC(2026, 9, 10, 12);
@@ -47,11 +48,17 @@ async function json<T>(server: NeoServer, method: string, path: string, body?: u
 }
 
 /** POST a message and read the SSE stream to the end. */
+function newEpisode(server: NeoServer, offRecord = false): Conversation {
+  const current = server.services.conversations.currentEpisode();
+  if (current) server.services.conversations.closeEpisode(current.id);
+  return server.services.conversations.createEpisode({ offRecord });
+}
+
 async function streamTurn(server: NeoServer, conversationId: string, text: string): Promise<AgentEvent[]> {
-  const response = await fetch(`${server.url}/api/conversations/${conversationId}/messages`, {
+  const response = await fetch(`${server.url}/api/timeline/messages`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${server.ownerToken}`, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, offRecord: server.services.conversations.get(conversationId)?.offRecord ?? false }),
     signal: AbortSignal.timeout(8_000),
   });
   expect(response.status).toBe(200);
@@ -93,7 +100,7 @@ function replyText(events: AgentEvent[]): string {
 
 const text = (n: MemoryNode) => `${n.label}\n${n.content}`;
 
-describe.sequential('memory quality: replaying a Demo-mode session with the stock demo brain', () => {
+describe.sequential('memory quality: replaying a scripted test session with the scripted test fixture', () => {
   let server: NeoServer;
   let memory: MemoryService;
   let observed = 0;
@@ -116,7 +123,7 @@ describe.sequential('memory quality: replaying a Demo-mode session with the stoc
   }
 
   async function allMemories(): Promise<MemoryNode[]> {
-    return (await memory.export()).nodes.filter((n) => n.status === 'active' || n.status === 'pending');
+    return (await memory.export()).nodes.filter((n) => n.status === 'active');
   }
 
   async function nodesOf(items: Recalled): Promise<MemoryNode[]> {
@@ -131,10 +138,10 @@ describe.sequential('memory quality: replaying a Demo-mode session with the stoc
       parseConfig({
         dataDir: '/unwritten-neo-memory-quality',
         server: { host: '127.0.0.1', port: 0, authToken: 'memory-quality-token-0123456789' },
-        settings: { timezone: 'UTC', locale: 'en', agent: { autoTitle: false }, memory: { consolidation: { enabled: false } } },
+        settings: { timezone: 'UTC', locale: 'en', memory: { consolidation: { enabled: false } } },
         log: { level: 'silent' },
       }),
-      { inMemory: true, logger: silentLogger, clock },
+      { ...scriptedProviderOptions(), inMemory: true, logger: silentLogger, clock },
     );
     memory = server.services.memory;
     // Count and await the post-turn write-back (core starts it after the reply, off the critical path).
@@ -154,13 +161,13 @@ describe.sequential('memory quality: replaying a Demo-mode session with the stoc
   });
 
   it('1. learns the name and the hobby from an introduction, not from NEO’s reply', async () => {
-    first = await json<Conversation>(server, 'POST', '/conversations', {});
+    first = newEpisode(server);
     await turn(first, 'Hi! My name is Richard and I love hiking in the mountains.');
     const nodes = await allMemories();
     const labels = nodes.filter((n) => n.kind !== 'episode').map((n) => n.label);
     expect(labels).toContain('Name: Richard');
     expect(labels).toContain('Loves hiking in the mountains');
-    // The demo reply suggests “Remember that I prefer window seats”; the user never said it.
+    // The test reply suggests “Remember that I prefer window seats”; the user never said it.
     expect(nodes.filter((n) => /window seat|靠窗/i.test(text(n)))).toEqual([]);
     expect(nodes.filter((n) => /\bNEO\b/.test(text(n)))).toEqual([]);
     const episode = nodes.find((n) => n.kind === 'episode');
@@ -189,7 +196,7 @@ describe.sequential('memory quality: replaying a Demo-mode session with the stoc
   });
 
   it('4. “What do you remember about me?” in a new conversation recalls name, hiking and vegetarian', async () => {
-    second = await json<Conversation>(server, 'POST', '/conversations', {});
+    second = newEpisode(server);
     const { recalled, reply } = await turn(second, 'What do you remember about me?');
     const nodes = await nodesOf(recalled);
     const all = nodes.map(text).join('\n');
@@ -197,7 +204,7 @@ describe.sequential('memory quality: replaying a Demo-mode session with the stoc
     expect(all).toMatch(/hiking/i);
     expect(all).toMatch(/vegetarian/i);
     expect(nodes.filter((n) => n.kind === 'episode' && n.source.conversationId === second.id)).toEqual([]);
-    // The demo answers with the recall tool; the answer names the same three things.
+    // The test provider answers with the recall tool; the answer names the same three things.
     expect(reply).toMatch(/Richard/);
     expect(reply).toMatch(/hiking/i);
     expect(reply).toMatch(/vegetarian/i);
@@ -216,7 +223,7 @@ describe.sequential('memory quality: replaying a Demo-mode session with the stoc
   });
 
   it('6. a later Chinese message about tea recalls the tea preference (CJK keywords work)', async () => {
-    const third = await json<Conversation>(server, 'POST', '/conversations', {});
+    const third = newEpisode(server);
     const { recalled } = await turn(third, '我今天想喝茶');
     const nodes = await nodesOf(recalled);
     expect(nodes.map((n) => n.label)).toContain('喜欢喝茶');

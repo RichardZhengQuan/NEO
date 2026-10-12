@@ -1,13 +1,13 @@
 /**
- * F10: Conversation caches are cleared on server switch, and in-flight
+ * F10: Timeline caches are cleared on server switch, and in-flight
  * responses from the old server are discarded after switching.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_SETTINGS, type Conversation, type Note, type ProvidersResponse } from '@neo/protocol';
+import { DEFAULT_SETTINGS, type Episode, type Note, type ProvidersResponse } from '@neo/protocol';
 import { NeoClient } from '@neo/client';
-import { useConversations } from './conversations.js';
-import { loadNotes, loadTaskLists, refreshPendingMemories, useData } from './data.js';
-import { loadConversationList, refreshAll, startEventStream } from './connection.js';
+import { applyTimelineEvent, beginTimelineStream, emptyEntry, useTimeline } from './timeline.js';
+import { loadNotes, loadTaskLists, useData } from './data.js';
+import { loadOffRecord, loadTimeline, refreshAll, startEventStream } from './connection.js';
 import type { EventContext } from './events.js';
 import { connectWith } from '../actions/session.js';
 import { useToasts } from './notifications.js';
@@ -22,7 +22,7 @@ vi.mock('@neo/client', async (importOriginal) => {
   return {
     ...actual,
     NeoClient: vi.fn().mockImplementation(() => ({
-      conversations: { list: vi.fn(), get: vi.fn() },
+      timeline: { offRecord: vi.fn().mockResolvedValue({ active: false, episodeId: null, startedAt: null }), startOffRecord: vi.fn().mockResolvedValue({ active: true, episodeId: null, startedAt: 1 }), list: vi.fn() },
       notes: { list: vi.fn() },
       reminders: { list: vi.fn() },
       tasks: { list: vi.fn(), lists: vi.fn() },
@@ -39,21 +39,8 @@ vi.mock('@neo/client', async (importOriginal) => {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-function makeConversation(id: string): Conversation {
-  return {
-    id,
-    title: id,
-    model: null,
-    incognito: false,
-    pinned: false,
-    archived: false,
-    createdAt: 1000,
-    updatedAt: 1000,
-    systemPrompt: null,
-    toolset: null,
-    lastMessageAt: null,
-    preview: null,
-  };
+function makeEpisode(id: string): Episode {
+  return { id, kind: 'episode', offRecord: false, ephemeral: false, startedAt: 1000, closedAt: null, lastMessageAt: null };
 }
 
 function makeNote(id: string, title: string): Note {
@@ -63,12 +50,13 @@ function makeNote(id: string, title: string): Note {
 // ── setup ─────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  useConversations.setState({ conversations: {}, entries: {}, listLoaded: false, archivedLoaded: false });
+  useTimeline.setState(emptyEntry(), true);
+  sessionStorage.clear();
   useData.setState({
     reminders: {}, remindersLoaded: false,
     tasks: {}, taskLists: [], tasksLoaded: false,
     notes: {}, notesLoaded: false,
-    memoryVersion: 0, pendingMemories: 0,
+    memoryVersion: 0,
     notifications: [], unreadNotifications: 0,
   });
   useSession.setState((s) => ({ ...s, phase: 'booting' }));
@@ -82,22 +70,20 @@ afterEach(() => {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 describe('startSession cache reset (F10)', () => {
-  it('clears the conversations store when switching servers', () => {
+  it('clears the timeline store when switching servers', () => {
     // Pre-populate server A data.
-    useConversations.setState({
-      conversations: { conv_a1: makeConversation('conv_a1') },
-      entries: {},
-      listLoaded: true,
-      archivedLoaded: false,
+    useTimeline.setState({
+      episodes: { conv_a1: { ...makeEpisode('conv_a1'), episodeId: 'conv_a1' } },
+      loaded: true,
     });
     useData.setState((s) => ({ ...s, notes: { note_a1: makeNote('note_a1', 'Server A note') }, notesLoaded: true }));
 
     // Switch to server B.
     startSession('https://server-b.example', 'tok_b', 'manual');
 
-    const convState = useConversations.getState();
-    expect(convState.conversations).toEqual({});
-    expect(convState.listLoaded).toBe(false);
+    const convState = useTimeline.getState();
+    expect(convState.episodes).toEqual({});
+    expect(convState.loaded).toBe(false);
 
     const dataState = useData.getState();
     expect(dataState.notes).toEqual({});
@@ -114,30 +100,30 @@ describe('startSession cache reset (F10)', () => {
     expect(epoch2).toBe(epoch0 + 2);
   });
 
-  it('A→B→A: only the most-recently loaded conversations are visible', async () => {
-    // Server A session: loadConversationList returns conv_a1.
+  it('A→B→A: only the most-recently loaded timeline messages are visible', async () => {
+    // Server A session: loadTimeline returns conv_a1.
     const clientA = startSession('https://server-a.example', 'tok_a', 'manual');
-    vi.mocked(clientA.conversations.list).mockResolvedValueOnce({ items: [makeConversation('conv_a1')] });
-    await loadConversationList(clientA);
-    expect(Object.keys(useConversations.getState().conversations)).toContain('conv_a1');
+    vi.mocked(clientA.timeline.list).mockResolvedValueOnce({ items: [{ id: 'conv_a1', episodeId: 'ep', conversationId: 'ep', role: 'user', parts: [], createdAt: 1, status: 'complete' }], episodes: [], nextCursor: null });
+    await loadTimeline(clientA);
+    expect(useTimeline.getState().messages[0]?.id).toBe('conv_a1');
 
     // Switch to server B — caches cleared.
     const clientB = startSession('https://server-b.example', 'tok_b', 'manual');
-    expect(useConversations.getState().conversations).toEqual({});
+    expect(useTimeline.getState().episodes).toEqual({});
 
-    vi.mocked(clientB.conversations.list).mockResolvedValueOnce({ items: [makeConversation('conv_b1')] });
-    await loadConversationList(clientB);
-    expect(Object.keys(useConversations.getState().conversations)).toContain('conv_b1');
-    expect(Object.keys(useConversations.getState().conversations)).not.toContain('conv_a1');
+    vi.mocked(clientB.timeline.list).mockResolvedValueOnce({ items: [{ id: 'conv_b1', episodeId: 'ep', conversationId: 'ep', role: 'user', parts: [], createdAt: 1, status: 'complete' }], episodes: [], nextCursor: null });
+    await loadTimeline(clientB);
+    expect(useTimeline.getState().messages[0]?.id).toBe('conv_b1');
+    expect(Object.keys(useTimeline.getState().episodes)).not.toContain('conv_a1');
 
     // Switch back to server A — caches cleared again.
     const clientA2 = startSession('https://server-a.example', 'tok_a', 'manual');
-    expect(useConversations.getState().conversations).toEqual({});
+    expect(useTimeline.getState().episodes).toEqual({});
 
-    vi.mocked(clientA2.conversations.list).mockResolvedValueOnce({ items: [makeConversation('conv_a2')] });
-    await loadConversationList(clientA2);
-    expect(Object.keys(useConversations.getState().conversations)).toContain('conv_a2');
-    expect(Object.keys(useConversations.getState().conversations)).not.toContain('conv_b1');
+    vi.mocked(clientA2.timeline.list).mockResolvedValueOnce({ items: [{ id: 'conv_a2', episodeId: 'ep', conversationId: 'ep', role: 'user', parts: [], createdAt: 1, status: 'complete' }], episodes: [], nextCursor: null });
+    await loadTimeline(clientA2);
+    expect(useTimeline.getState().messages[0]?.id).toBe('conv_a2');
+    expect(Object.keys(useTimeline.getState().episodes)).not.toContain('conv_b1');
   });
 
   it('late response from the original A session stays discarded through A→B→A', async () => {
@@ -174,36 +160,33 @@ function deferred<T>() {
 const providers: ProvidersResponse = { items: [], defaultModel: null };
 
 describe('session-scoped async work', () => {
-  it('resets provider/settings/model caches, drafts and server toasts', () => {
+  it('resets provider/settings/model caches, drawer and server toasts', () => {
     startSession('https://a.example', 'a', 'manual');
     useSession.setState({ settings: DEFAULT_SETTINGS, providers, models: { old: [] } });
-    useUi.setState({ draft: { model: { provider: 'old', model: 'old' }, incognito: true } });
+    useUi.setState({ drawerOpen: true });
     useToasts.setState({ toasts: [{ id: 'old', tone: 'reminder', title: 'Server A', duration: null, createdAt: 0 }] });
     startSession('https://b.example', 'b', 'manual');
     expect(useSession.getState()).toMatchObject({ settings: null, providers: null, models: {} });
-    expect(useUi.getState().draft).toEqual({ model: null, incognito: false });
+    expect(useUi.getState().drawerOpen).toBe(false);
     expect(useToasts.getState().toasts).toEqual([]);
   });
 
-  it('discards late provider, model, pending-memory and task-list responses', async () => {
+  it('discards late provider, model and task-list responses', async () => {
     const a = startSession('https://a.example', 'a', 'manual');
     const p = deferred<ProvidersResponse>();
     const m = deferred<{ items: [] }>();
-    const stats = deferred<Awaited<ReturnType<typeof a.memory.stats>>>();
     const lists = deferred<Awaited<ReturnType<typeof a.tasks.lists>>>();
     vi.mocked(a.providers.list).mockReturnValueOnce(p.promise);
     vi.mocked(a.providers.models).mockReturnValueOnce(m.promise);
-    vi.mocked(a.memory.stats).mockReturnValueOnce(stats.promise);
     vi.mocked(a.tasks.lists).mockReturnValueOnce(lists.promise);
-    const loads = [loadProviders(), loadModels('old'), refreshPendingMemories(a), loadTaskLists(a)];
+    const loads = [loadProviders(), loadModels('old'), loadTaskLists(a)];
     startSession('https://b.example', 'b', 'manual');
     p.resolve(providers);
     m.resolve({ items: [] });
-    stats.resolve({ pending: 9 } as Awaited<ReturnType<typeof a.memory.stats>>);
     lists.resolve({ items: [{ id: 'old', name: 'A', color: null, icon: null, order: 0, createdAt: 0 }] });
     await Promise.all(loads);
     expect(useSession.getState()).toMatchObject({ providers: null, models: {} });
-    expect(useData.getState()).toMatchObject({ pendingMemories: 0, taskLists: [] });
+    expect(useData.getState()).toMatchObject({ taskLists: [] });
   });
 
   it.each(['resolve', 'reject'] as const)('a stale optimistic settings %s cannot alter the new session', async (outcome) => {
@@ -225,9 +208,8 @@ describe('session-scoped async work', () => {
     const a = startSession('https://a.example', 'a', 'manual');
     const settings = deferred<typeof DEFAULT_SETTINGS>();
     vi.mocked(a.settings.get).mockReturnValueOnce(settings.promise);
-    vi.mocked(a.conversations.list).mockResolvedValueOnce({ items: [] });
-    vi.mocked(a.memory.stats).mockResolvedValueOnce({ pending: 1 } as Awaited<ReturnType<typeof a.memory.stats>>);
-    const refresh = refreshAll(a, null);
+    vi.mocked(a.timeline.list).mockResolvedValueOnce({ items: [], episodes: [], nextCursor: null });
+    const refresh = refreshAll(a);
     startSession('https://b.example', 'b', 'manual');
     settings.resolve(DEFAULT_SETTINGS);
     await refresh;
@@ -238,15 +220,15 @@ describe('session-scoped async work', () => {
   it('closes the old websocket immediately and ignores queued events/status callbacks', () => {
     const a = startSession('https://a.example', 'a', 'manual');
     const context = vi.fn(() => ({} as EventContext));
-    const stop = startEventStream({ client: a, context, activeConversationId: () => null });
+    const stop = startEventStream({ client: a, context, timelineActive: () => false });
     const callbacks = vi.mocked(a.connect).mock.calls[0]![0]!;
     const connection = vi.mocked(a.connect).mock.results[0]!.value;
     startSession('https://b.example', 'b', 'manual');
     expect(connection.close).toHaveBeenCalledTimes(1);
-    callbacks.onEvent?.({ seq: 1, at: 0, event: { type: 'conversation.updated', conversation: makeConversation('late_a') } });
+    callbacks.onEvent?.({ seq: 1, at: 0, event: { type: 'conversation.updated', episodeId: 'late_a', conversation: makeEpisode('late_a') } });
     callbacks.onStatus?.('open');
     expect(context).not.toHaveBeenCalled();
-    expect(useConversations.getState().conversations).toEqual({});
+    expect(useTimeline.getState().episodes).toEqual({});
     expect(useSession.getState().wsStatus).toBe('idle');
     useSession.setState({ wsStatus: 'open' });
     stop();
@@ -280,7 +262,7 @@ describe('session-scoped async work', () => {
     const response = deferred<{ items: Note[] }>();
     vi.mocked(a.notes.list).mockReturnValueOnce(response.promise);
     const load = loadNotes(a);
-    startEventStream({ client: a, context: () => ({} as EventContext), activeConversationId: () => null });
+    startEventStream({ client: a, context: () => ({} as EventContext), timelineActive: () => false });
     const connection = vi.mocked(a.connect).mock.results[0]!.value;
     showConnect({ reason: 'none' });
     response.resolve({ items: [makeNote('old', 'A')] });
@@ -300,4 +282,73 @@ describe('session-scoped async work', () => {
     await connecting;
     expect(useSession.getState()).toMatchObject({ client: b, phase: 'booting', settings: null });
   });
+});
+
+
+it('SSE fallback suppresses duplicate live WS deltas while the socket connects', () => {
+  const client = startSession('https://fixture.example', 't', 'manual');
+  const context = vi.fn(() => ({} as EventContext));
+  const stop = startEventStream({ client, context, timelineActive: () => true });
+  const callbacks = vi.mocked(client.connect).mock.calls[0]![0]!;
+  const finish = beginTimelineStream(client);
+  const event = { type: 'text.delta' as const, episodeId: 'ep', conversationId: 'ep', turnId: 'turn', messageId: 'a', text: 'hello' };
+  callbacks.onEvent?.({ seq: 1, at: 0, event });
+  expect(context).not.toHaveBeenCalled();
+  finish();
+  callbacks.onEvent?.({ seq: 2, at: 0, event });
+  expect(useTimeline.getState().messages[0]?.parts).toEqual([{ type: 'text', text: 'hello' }]);
+  stop();
+});
+
+it('a late newest-page load cannot replace a newer source jump', async () => {
+  const client = startSession('https://fixture.example', 't', 'manual');
+  const old = { id: 'old', episodeId: 'old-ep', conversationId: 'old-ep', role: 'user' as const, parts: [], createdAt: 1, status: 'complete' as const };
+  const latest = { ...old, id: 'latest', episodeId: 'new-ep', conversationId: 'new-ep', createdAt: 9 };
+  const response = deferred<Awaited<ReturnType<typeof client.timeline.list>>>();
+  vi.mocked(client.timeline.list).mockReturnValueOnce(response.promise).mockResolvedValueOnce({ items: [old], episodes: [], nextCursor: null });
+  const newest = loadTimeline(client);
+  await loadTimeline(client, 'old');
+  response.resolve({ items: [latest], episodes: [], nextCursor: null });
+  await newest;
+  expect(client.timeline.list).toHaveBeenNthCalledWith(2, { limit: 100, around: 'old' });
+  expect(useTimeline.getState().messages.map((item) => item.id)).toEqual(['old']);
+});
+
+
+it('clears a cached source page when its off-record message was purged while disconnected', async () => {
+  const client = startSession('https://fixture.example', 't', 'manual');
+  useTimeline.setState({ messages: [{ id: 'private', episodeId: 'private-ep', conversationId: 'private-ep', role: 'user', parts: [{ type: 'text', text: 'Private text' }], createdAt: 9, status: 'complete' }], loaded: true, hasMore: false, turn: null, confirmations: [], recalled: {}, notices: {}, lastError: null, viewAround: 'private' });
+  vi.mocked(client.timeline.list).mockRejectedValueOnce(Object.assign(new Error('Message not found'), { httpStatus: 404 }));
+  await expect(loadTimeline(client, 'private')).rejects.toThrow('Message not found');
+  expect(useTimeline.getState().messages).toEqual([]);
+});
+
+it('a reconnect waits for an in-progress source jump before refreshing that window', async () => {
+  const client = startSession('https://fixture.example', 't', 'manual');
+  const source = { id: 'source', episodeId: 'ep', conversationId: 'ep', role: 'user' as const, parts: [], createdAt: 1, status: 'complete' as const };
+  const response = deferred<Awaited<ReturnType<typeof client.timeline.list>>>();
+  vi.mocked(client.timeline.list).mockReturnValueOnce(response.promise).mockResolvedValueOnce({ items: [source], episodes: [], nextCursor: null });
+  vi.mocked(client.settings.get).mockResolvedValueOnce(DEFAULT_SETTINGS);
+  const jumping = loadTimeline(client, 'source');
+  const refresh = refreshAll(client);
+  expect(client.timeline.list).toHaveBeenCalledOnce();
+  response.resolve({ items: [source], episodes: [], nextCursor: null });
+  await Promise.all([jumping, refresh]);
+  expect(client.timeline.list).toHaveBeenNthCalledWith(2, { limit: 100, around: 'source' });
+  expect(useTimeline.getState()).toMatchObject({ viewAround: 'source', messages: [source] });
+});
+
+
+it('restores server privacy without a browser cache and ignores stale reads after a device event', async () => {
+  const client = startSession('https://privacy.example', 'token', 'manual');
+  vi.mocked(client.timeline.offRecord).mockResolvedValueOnce({ active: true, episodeId: 'private', startedAt: 10 });
+  await loadOffRecord(client);
+  expect(useTimeline.getState()).toMatchObject({ offRecord: true, offRecordLoaded: true, episodes: { private: { offRecord: true, ephemeral: true } } });
+  let resolve!: (state: { active: boolean; episodeId: null; startedAt: null }) => void;
+  vi.mocked(client.timeline.offRecord).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+  const loading = loadOffRecord(client);
+  applyTimelineEvent({ type: 'timeline.off_record', active: true });
+  resolve({ active: false, episodeId: null, startedAt: null });
+  await loading;
+  expect(useTimeline.getState().offRecord).toBe(true);
 });

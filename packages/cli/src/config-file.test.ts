@@ -184,16 +184,40 @@ describe('writeInitConfig', () => {
     writeInitConfig(nestedDir, baseAnswers);
     expect(fs.existsSync(nestedDir)).toBe(true);
   });
+
+  it('writes no providers or default model when AI setup is skipped', () => {
+    writeInitConfig(tmpDir, { ...baseAnswers, providerKind: null, apiKey: '', defaultModel: '' });
+    const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf8'));
+    expect(cfg.providers).toEqual([]);
+    expect(cfg.settings.defaultModel).toBeNull();
+  });
 });
 
 // ── runInitWizard ────────────────────────────────────────────────────────────
 
 describe('runInitWizard', () => {
+  it('allows skipping AI setup without offering a mock provider', async () => {
+    const questions: string[] = [];
+    const responses = ['0', 'local'];
+    const answers = await runInitWizard(async question => {
+      questions.push(question);
+      return responses.shift() ?? '';
+    });
+    expect(questions).toHaveLength(2);
+    expect(questions[0]).toContain('Skip for now');
+    expect(questions.join('\n')).not.toMatch(/demo|mock/i);
+    expect(answers).toMatchObject({ providerKind: null, apiKey: '', defaultModel: '', mode: 'local' });
+  });
+
+  it('rejects an invalid choice instead of configuring a mock provider', async () => {
+    await expect(runInitWizard(async () => '999')).rejects.toMatchObject({ code: 'bad_request' });
+  });
+
   it('returns expected answers with anthropic preset', async () => {
     // PROVIDER_PRESETS keys: anthropic is index 0 typically, but we probe with "1"
     // We create a deterministic prompt mock based on what questions are asked
     const promptHistory: string[] = [];
-    const responses = ['1', 'sk-ant-test', '', 'claude-opus-5-5', 'local'];
+    const responses = ['1', 'sk-ant-test', '', 'local'];
     let callIndex = 0;
 
     const mockPrompt: PromptFn = async (question) => {
@@ -205,7 +229,7 @@ describe('runInitWizard', () => {
     // Should get the first preset's kind
     expect(answers.apiKey).toBe('sk-ant-test');
     expect(answers.mode).toBe('local');
-    expect(answers.defaultModel).toBe('claude-opus-5-5');
+    expect(answers.defaultModel).toBe('claude-sonnet-5-5');
   });
 
   it('server mode returns host and port', async () => {

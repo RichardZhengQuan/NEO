@@ -37,7 +37,7 @@ function wrap(ui: ReactElement, locale = 'en') {
 }
 
 function msg(partial: Partial<Message> & Pick<Message, 'role' | 'parts'>): Message {
-  return { id: 'msg_1', conversationId: 'conv_1', createdAt: 1, status: 'complete', ...partial };
+  return { id: 'msg_1', episodeId: 'conv_1', conversationId: 'conv_1', createdAt: 1, status: 'complete', ...partial };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -383,32 +383,20 @@ describe('block actions', () => {
     expect(screen.queryByText('Snooze 10 min')).toBeNull();
   });
 
-  it('memory widget approve / reject / forget use the reserved ids', async () => {
+  it('memory widget forget uses the reserved id', async () => {
     const { calls, onAction } = capture();
     // Forget is a tool action: the server confirms it, the widget doesn't ask itself.
     const spy = vi.spyOn(window, 'confirm');
     wrap(
       <BlockRenderer
-        block={{
-          type: 'memory',
-          nodes: [
-            { id: 'mem_a', kind: 'fact', label: 'Is vegetarian', status: 'pending' },
-            { id: 'mem_b', kind: 'preference', label: 'Likes tea', status: 'pending' },
-            { id: 'mem_c', kind: 'entity', label: 'Mia', status: 'active' },
-          ],
-        }}
+        block={{ type: 'memory', nodes: [{ id: 'mem_c', kind: 'entity', label: 'Mia', status: 'active' }] }}
         uiId="ui_m"
         onAction={onAction}
       />,
     );
-    fireEvent.click(screen.getAllByText('Remember')[0]!);
-    await waitFor(() => expect(calls).toHaveLength(1));
-    fireEvent.click(screen.getAllByText("Don't remember")[0]!);
-    await waitFor(() => expect(calls).toHaveLength(2));
     fireEvent.click(screen.getByText('Forget'));
-    await waitFor(() => expect(calls).toHaveLength(3));
-    expect(calls.map((c) => c.action.id)).toEqual(['memory.approve:mem_a', 'memory.reject:mem_b', 'memory.forget:mem_c']);
-    expect(screen.getByText('Remembered')).toBeTruthy();
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls.map((c) => c.action.id)).toEqual(['memory.forget:mem_c']);
     expect(screen.getByText('Forgotten')).toBeTruthy();
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
@@ -471,7 +459,7 @@ describe('chart helpers', () => {
 
 const confirmation: ToolConfirmation = {
   id: 'cnf_1',
-  conversationId: 'conv_1',
+  episodeId: 'conv_1', conversationId: 'conv_1',
   turnId: 'turn_1',
   messageId: 'msg_a',
   toolCallId: 'tc_1',
@@ -842,16 +830,6 @@ describe('MemoryNodeCard', () => {
     expect(screen.getByText('Prefers window seats')).toBeTruthy();
     expect(screen.getByText('Preference')).toBeTruthy();
     expect(screen.getAllByText('Strength 42%').length).toBeGreaterThan(0);
-  });
-
-  it('pending memories offer approve / reject', () => {
-    const onApprove = vi.fn();
-    const onReject = vi.fn();
-    wrap(<MemoryNodeCard node={{ ...node, status: 'pending' }} onApprove={onApprove} onReject={onReject} />);
-    fireEvent.click(screen.getByText('Remember'));
-    fireEvent.click(screen.getByText("Don't remember"));
-    expect(onApprove).toHaveBeenCalled();
-    expect(onReject).toHaveBeenCalled();
   });
 
   it('forget asks for confirmation first', async () => {

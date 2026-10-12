@@ -94,7 +94,7 @@ function makeReminder(id = 'rem_1', title = 'Call Alice', notes: string | null =
     status: 'scheduled' as const,
     firedCount: 0,
     lastFiredAt: null,
-    conversationId: null,
+    messageId: null,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -231,4 +231,8 @@ describe('createTrayIconPng', () => {
     // IEND appears somewhere near the end
     expect(buf.toString('ascii', buf.length - 8, buf.length - 4)).toBe('IEND');
   });
+});
+
+it('maps timeline message notification links into the web timeline route', () => {
+  expect(deepLinkToHash('neo://timeline?messageId=msg_1')).toBe('#/timeline?messageId=msg_1');
 });

@@ -1,7 +1,7 @@
 /**
  * Read path: recall(query) — docs/MEMORY.md "Read path".
  *
- * seeds (vector + lexical + entity + profile + pinned core) → 2-hop spreading
+ * seeds (vector + lexical + entity + profile + pinned core + assistant style) → 2-hop spreading
  * activation over effective edge weights with fan normalization → score =
  * A × strength × pinnedBoost → minScore → MMR under the token budget.
  * Pure read: reinforcement is applied by the caller (write.ts).
@@ -9,6 +9,7 @@
 import type { EdgeType, Embedder, MemoryKind, MemoryNode, RecallQuery, RecallResult, RecalledMemory } from '@neo/protocol';
 import { fromJson, toNum, type SqlValue } from '@neo/storage';
 import { MEMORY_CONSTANTS } from './constants.js';
+import { ASSISTANT_STYLE_TAG } from './assistant-style.js';
 import type { MemoryContext } from './context.js';
 import { getNodes } from './db-helpers.js';
 import { containsTerm, estimateTokens, hasCJK, isBroadSelfQuery, normalizeText, recallTerms, wordMatchExpression } from './text.js';
@@ -17,7 +18,7 @@ import { sameSpace } from './vectors.js';
 
 const C = MEMORY_CONSTANTS;
 
-type SeedSource = 'vector' | 'lexical' | 'entity' | 'profile' | 'pinned';
+type SeedSource = 'vector' | 'lexical' | 'entity' | 'profile' | 'pinned' | 'style';
 
 interface Seed {
   a0: number;
@@ -47,8 +48,8 @@ export interface RecallOutcome {
 
 /**
  * Candidate predicate: active (+ archived with includeArchived), not expired,
- * kind filter, and sensitive excluded unless allowSensitive. Pending and
- * superseded memories are never candidates. With a conversationId, that
+ * kind filter, and sensitive excluded unless allowSensitive. Superseded
+ * memories are never candidates. With a conversationId, that
  * conversation's own episodes are left out: they are already in the transcript
  * (working memory). Facts learned in it stay recallable.
  */
@@ -185,6 +186,8 @@ function seedReason(source: SeedSource, node: MemoryNode): string {
       return 'part of your profile';
     case 'pinned':
       return 'pinned core memory';
+    case 'style':
+      return 'assistant-style preference';
   }
 }
 
@@ -201,7 +204,7 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
     selectedIds,
     querySeedIds,
   });
-  if (!text || limit === 0) return finish([], 0, 0);
+  if (limit === 0) return finish([], 0, 0);
 
   // ── 1. candidates ──
   const where = candidateWhere(query, now);
@@ -224,7 +227,7 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   };
 
   // Vector: top seedTopK with sim ≥ floor, a₀ = (sim − floor) / (1 − floor).
-  const spaces = await querySpaces(ctx, query, text, (query.context ?? '').trim());
+  const spaces = text ? await querySpaces(ctx, query, text, (query.context ?? '').trim()) : new Map<string, QuerySpace>();
   if (spaces.size) {
     const main = ctx.vectors.all(ctx.embedder.id);
     const onDevice = ctx.localEmbedder !== ctx.embedder ? ctx.vectors.all(ctx.localEmbedder.id) : null;
@@ -287,12 +290,24 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   }
 
   // Core: up to pinnedAlwaysLimit pinned candidates, highest importance first, get at least the floor.
-  {
+  if (text) {
     const w = candidateWhere(query, now);
     const rows = db
       .prepare(`SELECT id FROM memory_nodes WHERE pinned = 1 AND ${w.sql} ORDER BY importance DESC, id LIMIT ?`)
       .all(...w.params, C.pinnedAlwaysLimit) as { id: string }[];
     for (const row of rows) offer(row.id, C.pinnedActivationFloor, 'pinned');
+  }
+
+  // Style: reserve up to five active preferences on every turn, newest then strongest.
+  const styleRows = db.prepare(`SELECT id FROM memory_nodes WHERE kind = 'preference' AND ${where.sql} AND EXISTS (SELECT 1 FROM json_each(memory_nodes.tags) WHERE lower(value) = ?)`)
+    .all(...where.params, ASSISTANT_STYLE_TAG) as { id: string }[];
+  const allStyleIds = new Set(styleRows.map((row) => row.id));
+  const styleNodes = getNodes(db, [...allStyleIds]).filter((node) => node.status === 'active');
+  styleNodes.sort((a, b) => b.updatedAt - a.updatedAt || b.importance * b.confidence * retention(b, now) - a.importance * a.confidence * retention(a, now) || (a.id < b.id ? -1 : 1));
+  const styleIds = new Set(styleNodes.slice(0, C.assistantStyleSeedLimit).map((node) => node.id));
+  for (const id of styleIds) {
+    const current = seeds.get(id);
+    seeds.set(id, { a0: Math.max(C.assistantStyleActivation, current?.a0 ?? 0), source: 'style', sim: current?.sim ?? 0 });
   }
 
   // ── 3. spreading activation ──
@@ -321,7 +336,7 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
     return list;
   };
 
-  let frontier = [...seeds.keys()];
+  let frontier = text ? [...seeds.keys()] : [];
   for (let hop = 0; hop < C.spreadHops && frontier.length; hop++) {
     const inc = new Map<string, number>();
     for (const i of frontier) {
@@ -347,24 +362,41 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
 
   // ── 4. score: A × strength × pinnedBoost ──
   const minScore = policy.minScore;
-  const reachable = [...A.entries()].filter(([, a]) => a * C.pinnedBoost >= minScore).map(([id]) => id);
+  const reachable = [...A.entries()].filter(([id, a]) => styleIds.has(id) || (a * C.pinnedBoost >= minScore && !allStyleIds.has(id))).map(([id]) => id);
   const nodes = new Map(getNodes(db, reachable).map((n) => [n.id, n]));
   const scored: { node: MemoryNode; score: number; R: number }[] = [];
   for (const node of nodes.values()) {
     const R = retention(node, now);
     const strength = C.strengthBase + C.weightRetention * R + C.weightImportance * node.importance + C.weightConfidence * node.confidence;
     const score = A.get(node.id)! * strength * (node.pinned ? C.pinnedBoost : 1);
-    if (score >= minScore) scored.push({ node, score, R });
+    if (styleIds.has(node.id) || score >= minScore) scored.push({ node, score, R });
   }
   scored.sort((a, b) => b.score - a.score || (a.node.id < b.node.id ? -1 : 1));
 
   // ── 5. MMR under the item limit and token budget ──
-  const pool = scored.slice(0, Math.max(limit * 8, 64));
+  const styleItems = new Map(scored.filter((item) => styleIds.has(item.node.id)).map((item) => [item.node.id, item]));
+  const pool = scored.filter((item) => !allStyleIds.has(item.node.id)).slice(0, Math.max(limit * 8, 64));
   const vectorOf = (id: string) => ctx.vectors.find(ctx.embedder.id, ctx.localEmbedder.id, id);
   const maxSim = new Float64Array(pool.length);
   const remaining = new Set(pool.keys());
   const selected: (typeof pool)[number][] = [];
   let tokens = 0;
+  const choose = (item: (typeof pool)[number]): void => {
+    selected.push(item);
+    tokens += estimateTokens(`${item.node.label} ${item.node.content}`);
+    const v = vectorOf(item.node.id);
+    if (v) {
+      for (const i of remaining) {
+        const u = vectorOf(pool[i]!.node.id);
+        if (u && sameSpace(u, v)) maxSim[i] = Math.max(maxSim[i]!, dot(u, v));
+      }
+    }
+  };
+  for (const id of styleIds) {
+    const item = styleItems.get(id);
+    if (!item || selected.length >= limit) break;
+    if (tokens + estimateTokens(`${item.node.label} ${item.node.content}`) <= tokenBudget) choose(item);
+  }
   while (selected.length < limit && remaining.size) {
     let pick = -1;
     let bestMmr = -Infinity;
@@ -379,15 +411,7 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
     const item = pool[pick]!;
     const cost = estimateTokens(`${item.node.label} ${item.node.content}`);
     if (tokens + cost > tokenBudget) continue; // too big for what is left; smaller ones may still fit
-    selected.push(item);
-    tokens += cost;
-    const v = vectorOf(item.node.id);
-    if (v) {
-      for (const i of remaining) {
-        const u = vectorOf(pool[i]!.node.id);
-        if (u && sameSpace(u, v)) maxSim[i] = Math.max(maxSim[i]!, dot(u, v));
-      }
-    }
+    choose(item);
   }
 
   // ── 6. explain ──
@@ -421,7 +445,7 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
     };
   });
   const querySeedIds = selected
-    .filter(({ node }) => QUERY_SOURCES.has(seeds.get(node.id)?.source as SeedSource))
+    .filter(({ node }) => !allStyleIds.has(node.id) && QUERY_SOURCES.has(seeds.get(node.id)?.source as SeedSource))
     .sort((a, b) => b.score - a.score)
     .map(({ node }) => node.id);
   return finish(items, seeds.size, A.size, selected.map((s) => s.node.id), querySeedIds);

@@ -5,7 +5,7 @@ import type {
   AgentEvent,
   ChatRequest,
   Conversation,
-  ConversationWithMessages,
+  TimelinePage,
   EventEnvelope,
   ImportReport,
   ListResponse,
@@ -16,6 +16,7 @@ import type {
   Message,
   NeoSettings,
   Notification,
+  OffRecordState,
   Reminder,
   Task,
   ToolInfo,
@@ -23,7 +24,8 @@ import type {
   UiActionResponse,
   WsServerMessage,
 } from '@neo/protocol';
-import { defaultMockScript } from '@neo/providers';
+import { scriptedMockScript } from '../../providers/src/testing/scripted-brain.js';
+import { scriptedProviderOptions } from './testing/mock-options.js';
 import type { MockScript } from '@neo/providers';
 import { startServer } from './server.js';
 import { createServices } from './services.js';
@@ -36,7 +38,7 @@ const epoch = Date.UTC(2026, 9, 10, 12);
 
 function latestUserText(request: ChatRequest): string {
   const user = request.messages.findLast((message) => message.role === 'user');
-  return user?.parts.filter((part) => part.type === 'text').map((part) => part.text).join('\n') ?? '';
+  return user?.parts.filter((part) => part.type === 'text').map((part) => part.text).join('\n').replace(/<neo_context>[\s\S]*?<\/neo_context>/g, '') ?? '';
 }
 
 function makeScript(): MockScript {
@@ -59,10 +61,10 @@ function makeScript(): MockScript {
         }),
       };
     }
-    if (request.metadata?.['purpose']) return defaultMockScript(request, callIndex);
+    if (request.metadata?.['purpose']) return scriptedMockScript(request, callIndex);
     if (request.messages.at(-1)?.role === 'tool') return { text: 'Done.' };
     if (text.includes('Remind me to drink water in 2 minutes')) {
-      return defaultMockScript(request, callIndex);
+      return scriptedMockScript(request, callIndex);
     }
     const deleteId = /Delete task (task_[A-Za-z0-9_-]+)/.exec(text)?.[1];
     if (deleteId) return { toolCalls: [{ id: `delete-call-${callIndex}`, name: 'delete_task', input: { id: deleteId } }] };
@@ -93,11 +95,22 @@ async function json<T>(server: NeoServer, method: string, path: string, body?: u
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+function newEpisode(server: NeoServer, offRecord = false): Conversation {
+  const current = server.services.conversations.currentEpisode();
+  if (current) server.services.conversations.closeEpisode(current.id);
+  return server.services.conversations.createEpisode({ offRecord });
+}
+
+async function episodeTranscript(server: NeoServer, episodeId: string): Promise<{ messages: Message[] }> {
+  const page = await json<TimelinePage>(server, 'GET', '/timeline?limit=500');
+  return { messages: page.items.filter(message => message.episodeId === episodeId) };
+}
+
 async function streamTurn(server: NeoServer, conversationId: string, text: string): Promise<AgentEvent[]> {
-  const response = await fetch(`${server.url}/api/conversations/${conversationId}/messages`, {
+  const response = await fetch(`${server.url}/api/timeline/messages`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${server.ownerToken}`, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, offRecord: server.services.conversations.get(conversationId)?.offRecord ?? false }),
     signal: AbortSignal.timeout(8_000),
   });
   expect(response.status).toBe(200);
@@ -182,9 +195,9 @@ describe.sequential('end-to-end: real storage, provider, memory, tools, runtime 
     server = await startServer(parseConfig({
       dataDir: '/unwritten-neo-e2e',
       server: { host: '127.0.0.1', port: 0, authToken: 'e2e-owner-token-0123456789' },
-      settings: { timezone: 'UTC', locale: 'en', agent: { autoTitle: false }, memory: { consolidation: { enabled: false } } },
+      settings: { timezone: 'UTC', locale: 'en', memory: { consolidation: { enabled: false } } },
       log: { level: 'silent' },
-    }), { inMemory: true, logger: silentLogger, clock, mockScript: makeScript() });
+    }), { ...scriptedProviderOptions(), inMemory: true, logger: silentLogger, clock, mockScript: makeScript() });
     expect(server.port).toBeGreaterThan(0);
     connection = await openEvents(server);
   });
@@ -203,12 +216,12 @@ describe.sequential('end-to-end: real storage, provider, memory, tools, runtime 
     expect(health).toMatchObject({ ok: true, onboarded: false });
     const settings = await json<NeoSettings>(server, 'PATCH', '/settings', { onboarded: true });
     expect(settings.onboarded).toBe(true);
-    expect(settings.agent.autoTitle).toBe(false);
+    expect(settings.agent).not.toHaveProperty('autoTitle');
     await until(() => connection.envelopes, (events) => events.some(({ event }) => event.type === 'settings.updated' && event.settings.onboarded), 'settings update reaches WebSocket');
   });
 
   it('2. streams an introduction and observes a hiking memory asynchronously', async () => {
-    conversation = await json<Conversation>(server, 'POST', '/conversations', { title: 'Richard' });
+    conversation = newEpisode(server);
     const events = await streamTurn(server, conversation.id, 'My name is Richard and I love hiking');
     completedMessage(events);
     const memories = await until(
@@ -236,12 +249,12 @@ describe.sequential('end-to-end: real storage, provider, memory, tools, runtime 
     expect(widget.block).toMatchObject({ type: 'reminder', reminderId: reminder.id, dueAt: reminder.dueAt });
     expect(reminder.dueAt - clock()).toBeGreaterThan(119_000);
     expect(reminder.dueAt - clock()).toBeLessThanOrEqual(120_000);
-    const stored = await json<ConversationWithMessages>(server, 'GET', `/conversations/${conversation.id}`);
+    const stored = await episodeTranscript(server, conversation.id);
     expect(stored.messages.find((message) => message.id === reminderMessage.id)?.parts).toContainEqual(widget);
   });
 
   it('4. resolves reminder.snooze:10 against the stored widget and moves dueAt', async () => {
-    const action = await json<UiActionResponse>(server, 'POST', `/conversations/${conversation.id}/ui-action`, {
+    const action = await json<UiActionResponse>(server, 'POST', '/timeline/ui-action', {
       messageId: reminderMessage.id, uiId: widget.id, actionId: 'reminder.snooze:10',
     });
     expect(action).toMatchObject({ kind: 'tool', isError: false });
@@ -274,49 +287,49 @@ describe.sequential('end-to-end: real storage, provider, memory, tools, runtime 
   // Keep the exact requested journey step as an expected failure; the next
   // case proves ordinary keyword recall still works across conversations.
   it('6. recalls hiking for the broad personal-memory question in a new conversation', async () => {
-    const other = await json<Conversation>(server, 'POST', '/conversations', {});
+    const other = newEpisode(server);
     const events = await streamTurn(server, other.id, 'What do you remember about me?');
     completedMessage(events);
     expect(events.some((event) => event.type === 'memory.recalled' && event.items.some((item) => item.id === hiking.id))).toBe(true);
-    const stored = await json<ConversationWithMessages>(server, 'GET', `/conversations/${other.id}`);
+    const stored = await episodeTranscript(server, other.id);
     const context = stored.messages.find((message) => message.role === 'user')?.parts.find((part) => part.type === 'context');
     expect(context?.type).toBe('context');
     expect(context && context.type === 'context' ? context.text : '').toContain('hiking');
   });
 
   it('6a. recalls hiking across conversations when the question names hiking', async () => {
-    const other = await json<Conversation>(server, 'POST', '/conversations', {});
+    const other = newEpisode(server);
     const events = await streamTurn(server, other.id, 'What do you remember about Richard and hiking?');
     completedMessage(events);
     expect(events.some((event) => event.type === 'memory.recalled' && event.items.some((item) => item.id === hiking.id))).toBe(true);
-    const stored = await json<ConversationWithMessages>(server, 'GET', `/conversations/${other.id}`);
+    const stored = await episodeTranscript(server, other.id);
     const context = stored.messages.find((message) => message.role === 'user')?.parts.find((part) => part.type === 'context');
     expect(context && context.type === 'context' ? context.text : '').toContain('hiking');
   });
 
-  it('7. keeps incognito turns out of memory and injects no recalled memories', async () => {
+  it('7. allows recall off the record without writing new memories', async () => {
     const before = await json<MemoryStats>(server, 'GET', '/memory/stats');
-    const incognito = await json<Conversation>(server, 'POST', '/conversations', { incognito: true });
-    const events = await streamTurn(server, incognito.id, 'My name is Richard and I love hiking');
+    const incognito = await json<OffRecordState>(server, 'POST', '/timeline/off-record/start', {});
+    const events = await streamTurn(server, incognito.episodeId!, 'My name is Richard and I love hiking');
     completedMessage(events);
-    expect(events.some((event) => event.type === 'memory.recalled')).toBe(false);
-    const stored = await json<ConversationWithMessages>(server, 'GET', `/conversations/${incognito.id}`);
+    expect(events.some((event) => event.type === 'memory.recalled')).toBe(true);
+    const stored = await episodeTranscript(server, incognito.episodeId!);
     const context = stored.messages.find((message) => message.role === 'user')?.parts.find((part) => part.type === 'context');
     const contextText = context && context.type === 'context' ? context.text : '';
-    expect(contextText).toContain('Incognito');
-    expect(contextText).not.toContain('memories:');
-    expect(contextText).not.toContain('hiking');
+    expect(contextText).toContain('Off the record');
+    expect(events.some(event => event.type === 'memory.written')).toBe(false);
     // A subsequent completed turn lets pending microtasks/write-back settle;
     // the count assertion is about actual stored memory, not just absent events.
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     expect((await json<MemoryStats>(server, 'GET', '/memory/stats')).total).toBe(before.total);
+    await json(server, 'POST', '/timeline/off-record/end', {});
   });
 
   it('8. pauses for a dangerous tool confirmation, approves through HTTP and deletes the task', async () => {
     const permission = await json<ToolInfo>(server, 'PUT', '/tools/delete_task/permission', { permission: 'confirm' });
     expect(permission.permission).toBe('confirm');
     const task = await json<Task>(server, 'POST', '/tasks', { title: 'Disposable integration task' });
-    const deleting = await json<Conversation>(server, 'POST', '/conversations', {});
+    const deleting = newEpisode(server);
     const afterSeq = connection.envelopes.at(-1)?.seq ?? 0;
     const stream = streamTurn(server, deleting.id, `Delete task ${task.id}`);
     const observed = await until(
@@ -367,10 +380,10 @@ it('stock mock: introduction should create a hiking memory after a real turn', a
   const server = await startServer(parseConfig({
     dataDir: '/unwritten-neo-e2e-default',
     server: { host: '127.0.0.1', port: 0, authToken: 'e2e-default-token-0123456789' },
-    settings: { agent: { autoTitle: false } }, log: { level: 'silent' },
-  }), { inMemory: true, logger: silentLogger });
+    log: { level: 'silent' },
+  }), { ...scriptedProviderOptions(), inMemory: true, logger: silentLogger });
   try {
-    const conversation = await json<Conversation>(server, 'POST', '/conversations', {});
+    const conversation = newEpisode(server);
     await streamTurn(server, conversation.id, 'My name is Richard and I love hiking');
     await until(() => server.services.runtime.activeTurns(), (turns) => turns.length === 0, 'turn completes');
     // Poll through the public API for asynchronous write-back, as a real client
@@ -394,10 +407,10 @@ it('stock mock: explicit Remember should call remember and store the requested f
   const server = await startServer(parseConfig({
     dataDir: '/unwritten-neo-e2e-remember',
     server: { host: '127.0.0.1', port: 0, authToken: 'e2e-remember-token-0123456789' },
-    settings: { agent: { autoTitle: false } }, log: { level: 'silent' },
-  }), { inMemory: true, logger: silentLogger });
+    log: { level: 'silent' },
+  }), { ...scriptedProviderOptions(), inMemory: true, logger: silentLogger });
   try {
-    const conversation = await json<Conversation>(server, 'POST', '/conversations', {});
+    const conversation = newEpisode(server);
     const events = await streamTurn(server, conversation.id, 'Remember that I prefer window seats');
     expect(events.some((event) => event.type === 'tool.started' && event.name === 'remember')).toBe(true);
     await until(
@@ -415,12 +428,12 @@ it('stock mock: bare remember intent should send input accepted by the real reme
   const services = await createServices(parseConfig({
     dataDir: '/unwritten-neo-e2e-remember-schema',
     server: { authToken: 'e2e-remember-schema-0123456789' }, log: { level: 'silent' },
-  }), { inMemory: true, logger: silentLogger, clock: () => epoch });
+  }), { ...scriptedProviderOptions(), inMemory: true, logger: silentLogger, clock: () => epoch });
   try {
-    const adapter = services.providers.get('demo');
-    if (!adapter) throw new Error('Missing demo adapter');
+    const adapter = services.providers.get('test');
+    if (!adapter) throw new Error('Missing test adapter');
     const reply = await collectChat(adapter.chat({
-      model: 'neo-demo', tools: services.tools.specs(),
+      model: 'neo-test', tools: services.tools.specs(),
       messages: [{ role: 'user', parts: [{ type: 'text', text: 'Remember that I prefer window seats' }] }],
     }));
     expect(reply.toolCalls[0]?.name).toBe('remember');
@@ -442,7 +455,7 @@ it('stock mock: relative reminders should use the injected service clock', async
     dataDir: '/unwritten-neo-e2e-reminder-clock',
     server: { authToken: 'e2e-reminder-clock-0123456789' },
     settings: { timezone: 'UTC', agent: { autoTitle: false } }, log: { level: 'silent' },
-  }), { inMemory: true, logger: silentLogger, clock: () => epoch });
+  }), { ...scriptedProviderOptions(), inMemory: true, logger: silentLogger, clock: () => epoch });
   try {
     const conversation = services.conversations.create();
     const turn = await services.runtime.send({ conversationId: conversation.id, parts: [{ type: 'text', text: 'Remind me to drink water in 2 minutes' }] });

@@ -3,14 +3,14 @@
  * the provider list (for model pickers) and the live WebSocket status.
  */
 import { create } from 'zustand';
-import { deepMerge, type HealthResponse, type ModelInfo, type NeoSettings, type NeoSettingsPatch, type ProvidersResponse } from '@neo/protocol';
+import { applySettingsPatch, type HealthResponse, type ModelInfo, type NeoSettings, type NeoSettingsPatch, type ProvidersResponse } from '@neo/protocol';
 import { NeoClient, type ConnectionStatus } from '@neo/client';
 import type { ConnectionSource } from '../connection.js';
 import { STORAGE_KEYS, writeString } from '../lib/storage.js';
-import { useConversations } from './conversations.js';
+import { resetTimeline } from './timeline.js';
 import { useData } from './data.js';
 import { useToasts } from './notifications.js';
-import { resetDraft, setDrawer } from './ui.js';
+import { setDrawer } from './ui.js';
 
 export type Phase = 'booting' | 'connect' | 'offline' | 'ready';
 
@@ -86,22 +86,22 @@ export function onSessionEnd(cleanup: () => void): () => void {
 function resetSessionData(): void {
   for (const cleanup of [...sessionCleanups]) cleanup();
   sessionCleanups.clear();
-  useConversations.setState({ conversations: {}, entries: {}, listLoaded: false, archivedLoaded: false });
+  resetTimeline();
   useData.setState({
     reminders: {}, remindersLoaded: false,
     tasks: {}, taskLists: [], tasksLoaded: false,
     notes: {}, notesLoaded: false,
-    memoryVersion: 0, pendingMemories: 0,
+    memoryVersion: 0,
     notifications: [], unreadNotifications: 0,
   });
   useToasts.setState({ toasts: [] });
-  resetDraft();
   setDrawer(false);
 }
 
 export function startSession(serverUrl: string, token: string, source: ConnectionSource): NeoClient {
   const client = new NeoClient({ baseUrl: serverUrl, token });
   resetSessionData();
+  resetTimeline(serverUrl);
   useSession.setState((s) => ({
     client,
     serverUrl,
@@ -137,7 +137,7 @@ export function setSettings(settings: NeoSettings): void {
 export async function updateSettings(patch: NeoSettingsPatch): Promise<NeoSettings> {
   const { client, settings, sessionEpoch } = useSession.getState();
   if (!client || !settings) throw new Error('Not connected');
-  setSettings(deepMerge(settings, patch));
+  setSettings(applySettingsPatch(settings, patch));
   try {
     const next = await client.settings.update(patch);
     if (isCurrentSession(sessionEpoch, client)) setSettings(next);

@@ -14,10 +14,10 @@ export interface MemoryContext {
   /** On-device embedder for text that must not leave the device; === embedder when that one is local. */
   localEmbedder: Embedder;
   /**
-   * True when a memory's text must stay on the device: sensitive (unless policy.sendSensitiveToCloud)
-   * or pending approval, while the main embedder is remote.
+   * True when a memory's text must stay on the device: sensitive (unless policy.sendSensitiveToCloud),
+   * while the main embedder is remote.
    */
-  keepLocal(node: { sensitivity: string; status: string }): boolean;
+  keepLocal(node: { sensitivity: string }): boolean;
   vectors: VectorCache;
   clock: Clock;
   logger: Logger;

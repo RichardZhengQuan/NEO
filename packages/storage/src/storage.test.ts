@@ -25,6 +25,44 @@ let db: NeoDatabase;
 afterEach(() => db?.close());
 
 describe('database', () => {
+  it('retires the stored default demo and every active model reference without changing transcript bytes', () => {
+    db = openDatabase(':memory:');
+    migrate(db, 'storage', storageMigrations.filter(migration => migration.version <= 3));
+    const ref = { provider: 'demo', model: 'neo-demo' };
+    createProviderConfigStore(db).upsert({ id: 'demo', kind: 'mock', enabled: true, defaultModel: 'neo-demo' });
+    createProviderConfigStore(db).upsert({ id: 'test-double', kind: 'mock', enabled: false });
+    db.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run('settings', JSON.stringify({ defaultModel: ref, memoryModel: ref, titleModel: ref, embedding: ref }), 1);
+    const conversations = createConversationStore(db);
+    const conversation = conversations.create({ model: ref });
+    conversations.appendMessage({
+      id: 'old_demo_answer', conversationId: conversation.id, role: 'assistant', createdAt: 1, status: 'complete', model: ref,
+      parts: [{ type: 'text', text: 'A historical answer' }, { type: 'reasoning', text: 'Original thinking', provider: 'mock', model: 'neo-demo' }],
+    });
+    const transcript = db.prepare('SELECT * FROM messages').all();
+    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([4, 5, 6]);
+    expect(createProviderConfigStore(db).get('demo')).toBeNull();
+    expect(createProviderConfigStore(db).get('test-double')).toMatchObject({ id: 'test-double', kind: 'mock' });
+    const migrated = JSON.parse((db.prepare('SELECT value FROM settings WHERE key = ?').get('settings') as { value: string }).value);
+    expect(migrated).toMatchObject({ defaultModel: null, memoryModel: null, titleModel: null, embedding: null });
+    expect(conversations.get(conversation.id)?.model).toBeNull();
+    expect(db.prepare('SELECT * FROM messages').all()).toEqual(transcript);
+    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([]);
+  });
+
+  it('retains real providers and their model references even when their id is demo', () => {
+    db = openDatabase(':memory:');
+    migrate(db, 'storage', storageMigrations.filter(migration => migration.version <= 3));
+    const ref = { provider: 'demo', model: 'neo-demo' };
+    createProviderConfigStore(db).upsert({ id: 'demo', kind: 'ollama', enabled: true, defaultModel: 'neo-demo' });
+    createSettingsStore(db).update({ defaultModel: ref, memoryModel: ref });
+    const store = createConversationStore(db);
+    const conversation = store.create({ model: ref });
+    migrate(db, 'storage', storageMigrations);
+    expect(createProviderConfigStore(db).get('demo')?.kind).toBe('ollama');
+    expect(createSettingsStore(db).get()).toMatchObject({ defaultModel: ref, memoryModel: ref });
+    expect(store.get(conversation.id)?.model).toEqual(ref);
+  });
+
   it('migrates idempotently and supports nested transactions', () => {
     db = openNeoDatabase(':memory:');
     const again = migrate(db, 'storage', []);
@@ -106,7 +144,7 @@ describe('conversation store', () => {
       .run('v2_context', conversation.id, 'user', JSON.stringify([{ type: 'context', text: secret, sensitive: true }]), 1, 'complete');
     db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
       .run('v2_answer', conversation.id, 'assistant', JSON.stringify([{ type: 'text', text: `I remember ${secret}` }]), 2, 'complete');
-    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([3]);
+    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([3, 4, 5, 6]);
     expect(store.getMessage('v2_answer')?.sensitive).toBe(true);
     expect(JSON.stringify(toChatMessages(store.messages(conversation.id), { omitSensitiveContext: true }))).not.toContain(secret);
   });
@@ -183,7 +221,7 @@ describe('conversation store', () => {
       db.prepare('INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)').run('old_conv', 'Old', 1, 1);
       db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
         .run('old_msg', 'old_conv', 'assistant', JSON.stringify([{ type: 'text', text: 'Old answer' }]), 1, 'complete');
-      expect(migrate(db, 'storage', storageMigrations).applied).toEqual([2, 3]);
+      expect(migrate(db, 'storage', storageMigrations).applied).toEqual([2, 3, 4, 5, 6]);
     }
     const store = createConversationStore(db);
     if (upgraded) {
@@ -245,14 +283,32 @@ describe('conversation store', () => {
 });
 
 describe('settings, secrets, devices, push, providers', () => {
+  it.each(['auto', 'approve', 'off'])('loads legacy %s memory settings as automatic memory', (mode) => {
+    db = openNeoDatabase(':memory:');
+    const stored = {
+      persona: { avatar: '🌟', name: 'Nova' },
+      memory: { mode, blockedTopics: ['health', 'money'], recall: false, sendSensitiveToCloud: true, recallLimit: 7 },
+    };
+    db.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run('settings', JSON.stringify(stored), 1);
+    const settings = createSettingsStore(db);
+    expect(settings.get().persona).toEqual({ avatar: '🌟' });
+    expect(settings.get().memory).toMatchObject({ recall: false, sendSensitiveToCloud: true, recallLimit: 7, storeEpisodes: true });
+    expect(settings.get().memory).not.toHaveProperty('mode');
+    expect(settings.get().memory).not.toHaveProperty('blockedTopics');
+    settings.update({ theme: 'dark' });
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('settings') as { value: string };
+    expect(JSON.parse(row.value).memory).toEqual(settings.get().memory);
+    expect(createSettingsStore(db).get()).toEqual(settings.get());
+  });
+
   it('persists settings with defaults and validates patches', () => {
     db = openNeoDatabase(':memory:');
     const s = createSettingsStore(db);
     let seen = '';
-    s.onChange((v) => (seen = v.persona.name));
-    s.update({ persona: { name: 'Nova' } });
-    expect(seen).toBe('Nova');
-    expect(createSettingsStore(db).get().persona.name).toBe('Nova');
+    s.onChange((v) => (seen = v.persona.avatar ?? ''));
+    s.update({ persona: { avatar: '🌟' } });
+    expect(seen).toBe('🌟');
+    expect(createSettingsStore(db).get().persona).toEqual({ avatar: '🌟' });
     expect(() => s.update({ agent: { maxSteps: -1 } })).toThrow(/Invalid settings/);
   });
 

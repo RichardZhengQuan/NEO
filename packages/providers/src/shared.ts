@@ -24,8 +24,8 @@ export function hasHeader(headers: Record<string, string> | undefined, ...names:
 /** The friendly provider_auth error for a provider whose preset needs a key. */
 export function missingKeyError(config: ProviderConfig): NeoError {
   const preset = PROVIDER_PRESETS[config.kind];
-  const where = preset.keyUrl ? ` You can create one at ${preset.keyUrl}.` : '';
-  return new NeoError('provider_auth', `${preset.label} needs an API key. Add it in Settings → Providers.${where}`, {
+  const where = preset?.keyUrl ? ` You can create one at ${preset.keyUrl}.` : '';
+  return new NeoError('provider_auth', `${preset?.label ?? config.label ?? config.id} needs an API key. Add it in Settings → Providers.${where}`, {
     details: { provider: config.id },
   });
 }
@@ -164,6 +164,19 @@ export async function testByListingModels(list: () => Promise<{ id: string }[]>)
     const neo = NeoError.from(err, 'provider_error');
     return { ok: false, latencyMs: Math.round(performance.now() - start), error: neo.message };
   }
+}
+
+/** JSON parser errors can include upstream body excerpts; model discovery never reflects them. */
+export async function readModelData(response: Response, label: string, field: 'data' | 'models', signal?: AbortSignal): Promise<Record<string, unknown>> {
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throwIfAborted(signal);
+    throw new NeoError('provider_error', `${label} returned invalid model data.`);
+  }
+  if (!isPlainObject(value) || !Array.isArray(value[field])) throw new NeoError('provider_error', `${label} returned invalid model data.`);
+  return value;
 }
 
 /** Plain JSON object check (tool inputs must be objects for most providers). */

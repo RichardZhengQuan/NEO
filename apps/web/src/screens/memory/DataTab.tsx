@@ -7,7 +7,7 @@ import { MemoryExportSchema, type MemoryExport, type MemoryNode } from '@neo/pro
 import { Button, Icon, SegmentedControl, Switch, TextField, formatDateTime, useConfirm, useLocale, useT } from '@neo/ui';
 import { downloadJson, readFileText } from '../../lib/download.js';
 import { errorMessage } from '../../lib/errors.js';
-import { bumpMemoryVersion, refreshPendingMemories } from '../../state/data.js';
+import { bumpMemoryVersion } from '../../state/data.js';
 import { pushToast } from '../../state/notifications.js';
 import { requireClient } from '../../state/session.js';
 
@@ -81,7 +81,6 @@ function ImportCard(): ReactElement {
       setFile(null);
       if (input.current) input.current.value = '';
       bumpMemoryVersion();
-      void refreshPendingMemories(requireClient());
     } catch (err) {
       pushToast({ tone: 'error', title: errorMessage(err, t) });
     } finally {

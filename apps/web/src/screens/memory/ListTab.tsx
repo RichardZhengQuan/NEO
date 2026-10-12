@@ -6,21 +6,19 @@ import { MEMORY_KINDS, type MemoryKind, type MemoryNode, type MemorySearchQuery,
 import { Button, Chip, EmptyState, MemoryNodeCard, Select, Skeleton, TextField, useT } from '@neo/ui';
 import { useDebounced } from '../../hooks/useLoader.js';
 import { errorMessage } from '../../lib/errors.js';
-import { bumpMemoryVersion, refreshPendingMemories, useData } from '../../state/data.js';
+import { bumpMemoryVersion, useData } from '../../state/data.js';
 import { pushToast } from '../../state/notifications.js';
 import { requireClient } from '../../state/session.js';
 
-type StatusFilter = 'current' | MemoryStatus | 'all';
+type StatusFilter = MemoryStatus | 'all';
 type Sort = NonNullable<MemorySearchQuery['sort']>;
 const PAGE = 40;
 
 const STATUS_QUERY: Record<StatusFilter, MemoryStatus[] | undefined> = {
-  current: ['active', 'pending'],
   active: ['active'],
-  pending: ['pending'],
   archived: ['archived'],
   superseded: ['superseded'],
-  all: ['active', 'pending', 'archived', 'superseded'],
+  all: ['active', 'archived', 'superseded'],
 };
 
 export function ListTab({ selectedId, onSelect }: { selectedId: string | null; onSelect: (id: string) => void }): ReactElement {
@@ -28,7 +26,7 @@ export function ListTab({ selectedId, onSelect }: { selectedId: string | null; o
   const version = useData((s) => s.memoryVersion);
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState<'all' | MemoryKind>('all');
-  const [status, setStatus] = useState<StatusFilter>('current');
+  const [status, setStatus] = useState<StatusFilter>('active');
   const [sort, setSort] = useState<Sort>('recent');
   const [pinned, setPinned] = useState(false);
   const [items, setItems] = useState<MemoryNode[] | null>(null);
@@ -80,7 +78,6 @@ export function ListTab({ selectedId, onSelect }: { selectedId: string | null; o
     try {
       await fn();
       bumpMemoryVersion();
-      void refreshPendingMemories(requireClient());
     } catch (err) {
       pushToast({ tone: 'error', title: errorMessage(err, t) });
     }
@@ -99,7 +96,7 @@ export function ListTab({ selectedId, onSelect }: { selectedId: string | null; o
           ariaLabel={t('memoryList.status')}
           value={status}
           onChange={(v) => setStatus(v as StatusFilter)}
-          options={(['current', 'active', 'pending', 'archived', 'superseded', 'all'] as const).map((s) => ({ value: s, label: t(`memoryList.status_${s}`) }))}
+          options={(['active', 'archived', 'superseded', 'all'] as const).map((s) => ({ value: s, label: t(`memoryList.status_${s}`) }))}
         />
         <Select size="sm" ariaLabel={t('memoryList.sort')} value={sort} onChange={(v) => setSort(v as Sort)} options={(['recent', 'importance', 'strength', 'relevance'] as const).map((s) => ({ value: s, label: t(`memoryList.sort_${s}`) }))} />
         <Chip pressed={pinned} onClick={() => setPinned((v) => !v)} icon="pin">
@@ -128,8 +125,6 @@ export function ListTab({ selectedId, onSelect }: { selectedId: string | null; o
                 selected={node.id === selectedId}
                 onOpen={() => onSelect(node.id)}
                 onTogglePin={() => void act(() => client.memory.update(node.id, { pinned: !node.pinned }))}
-                onApprove={() => void act(() => client.memory.approve([node.id]))}
-                onReject={() => void act(() => client.memory.reject([node.id]))}
                 onRestore={() => void act(() => client.memory.update(node.id, { status: 'active' }))}
                 onForget={() => void act(() => client.memory.forget([node.id]))}
               />

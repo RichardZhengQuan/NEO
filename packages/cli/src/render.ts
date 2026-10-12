@@ -82,12 +82,11 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
     }
 
     case 'memory.written': {
-      const n = event.created.length + event.updated.length + event.pending.length;
+      const n = event.created.length + event.updated.length;
       if (n === 0) return [];
       const parts: string[] = [];
       if (event.created.length) parts.push(`${event.created.length} new`);
       if (event.updated.length) parts.push(`${event.updated.length} updated`);
-      if (event.pending.length) parts.push(`${event.pending.length} pending approval`);
       return [{ text: dim(`  💭 ${parts.join(', ')} memor${n === 1 ? 'y' : 'ies'}`) }];
     }
 

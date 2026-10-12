@@ -27,13 +27,13 @@ describe('sensitive historical memory context', () => {
   it('withholds locally recalled sensitive context after switching the conversation to a cloud model', async () => {
     const local = new ScriptedAdapter({ id: 'local', isLocal: true });
     const cloud = new ScriptedAdapter({ id: 'cloud', isLocal: false });
-    const h = harness({ adapters: [local, cloud], settings: { agent: { autoTitle: false } } });
+    const h = harness({ adapters: [local, cloud], settings: { agent: { } } });
     h.memory.recallItems = [sensitiveMemory()];
     const first = await runTurn(h, 'What do you remember?');
     expect(JSON.stringify(local.requests[0]!.messages)).toContain(SECRET);
 
     h.memory.recallItems = [];
-    h.conversations.update(h.conv.id, { model: { provider: cloud.id, model: 'cloud-model' } });
+    h.settings.update({ ai: { capabilities: { text: { provider: cloud.id, model: 'cloud-model' } } } });
     await runTurn(h, 'Continue using another model');
 
     expect(JSON.stringify(cloud.requests[0]!.messages)).not.toContain(SECRET);
@@ -48,12 +48,12 @@ describe('sensitive historical memory context', () => {
   ])('retains sensitive history for $destination', async ({ isLocal, sendSensitiveToCloud }) => {
     const local = new ScriptedAdapter({ id: 'source', isLocal: true });
     const destination = new ScriptedAdapter({ id: 'destination', isLocal });
-    const h = harness({ adapters: [local, destination], settings: { agent: { autoTitle: false } } });
+    const h = harness({ adapters: [local, destination], settings: { agent: { } } });
     h.memory.recallItems = [sensitiveMemory()];
     await runTurn(h, 'Recall my private memory');
     h.memory.recallItems = [];
     h.settings.update({ memory: { sendSensitiveToCloud } });
-    h.conversations.update(h.conv.id, { model: { provider: destination.id, model: 'destination-model' } });
+    h.settings.update({ ai: { capabilities: { text: { provider: destination.id, model: 'destination-model' } } } });
     await runTurn(h, 'Continue');
 
     expect(JSON.stringify(destination.requests[0]!.messages)).toContain(SECRET);
@@ -61,7 +61,7 @@ describe('sensitive historical memory context', () => {
   });
 
   it('rechecks sensitive sharing for every provider request when cloud sharing is revoked between steps', async () => {
-    const h = harness({ settings: { agent: { autoTitle: false }, memory: { sendSensitiveToCloud: true } } });
+    const h = harness({ settings: { agent: { }, memory: { sendSensitiveToCloud: true } } });
     h.memory.recallItems = [sensitiveMemory()];
     h.model.script([ev.call('echo_call', 'echo', { msg: 'hello' }), ev.done('tool_use')], [ev.text('Finished'), ev.done()]);
     h.runtime.subscribe((event) => {
@@ -77,7 +77,7 @@ describe('sensitive historical memory context', () => {
   it('withholds the current answer and reasoning when sharing is revoked between steps', async () => {
     const h = harness({
       adapters: [new ScriptedAdapter({ caps: { reasoning: true } })],
-      settings: { agent: { autoTitle: false }, memory: { sendSensitiveToCloud: true } },
+      settings: { agent: { }, memory: { sendSensitiveToCloud: true } },
     });
     h.memory.recallItems = [sensitiveMemory()];
     h.model.script(
@@ -99,10 +99,10 @@ describe('sensitive historical memory context', () => {
     const h = harness({ adapters: [new ScriptedAdapter({ isLocal: true })] });
     h.memory.recallItems = [sensitiveMemory()];
     await runTurn(h, 'Help me make a plan');
-    await until(() => h.model.titleRequests.length === 1);
+    await settle();
 
     expect(JSON.stringify(h.model.requests[0]!.messages)).toContain(SECRET);
-    expect(JSON.stringify(h.model.titleRequests[0]!.messages)).not.toContain(SECRET);
+    expect(h.model.titleRequests).toEqual([]);
   });
 
   it('does not send a private-derived cloud answer for a title after sharing is revoked', async () => {
@@ -124,7 +124,7 @@ describe('sensitive historical memory context', () => {
 
 describe('permission revocation after tool approval', () => {
   it.each([false, true])('declines an approved call when permission is revoked before execution (always=%s)', async (always) => {
-    const h = harness({ settings: { agent: { autoTitle: false } } });
+    const h = harness({ settings: { agent: { } } });
     h.model.script([ev.call('delete_call', 'delete_thing', { msg: 'Groceries' }), ev.done('tool_use')]);
     h.runtime.subscribe((event) => {
       if (event.type === 'tool.confirmation') h.runtime.confirm(event.confirmation.id, { approve: true, always });
@@ -140,7 +140,7 @@ describe('permission revocation after tool approval', () => {
   });
 
   it('preserves a deny written synchronously while persisting an always approval', async () => {
-    const h = harness({ settings: { agent: { autoTitle: false } } });
+    const h = harness({ settings: { agent: { } } });
     h.settings.onChange((settings) => {
       if (settings.tools.permissions.delete_thing === 'auto') h.settings.update({ tools: { permissions: { delete_thing: 'deny' } } });
     });
@@ -157,7 +157,7 @@ describe('permission revocation after tool approval', () => {
   });
 
   it.each(['confirm', 'auto'] as const)('cancels execution if %s permission becomes deny during asynchronous input validation', async (permission) => {
-    const h = harness({ settings: { agent: { autoTitle: false } } });
+    const h = harness({ settings: { agent: { } } });
     h.settings.update({ tools: { permissions: { delete_thing: permission } } });
     const def = h.tools.get('delete_thing')!;
     const parsing = deferred();
@@ -216,6 +216,7 @@ describe('sensitive recall tool result redaction (F02)', () => {
     return {
       id: 'msg_asst',
       conversationId: 'conv_test',
+      episodeId: 'conv_test',
       role: 'assistant',
       parts: [
         { type: 'tool_call', id: 'call_1', name: 'recall', input: {} },
@@ -264,7 +265,7 @@ describe('sensitive recall tool result redaction (F02)', () => {
     const cloud = new ScriptedAdapter({ id: 'cloud', isLocal: false });
     const h = harness({
       adapters: [local, cloud],
-      settings: { agent: { autoTitle: false } },
+      settings: { agent: { } },
       tools: [
         {
           name: 'recall',
@@ -292,7 +293,7 @@ describe('sensitive recall tool result redaction (F02)', () => {
     expect(stored?.sensitive).toBe(true);
 
     // A second turn with a cloud model should NOT see the raw secret in the recall tool result
-    h.conversations.update(h.conv.id, { model: { provider: cloud.id, model: 'cloud-model' } });
+    h.settings.update({ ai: { capabilities: { text: { provider: cloud.id, model: 'cloud-model' } } } });
     await runTurn(h, 'Continue');
     const cloudJson = JSON.stringify(cloud.requests[0]!.messages);
     expect(cloudJson).not.toContain(SECRET);
@@ -309,6 +310,7 @@ describe('tool-specific confirmation cancellation', () => {
       name,
       turnId,
       conversationId: 'conv_test',
+      episodeId: 'conv_test',
       messageId: 'msg_test',
       toolCallId: `call_${id}`,
       title: name,

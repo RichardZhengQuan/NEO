@@ -250,7 +250,7 @@ export function deleteNodes(db: NeoDatabase, ids: readonly string[]): string[] {
 
 /**
  * The entity called `name` (normalized label or alias), preferring active over
- * pending/archived and older over newer. Superseded entities never match.
+ * archived and older over newer. Superseded entities never match.
  */
 export function findEntityByName(db: NeoDatabase, name: string): MemoryNode | null {
   const norm = normalizeText(name);

@@ -22,8 +22,11 @@ export interface ProviderOptions {
   fetch?: typeof fetch;
   /** Resolves ProviderConfig.apiKeySecret names to values (encrypted SecretStore). */
   resolveSecret?: (name: string) => string | undefined;
+  /** ChatGPT credentials are managed server-side and never copied into ProviderConfig. */
+  getChatGPTAccessToken?: (providerId: string) => Promise<string>;
+  onChatGPTUnauthorized?: (providerId: string, accessToken?: string) => void;
   logger?: Logger;
-  /** Script for `mock` providers; defaults to {@link defaultMockScript}. */
+  /** Required explicit script for internal `mock` test providers. */
   mockScript?: MockScript;
   /** Waits between pre-first-byte retries (default: an abortable timer). Injected by tests. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -56,8 +59,9 @@ export interface SSEMessage {
 
 import { AnthropicAdapter } from './anthropic.js';
 import { OpenAIAdapter } from './openai.js';
+import { ChatGPTAdapter } from './chatgpt.js';
 import { GeminiAdapter } from './gemini.js';
-import { MockProvider, defaultMockScript as _defaultMockScript } from './mock.js';
+import { MockProvider } from './mock.js';
 export { parseSSE } from './sse.js';
 export { withRetry } from './retry.js';
 export type { RetryOptions } from './retry.js';
@@ -72,6 +76,8 @@ export function createProvider(config: ProviderConfig, options: ProviderOptions 
   switch (config.kind) {
     case 'anthropic':
       return new AnthropicAdapter(config, options);
+    case 'chatgpt':
+      return new ChatGPTAdapter(config, options);
     case 'openai':
     case 'openai-compatible':
     case 'ollama':
@@ -113,19 +119,9 @@ export function createProviderRegistry(configs: readonly ProviderConfig[], optio
   };
 }
 
-/**
- * The demo brain used by `mock` providers when no script is given (demo-brain.ts):
- * recognizes reminders, tasks, notes, "remember …", "what do you remember",
- * "forget …", time, arithmetic, UI demos and URLs in English and Chinese and
- * answers with the matching tool (only tools offered in the request), confirms
- * tool results in plain language, serves memory extraction / consolidation /
- * titles (metadata.purpose), and otherwise explains Demo mode and mentions what
- * it remembers from the `<neo_context>` block.
- */
-export const defaultMockScript: MockScript = _defaultMockScript;
-
 // Re-export adapters for advanced usage
 export { AnthropicAdapter } from './anthropic.js';
 export { OpenAIAdapter } from './openai.js';
+export { ChatGPTAdapter } from './chatgpt.js';
 export { GeminiAdapter } from './gemini.js';
 export { MockProvider } from './mock.js';

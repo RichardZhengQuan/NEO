@@ -4,7 +4,7 @@
  * Reminders are also scheduled as on-device local notifications so they fire
  * even when the phone can't reach the server. We keep the next 64 upcoming
  * reminders scheduled and re-plan on reminder events, reconnects and resume.
- * Notification taps open #/reminders/<id>; the "Snooze 10 min" / "Done"
+ * Notification taps open the source message or reminder; "Snooze 10 min" / "Done"
  * buttons call the API. `neo://` deep links (pairing, routes) come through
  * @capacitor/app. Plugins are imported lazily so web bundles stay lean.
  */

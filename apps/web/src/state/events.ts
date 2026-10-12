@@ -1,28 +1,28 @@
 /**
  * The one place server events are applied to app state.
  *
- * Agent events and conversation events go through the pure conversation
+ * Agent events and episode events go through the pure timeline
  * reducer; productivity, memory, notification and settings events update
  * their stores; a few produce toasts (reminders firing, approvals needed in a
- * conversation you are not looking at). `EventSequencer` detects gaps in the
+ * timeline while you are on another screen). `EventSequencer` detects gaps in the
  * WebSocket `seq` so the app can refetch what it missed.
  */
 import type { NeoClient } from '@neo/client';
 import type { ServerEvent } from '@neo/protocol';
 import { formatTime, type TranslateFn } from '@neo/ui';
-import { applyConversationEvent, findConfirmation } from './conversations.js';
-import { addNotification, bumpMemoryVersion, refreshPendingMemories, removeNote, removeReminder, removeTask, upsertNote, upsertReminder, upsertTask } from './data.js';
+import { applyTimelineEvent, findConfirmation } from './timeline.js';
+import { addNotification, bumpMemoryVersion, removeNote, removeReminder, removeTask, upsertNote, upsertReminder, upsertTask } from './data.js';
 import { dismissToastKey, pushToast } from './notifications.js';
-import { currentSessionEpoch, isCurrentSession, setSettings } from './session.js';
+import { currentSessionEpoch, isCurrentSession, setSettings, useSession } from './session.js';
 
 export interface EventContext {
   client: NeoClient;
   t: TranslateFn;
   locale: string;
-  /** The persona's name, for messages like "Nova wants to remember…". */
+  /** The assistant's display name, for confirmation requests. */
   assistantName(): string;
-  /** Conversation currently on screen (toasts are skipped for it). */
-  activeConversationId(): string | null;
+  /** Suppress approval toasts while the timeline is on screen. */
+  timelineActive(): boolean;
   openLink(url: string): void;
   /** Re-plan on-device reminder notifications (debounced by the caller). */
   syncReminders(): void;
@@ -73,7 +73,9 @@ export async function runReminderAction(client: NeoClient, reminderId: string, a
 export function handleServerEvent(event: ServerEvent, ctx: EventContext): void {
   const { t } = ctx;
   switch (event.type) {
-    // ── conversations & turns ──
+    // ── episodes & turns ──
+    case 'timeline.off_record':
+    case 'episode.started':
     case 'turn.started':
     case 'text.delta':
     case 'reasoning.delta':
@@ -83,16 +85,28 @@ export function handleServerEvent(event: ServerEvent, ctx: EventContext): void {
     case 'memory.recalled':
     case 'message.completed':
     case 'turn.finished':
-    case 'turn.failed':
     case 'conversation.updated':
     case 'conversation.deleted':
-      applyConversationEvent(event);
+      applyTimelineEvent(event);
       return;
 
+    case 'turn.failed': {
+      applyTimelineEvent(event);
+      const details = event.error.details;
+      const reason = typeof details === 'object' && details !== null && 'reason' in details ? details.reason : undefined;
+      if (reason === 'subscription_sharing_invalid_user' || reason === 'invalid_grant') {
+        const epoch = currentSessionEpoch();
+        void ctx.client.providers.list().then((providers) => {
+          if (isCurrentSession(epoch, ctx.client)) useSession.setState({ providers });
+        }).catch(() => undefined);
+      }
+      return;
+    }
+
     case 'tool.confirmation': {
-      applyConversationEvent(event);
+      applyTimelineEvent(event);
       const c = event.confirmation;
-      if (ctx.activeConversationId() !== c.conversationId) {
+      if (!ctx.timelineActive()) {
         pushToast({
           tone: 'warning',
           key: `confirm:${c.id}`,
@@ -100,35 +114,21 @@ export function handleServerEvent(event: ServerEvent, ctx: EventContext): void {
           title: t('toast.confirm_needed', { name: ctx.assistantName() }),
           body: c.description || c.title,
           duration: null,
-          actions: [{ label: t('toast.review'), primary: true, onClick: () => ctx.openLink(`neo://chat/${c.conversationId}`) }],
+          actions: [{ label: t('toast.review'), primary: true, onClick: () => ctx.openLink(`neo://timeline?messageId=${encodeURIComponent(c.messageId)}`) }],
         });
       }
       return;
     }
 
     case 'tool.confirmation_resolved': {
-      const resolved = findConfirmation(event.conversationId, event.turnId, event.toolCallId, event.confirmationId);
-      applyConversationEvent(event);
+      const resolved = findConfirmation(event.turnId, event.toolCallId, event.confirmationId);
+      applyTimelineEvent(event);
       if (resolved) dismissToastKey(`confirm:${resolved.id}`);
       return;
     }
 
     case 'memory.written':
-      applyConversationEvent(event);
-      if (event.pending.length) {
-        ctx.debounce('pending-memories', () => void refreshPendingMemories(ctx.client), 300);
-        if (ctx.activeConversationId() !== event.conversationId) {
-          pushToast({
-            tone: 'memory',
-            key: `memory:${event.turnId}`,
-            icon: 'brain',
-            title: t('toast.memory_pending', { n: event.pending.length, name: ctx.assistantName() }),
-            body: event.pending.map((p) => p.label).slice(0, 3).join(' · '),
-            duration: 9000,
-            actions: [{ label: t('toast.review'), primary: true, onClick: () => ctx.openLink('neo://memory/pending') }],
-          });
-        }
-      }
+      applyTimelineEvent(event);
       return;
 
     // ── reminders ──
@@ -179,9 +179,6 @@ export function handleServerEvent(event: ServerEvent, ctx: EventContext): void {
     // ── memory, notifications, settings ──
     case 'memory.changed':
       ctx.debounce('memory-version', bumpMemoryVersion, 250);
-      if (event.change.type === 'pending' || event.change.type === 'updated' || event.change.type === 'deleted' || event.change.type === 'created') {
-        ctx.debounce('pending-memories', () => void refreshPendingMemories(ctx.client), 500);
-      }
       return;
     case 'notification.created':
       addNotification(event.notification);
@@ -189,6 +186,15 @@ export function handleServerEvent(event: ServerEvent, ctx: EventContext): void {
       return;
     case 'settings.updated':
       setSettings(event.settings);
+      return;
+
+    case 'provider.connected':
+      useSession.setState((s) => {
+        const items = [...(s.providers?.items ?? []).filter((provider) => provider.id !== event.provider.id), event.provider];
+        const models = { ...s.models };
+        delete models[event.provider.id];
+        return { providers: { ...s.providers, items, defaultModel: s.providers?.defaultModel ?? null }, models };
+      });
       return;
 
     default:

@@ -77,7 +77,6 @@ async function doStats(client: NeoClient): Promise<void> {
   for (const [k, v] of Object.entries(stats.byKind)) {
     process.stdout.write(`    ${k}: ${v}\n`);
   }
-  process.stdout.write(`  ${bold('Pending:')} ${stats.pending}\n`);
   process.stdout.write(`  ${bold('Edges:')} ${stats.edges}\n`);
   if (stats.lastConsolidationAt) {
     process.stdout.write(`  ${bold('Last consolidation:')} ${new Date(stats.lastConsolidationAt).toLocaleString()}\n`);

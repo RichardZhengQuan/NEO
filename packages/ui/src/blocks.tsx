@@ -7,7 +7,7 @@
  *   <details>.
  * - Actions go through `onAction(action, { uiId, values })`. Live widgets send
  *   the reserved ids from `widgetActionId` (task.toggle:<id>, reminder.snooze:<min>,
- *   reminder.complete, memory.approve|reject|forget:<id>), which the server
+ *   reminder.complete, memory.forget:<id>), which the server
  *   resolves against the stored block.
  * - `confirm` on a message / event / link / copy action asks first (in-app
  *   dialog). Tool actions ignore it: the server confirms them with its own
@@ -1115,7 +1115,7 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
   );
 }
 
-type MemoryResolution = 'approved' | 'rejected' | 'forgotten';
+type MemoryResolution = 'forgotten';
 
 function MemoryWidgetRenderer({ block, uiId, onAction, live }: BlockRendererProps & { block: MemoryBlock }): ReactElement {
   const t = useT();
@@ -1153,27 +1153,7 @@ function MemoryWidgetRenderer({ block, uiId, onAction, live }: BlockRendererProp
                   <span className="neo-mem-row__resolved" role="status">
                     {t(`memory.resolved_${result}`)}
                   </span>
-                ) : !onAction ? null : status === 'pending' ? (
-                  <>
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      icon="check"
-                      loading={runner.busy === widgetActionId.memoryApprove(node.id)}
-                      onClick={() => void act({ id: widgetActionId.memoryApprove(node.id), kind: 'tool', tool: 'approve_memory', label: t('memory.remember'), input: { ids: [node.id] } }, node.id, 'approved')}
-                    >
-                      {t('memory.remember')}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      loading={runner.busy === widgetActionId.memoryReject(node.id)}
-                      onClick={() => void act({ id: widgetActionId.memoryReject(node.id), kind: 'tool', tool: 'reject_memory', label: t('memory.dont_remember'), input: { ids: [node.id] } }, node.id, 'rejected')}
-                    >
-                      {t('memory.dont_remember')}
-                    </Button>
-                  </>
-                ) : status === 'active' || status === 'archived' ? (
+                ) : !onAction ? null : status === 'active' || status === 'archived' ? (
                   <Button
                     size="sm"
                     variant="ghost"

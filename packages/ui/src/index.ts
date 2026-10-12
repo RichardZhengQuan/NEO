@@ -91,10 +91,10 @@ export { MemoryNodeCard } from './memory-card.js';
 // ───────────────────────────── avatar ─────────────────────────────────
 
 export type {
-  AvatarCharacter, AvatarConfig, AvatarState, NeoAvatarProps, AvatarShape, AvatarPickerProps, AvatarActivity,
+  AvatarCharacter, AvatarConfig, AvatarState, NeoAvatarProps, AvatarShape, AvatarPickerProps, AvatarPickerSlots, AvatarActivity, NeoFigureProps, NeoFigureVariant,
 } from './avatar/index.js';
 export {
-  NeoAvatar, AvatarStyles, AvatarPicker, useAvatarState,
+  NeoAvatar, AvatarStyles, AvatarPicker, useAvatarState, NeoFigure,
   AVATAR_CHARACTERS, AVATAR_STATES, AVATAR_BACKGROUNDS, DEFAULT_AVATAR,
   serializeAvatar, parseAvatar, isAvatarString, normalizeAvatar,
 } from './avatar/index.js';

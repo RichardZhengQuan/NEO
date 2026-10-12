@@ -1,17 +1,19 @@
 /**
  * @neo/client — typed client for the NEO API.
  *
- * FROZEN PUBLIC API (docs/IMPLEMENTATION_PLAN.md, WP-client). Implementations
- * may add members but must not change these signatures. Every method maps 1:1
- * to a route in docs/API.md.
+ * Every method maps 1:1 to a route in docs/API.md.
  */
 import {
   NeoError,
   type AgentEvent,
+  type TimelinePage,
+  type TimelineQuery,
+  type TimelineSearchHit,
+  type TimelineSearchSnippet,
+  type TimelineDeleteResult,
+  type OffRecordState,
+  type EndOffRecordResponse,
   type ConfirmToolRequest,
-  type Conversation,
-  type ConversationWithMessages,
-  type CreateConversationRequest,
   type CreateDeviceResponse,
   type CreateProviderRequest,
   type Device,
@@ -32,6 +34,9 @@ import {
   type ModelInfo,
   type NeoSettings,
   type NeoSettingsPatch,
+  type OpenRouterStartResponse,
+  type ChatGPTStartResponse,
+  type ChatGPTStatusResponse,
   type Note,
   type NoteInput,
   type NotePatch,
@@ -57,17 +62,20 @@ import {
   type ToolInfo,
   type UiActionRequest,
   type UiActionResponse,
-  type UpdateConversationRequest,
   type UpdateProviderRequest,
   type ProviderKind,
 } from '@neo/protocol';
 
 export type {
   AgentEvent,
+  TimelinePage,
+  TimelineQuery,
+  TimelineSearchHit,
+  TimelineSearchSnippet,
+  TimelineDeleteResult,
+  OffRecordState,
+  EndOffRecordResponse,
   ConfirmToolRequest,
-  Conversation,
-  ConversationWithMessages,
-  CreateConversationRequest,
   CreateDeviceResponse,
   CreateProviderRequest,
   Device,
@@ -88,6 +96,7 @@ export type {
   ModelInfo,
   NeoSettings,
   NeoSettingsPatch,
+  OpenRouterStartResponse,
   Note,
   NoteInput,
   NotePatch,
@@ -113,7 +122,6 @@ export type {
   ToolInfo,
   UiActionRequest,
   UiActionResponse,
-  UpdateConversationRequest,
   UpdateProviderRequest,
   ProviderKind,
 };
@@ -155,27 +163,21 @@ export class NeoClient {
     return this._impl.health();
   }
 
-  readonly conversations = {
-    list: (q?: { limit?: number; before?: number; archived?: boolean; query?: string }): Promise<ListResponse<Conversation>> =>
-      this._impl.conversations.list(q),
-    get: (id: string, q?: { limit?: number; before?: number }): Promise<ConversationWithMessages> =>
-      this._impl.conversations.get(id, q),
-    create: (body?: CreateConversationRequest): Promise<Conversation> =>
-      this._impl.conversations.create(body),
-    update: (id: string, body: UpdateConversationRequest): Promise<Conversation> =>
-      this._impl.conversations.update(id, body),
-    delete: (id: string): Promise<void> =>
-      this._impl.conversations.delete(id),
-    /** POST …/messages → 202. Events arrive on the WebSocket. */
-    send: (id: string, body: SendMessageRequest): Promise<SendMessageResponse> =>
-      this._impl.conversations.send(id, body),
-    /** POST …/messages with Accept: text/event-stream; yields this turn's events until turn.finished/failed. */
-    stream: (id: string, body: SendMessageRequest, signal?: AbortSignal): AsyncIterable<AgentEvent> =>
-      this._impl.conversations.stream(id, body, signal),
-    cancel: (id: string, turnId?: string): Promise<{ cancelled: boolean }> =>
-      this._impl.conversations.cancel(id, turnId),
-    uiAction: (id: string, body: UiActionRequest): Promise<UiActionResponse> =>
-      this._impl.conversations.uiAction(id, body),
+  readonly timeline = {
+    list: (q?: TimelineQuery): Promise<TimelinePage> => this._impl.timeline.list(q),
+    /** POST /timeline/messages → 202. Events arrive on the WebSocket. */
+    send: (body: SendMessageRequest): Promise<SendMessageResponse> => this._impl.timeline.send(body),
+    /** Yields this turn's SSE events until turn.finished/failed. */
+    stream: (body: SendMessageRequest, signal?: AbortSignal): AsyncIterable<AgentEvent> =>
+      this._impl.timeline.stream(body, signal),
+    cancel: (turnId?: string): Promise<{ cancelled: boolean }> => this._impl.timeline.cancel(turnId),
+    search: (q: string, limit?: number): Promise<ListResponse<TimelineSearchHit>> => this._impl.timeline.search(q, limit),
+    deleteMessage: (id: string): Promise<TimelineDeleteResult> => this._impl.timeline.deleteMessage(id),
+    deleteRange: (q: { from?: string; to?: string }): Promise<TimelineDeleteResult> => this._impl.timeline.deleteRange(q),
+    offRecord: (): Promise<OffRecordState> => this._impl.timeline.offRecord(),
+    startOffRecord: (): Promise<OffRecordState> => this._impl.timeline.startOffRecord(),
+    endOffRecord: (): Promise<EndOffRecordResponse> => this._impl.timeline.endOffRecord(),
+    uiAction: (body: UiActionRequest): Promise<UiActionResponse> => this._impl.timeline.uiAction(body),
   };
 
   readonly confirmations = {
@@ -198,12 +200,10 @@ export class NeoClient {
       this._impl.memory.delete(id),
     forget: (ids: string[]): Promise<{ deleted: number }> =>
       this._impl.memory.forget(ids),
+    forgetBySource: (messageIds: string[]): Promise<{ deleted: number }> =>
+      this._impl.memory.forgetBySource(messageIds),
     findForForget: (query: string, limit?: number): Promise<ListResponse<MemoryNode>> =>
       this._impl.memory.findForForget(query, limit),
-    approve: (ids: string[]): Promise<{ count: number }> =>
-      this._impl.memory.approve(ids),
-    reject: (ids: string[]): Promise<{ count: number }> =>
-      this._impl.memory.reject(ids),
     link: (body: { from: string; to: string; type: string; weight?: number }): Promise<unknown> =>
       this._impl.memory.link(body),
     unlink: (edgeId: string): Promise<{ ok: boolean }> =>
@@ -276,6 +276,14 @@ export class NeoClient {
       this._impl.notifications.list(q),
     markRead: (ids: string[] | 'all'): Promise<{ count: number }> =>
       this._impl.notifications.markRead(ids),
+  };
+
+  readonly auth = {
+    openrouterStart: (): Promise<OpenRouterStartResponse> => this._impl.auth.openrouterStart(),
+    openrouterCancel: (state: string): Promise<{ cancelled: boolean }> => this._impl.auth.openrouterCancel(state),
+    chatgptStart: (providerId?: string): Promise<ChatGPTStartResponse> => this._impl.auth.chatgptStart(providerId),
+    chatgptCancel: (state: string): Promise<{ cancelled: boolean }> => this._impl.auth.chatgptCancel(state),
+    chatgptStatus: (state: string): Promise<ChatGPTStatusResponse> => this._impl.auth.chatgptStatus(state),
   };
 
   readonly providers = {

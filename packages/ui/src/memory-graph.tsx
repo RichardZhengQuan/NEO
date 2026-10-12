@@ -314,15 +314,6 @@ export function MemoryGraphView({ graph, selectedId = null, highlightIds = [], o
         ctx.fill();
         ctx.globalAlpha = dim(s.id) ? 0.14 : 1;
       }
-      if (node.status === 'pending') {
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, s.r + 4, 0, Math.PI * 2);
-        ctx.setLineDash([3, 3]);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
       if (node.pinned) {
         ctx.beginPath();
         ctx.arc(s.x + s.r * 0.72, s.y - s.r * 0.72, 3, 0, Math.PI * 2);

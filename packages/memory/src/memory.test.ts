@@ -259,13 +259,6 @@ describe('remember + get', () => {
     expect(detail?.node.content).toBe('Lives in Berlin');
   });
 
-  it('remember via approve-mode policy creates pending node', async () => {
-    const { svc } = makeTestService();
-    await svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'approve' });
-    const node = await svc.remember({ kind: 'fact', label: 'Secret', content: 'Private info', importance: 0.5 });
-    expect(node.status).toBe('pending');
-  });
-
   it('get returns null for unknown id', async () => {
     const { svc } = makeTestService();
     const detail = await svc.get('mem_nonexistent');
@@ -292,30 +285,6 @@ describe('update + forget', () => {
     const detail = await svc.get(node.id);
     // forget hard-deletes; node is gone
     expect(detail).toBeNull();
-  });
-});
-
-// ─── approve / reject workflow ───────────────────────────────────────────────
-
-describe('approve / reject', () => {
-  it('approve makes pending memory active', async () => {
-    const { svc } = makeTestService();
-    await svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'approve' });
-    const node = await svc.remember({ kind: 'fact', label: 'P1', content: 'Pending content', importance: 0.5 });
-    expect(node.status).toBe('pending');
-    await svc.approve([node.id]);
-    const detail = await svc.get(node.id);
-    expect(detail?.node.status).toBe('active');
-  });
-
-  it('reject deletes a pending memory', async () => {
-    const { svc } = makeTestService();
-    await svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'approve' });
-    const node = await svc.remember({ kind: 'fact', label: 'P2', content: 'Pending content 2', importance: 0.5 });
-    expect(node.status).toBe('pending');
-    expect(await svc.reject([node.id])).toBe(1);
-    // reject deletes the pending memory for good
-    expect(await svc.get(node.id)).toBeNull();
   });
 });
 
@@ -388,13 +357,6 @@ describe('stats', () => {
     expect(s.byKind.entity).toBe(1);
   });
 
-  it('pending count reflects pending nodes', async () => {
-    const { svc } = makeTestService();
-    await svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'approve' });
-    await svc.remember({ kind: 'fact', label: 'P', content: 'Pending', importance: 0.4 });
-    const s = await svc.stats();
-    expect(s.pending).toBe(1);
-  });
 });
 
 // ─── search ──────────────────────────────────────────────────────────────────
@@ -431,19 +393,6 @@ describe('recall', () => {
     const result = await svc.recall({ text: 'Tell me about the golden retriever', limit: 5, reinforce: false });
     expect(result.items.length).toBeGreaterThanOrEqual(1);
     expect(result.items[0]!.node.label).toBe('Dog breed');
-  });
-
-  it('pending nodes are never returned in recall', async () => {
-    const { svc } = makeTestService();
-    await svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'approve' });
-    await svc.remember({ kind: 'fact', label: 'PendingFact', content: 'Pending golden retriever info', importance: 0.9 });
-    // Reset to auto mode and add active node
-    await svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'auto' });
-    await svc.remember({ kind: 'fact', label: 'ActiveFact', content: 'Active golden retriever info', importance: 0.9 });
-
-    const result = await svc.recall({ text: 'golden retriever', limit: 10, reinforce: false });
-    const pendingReturned = result.items.some(r => r.node.status === 'pending');
-    expect(pendingReturned).toBe(false);
   });
 
   it('sensitive memories not returned without allowSensitive', async () => {
@@ -505,35 +454,11 @@ describe('dedupe', () => {
   });
 });
 
-// ─── policy: blocked topics ──────────────────────────────────────────────────
-
 describe('policy', () => {
-  it('getPolicy / setPolicy round-trip with blockedTopics', async () => {
+  it('getPolicy / setPolicy round-trips recall settings', () => {
     const { svc } = makeTestService();
-    const policy = svc.getPolicy();
-    expect(policy).toBeDefined();
-    svc.setPolicy({ ...policy, blockedTopics: [...policy.blockedTopics, 'custom-blocked'] });
-    const updated = svc.getPolicy();
-    expect(updated.blockedTopics).toContain('custom-blocked');
-  });
-
-  it('blocks memories on blocked topics during observe', async () => {
-    const fakeResponse = JSON.stringify({
-      episode: null,
-      memories: [
-        { op: 'create', kind: 'fact', label: 'savings amount', content: 'User has savings', importance: 0.7 },
-      ],
-      links: [],
-    });
-    const { svc } = makeTestService(makeFakeLLM(fakeResponse));
-    // Block topic 'savings' which appears in the label/content
-    svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, blockedTopics: ['savings'] });
-
-    const statsBefore = await svc.stats();
-    await svc.observe(makeTurn('I have money in savings.', 'That is a healthy amount.'));
-    const statsAfter = await svc.stats();
-    // Memory with blocked topic should not be created
-    expect(statsAfter.total).toBe(statsBefore.total);
+    svc.setPolicy({ ...svc.getPolicy(), recall: false, recallLimit: 8 });
+    expect(svc.getPolicy()).toMatchObject({ recall: false, recallLimit: 8 });
   });
 });
 
@@ -605,7 +530,7 @@ describe('observe', () => {
 
     const { svc } = makeTestService(makeFakeLLM(fakeResponse));
     const result = await svc.observe(makeTurn('My cat Luna is so cute!', 'Luna sounds wonderful!'));
-    expect(result.created.length + result.updated.length + result.pending.length).toBeGreaterThanOrEqual(1);
+    expect(result.created.length + result.updated.length).toBeGreaterThanOrEqual(1);
   });
 
   it('observe with no LLM falls back gracefully', async () => {
@@ -624,7 +549,7 @@ describe('observe', () => {
 
     const { svc } = makeTestService(makeFakeLLM(messyResponse));
     const result = await svc.observe(makeTurn('I love jazz music.', 'Jazz is wonderful!'));
-    expect(result.created.length + result.pending.length).toBeGreaterThanOrEqual(1);
+    expect(result.created.length).toBeGreaterThanOrEqual(1);
   });
 
   it('observe with prose-prefixed LLM JSON parses memories', async () => {
@@ -638,7 +563,7 @@ describe('observe', () => {
 
     const { svc } = makeTestService(makeFakeLLM(proseResponse));
     const result = await svc.observe(makeTurn('Blue is my favorite color.', 'Blue is a great color!'));
-    expect(result.created.length + result.pending.length).toBeGreaterThanOrEqual(1);
+    expect(result.created.length).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -765,7 +690,7 @@ describe('onChange', () => {
     });
 
     await svc.remember({ kind: 'fact', label: 'Watch', content: 'Watched content', importance: 0.5 });
-    expect(events.some(e => e === 'created' || e === 'pending')).toBe(true);
+    expect(events.some(e => e === 'created')).toBe(true);
     unsubscribe();
   });
 
@@ -1201,29 +1126,6 @@ describe('consolidation detailed', () => {
 // ─── observe() detailed behaviors ─────────────────────────────────────────
 
 describe('observe() detailed', () => {
-  it('blocked topic IN USER TEXT skips episode creation', async () => {
-    const fakeEpisodeResponse = JSON.stringify({
-      episode: {
-        label: 'Medical discussion',
-        summary: 'User discussed medical topic',
-        importance: 0.5,
-      },
-      memories: [],
-      links: [],
-    });
-    const { svc } = makeTestService(makeFakeLLM(fakeEpisodeResponse));
-    svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, blockedTopics: ['medical'], storeEpisodes: true });
-
-    const statsBefore = await svc.stats();
-    const result = await svc.observe(makeTurn('My medical history includes asthma.', 'I understand your medical situation.'));
-
-    // Episode should be skipped because user text mentions 'medical'
-    const statsAfter = await svc.stats();
-    // Either skipped field is set or episode not created
-    const episodesCreated = statsAfter.byKind.episode - statsBefore.byKind.episode;
-    // The episode should NOT be created since user text has blocked topic
-    expect(episodesCreated).toBe(0);
-  });
 
   it('credential-like content (sk-abc...) is never stored even when LLM extracts it', async () => {
     const credentialResponse = JSON.stringify({
@@ -1247,32 +1149,6 @@ describe('observe() detailed', () => {
     expect(statsAfter.total).toBe(statsBefore.total);
   });
 
-  it('approve-mode pending nodes are never returned by recall', async () => {
-    const fakeResponse = JSON.stringify({
-      episode: null,
-      memories: [
-        { op: 'create', kind: 'fact', label: 'Pending recall test', content: 'Pending content golden topic recall', importance: 0.9 },
-      ],
-      links: [],
-    });
-    const { svc } = makeTestService(makeFakeLLM(fakeResponse));
-    await svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'approve' });
-    await svc.observe(makeTurn('I have a golden topic recall fact.', 'I see.'));
-
-    const result = await svc.recall({ text: 'golden topic recall', limit: 20, reinforce: false });
-    const hasPending = result.items.some((r) => r.node.status === 'pending');
-    expect(hasPending).toBe(false);
-  });
-
-  it('mode=off returns skipped and stores nothing', async () => {
-    const { svc } = makeTestService();
-    svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'off' });
-    const statsBefore = await svc.stats();
-    const result = await svc.observe(makeTurn('I love jazz.', 'Great!'));
-    expect(result.skipped).toBeTruthy();
-    const statsAfter = await svc.stats();
-    expect(statsAfter.total).toBe(statsBefore.total);
-  });
 });
 
 // ─── F04: forget command does not re-create deleted memory ──────────────────
@@ -1445,50 +1321,23 @@ describe('observe: policy is rechecked before writing (F11)', () => {
       })), name: 'fake', isLocal: true }),
       logger: silentLogger,
     });
-    const pending = svc.observe(makeTurn('I met Mira yesterday.', 'How was your meeting?'));
+    const observation = svc.observe(makeTurn('I met Mira yesterday.', 'How was your meeting?'));
     await embeddingStarted;
     expect((await svc.stats()).total).toBe(0);
-    return { svc, db, pending, release };
+    return { svc, db, observation, release };
   }
 
-  it('drops an observation when memory is turned off during embedding', async () => {
-    const { svc, db, pending, release } = await pausedObservation();
-    try {
-      svc.setPolicy({ ...svc.getPolicy(), mode: 'off' });
-      release();
-      expect((await pending).skipped).toBe('memory was disabled after extraction');
-      expect((await svc.stats()).total).toBe(0);
-    } finally { release(); await pending; db.close(); }
-  });
-
-  it('makes the episode, fact and entity pending when approve mode is selected during embedding', async () => {
-    const { svc, db, pending, release } = await pausedObservation();
-    try {
-      svc.setPolicy({ ...svc.getPolicy(), mode: 'approve' });
-      release();
-      const result = await pending;
-      expect(result.created).toEqual([]);
-      expect(result.pending.map((node) => node.kind).sort()).toEqual(['episode', 'fact']);
-      expect(result.pending.every((node) => node.status === 'pending')).toBe(true);
-      const stored = (await svc.search({})).items;
-      expect(stored.map((node) => node.kind).sort()).toEqual(['entity', 'episode', 'fact']);
-      expect(stored.every((node) => node.status === 'pending')).toBe(true);
-      expect((await svc.recall({ text: 'Mira', reinforce: false })).items).toEqual([]);
-    } finally { release(); await pending; db.close(); }
-  });
-
   it.each([
-    { blockedTopics: ['Mira'] },
     { allowedKinds: ['preference'] as const },
     { sendSensitiveToCloud: true },
   ])('drops an observation when extraction rules change during embedding: %j', async (change) => {
-    const { svc, db, pending, release } = await pausedObservation();
+    const { svc, db, observation, release } = await pausedObservation();
     try {
       svc.setPolicy({ ...svc.getPolicy(), ...change, allowedKinds: [...(change.allowedKinds ?? svc.getPolicy().allowedKinds)] });
       release();
-      expect((await pending).skipped).toBe('memory settings changed during extraction');
+      expect((await observation).skipped).toBe('memory settings changed during extraction');
       expect((await svc.stats()).total).toBe(0);
-    } finally { release(); await pending; db.close(); }
+    } finally { release(); await observation; db.close(); }
   });
 });
 

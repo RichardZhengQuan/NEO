@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen, within } from '@testing-library/react';
 import { useState, type ReactElement } from 'react';
 import { I18nProvider } from '../i18n.js';
 import {
-  AVATAR_CHARACTERS, AVATAR_STATES, DEFAULT_AVATAR,
+  AVATAR_BACKGROUNDS, AVATAR_CHARACTERS, AVATAR_STATES, DEFAULT_AVATAR,
   isAvatarString, normalizeAvatar, parseAvatar, serializeAvatar,
   type AvatarConfig,
 } from './config.js';
@@ -109,9 +109,9 @@ describe('NeoAvatar', () => {
 });
 
 describe('AvatarPicker', () => {
-  function Harness({ onChange }: { onChange: (s: string, c: AvatarConfig) => void }): ReactElement {
+  function Harness({ onChange, hero = false, orbit = false }: { onChange: (s: string, c: AvatarConfig) => void; hero?: boolean; orbit?: boolean }): ReactElement {
     const [value, setValue] = useState<string | null>(null);
-    return <AvatarPicker value={value} onChange={(s, c) => { setValue(s); onChange(s, c); }} />;
+    return <AvatarPicker size={hero ? 'hero' : 'default'} layout={orbit ? 'orbit' : 'default'} value={value} onChange={(s, c) => { setValue(s); onChange(s, c); }} />;
   }
 
   it('changes character and background and emits the stored string', () => {
@@ -127,6 +127,21 @@ describe('AvatarPicker', () => {
     fireEvent.change(screen.getByLabelText('Custom color'), { target: { value: '#123456' } });
     expect(onChange.mock.lastCall![1]).toEqual({ kind: 'cat', bg: '#123456' });
     expect(parseAvatar(onChange.mock.lastCall![0])).toEqual(onChange.mock.lastCall![1]);
+  });
+
+  it.each(['default', 'compact', 'hero'] as const)('retains preset and custom backgrounds in the %s picker', (layout) => {
+    wrap(<AvatarPicker value={null} onChange={() => {}} compact={layout === 'compact'} size={layout === 'hero' ? 'hero' : 'default'} />);
+    const group = screen.getByRole('radiogroup', { name: 'Background' });
+    expect(within(group).getAllByRole('radio')).toHaveLength(AVATAR_BACKGROUNDS.length + 1);
+    AVATAR_BACKGROUNDS.forEach((bg) => expect(within(group).getByRole('radio', { name: bg })).toBeTruthy());
+    expect(within(group).getByRole('radio', { name: 'Custom color' }).getAttribute('type')).toBe('color');
+  });
+
+  it('uses the default background when a fresh orbit picker changes character', () => {
+    const onChange = vi.fn();
+    wrap(<Harness orbit onChange={onChange} />);
+    fireEvent.click(screen.getByRole('radio', { name: 'Dog' }));
+    expect(onChange).toHaveBeenLastCalledWith(serializeAvatar({ kind: 'dog', bg: DEFAULT_AVATAR.bg }), { kind: 'dog', bg: DEFAULT_AVATAR.bg });
   });
 
   it('previews each state', () => {
@@ -146,6 +161,158 @@ describe('AvatarPicker', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('shows a large hero preview, five character tiles and backgrounds without state controls', () => {
+    wrap(<AvatarPicker size="hero" value={null} onChange={() => {}} />);
+    const preview = screen.getByRole('img', { name: 'Preview' });
+    expect(parseInt(preview.style.width)).toBeGreaterThanOrEqual(160);
+    expect(within(screen.getByRole('radiogroup', { name: 'Character' })).getAllByRole('radio')).toHaveLength(5);
+    expect(screen.getByRole('radiogroup', { name: 'Background' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Thinking' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Speaking' })).toBeNull();
+  });
+
+  it('briefly speaks after a different hero character is picked, resetting for rapid changes', () => {
+    vi.useFakeTimers();
+    try {
+      const { unmount } = wrap(<Harness hero onChange={() => {}} />);
+      const preview = screen.getByRole('img', { name: 'Preview' });
+      fireEvent.click(screen.getByRole('radio', { name: 'Robot' }));
+      expect(preview.getAttribute('data-state')).toBe('idle');
+      fireEvent.click(screen.getByRole('radio', { name: '#DCD0F4' }));
+      expect(preview.getAttribute('data-state')).toBe('idle');
+
+      fireEvent.click(screen.getByRole('radio', { name: 'Cat' }));
+      expect(preview.getAttribute('data-state')).toBe('speaking');
+      act(() => { vi.advanceTimersByTime(800); });
+      fireEvent.click(screen.getByRole('radio', { name: 'Dog' }));
+      act(() => { vi.advanceTimersByTime(800); });
+      expect(preview.getAttribute('data-kind')).toBe('dog');
+      expect(preview.getAttribute('data-state')).toBe('speaking');
+      fireEvent.click(screen.getByRole('radio', { name: 'Dog' }));
+      act(() => { vi.advanceTimersByTime(400); });
+      expect(preview.getAttribute('data-state')).toBe('idle');
+      act(() => { vi.advanceTimersByTime(2600); });
+      expect(preview.getAttribute('data-state')).toBe('idle');
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cleans up the hero speaking timer when unmounted', () => {
+    vi.useFakeTimers();
+    try {
+      const { unmount } = wrap(<Harness hero onChange={() => {}} />);
+      fireEvent.click(screen.getByRole('radio', { name: 'Cat' }));
+      expect(vi.getTimerCount()).toBe(1);
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['hero', 'orbit'])('selects and focuses %s characters with arrows, Home and End', (layout) => {
+    const onChange = vi.fn();
+    wrap(<Harness hero={layout === 'hero'} orbit={layout === 'orbit'} onChange={onChange} />);
+    const robot = screen.getByRole('radio', { name: 'Robot' });
+    const cat = screen.getByRole('radio', { name: 'Cat' });
+    const girl = screen.getByRole('radio', { name: 'Girl' });
+    robot.focus();
+    fireEvent.keyDown(robot, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(cat);
+    expect(cat.getAttribute('aria-checked')).toBe('true');
+    expect(cat.tabIndex).toBe(0);
+    expect(robot.tabIndex).toBe(-1);
+    expect(onChange).toHaveBeenLastCalledWith(expect.stringMatching(/^neo-avatar:/), { kind: 'cat', bg: DEFAULT_AVATAR.bg });
+
+    fireEvent.keyDown(cat, { key: 'End' });
+    expect(document.activeElement).toBe(girl);
+    expect(girl.getAttribute('aria-checked')).toBe('true');
+    fireEvent.keyDown(girl, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(robot);
+    fireEvent.keyDown(robot, { key: 'ArrowLeft' });
+    expect(document.activeElement).toBe(girl);
+    fireEvent.keyDown(girl, { key: 'Home' });
+    expect(document.activeElement).toBe(robot);
+    expect(robot.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('exposes only the character orbit slot without a preview or state controls', () => {
+    const { container } = wrap(
+      <AvatarPicker layout="orbit" size="hero" value={null} onChange={() => {}}>
+        {({ characters }) => <section data-testid="characters">{characters}</section>}
+      </AvatarPicker>,
+    );
+    const characters = within(screen.getByTestId('characters')).getByRole('radiogroup', { name: 'Character' });
+    expect(within(characters).getAllByRole('radio')).toHaveLength(5);
+    expect(screen.getAllByRole('radiogroup')).toHaveLength(1);
+    expect(screen.queryByRole('radiogroup', { name: 'Background' })).toBeNull();
+    expect(container.querySelector('.neo-avp-swatch, input[type="color"], [data-orbit="color"]')).toBeNull();
+    expect(container.querySelector('.neo-avp--orbit')).not.toBeNull();
+    expect(container.querySelector('.neo-avp-stage')).toBeNull();
+    expect(screen.queryByRole('img', { name: 'Preview' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Thinking' })).toBeNull();
+    expect(container.querySelector('.neo-avp-orbit-trace')).toBeNull();
+    expect(container.querySelectorAll('.neo-avp-kind .neo-av--circle')).toHaveLength(5);
+  });
+
+  it.each(['#DCD0F4', '#123456'])('selects an orbit portrait while preserving its previous background %s', (bg) => {
+    const onChange = vi.fn();
+    const { container } = wrap(<AvatarPicker layout="orbit" value={serializeAvatar({ kind: 'robot', bg })} onChange={onChange} />);
+    const robot = screen.getByRole('radio', { name: 'Robot' });
+    const cat = screen.getByRole('radio', { name: 'Cat' });
+    fireEvent.click(cat);
+    expect(cat.getAttribute('data-orbit')).toBe('portrait');
+    expect(cat.textContent).toBe('');
+    expect(cat.getAttribute('title')).toBe('Cat');
+    expect(onChange).toHaveBeenLastCalledWith(serializeAvatar({ kind: 'cat', bg }), { kind: 'cat', bg });
+    expect(Array.from(container.querySelectorAll('.neo-avp-kind .neo-av')).map((portrait) => portrait.querySelector('rect')!.getAttribute('fill'))).toEqual(Array(5).fill(bg));
+    expect(robot.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('selects and focuses hero colors with arrows, Home and End, including custom', () => {
+    const onChange = vi.fn();
+    wrap(<Harness hero onChange={onChange} />);
+    const group = screen.getByRole('radiogroup', { name: 'Background' });
+    const radios = within(group).getAllByRole('radio');
+    const first = radios[0]!;
+    const second = radios[1]!;
+    const custom = screen.getByRole('radio', { name: 'Custom color' });
+    expect(radios).toHaveLength(AVATAR_BACKGROUNDS.length + 1);
+    expect(radios.filter((radio) => radio.tabIndex === 0)).toEqual([first]);
+    first.focus();
+    fireEvent.keyDown(first, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(second);
+    expect(second.getAttribute('aria-checked')).toBe('true');
+    expect(onChange.mock.lastCall![1].bg).toBe(AVATAR_BACKGROUNDS[1]);
+    fireEvent.keyDown(second, { key: 'End' });
+    expect(document.activeElement).toBe(custom);
+    expect(custom.getAttribute('aria-checked')).toBe('true');
+    expect(radios.filter((radio) => radio.tabIndex === 0)).toEqual([custom]);
+    expect(radios.filter((radio) => radio.getAttribute('aria-checked') === 'true')).toEqual([custom]);
+    fireEvent.change(custom, { target: { value: '#123456' } });
+    expect(onChange.mock.lastCall![1].bg).toBe('#123456');
+    fireEvent.keyDown(custom, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(first);
+    expect(first.getAttribute('aria-checked')).toBe('true');
+    expect(custom.getAttribute('aria-checked')).toBe('false');
+    fireEvent.keyDown(first, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(custom);
+    fireEvent.keyDown(custom, { key: 'Home' });
+    expect(document.activeElement).toBe(first);
+    expect(radios.filter((radio) => radio.tabIndex === 0)).toEqual([first]);
+  });
+
+  it('submits its containing form with Enter from each orbit character', () => {
+    const onSubmit = vi.fn((e: { preventDefault: () => void }) => e.preventDefault());
+    wrap(<form onSubmit={onSubmit}><Harness orbit onChange={() => {}} /><button type="submit">Continue</button></form>);
+    for (const name of ['Robot', 'Cat', 'Dog', 'Boy', 'Girl']) {
+      fireEvent.keyDown(screen.getByRole('radio', { name }), { key: 'Enter' });
+    }
+    expect(onSubmit).toHaveBeenCalledTimes(AVATAR_CHARACTERS.length);
   });
 
   it('speaks Chinese', () => {

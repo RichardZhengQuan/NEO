@@ -60,14 +60,11 @@ import { containsTerm, hasCJK, hasCredentials, lexicalQuery, normalizeText } fro
 import { dot, normalized, retention } from './utils.js';
 import { VectorCache } from './vectors.js';
 import {
-  approve as runApprove,
-  approveNodes,
   embedTexts,
   forget as runForget,
   link as runLink,
   observe as runObserve,
   reinforceRecall,
-  reject as runReject,
   remember as runRemember,
   runWrite,
   unlink as runUnlink,
@@ -84,8 +81,7 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeo
  * Validate a policy one field at a time (docs/MEMORY.md, policy): each valid
  * field is kept and each invalid one falls back to its default. In a nested
  * object (`consolidation`) every sub-field is checked on its own, and in a list
- * (`blockedTopics`, `allowedKinds`) invalid entries are dropped, so one bad
- * entry never wipes the user's other blocked topics. Unknown keys are dropped.
+ * (`allowedKinds`) invalid entries are dropped. Unknown keys are dropped.
  */
 export function parsePolicyFields(input: unknown): MemoryPolicy {
   const raw = isPlainObject(input) ? input : {};
@@ -139,8 +135,8 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
   let policy: MemoryPolicy = parsePolicy(options.policy ?? DEFAULT_MEMORY_POLICY);
   // Text that must not leave the device is embedded on the device (its vectors keep their own model id).
   let localEmbedder: Embedder = isLocalEmbedder(embedder) ? embedder : new LocalFallbackEmbedder(512);
-  let keepLocal = (node: { sensitivity: string; status: string }): boolean =>
-    localEmbedder !== embedder && ((node.sensitivity === 'sensitive' && !policy.sendSensitiveToCloud) || node.status === 'pending');
+  let keepLocal = (node: { sensitivity: string }): boolean =>
+    localEmbedder !== embedder && node.sensitivity === 'sensitive' && !policy.sendSensitiveToCloud;
   vectors.setRouting({ main: embedder, local: localEmbedder, keepLocal });
   const listeners = new Set<(event: MemoryChangeEvent) => void>();
 
@@ -190,8 +186,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
 
   async function recallImpl(query: RecallQuery): Promise<RecallResult> {
     const outcome = await runRecall(ctx, query);
-    // With memory off nothing is written, not even strength and association updates.
-    if (query.reinforce !== false && policy.mode !== 'off' && outcome.selectedIds.length) {
+    if (query.reinforce !== false && outcome.selectedIds.length) {
       try {
         reinforceRecall(ctx, outcome.selectedIds, outcome.querySeedIds, query.now ?? clock());
       } catch (err) {
@@ -258,13 +253,13 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
     return [...matches.values()];
   }
 
-  /** Search filters; default status filter is active + pending. Tags match exactly (case-insensitive). */
+  /** Search filters; default status filter is active. Tags match exactly (case-insensitive). */
   function searchWhere(query: MemorySearchQuery): Where {
     return (alias = '') => {
       const a = alias ? `${alias}.` : '';
       const conds: string[] = [];
       const params: SqlValue[] = [];
-      const status = query.status?.length ? query.status : (['active', 'pending'] as MemoryStatus[]);
+      const status = query.status?.length ? query.status : (['active'] as MemoryStatus[]);
       conds.push(`${a}status IN (${status.map(() => '?').join(',')})`);
       params.push(...status);
       if (query.kinds?.length) {
@@ -294,7 +289,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
           });
         } catch (err) {
           logger.error('memory: observe failed', { error: String(err) });
-          return { created: [], updated: [], superseded: [], pending: [], linked: 0, skipped: 'memory error' };
+          return { created: [], updated: [], superseded: [], linked: 0, skipped: 'memory error' };
         }
       };
       const result = observeQueue.then(run, run);
@@ -302,7 +297,30 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
       return result;
     },
 
-    remember: (input: RememberInput) => runRemember(ctx, input),
+    remember: (input: RememberInput, signal?: AbortSignal) => runRemember(ctx, input, signal),
+
+    async findBySource(messageIds: string[]): Promise<MemoryNode[]> {
+      if (!messageIds.length) return [];
+      await observeQueue;
+      const ids = new Set<string>();
+      const sources = [...new Set(messageIds)];
+      for (let offset = 0; offset < sources.length; offset += 500) {
+        const batch = sources.slice(offset, offset + 500);
+        const rows = db.prepare(`WITH RECURSIVE derived(id) AS (
+          SELECT id FROM memory_nodes WHERE json_extract(source, '$.messageId') IN (${batch.map(() => '?').join(',')})
+          UNION
+          SELECT e.src FROM memory_edges e JOIN derived d ON e.dst = d.id WHERE e.type = 'derived_from'
+        ) SELECT id FROM derived`).all(...batch) as { id: string }[];
+        for (const row of rows) ids.add(row.id);
+      }
+      return getNodes(db, [...ids]);
+    },
+
+    async forgetBySource(messageIds: string[]): Promise<number> {
+      await observeQueue;
+      const nodes = await svc.findBySource(messageIds);
+      return runForget(ctx, nodes.map(node => node.id));
+    },
 
     async search(query: MemorySearchQuery): Promise<{ items: MemoryNode[]; total: number }> {
       const limit = Math.max(1, Math.min(500, query.limit ?? 20));
@@ -371,8 +389,8 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
       if (p.kind !== undefined) next.kind = p.kind;
       if (p.aliases !== undefined) next.aliases = p.aliases.map((a) => a.trim()).filter(Boolean);
       const textChanged = next.label !== node.label || next.content !== node.content || next.kind !== node.kind || next.aliases.join('\u0000') !== node.aliases.join('\u0000');
-      // Embedded where the edited memory's privacy allows (sensitive or pending text stays on the device).
-      const onDevice = keepLocal({ sensitivity: p.sensitivity ?? node.sensitivity, status: p.status ?? node.status });
+      // Embedded where the edited memory's privacy allows (sensitive text stays on the device).
+      const onDevice = keepLocal({ sensitivity: p.sensitivity ?? node.sensitivity });
       const [vector] = textChanged ? await embedTexts(ctx, [nodeEmbedText(next.kind, next.label, next.content, next.aliases)], onDevice) : [null];
 
       const now = clock();
@@ -391,20 +409,12 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
         if (p.pinned !== undefined) fields.pinned = p.pinned;
         if (p.sensitivity !== undefined) fields.sensitivity = p.sensitivity;
         if (p.validUntil !== undefined) fields.validUntil = p.validUntil ?? undefined;
-        let updated: MemoryNode;
-        if (p.status === 'active' && current.status === 'pending') {
-          // Activating a pending memory from the UI is an approval.
-          updateNode(db, id, fields, now);
-          approveNodes(s, [id]);
-          updated = getNode(db, id)!;
-        } else {
-          if (p.status !== undefined && p.status !== current.status) {
-            fields.status = p.status;
-            // Restoring an archived memory counts as using it.
-            if (p.status === 'active') fields.lastAccessedAt = now;
-          }
-          updated = updateNode(db, id, fields, now)!;
+        if (p.status !== undefined && p.status !== current.status) {
+          fields.status = p.status;
+          // Restoring an archived memory counts as using it.
+          if (p.status === 'active') fields.lastAccessedAt = now;
         }
+        let updated = updateNode(db, id, fields, now)!;
         if (textChanged) {
           s.writeVector(id, vector);
           updated = getNode(db, id)!;
@@ -422,7 +432,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
       const text = query.trim();
       if (!text) return [];
       const max = Math.max(1, Math.min(500, limit));
-      const where: Where = (alias = '') => ({ sql: `${alias ? `${alias}.` : ''}status IN ('active', 'pending', 'archived')`, params: [] });
+      const where: Where = (alias = '') => ({ sql: `${alias ? `${alias}.` : ''}status IN ('active', 'archived')`, params: [] });
       const scored = new Map<string, number>();
       const add = (id: string, score: number) => scored.set(id, Math.max(scored.get(id) ?? 0, score));
 
@@ -434,7 +444,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
         if (!terms.some((t) => (hasCJK(t) || t.length >= 2) && containsTerm(normQuery, t))) continue;
         add(row.id, 2);
         const about = db
-          .prepare(`SELECT n.id FROM memory_edges e JOIN memory_nodes n ON n.id = e.src WHERE e.dst = ? AND e.type = 'about' AND n.status IN ('active', 'pending', 'archived')`)
+          .prepare(`SELECT n.id FROM memory_edges e JOIN memory_nodes n ON n.id = e.src WHERE e.dst = ? AND e.type = 'about' AND n.status IN ('active', 'archived')`)
           .all(row.id) as { id: string }[];
         for (const a of about) add(a.id, 1.5);
       }
@@ -447,8 +457,6 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
       return ranked.map(([id]) => nodes.get(id)).filter((n): n is MemoryNode => !!n);
     },
 
-    approve: async (ids: string[]) => runApprove(ctx, ids),
-    reject: async (ids: string[]) => runReject(ctx, ids),
     link: async (from: string, to: string, type: EdgeType, weight?: number): Promise<MemoryEdge> => runLink(ctx, from, to, type, weight),
     unlink: async (edgeId: string) => runUnlink(ctx, edgeId),
 
@@ -456,7 +464,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
       const limit = Math.max(1, Math.min(1000, query.limit ?? 150));
       const depth = Math.max(1, Math.min(4, query.depth ?? 2));
       const now = clock();
-      const statuses: MemoryStatus[] = query.includeArchived ? ['active', 'pending', 'archived', 'superseded'] : ['active', 'pending'];
+      const statuses: MemoryStatus[] = query.includeArchived ? ['active', 'archived', 'superseded'] : ['active'];
       const kinds = query.kinds?.length ? new Set<MemoryKind>(query.kinds) : null;
       const visible = (n: MemoryNode) => statuses.includes(n.status) && (!kinds || kinds.has(n.kind));
       let nodes: MemoryNode[];
@@ -527,9 +535,6 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
         entitiesMerged: 0,
         notes: [note],
       });
-      // Memory off means nothing is written: no fading, pruning, linking, merging or journal
-      // entry, also for "Consolidate now" (force).
-      if (policy.mode === 'off') return Promise.resolve(skipped('Skipped: memory is off'));
       if (!opts?.force) {
         if (!policy.consolidation.enabled) return Promise.resolve(skipped('Skipped: consolidation is turned off'));
         const last = lastConsolidationAt(ctx);
@@ -561,7 +566,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
       for (const r of db.prepare('SELECT kind, COUNT(*) AS n FROM memory_nodes GROUP BY kind').all() as { kind: MemoryKind; n: number | bigint }[]) {
         if (r.kind in byKind) byKind[r.kind] = toNum(r.n);
       }
-      const byStatus: Record<MemoryStatus, number> = { active: 0, pending: 0, archived: 0, superseded: 0 };
+      const byStatus: Record<MemoryStatus, number> = { active: 0, archived: 0, superseded: 0 };
       for (const r of db.prepare('SELECT status, COUNT(*) AS n FROM memory_nodes GROUP BY status').all() as { status: MemoryStatus; n: number | bigint }[]) {
         if (r.status in byStatus) byStatus[r.status] = toNum(r.n);
       }
@@ -570,7 +575,6 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
         byKind,
         byStatus,
         edges: count('SELECT COUNT(*) AS n FROM memory_edges'),
-        pending: byStatus.pending,
         lastConsolidationAt: lastConsolidationAt(ctx),
         embeddingModel: embedder.id,
       };
@@ -647,8 +651,8 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
      *  Updates the routing table and re-embeds any stale vectors in the background. */
     setEmbedder(newEmbedder: Embedder): void {
       const newLocalEmbedder: Embedder = isLocalEmbedder(newEmbedder) ? newEmbedder : new LocalFallbackEmbedder(512);
-      const newKeepLocal = (node: { sensitivity: string; status: string }): boolean =>
-        newLocalEmbedder !== newEmbedder && ((node.sensitivity === 'sensitive' && !policy.sendSensitiveToCloud) || node.status === 'pending');
+      const newKeepLocal = (node: { sensitivity: string }): boolean =>
+        newLocalEmbedder !== newEmbedder && node.sensitivity === 'sensitive' && !policy.sendSensitiveToCloud;
       embedder = newEmbedder;
       localEmbedder = newLocalEmbedder;
       keepLocal = newKeepLocal;

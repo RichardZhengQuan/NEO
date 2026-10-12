@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import webpush from 'web-push';
 import { silentLogger } from '@neo/protocol';
-import { createPushSubscriptionStore, migrate, openNeoDatabase } from '@neo/storage';
+import { createConversationStore, createPushSubscriptionStore, migrate, openNeoDatabase } from '@neo/storage';
 import type { NeoDatabase } from '@neo/storage';
 import { createProductivityStores, toolsMigrations } from '@neo/tools';
 import { EventHub } from './events.js';
@@ -64,4 +64,21 @@ describe('notifications and Web Push', () => {
     expect(loadOrCreateVapidKeys(absent, { vapidPublicKey: keys.publicKey, vapidPrivateKey: keys.privateKey })).toEqual(keys);
     expect(existsSync(absent)).toBe(false);
   });
+});
+
+
+it('notification payloads target timeline message ids and convert legacy conversation links', async () => {
+  db = openNeoDatabase(':memory:');
+  migrate(db, 'tools', toolsMigrations);
+  const conversations = createConversationStore(db, { clock: () => 1234 });
+  const episode = conversations.createEpisode();
+  conversations.appendMessage({ id: 'source-message', conversationId: episode.id, role: 'assistant', createdAt: 1234, status: 'complete', parts: [] });
+  const notifications = createProductivityStores(db).notifications;
+  const events = new EventHub();
+  const notifier = createNotifier({ notifications, conversations, push: createPushSubscriptionStore(db), events, clock: () => 1234, logger: silentLogger, vapidKeys: null, pushSubject: 'mailto:test@example.com' });
+  const current = await notifier.notify({ kind: 'reminder', title: 'Current', body: 'Details', data: { messageId: 'source-message', reminderId: 'reminder' } });
+  expect(current.data).toEqual({ messageId: 'source-message', reminderId: 'reminder', url: 'neo://timeline/source-message' });
+  const legacy = await notifier.notify({ kind: 'reminder', title: 'Legacy', body: 'Details', data: { conversationId: episode.id, url: `neo://chat/${episode.id}` } });
+  expect(legacy.data).toEqual({ messageId: 'source-message', url: 'neo://timeline/source-message' });
+  expect(events.since(0)).toHaveLength(2);
 });

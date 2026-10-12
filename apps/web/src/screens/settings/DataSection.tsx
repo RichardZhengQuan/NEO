@@ -2,13 +2,15 @@
  * Settings → Data & about: the server this app talks to, your data, setup,
  * shortcuts, and disconnecting this device.
  */
-import type { ReactElement } from 'react';
-import { Badge, Button, useConfirm, useT } from '@neo/ui';
+import { useEffect, useState, type ReactElement } from 'react';
+import { Badge, Button, Select, TextField, useConfirm, useT } from '@neo/ui';
 import { openLink } from '../../actions/links.js';
 import { disconnect } from '../../actions/session.js';
+import { deleteRange } from '../../actions/timeline.js';
+import { deviceTimeZone, fromLocalInputValue, instantOf, wallTimeOf } from '../../lib/time.js';
 import { getPlatform } from '../../platform/index.js';
 import { navigate } from '../../router.js';
-import { useSession } from '../../state/session.js';
+import { isCurrentSession, useSession } from '../../state/session.js';
 import { Section, SettingRow } from './common.js';
 
 export function DataSection(): ReactElement {
@@ -17,9 +19,52 @@ export function DataSection(): ReactElement {
   const serverUrl = useSession((s) => s.serverUrl);
   const health = useSession((s) => s.health);
   const source = useSession((s) => s.source);
+  const client = useSession((s) => s.client);
+  const epoch = useSession((s) => s.sessionEpoch);
+  const timeZone = useSession((s) => s.settings?.timezone) ?? deviceTimeZone();
+  const [range, setRange] = useState('last_hour');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [invalidRange, setInvalidRange] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const desktop = getPlatform().kind === 'electron';
   const mac = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.userAgent);
   const mod = mac ? '⌘' : 'Ctrl';
+  useEffect(() => {
+    setDeleting(false);
+    setInvalidRange(false);
+    setFrom('');
+    setTo('');
+  }, [epoch]);
+  const removeRange = async () => {
+    if (!client || deleting) return;
+    const now = new Date();
+    let start: Date;
+    let end = now;
+    if (range === 'last_hour') start = new Date(now.getTime() - 60 * 60 * 1000);
+    else if (range === 'today') {
+      const wall = wallTimeOf(now.getTime(), timeZone);
+      start = new Date(instantOf(wall.year, wall.month, wall.day, 0, 0, timeZone));
+    } else {
+      const fromMs = fromLocalInputValue(from, timeZone);
+      const toMs = fromLocalInputValue(to, timeZone);
+      if (fromMs === null || toMs === null || !Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
+        setInvalidRange(true);
+        return;
+      }
+      start = new Date(fromMs);
+      end = new Date(toMs);
+    }
+    setInvalidRange(false);
+    setDeleting(true);
+    try {
+      await deleteRange(client, { from: start.toISOString(), to: end.toISOString() }, t, confirm);
+    } catch {
+      // The action reports errors for the current session.
+    } finally {
+      if (isCurrentSession(epoch, client)) setDeleting(false);
+    }
+  };
   return (
     <>
       <Section title={t('dataSettings.server')} description={desktop ? t('dataSettings.on_device') : t('dataSettings.server_help')}>
@@ -74,13 +119,38 @@ export function DataSection(): ReactElement {
         </div>
       </Section>
 
+      <Section title={t('dataSettings.delete_timeline')} description={t('dataSettings.delete_timeline_help')}>
+        <div className="neo-card">
+          <SettingRow label={t('dataSettings.range')} help={t('dataSettings.range_timezone', { timezone: timeZone })} stack>
+            <Select
+              ariaLabel={t('dataSettings.range')}
+              value={range}
+              disabled={deleting}
+              onChange={(value) => { setRange(value); setInvalidRange(false); }}
+              options={['last_hour', 'today', 'custom'].map((value) => ({ value, label: t(`dataSettings.${value}`) }))}
+            />
+          </SettingRow>
+          {range === 'custom' && (
+            <>
+              <SettingRow label={t('dataSettings.from')} stack>
+                <TextField ariaLabel={t('dataSettings.from')} type="datetime-local" value={from} disabled={deleting} onChange={(value) => { setFrom(value); setInvalidRange(false); }} />
+              </SettingRow>
+              <SettingRow label={t('dataSettings.to')} stack>
+                <TextField ariaLabel={t('dataSettings.to')} type="datetime-local" value={to} disabled={deleting} onChange={(value) => { setTo(value); setInvalidRange(false); }} />
+              </SettingRow>
+            </>
+          )}
+          {invalidRange && <p className="neo-error-text" role="alert">{t('dataSettings.invalid_range')}</p>}
+          <Button size="sm" variant="danger" icon="trash" disabled={!client || deleting} onClick={() => void removeRange()}>
+            {deleting ? t('dataSettings.deleting') : t('dataSettings.delete_range')}
+          </Button>
+        </div>
+      </Section>
+
       <Section title={t('dataSettings.shortcuts')}>
         <div className="neo-card">
-          <SettingRow label={t('dataSettings.shortcut_new')}>
+          <SettingRow label={t('dataSettings.shortcut_search')}>
             <span className="kbd">{mod} K</span>
-          </SettingRow>
-          <SettingRow label={t('dataSettings.shortcut_incognito')}>
-            <span className="kbd">{mod} ⇧ K</span>
           </SettingRow>
           <SettingRow label={t('dataSettings.shortcut_focus')}>
             <span className="kbd">{mod} /</span>

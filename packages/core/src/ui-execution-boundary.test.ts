@@ -6,7 +6,7 @@ import { newId, type Message, type ToolDefinition, type UiActionInput } from '@n
 import { deferred, harness, standardTools, until } from './fakes.test-utils.js';
 
 function fixture(def: ToolDefinition, toolInput: Record<string, unknown> = { msg: 'raw input' }) {
-  const h = harness({ tools: [def], settings: { agent: { autoTitle: false } } });
+  const h = harness({ tools: [def], settings: { agent: { } } });
   const message: Message = {
     id: newId('msg'), conversationId: h.conv.id, role: 'assistant', status: 'complete', createdAt: h.clock(),
     parts: [{ type: 'ui', id: 'ui_delete', block: { type: 'buttons', actions: [

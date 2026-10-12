@@ -10,9 +10,9 @@ Every tool has a **risk** (`read | write | external | dangerous`) and a **defaul
 |---|---|
 | `auto` | runs without asking |
 | `confirm` | the turn pauses with a `tool.confirmation` event. The user approves or denies it (optionally "always allow"). It times out as denied after `agent.confirmationTimeoutSec` |
-| `deny` | the tool is not offered to new conversations, and calls are refused |
+| `deny` | the tool is not offered to new episodes, and calls are refused |
 
-Defaults: `dangerous` tools are `confirm`, everything else is `auto`. Tools marked `uiOnly` are never offered to the model. They run only from UI actions (`origin: 'ui'`), for example the approve/reject buttons on a memory card. For UI-origin calls, a `confirm` permission is satisfied by the client-side confirm dialog (`UIAction.confirm`), while `deny` still refuses.
+Defaults: `dangerous` tools are `confirm`, everything else is `auto`. Tools marked `uiOnly` are never offered to the model. They run only from UI actions (`origin: 'ui'`). For UI-origin calls, `confirm` permissions and dangerous tools require a server-issued, single-use confirmation token, while `deny` still refuses.
 
 `ToolRegistry.execute` validates the input against the zod schema and catches every error. A failure comes back as `{ isError: true, output: { error: string, issues? } }` so the model can correct itself. It never throws.
 
@@ -42,11 +42,9 @@ Times: tools accept `when`/`due` strings parsed by `parseDateTime(input, now, ti
 | `update_note` | write / auto | `{ id, title?, content?, append?, tags? }` | updates title/tags, or appends `content` when `append: true`; preserves existing text and refuses full-content replacement |
 | `replace_note` | dangerous / confirm | `{ id, content }` | replaces all note content after confirmation, including clearing it; title and tags stay unchanged |
 | `delete_note` | dangerous / confirm | `{ id }` | `{ deleted }` |
-| `remember` | write / auto | `{ content, kind?, label?, importance?, entities?, pinned? }` | `memory.remember({ …, source: { by: 'tool', conversationId } })`. Ui: `memory` block (pending → Remember / Don't remember; active → Forget) |
+| `remember` | write / auto | `{ content, kind?, label?, importance?, entities?, pinned? }` | `memory.remember({ …, source: { by: 'tool', conversationId, messageId } })`, where `conversationId` is the episode id. Unavailable off the record. Ui: `memory` block (active → Forget) |
 | `recall` | read / auto | `{ query, limit? }` | `memory.recall({ text, limit, allowSensitive: ctx.allowSensitive })` → `[{ id, kind, label, content, reason }]` |
 | `forget` | dangerous / confirm | `{ query?, ids? }` | resolves ids (`findForForget(query)` when no ids). `describeCall` names them. Then `memory.forget(ids)` → `{ forgotten: [labels] }` |
-| `approve_memory` | write / auto, **uiOnly** | `{ ids }` | `memory.approve` |
-| `reject_memory` | write / auto, **uiOnly** | `{ ids }` | `memory.reject` |
 | `web_fetch` | external / auto | `{ url, maxChars? (default 20 000) }` | GET with 10 s timeout, 2 MB cap, only http(s). HTML → readable text (strip script/style/nav/footer, decode entities, collapse whitespace, keep title and link URLs). Output `{ url, title, text, truncated? }` with untrusted text. Titles are bounded to 300 characters. `maxChars` bounds the complete serialized JSON output, including metadata and escaping; `truncated: true` marks any omitted content. Text is shortened first, then title and unusually long URL metadata if necessary. **SSRF guard** (`src/net.ts`): resolve DNS through the system resolver and refuse loopback, private, link-local, CGNAT, metadata, unspecified and multicast addresses, including IPv4 embedded in IPv6, unless `allowPrivateNetwork`. The default transport pins the connection to the vetted addresses (no DNS-rebinding window). Redirects are followed manually (≤ 5) with the same check. `198.18.0.0/15` is allowed because some local proxies hand out fake IPs from it |
 | `web_search` | external / auto | `{ query, count? (≤ 10) }` | only registered when `webSearch.provider !== 'none'`. Supports SearXNG (`/search?format=json`), Brave (`api.search.brave.com/res/v1/web/search`) and Tavily (`api.tavily.com/search`). Output `[{ title, url, snippet }]` (untrusted) + ui `list` of `link` actions |
 | `render_ui` | read / auto | `{ blocks: object[] }` | validates with `validateUIBlocks`. Invalid input returns `isError` with the zod message so the model retries. Output `{ shown: true, text: uiBlocksToText(blocks).slice(0, 1000) }` + **ui**: the blocks |

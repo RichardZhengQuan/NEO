@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   CreateMemoryRequestSchema,
   ForgetMatchingRequestSchema,
+  ForgetBySourceRequestSchema,
   IdsRequestSchema,
   ImportMemoryRequestSchema,
   LinkMemoryRequestSchema,
@@ -19,6 +20,11 @@ import { queryBoolean, queryList, queryLimit, queryNumber, validateBody, validat
 
 export function registerMemory(app: Hono, services: NeoServices): void {
   const { memory } = services;
+
+  app.post('/api/memory/forget-by-source', async c => {
+    const body = await validateBody(c, ForgetBySourceRequestSchema);
+    return c.json({ deleted: await memory.forgetBySource(body.messageIds) });
+  });
 
   // GET /api/memory
   app.get('/api/memory', async (c) => {
@@ -87,20 +93,6 @@ export function registerMemory(app: Hono, services: NeoServices): void {
     const body = await validateBody(c, ImportMemoryRequestSchema);
     const report = await memory.import(body.data, { mode: body.mode });
     return c.json(report);
-  });
-
-  // POST /api/memory/approve
-  app.post('/api/memory/approve', async (c) => {
-    const body = await validateBody(c, IdsRequestSchema);
-    const count = await memory.approve(body.ids);
-    return c.json({ count });
-  });
-
-  // POST /api/memory/reject
-  app.post('/api/memory/reject', async (c) => {
-    const body = await validateBody(c, IdsRequestSchema);
-    const count = await memory.reject(body.ids);
-    return c.json({ count });
   });
 
   // POST /api/memory/forget

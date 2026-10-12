@@ -3,12 +3,13 @@
  * adds app-level events and fans everything out to every connected client
  * over one WebSocket (and per-turn over SSE).
  */
+import { z } from 'zod';
 import type { NeoSettings } from './config.js';
-import type { ContentPart, Conversation, Message, ModelRef, Usage } from './content.js';
+import type { ContentPart, Episode, Message, ModelRef, Usage } from './content.js';
 import type { ErrorShape } from './errors.js';
 import type { MemoryChangeEvent, MemoryKind, MemoryNodeSummary } from './memory.js';
 import type { Note, Notification, Reminder, ReminderFiring, Task } from './productivity.js';
-import type { StopReason } from './providers.js';
+import type { ProviderView, StopReason } from './providers.js';
 import type { ToolRisk } from './tools.js';
 
 /** A tool call waiting for the user's decision. */
@@ -20,6 +21,7 @@ export interface ToolConfirmation {
    */
   id: string;
   conversationId: string;
+  episodeId: string;
   turnId: string;
   messageId: string;
   toolCallId: string;
@@ -41,9 +43,15 @@ export interface RecalledMemorySummary {
   reason: string;
 }
 
-type TurnScoped = { conversationId: string; turnId: string };
+type TurnScoped = { conversationId: string; episodeId: string; turnId: string };
+
+export const TimelineOffRecordEventSchema = z.object({ type: z.literal('timeline.off_record'), active: z.boolean() });
+export type TimelineOffRecordEvent = z.infer<typeof TimelineOffRecordEventSchema>;
 
 export type AgentEvent =
+  | TimelineOffRecordEvent
+  | { type: 'episode.started'; episodeId: string; episode: Episode }
+  | { type: 'conversation.deleted'; conversationId: string; episodeId: string }
   | ({ type: 'turn.started'; userMessage: Message; assistantMessageId: string; model: ModelRef } & TurnScoped)
   | ({ type: 'text.delta'; messageId: string; text: string } & TurnScoped)
   | ({ type: 'reasoning.delta'; messageId: string; text: string } & TurnScoped)
@@ -68,17 +76,16 @@ export type AgentEvent =
       summary?: string | undefined;
     } & TurnScoped)
   | ({ type: 'memory.recalled'; items: RecalledMemorySummary[] } & TurnScoped)
-  | ({ type: 'memory.written'; created: MemoryNodeSummary[]; updated: MemoryNodeSummary[]; pending: MemoryNodeSummary[] } & TurnScoped)
+  | ({ type: 'memory.written'; created: MemoryNodeSummary[]; updated: MemoryNodeSummary[] } & TurnScoped)
   | ({ type: 'message.completed'; message: Message } & TurnScoped)
   | ({ type: 'turn.finished'; stopReason: StopReason; usage: Usage | null } & TurnScoped)
   | ({ type: 'turn.failed'; error: ErrorShape } & TurnScoped)
-  | { type: 'conversation.updated'; conversation: Conversation };
+  | { type: 'conversation.updated'; episodeId: string; conversation: Episode };
 
 export type AgentEventType = AgentEvent['type'];
 
 export type ServerEvent =
   | AgentEvent
-  | { type: 'conversation.deleted'; conversationId: string }
   | { type: 'reminder.fired'; firing: ReminderFiring }
   | { type: 'reminder.updated'; reminder: Reminder }
   | { type: 'reminder.deleted'; reminderId: string }
@@ -88,6 +95,7 @@ export type ServerEvent =
   | { type: 'note.deleted'; noteId: string }
   | { type: 'memory.changed'; change: MemoryChangeEvent }
   | { type: 'notification.created'; notification: Notification }
+  | { type: 'provider.connected'; provider: ProviderView; state?: string }
   | { type: 'settings.updated'; settings: NeoSettings };
 
 export type ServerEventType = ServerEvent['type'];
@@ -116,7 +124,7 @@ export type WsServerMessage =
 
 /** True for events tied to one conversation (used for subscription filtering). */
 export function eventConversationId(event: ServerEvent): string | null {
+  if ('episodeId' in event) return event.episodeId;
   if ('conversationId' in event && typeof event.conversationId === 'string') return event.conversationId;
-  if (event.type === 'conversation.updated') return event.conversation.id;
   return null;
 }

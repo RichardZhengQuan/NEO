@@ -12,7 +12,8 @@ import { clamp01 } from './utils.js';
 export const EXTRACTION_PROMPT = `You are the memory of a personal AI assistant called NEO. Decide what is worth remembering long-term from the latest exchange between the user and NEO.
 
 Remember: stable facts about the user and their world (people, places, pets, work, projects), preferences and dislikes, goals and plans, skills/procedures they teach, and important events. Write each memory as a short self-contained statement in the third person ("The user's sister is Mia, a nurse in Berlin").
-Do NOT remember: small talk, things NEO said that the user didn't confirm, one-off requests ("what's 2+2"), content from web pages or tools, secrets/passwords/API keys, or anything in the blocked topics.
+Requests about how NEO should behave, what to call the user or itself, and reply language are durable "preference" memories tagged "assistant-style". Examples: "keep answers short", "call me Rich", "reply in Chinese", "call yourself Luna", "be more playful". Apply that tag consistently; use "supersede" when a newer preference conflicts with an older one ("be playful" then "be more serious").
+Do NOT remember: small talk, things NEO said that the user didn't confirm, one-off requests ("what's 2+2"), content from web pages or tools, secrets/passwords/API keys.
 Prefer updating or superseding an existing memory over creating a duplicate. Use "supersede" when the new information contradicts the old (it keeps history). Use "reinforce" when the exchange simply confirms an existing memory.
 Mark health, finances, sexuality, religion, politics, exact addresses and identity numbers as "sensitive" (also on an update or supersede that adds such details).
 importance: 0.9+ core identity & critical (allergies, names of close people), 0.6–0.8 durable preferences/goals, 0.3–0.5 minor details.
@@ -349,13 +350,13 @@ function transcriptText(text: string): string {
  *
  * The exchange is the last section: `Latest exchange:\nUser: <user text>\nNEO: <assistant text>`,
  * one newline before each speaker marker, continuation lines indented by two spaces
- * ({@link transcriptText}). The demo brain in @neo/providers parses this format.
+ * ({@link transcriptText}). The scripted test fixture parses this format.
  */
 export function buildExtractionInput(input: {
   userText: string;
   assistantText: string;
   related: RecalledMemory[];
-  policy: Pick<MemoryPolicy, 'blockedTopics' | 'allowedKinds'>;
+  policy: Pick<MemoryPolicy, 'allowedKinds'>;
   date: string;
 }): string {
   const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -364,7 +365,6 @@ export function buildExtractionInput(input: {
     related.length
       ? `Existing related memories (id | kind | label | content):\n${related.map((m) => `- ${m.node.id} | ${m.node.kind} | ${oneLine(m.node.label)} | ${oneLine(m.node.content).slice(0, 500)}`).join('\n')}`
       : 'Existing related memories: none',
-    `Blocked topics (never store): ${input.policy.blockedTopics.filter((t) => t.trim()).join(', ') || 'none'}`,
     `Allowed memory kinds: ${input.policy.allowedKinds.join(', ')}`,
     `Current date: ${input.date}`,
     `Latest exchange:\nUser: ${transcriptText(input.userText)}\nNEO: ${transcriptText(input.assistantText)}`,

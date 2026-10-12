@@ -28,8 +28,20 @@ export function isNetworkError(err: unknown): boolean {
 
 export function errorMessage(err: unknown, t: TranslateFn): string {
   if (isNetworkError(err)) return t('error.network');
+  const details = typeof err === 'object' && err !== null && 'details' in err ? err.details : undefined;
+  const reason = typeof details === 'object' && details !== null && 'reason' in details ? details.reason : undefined;
+  switch (reason) {
+    case 'subscription_sharing_usage_limit_exceeded': return t('provider.chatgpt_limit');
+    case 'subscription_sharing_usage_unavailable': return t('provider.chatgpt_unavailable');
+    case 'subscription_sharing_user_not_eligible': return t('provider.chatgpt_ineligible');
+    case 'subscription_sharing_invalid_user':
+    case 'invalid_grant': return t('provider.chatgpt_disconnected');
+    default: break;
+  }
   const code = errorCode(err);
   switch (code) {
+    case 'no_provider':
+      return t('chat.connect_ai');
     case 'unauthorized':
       return t('error.unauthorized');
     case 'rate_limited':

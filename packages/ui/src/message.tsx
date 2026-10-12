@@ -302,7 +302,7 @@ export interface MessageViewProps {
   onOpenMemory?: (id: string) => void;
   /** e.g. "Anthropic · claude-sonnet-5-5", shown as a tooltip on the avatar. */
   modelLabel?: string;
-  /** Extra content under the message (pending-memory card, notices…). */
+  /** Extra content under the message (memory card, notices…). */
   footer?: ReactNode;
 }
 

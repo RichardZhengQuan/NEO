@@ -31,6 +31,8 @@ export const MEMORY_CONSTANTS = {
   frontierLimit: 200,
   pinnedActivationFloor: 0.3,
   pinnedAlwaysLimit: 6,
+  assistantStyleSeedLimit: 5,
+  assistantStyleActivation: 0.35,
   strengthBase: 0.5,
   weightRetention: 0.25,
   weightImportance: 0.15,

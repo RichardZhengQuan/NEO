@@ -3,6 +3,7 @@ import { NeoConfigSchema, silentLogger } from '@neo/protocol';
 import type { ConsolidationReport } from '@neo/protocol';
 import type { NeoServer } from './index.js';
 import { startServer } from './server.js';
+import { scriptedProviderOptions } from './testing/mock-options.js';
 
 let server: NeoServer | null = null;
 afterEach(async () => {
@@ -13,7 +14,7 @@ afterEach(async () => {
 
 const config = NeoConfigSchema.parse({
   server: { port: 0, authToken: 'server-lifecycle-owner' },
-  settings: { agent: { autoTitle: false }, memory: { consolidation: { enabled: true, intervalHours: 1 } } },
+  settings: { memory: { consolidation: { enabled: true, intervalHours: 1 } } },
 });
 
 const report: ConsolidationReport = {
@@ -75,11 +76,10 @@ describe('server background lifecycle', () => {
     let entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
     server = await startServer(config, {
-      inMemory: true, logger: silentLogger,
+      ...scriptedProviderOptions(), inMemory: true, logger: silentLogger,
       mockScript: async () => { entered(); await pending; return { text: 'delayed' }; },
     });
-    const conversation = server.services.conversations.create();
-    const response = await fetch(`${server.url}/api/conversations/${conversation.id}/messages`, {
+    const response = await fetch(`${server.url}/api/timeline/messages`, {
       method: 'POST', headers: { Authorization: 'Bearer server-lifecycle-owner', 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: 'Wait for provider' }),
     });

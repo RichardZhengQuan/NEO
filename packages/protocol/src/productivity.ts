@@ -36,7 +36,7 @@ export const ReminderSchema = z.object({
   status: ReminderStatusSchema,
   firedCount: z.number().int().nonnegative(),
   lastFiredAt: z.number().nullable(),
-  conversationId: z.string().nullable(),
+  messageId: z.string().nullable(),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
@@ -48,7 +48,7 @@ export const ReminderInputSchema = z.object({
   dueAt: z.number(),
   timezone: z.string().optional(),
   recurrence: RecurrenceSchema.nullable().optional(),
-  conversationId: z.string().nullable().optional(),
+  messageId: z.string().nullable().optional(),
 });
 export type ReminderInput = z.input<typeof ReminderInputSchema>;
 

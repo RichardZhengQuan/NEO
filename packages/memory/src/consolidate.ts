@@ -29,7 +29,7 @@ import {
 import { nodeEmbedText } from './embedder.js';
 import { callModel, parseLenientJson } from './extract.js';
 import { addNote, journalJson } from './journal.js';
-import { hasCredentials, mentionsBlockedTopic, normalizeText } from './text.js';
+import { hasCredentials, normalizeText } from './text.js';
 import { clamp01, DAY_MS, dot, effectiveEdgeWeight, isStructural, retention } from './utils.js';
 import { createOrMerge, embedTexts, prepareEntityVectors, runWrite } from './write.js';
 import { sameSpace, vectorModel } from './vectors.js';
@@ -42,7 +42,7 @@ export const CONSOLIDATION_PROMPT = `You are the memory of a personal AI assista
 From the episodes below, return:
 - "summary": one short self-contained third-person statement of what these episodes have in common, or null when they share nothing lasting;
 - "facts": durable facts, preferences, skills or goals about the user and their world that the episodes clearly support, each a short self-contained statement in the third person.
-Never invent what the episodes do not support. Never include secrets or anything in the blocked topics. Mark health, finances, sexuality, religion, politics, exact addresses and identity numbers as "sensitive".
+Never invent what the episodes do not support. Never include secrets. Mark health, finances, sexuality, religion, politics, exact addresses and identity numbers as "sensitive".
 importance: 0.9+ core identity & critical, 0.6–0.8 durable preferences/goals, 0.3–0.5 minor details.
 Return ONLY a JSON object:
 {"summary": {"label": string, "content": string, "importance": number} | null,
@@ -166,7 +166,7 @@ function prune(ctx: MemoryContext, now: number, report: ConsolidationReport): vo
 async function discoverLinks(ctx: MemoryContext, now: number, lastRun: number, report: ConsolidationReport, signal: AbortSignal | undefined): Promise<void> {
   const { db } = ctx;
   const changedIds = (
-    db.prepare(`SELECT id FROM memory_nodes WHERE status IN ('active', 'pending') AND updated_at >= ? ORDER BY updated_at DESC LIMIT 500`).all(lastRun) as { id: string }[]
+    db.prepare(`SELECT id FROM memory_nodes WHERE status = 'active' AND updated_at >= ? ORDER BY updated_at DESC LIMIT 500`).all(lastRun) as { id: string }[]
   ).map((r) => r.id);
   if (!changedIds.length) return;
   const vectorOf = (id: string) => ctx.vectors.find(ctx.embedder.id, ctx.localEmbedder.id, id);
@@ -274,7 +274,7 @@ function mergeEntity(ctx: MemoryContext, a: MemoryNode, b: MemoryNode, now: numb
 async function mergeEntities(ctx: MemoryContext, now: number, report: ConsolidationReport, changed: Set<string>, signal: AbortSignal | undefined): Promise<void> {
   const { db } = ctx;
   const entities = (
-    db.prepare(`SELECT * FROM memory_nodes WHERE kind = 'entity' AND status IN ('active', 'pending') ORDER BY created_at ASC, rowid ASC`).all() as unknown as NodeRow[]
+    db.prepare(`SELECT * FROM memory_nodes WHERE kind = 'entity' AND status = 'active' ORDER BY created_at ASC, rowid ASC`).all() as unknown as NodeRow[]
   ).map(rowToNode);
   if (entities.length < 2) return;
   const vectors = ctx.vectors.all(ctx.embedder.id);
@@ -348,7 +348,7 @@ async function abstractEpisodes(
 ): Promise<void> {
   const llm = ctx.llm();
   const policy = ctx.policy();
-  if (!llm || policy.mode === 'off') return;
+  if (!llm) return;
   const { db } = ctx;
   // Sensitive episodes only go to a model on the user's own infrastructure (or when allowed).
   const allowSensitive = llm.isLocal || policy.sendSensitiveToCloud;
@@ -394,15 +394,13 @@ async function abstractEpisodes(
     .filter((c) => c.episodes.length >= 2 || now - c.episodes[0]!.createdAt > C.singleEpisodeAbstractDays * DAY_MS)
     .slice(0, C.maxClustersPerRun);
 
-  const status = policy.mode === 'approve' ? 'pending' : 'active';
-  const refused = (...texts: string[]) => texts.some((t) => mentionsBlockedTopic(t, policy.blockedTopics) || hasCredentials(t));
+  const refused = (...texts: string[]) => texts.some((t) => hasCredentials(t));
   let consolidated = 0;
   let learned = 0;
   for (const cluster of due) {
     if (signal?.aborted) break;
     const sensitive = cluster.episodes.some((e) => e.sensitivity === 'sensitive');
     const user = [
-      `Blocked topics (never store): ${policy.blockedTopics.filter((t) => t.trim()).join(', ') || 'none'}`,
       `Allowed memory kinds: ${policy.allowedKinds.join(', ')}`,
       `Episodes:\n${cluster.episodes.map((e) => `- [${new Date(e.createdAt).toISOString().slice(0, 10)}] ${e.label}: ${e.content.replace(/\s+/g, ' ').slice(0, 600)}`).join('\n')}`,
     ].join('\n\n');
@@ -426,8 +424,8 @@ async function abstractEpisodes(
     if (summary) items.push({ kind: 'summary', label: summary.label, content: summary.content, importance: summary.importance ?? 0.5, sensitive, entities: [] });
     for (const f of facts) items.push({ kind: f.kind, label: f.label, content: f.content, importance: f.importance ?? 0.5, sensitive: sensitive || f.sensitivity === 'sensitive', entities: f.entities ?? [] });
 
-    // Sensitive or pending knowledge is embedded on the device only.
-    const onDevice = items.map((it) => ctx.keepLocal({ sensitivity: it.sensitive ? 'sensitive' : 'normal', status }));
+    // Sensitive knowledge is embedded on the device only.
+    const onDevice = items.map((it) => ctx.keepLocal({ sensitivity: it.sensitive ? 'sensitive' : 'normal' }));
     const vecs = await embedTexts(ctx, items.map((it) => nodeEmbedText(it.kind, it.label, it.content, [])), onDevice);
     const entityVectors = new Map<string, Float32Array | null>();
     const localNames = new Set(items.flatMap((it, i) => (onDevice[i] ? it.entities : [])).map(normalizeText));
@@ -446,7 +444,6 @@ async function abstractEpisodes(
             confidence: C.extractionConfidence,
             sensitivity: it.sensitive ? 'sensitive' : 'normal',
             pinned: false,
-            status,
             source: { by: 'consolidation', note: `Abstracted ${from}` },
             entities: it.entities,
             tags: [],

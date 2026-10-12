@@ -3,10 +3,13 @@
  */
 import type {
   AgentEvent,
+  TimelinePage,
+  TimelineQuery,
+  TimelineSearchHit,
+  TimelineDeleteResult,
+  OffRecordState,
+  EndOffRecordResponse,
   ConfirmToolRequest,
-  Conversation,
-  ConversationWithMessages,
-  CreateConversationRequest,
   CreateDeviceResponse,
   CreateProviderRequest,
   Device,
@@ -26,6 +29,9 @@ import type {
   ModelInfo,
   NeoSettings,
   NeoSettingsPatch,
+  OpenRouterStartResponse,
+  ChatGPTStartResponse,
+  ChatGPTStatusResponse,
   Note,
   NoteInput,
   NotePatch,
@@ -51,7 +57,6 @@ import type {
   ToolInfo,
   UiActionRequest,
   UiActionResponse,
-  UpdateConversationRequest,
   UpdateProviderRequest,
   ProviderKind,
 } from '@neo/protocol';
@@ -105,44 +110,47 @@ export class NeoClientImpl {
     return apiRequest<HealthResponse>(this.ctx, { method: 'GET', path: '/health', timeout: true });
   }
 
-  // ─── Conversations ────────────────────────────────────────────────────────
+  // ─── Timeline ─────────────────────────────────────────────────────────────
 
-  readonly conversations = {
-    list: (q?: { limit?: number; before?: number; archived?: boolean; query?: string }) =>
-      this.req<ListResponse<Conversation>>('GET', '/conversations', { query: q }),
+  readonly timeline = {
+    list: (q?: TimelineQuery) =>
+      this.req<TimelinePage>('GET', '/timeline', { query: q as Record<string, unknown> }),
 
-    get: (id: string, q?: { limit?: number; before?: number }) =>
-      this.req<ConversationWithMessages>('GET', `/conversations/${id}`, { query: q }),
+    send: (body: SendMessageRequest) =>
+      this.req<SendMessageResponse>('POST', '/timeline/messages', { body }),
 
-    create: (body?: CreateConversationRequest) =>
-      this.req<Conversation>('POST', '/conversations', { body: body ?? {} }),
-
-    update: (id: string, body: UpdateConversationRequest) =>
-      this.req<Conversation>('PATCH', `/conversations/${id}`, { body }),
-
-    delete: (id: string) =>
-      this.req<void>('DELETE', `/conversations/${id}`),
-
-    send: (id: string, body: SendMessageRequest) =>
-      this.req<SendMessageResponse>('POST', `/conversations/${id}/messages`, { body }),
-
-    stream: (id: string, body: SendMessageRequest, signal?: AbortSignal): AsyncIterable<AgentEvent> => {
-      // Return an async iterable that fires the SSE fetch when iterated.
+    stream: (body: SendMessageRequest, signal?: AbortSignal): AsyncIterable<AgentEvent> => {
       const self = this;
       return {
         [Symbol.asyncIterator]() {
-          return streamConversation(self.ctx, id, body, signal)[Symbol.asyncIterator]();
+          return streamTimeline(self.ctx, body, signal)[Symbol.asyncIterator]();
         },
       };
     },
 
-    cancel: (id: string, turnId?: string) =>
-      this.req<{ cancelled: boolean }>('POST', `/conversations/${id}/cancel`, {
-        body: turnId ? { turnId } : {},
-      }),
+    cancel: (turnId?: string) =>
+      this.req<{ cancelled: boolean }>('POST', '/timeline/cancel', { body: turnId ? { turnId } : {} }),
 
-    uiAction: (id: string, body: UiActionRequest) =>
-      this.req<UiActionResponse>('POST', `/conversations/${id}/ui-action`, { body }),
+    search: (q: string, limit?: number) =>
+      this.req<ListResponse<TimelineSearchHit>>('GET', '/timeline/search', { query: { q, limit } }),
+
+    deleteMessage: (id: string) =>
+      this.req<TimelineDeleteResult>('DELETE', `/timeline/messages/${encodeURIComponent(id)}`),
+
+    deleteRange: (q: { from?: string; to?: string }) =>
+      this.req<TimelineDeleteResult>('DELETE', '/timeline', { query: q }),
+
+    offRecord: () =>
+      this.req<OffRecordState>('GET', '/timeline/off-record'),
+
+    startOffRecord: () =>
+      this.req<OffRecordState>('POST', '/timeline/off-record/start', { body: {} }),
+
+    endOffRecord: () =>
+      this.req<EndOffRecordResponse>('POST', '/timeline/off-record/end'),
+
+    uiAction: (body: UiActionRequest) =>
+      this.req<UiActionResponse>('POST', '/timeline/ui-action', { body }),
   };
 
   // ─── Confirmations ────────────────────────────────────────────────────────
@@ -170,14 +178,13 @@ export class NeoClientImpl {
 
     forget: (ids: string[]) => this.req<{ deleted: number }>('POST', '/memory/forget', { body: { ids } }),
 
+    forgetBySource: (messageIds: string[]) =>
+      this.req<{ deleted: number }>('POST', '/memory/forget-by-source', { body: { messageIds } }),
+
     findForForget: (query: string, limit?: number) =>
       this.req<ListResponse<MemoryNode>>('POST', '/memory/find-for-forget', {
         body: { query, ...(limit !== undefined ? { limit } : {}) },
       }),
-
-    approve: (ids: string[]) => this.req<{ count: number }>('POST', '/memory/approve', { body: { ids } }),
-
-    reject: (ids: string[]) => this.req<{ count: number }>('POST', '/memory/reject', { body: { ids } }),
 
     link: (body: { from: string; to: string; type: string; weight?: number }) =>
       this.req<unknown>('POST', '/memory/links', { body }),
@@ -276,6 +283,14 @@ export class NeoClientImpl {
       this.req<{ count: number }>('POST', '/notifications/read', { body: { ids } }),
   };
 
+  readonly auth = {
+    openrouterStart: () => this.req<OpenRouterStartResponse>('POST', '/auth/openrouter/start'),
+    openrouterCancel: (state: string) => this.req<{ cancelled: boolean }>('POST', '/auth/openrouter/cancel', { body: { state } }),
+    chatgptStart: (providerId?: string) => this.req<ChatGPTStartResponse>('POST', '/auth/chatgpt/start', { body: providerId ? { providerId } : {} }),
+    chatgptCancel: (state: string) => this.req<{ cancelled: boolean }>('POST', '/auth/chatgpt/cancel', { body: { state } }),
+    chatgptStatus: (state: string) => this.req<ChatGPTStatusResponse>('GET', '/auth/chatgpt/status', { query: { state } }),
+  };
+
   // ─── Providers ────────────────────────────────────────────────────────────
 
   readonly providers = {
@@ -355,13 +370,12 @@ export class NeoClientImpl {
 // SSE streaming helper
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function* streamConversation(
+async function* streamTimeline(
   ctx: HttpContext,
-  id: string,
   body: SendMessageRequest,
   signal?: AbortSignal,
 ): AsyncIterable<AgentEvent> {
-  const url = `${ctx.baseUrl}/api/conversations/${id}/messages`;
+  const url = `${ctx.baseUrl}/api/timeline/messages`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Accept': 'text/event-stream',

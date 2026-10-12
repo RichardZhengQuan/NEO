@@ -879,7 +879,7 @@ describe('GeminiAdapter — chat streaming', () => {
     }))).rejects.toMatchObject({ code: 'provider_auth' });
   });
 
-  it('listModels filters to generateContent-capable models', async () => {
+  it('listModels keeps generateContent and embedding-capable models', async () => {
     const modelsJson = {
       models: [
         {
@@ -909,7 +909,7 @@ describe('GeminiAdapter — chat streaming', () => {
 
     const adapter = new GeminiAdapter(makeGeminiConfig(), { fetch: fakeFetch });
     const models = await adapter.listModels();
-    expect(models.map((m) => m.id)).toEqual(['gemini-2.0-flash', 'gemini-1.5-pro']);
+    expect(models.map((m) => m.id)).toEqual(['gemini-2.0-flash', 'embedding-001', 'gemini-1.5-pro']);
   });
 
   it('embed returns vectors', async () => {
@@ -972,7 +972,7 @@ describe('MockProvider', () => {
     const adapter = new MockProvider(makeMockConfig(), { mockScript: script });
 
     const events = await collectEvents(adapter.chat({
-      model: 'neo-demo',
+      model: 'neo-test',
       messages: [{ role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
     }));
 
@@ -988,7 +988,7 @@ describe('MockProvider', () => {
     const adapter = new MockProvider(makeMockConfig(), { mockScript: script });
 
     const events = await collectEvents(adapter.chat({
-      model: 'neo-demo',
+      model: 'neo-test',
       messages: [{ role: 'user', parts: [{ type: 'text', text: 'think about this' }] }],
     }));
 
@@ -1003,7 +1003,7 @@ describe('MockProvider', () => {
     const adapter = new MockProvider(makeMockConfig(), { mockScript: script });
 
     const events = await collectEvents(adapter.chat({
-      model: 'neo-demo',
+      model: 'neo-test',
       messages: [{ role: 'user', parts: [{ type: 'text', text: 'do thing' }] }],
     }));
 
@@ -1023,7 +1023,7 @@ describe('MockProvider', () => {
     const adapter = new MockProvider(makeMockConfig(), { mockScript: script });
 
     const events = await collectEvents(adapter.chat({
-      model: 'neo-demo',
+      model: 'neo-test',
       messages: [{ role: 'user', parts: [{ type: 'text', text: 'test' }] }],
     }));
 
@@ -1040,7 +1040,7 @@ describe('MockProvider', () => {
     });
     const adapter = new MockProvider(makeMockConfig(), { mockScript: script });
 
-    const req = { model: 'neo-demo', messages: [{ role: 'user' as const, parts: [{ type: 'text' as const, text: 'hi' }] }] };
+    const req = { model: 'neo-test', messages: [{ role: 'user' as const, parts: [{ type: 'text' as const, text: 'hi' }] }] };
     await collectEvents(adapter.chat(req));
     await collectEvents(adapter.chat(req));
     await collectEvents(adapter.chat(req));
@@ -1055,27 +1055,27 @@ describe('MockProvider', () => {
 
     ac.abort();
     await expect(collectEvents(adapter.chat({
-      model: 'neo-demo',
+      model: 'neo-test',
       messages: [{ role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
       signal: ac.signal,
     }))).rejects.toMatchObject({ code: 'cancelled' });
   });
 
-  it('listModels returns neo-demo', async () => {
-    const adapter = new MockProvider(makeMockConfig());
+  it('listModels returns neo-test', async () => {
+    const adapter = new MockProvider(makeMockConfig(), { mockScript: () => ({ text: 'Test reply' }) });
     const models = await adapter.listModels();
     expect(models).toHaveLength(1);
-    expect(models[0]?.id).toBe('neo-demo');
+    expect(models[0]?.id).toBe('neo-test');
   });
 
   it('test() returns ok: true', async () => {
-    const adapter = new MockProvider(makeMockConfig());
+    const adapter = new MockProvider(makeMockConfig(), { mockScript: () => ({ text: 'Test reply' }) });
     const result = await adapter.test();
     expect(result.ok).toBe(true);
   });
 });
 
-// 6. defaultMockScript: see mock.test.ts.
+// 6. scriptedMockScript: see mock.test.ts.
 
 // ---------------------------------------------------------------------------
 // 7. createProvider / createProviderRegistry
@@ -1104,7 +1104,7 @@ describe('createProvider', () => {
   });
 
   it('creates MockProvider for mock kind', () => {
-    const adapter = createProvider({ id: 'p5', kind: 'mock', label: 'Mock', enabled: true });
+    const adapter = createProvider({ id: 'p5', kind: 'mock', label: 'Test Mock', enabled: true }, { mockScript: () => ({ text: 'Test reply' }) });
     expect(adapter.kind).toBe('mock');
   });
 
@@ -1201,54 +1201,54 @@ describe('createProviderRegistry', () => {
   ];
 
   it('get returns adapter by id', () => {
-    const registry = createProviderRegistry(configs);
+    const registry = createProviderRegistry(configs, { mockScript: () => ({ text: 'Test reply' }) });
     expect(registry.get('p1')?.kind).toBe('openai');
     expect(registry.get('p2')?.kind).toBe('gemini');
     expect(registry.get('nonexistent')).toBeUndefined();
   });
 
   it('list returns all adapters', () => {
-    const registry = createProviderRegistry(configs);
+    const registry = createProviderRegistry(configs, { mockScript: () => ({ text: 'Test reply' }) });
     expect(registry.list()).toHaveLength(3);
   });
 
   it('resolve returns adapter and model for enabled provider', () => {
-    const registry = createProviderRegistry(configs);
+    const registry = createProviderRegistry(configs, { mockScript: () => ({ text: 'Test reply' }) });
     const result = registry.resolve({ provider: 'p1', model: 'gpt-4o' });
     expect(result.adapter.kind).toBe('openai');
     expect(result.model).toBe('gpt-4o');
   });
 
   it('resolve throws config_error for disabled provider', () => {
-    const registry = createProviderRegistry(configs);
-    expect(() => registry.resolve({ provider: 'p3', model: 'neo-demo' })).toThrow(NeoError);
+    const registry = createProviderRegistry(configs, { mockScript: () => ({ text: 'Test reply' }) });
+    expect(() => registry.resolve({ provider: 'p3', model: 'neo-test' })).toThrow(NeoError);
   });
 
   it('resolve throws not_found for unknown provider', () => {
-    const registry = createProviderRegistry(configs);
+    const registry = createProviderRegistry(configs, { mockScript: () => ({ text: 'Test reply' }) });
     expect(() => registry.resolve({ provider: 'unknown', model: 'x' })).toThrow(NeoError);
   });
 
   it('upsert adds a new provider', () => {
-    const registry = createProviderRegistry(configs);
+    const registry = createProviderRegistry(configs, { mockScript: () => ({ text: 'Test reply' }) });
     registry.upsert({ id: 'p4', kind: 'mock' as const, label: 'New Mock', enabled: true });
     expect(registry.get('p4')?.kind).toBe('mock');
   });
 
   it('upsert updates an existing provider', () => {
-    const registry = createProviderRegistry(configs);
+    const registry = createProviderRegistry(configs, { mockScript: () => ({ text: 'Test reply' }) });
     registry.upsert({ id: 'p1', kind: 'mock' as const, label: 'Replaced', enabled: true });
     expect(registry.get('p1')?.kind).toBe('mock');
   });
 
   it('remove removes provider and returns true', () => {
-    const registry = createProviderRegistry(configs);
+    const registry = createProviderRegistry(configs, { mockScript: () => ({ text: 'Test reply' }) });
     expect(registry.remove('p1')).toBe(true);
     expect(registry.get('p1')).toBeUndefined();
   });
 
   it('remove returns false for nonexistent id', () => {
-    const registry = createProviderRegistry(configs);
+    const registry = createProviderRegistry(configs, { mockScript: () => ({ text: 'Test reply' }) });
     expect(registry.remove('nonexistent')).toBe(false);
   });
 });

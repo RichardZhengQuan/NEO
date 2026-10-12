@@ -30,6 +30,7 @@ import {
   type MessagePatch,
   type ModelCapabilities,
   type NeoSettings,
+  type OffRecordState,
   type NeoSettingsPatch,
   type NewConversation,
   type ObservedTurn,
@@ -107,6 +108,11 @@ export class MemConversationStore implements ConversationStore {
       toolset: null,
       lastMessageAt: null,
       preview: null,
+      kind: 'episode',
+      offRecord: input.offRecord ?? input.incognito ?? false,
+      ephemeral: input.ephemeral ?? false,
+      startedAt: now,
+      closedAt: input.closedAt ?? null,
     };
     this.convs.set(conv.id, conv);
     return clone(conv);
@@ -121,6 +127,7 @@ export class MemConversationStore implements ConversationStore {
   }
   delete(id: string): boolean {
     for (const [mid, m] of this.msgs) if (m.msg.conversationId === id) this.msgs.delete(mid);
+    if (this.privateState.episodeId === id) this.privateState.episodeId = null;
     return this.convs.delete(id);
   }
   messages(conversationId: string): Message[] {
@@ -159,7 +166,50 @@ export class MemConversationStore implements ConversationStore {
     return clone(next);
   }
   deleteMessage(id: string): boolean {
+    const message = this.getMessage(id);
+    if (message && this.get(message.conversationId)?.closedAt === null) this.closeEpisode(message.conversationId);
     return this.msgs.delete(id);
+  }
+  private privateState: OffRecordState = { active: false, episodeId: null, startedAt: null };
+  offRecordState(): OffRecordState { return structuredClone(this.privateState); }
+  setOffRecordState(state: OffRecordState): void { this.privateState = structuredClone(state); }
+  currentEpisode(): Conversation | null {
+    return this.list().filter((episode) => episode.closedAt === null).at(-1) ?? null;
+  }
+  latestEpisode(): Conversation | null {
+    return this.list().sort((a, b) => (a.startedAt ?? a.createdAt) - (b.startedAt ?? b.createdAt)).at(-1) ?? null;
+  }
+  createEpisode(input: { offRecord?: boolean } = {}): Conversation {
+    for (const episode of this.list()) if (episode.closedAt === null) this.closeEpisode(episode.id);
+    return this.create({ ...input, ephemeral: input.offRecord === true });
+  }
+  closeEpisode(id: string): Conversation {
+    return this.update(id, { closedAt: this.clock() });
+  }
+  purgeOffRecord(before: number): number {
+    const expires = this.privateState.active && this.privateState.startedAt !== null && this.privateState.startedAt < before;
+    const expired = this.offRecordEpisodes(expires ? Number.MAX_SAFE_INTEGER : before);
+    for (const episode of expired) this.delete(episode.id);
+    if (expires) this.privateState = { active: false, episodeId: null, startedAt: null };
+    return expired.length;
+  }
+  offRecordEpisodes(before = Number.MAX_SAFE_INTEGER): Conversation[] {
+    return this.list().filter((episode) => episode.offRecord && episode.ephemeral && (episode.startedAt ?? episode.createdAt) < before);
+  }
+  timeline(): { items: never[]; episodes: never[]; nextCursor: null } {
+    return { items: [], episodes: [], nextCursor: null };
+  }
+  searchMessages(): never[] { return []; }
+  messagesInRange(range: { from?: number; to?: number }): Message[] {
+    return [...this.msgs.values()]
+      .filter(({ msg }) => msg.createdAt >= (range.from ?? -Infinity) && msg.createdAt <= (range.to ?? Infinity))
+      .sort((a, b) => a.msg.createdAt - b.msg.createdAt || a.seq - b.seq)
+      .map(({ msg }) => clone(msg));
+  }
+  deleteRange(range: { from?: number; to?: number }): Message[] {
+    const messages = this.messagesInRange(range);
+    for (const message of messages) this.deleteMessage(message.id);
+    return messages;
   }
 }
 
@@ -318,7 +368,7 @@ export class FakeMemory implements MemoryService {
   recallError: Error | null = null;
   /** When set, recall waits for this promise (to test races). */
   recallGate: Promise<void> | null = null;
-  observeResult: MemoryWriteResult = { created: [], updated: [], superseded: [], pending: [], linked: 0 };
+  observeResult: MemoryWriteResult = { created: [], updated: [], superseded: [], linked: 0 };
   observeError: Error | null = null;
 
   async recall(query: RecallQuery): Promise<RecallResult> {
@@ -338,8 +388,8 @@ export class FakeMemory implements MemoryService {
   update = unsupported;
   forget = unsupported;
   findForForget = unsupported;
-  approve = unsupported;
-  reject = unsupported;
+  findBySource = unsupported;
+  forgetBySource = unsupported;
   link = unsupported;
   unlink = unsupported;
   graph = unsupported;
@@ -494,18 +544,6 @@ export function standardTools(): ToolDefinition[] {
             },
           ],
         };
-      },
-    },
-    {
-      name: 'approve_memory',
-      title: 'Approve memory',
-      description: 'UI only.',
-      inputSchema: z.object({ ids: z.array(z.string()) }),
-      risk: 'write',
-      defaultPermission: 'auto',
-      uiOnly: true,
-      async execute({ ids }: { ids: string[] }) {
-        return { output: { approved: ids.length } };
       },
     },
   ] as ToolDefinition[];

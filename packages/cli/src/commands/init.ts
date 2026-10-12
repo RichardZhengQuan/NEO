@@ -38,7 +38,9 @@ export async function runInit(opts: InitOptions): Promise<void> {
     process.stdout.write(green('  ✓ Config written.\n\n'));
     process.stdout.write(`  ${bold('Next steps:')}\n`);
     process.stdout.write(`  1. Run ${cyan('neo serve')} to start the server.\n`);
-    process.stdout.write(`  2. Run ${cyan('neo chat')} to start chatting.\n`);
+    process.stdout.write(answers.providerKind === null
+      ? `  2. Connect an AI in Settings → AI, or run ${cyan('neo init')} again.\n`
+      : `  2. Run ${cyan('neo chat')} to start chatting.\n`);
     process.stdout.write(`  3. Open ${cyan(getWebAppHint(answers.mode))} in a browser.\n\n`);
   } catch (e) {
     rl.close();

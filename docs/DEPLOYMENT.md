@@ -201,10 +201,9 @@ NEO is configured in three layers (later layers win):
     "maxBodyBytes": 20971520  // 20 MB
   },
 
-  // Boot-time provider list. Providers added via the UI are stored in the DB.
-  "providers": [
-    { "id": "demo", "kind": "mock", "label": "Demo mode", "enabled": true }
-  ],
+  // Boot-time provider list (empty by default). Connect an AI in Settings → AI.
+  // Providers added via the UI are stored in the DB.
+  "providers": [],
 
   // Web search (optional)
   "webSearch": {

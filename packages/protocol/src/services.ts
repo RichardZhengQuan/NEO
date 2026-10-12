@@ -30,6 +30,7 @@ import type {
 } from './productivity.js';
 import type { ToolResult, ToolRisk } from './tools.js';
 import type { UIAction } from './ui.js';
+import type { OffRecordState, TimelinePage, TimelineQuery, TimelineSearchHit } from './api.js';
 
 // ───────────────────────────── logging & time ─────────────────────────────
 
@@ -93,10 +94,13 @@ export interface NewConversation {
   title?: string;
   model?: ModelRef | null;
   incognito?: boolean;
+  offRecord?: boolean;
+  ephemeral?: boolean;
+  closedAt?: number | null;
 }
 
 export type ConversationPatch = Partial<
-  Pick<Conversation, 'title' | 'model' | 'pinned' | 'archived' | 'systemPrompt' | 'toolset' | 'lastMessageAt' | 'preview'>
+  Pick<Conversation, 'title' | 'model' | 'pinned' | 'archived' | 'systemPrompt' | 'toolset' | 'lastMessageAt' | 'preview' | 'closedAt'>
 >;
 
 export type MessagePatch = Partial<Pick<Message, 'parts' | 'status' | 'error' | 'usage' | 'model' | 'sensitive'>>;
@@ -115,6 +119,21 @@ export interface ConversationStore {
   appendMessage(message: Message): Message;
   updateMessage(id: string, patch: MessagePatch): Message;
   deleteMessage(id: string): boolean;
+  currentEpisode(): Conversation | null;
+  latestEpisode(): Conversation | null;
+  createEpisode(input?: { offRecord?: boolean }): Conversation;
+  closeEpisode(id: string): Conversation;
+  offRecordState(): OffRecordState;
+  setOffRecordState(state: OffRecordState): void;
+  /** Hard-delete only ephemeral off-record episodes that started before the cutoff. */
+  purgeOffRecord(before: number): number;
+  /** New off-record episodes only; migrated private history is never ephemeral. */
+  offRecordEpisodes(before?: number): Conversation[];
+  timeline(query?: TimelineQuery): TimelinePage;
+  searchMessages(query: string, limit?: number): TimelineSearchHit[];
+  messagesInRange(range: { from?: number; to?: number }): Message[];
+  /** Inclusive timestamp range. Closes every touched active episode. */
+  deleteRange(range: { from?: number; to?: number }): Message[];
 }
 
 export interface SettingsStore {
@@ -231,13 +250,18 @@ export interface SendInput {
   conversationId: string;
   /** User-authored parts (text, image) or a ui_event. */
   parts: ContentPart[];
-  /** Overrides the conversation/default model for this turn. */
-  model?: ModelRef;
+}
+
+export interface SendTimelineInput {
+  parts: ContentPart[];
+  /** Legacy entry hint; false cannot end the persisted private session. */
+  offRecord?: boolean;
 }
 
 export interface TurnHandle {
   turnId: string;
   conversationId: string;
+  episodeId: string;
   userMessage: Message;
   assistantMessageId: string;
   /** Events of this turn only, ending after turn.finished / turn.failed. */
@@ -288,6 +312,15 @@ export type UiActionResult =
 export interface AgentRuntimeApi {
   /** Persists the user message and starts a turn. Rejects with NeoError if the conversation is busy/unknown. */
   send(input: SendInput): Promise<TurnHandle>;
+  sendTimeline(input: SendTimelineInput): Promise<TurnHandle>;
+  cancelTimeline(turnId?: string): boolean;
+  startOffRecord(): Promise<OffRecordState>;
+  offRecordState(): OffRecordState;
+  endOffRecord(): Promise<{ deleted: number }>;
+  purgeOffRecord(before: number): Promise<number>;
+  waitForIdle(episodeIds?: string[]): Promise<void>;
+  /** Serialize a user timeline mutation with pending sends and off-record cleanup. */
+  mutateTimeline<T>(mutation: () => Promise<T>): Promise<T>;
   cancel(turnId: string): boolean;
   /** Cancel whatever turn is running in a conversation. */
   cancelConversation(conversationId: string): boolean;
@@ -300,6 +333,7 @@ export interface AgentRuntimeApi {
    * link/copy → returned for the client to perform.
    */
   handleUiAction(input: UiActionInput): Promise<UiActionResult>;
+  handleTimelineUiAction(input: Omit<UiActionInput, 'conversationId'>): Promise<UiActionResult>;
   subscribe(listener: (event: AgentEvent) => void): () => void;
   activeTurns(): { turnId: string; conversationId: string; startedAt: number }[];
 }

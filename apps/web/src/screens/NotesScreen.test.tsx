@@ -86,7 +86,6 @@ beforeEach(() => {
     taskLists: [],
     tasksLoaded: false,
     memoryVersion: 0,
-    pendingMemories: 0,
     notifications: [],
     unreadNotifications: 0,
   });

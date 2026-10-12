@@ -89,7 +89,7 @@ export function createReminderTools(stores: ProductivityStores, _clock?: Clock) 
         timezone: ctx.timezone,
         recurrence: input.recurrence ?? null,
         notes: input.notes ?? null,
-        conversationId: ctx.conversationId ?? null,
+        messageId: ctx.messageId ?? null,
       });
       const repeats = reminder.recurrence ? `, ${describeRecurrence(reminder.recurrence)}` : '';
       return {

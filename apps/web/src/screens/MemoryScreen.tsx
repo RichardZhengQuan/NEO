@@ -1,5 +1,5 @@
 /**
- * Memory: the net, a list, pending approvals, the dream journal, statistics
+ * Memory: the net, a list, the dream journal, statistics
  * and data (export / import / forget). Opening a memory shows its details in a
  * side panel on wide screens and a sheet on phones.
  */
@@ -8,22 +8,19 @@ import { Button, IconButton, Modal, Tabs, tabPanelProps, useT } from '@neo/ui';
 import { PageHeader } from '../components/PageHeader.js';
 import { useMediaQuery } from '../hooks/useMediaQuery.js';
 import { navigate, type MemoryTab } from '../router.js';
-import { useData } from '../state/data.js';
 import { DataTab } from './memory/DataTab.js';
 import { JournalTab } from './memory/JournalTab.js';
 import { ListTab } from './memory/ListTab.js';
 import { MemoryDetail } from './memory/MemoryDetail.js';
 import { MemoryEditor } from './memory/MemoryEditor.js';
 import { NetTab } from './memory/NetTab.js';
-import { PendingTab } from './memory/PendingTab.js';
 import { StatsTab } from './memory/StatsTab.js';
 
-const TAB_ICON: Record<MemoryTab, string> = { net: 'network', list: 'list', pending: 'check-square', journal: 'moon-star', stats: 'bar-chart', data: 'database' };
+const TAB_ICON: Record<MemoryTab, string> = { net: 'network', list: 'list', journal: 'moon-star', stats: 'bar-chart', data: 'database' };
 
 export function MemoryScreen({ tab, nodeId }: { tab: MemoryTab; nodeId?: string }): ReactElement {
   const t = useT();
   const wide = useMediaQuery('(min-width: 1180px)');
-  const pending = useData((s) => s.pendingMemories);
   const [creating, setCreating] = useState(false);
   const [focusId, setFocusId] = useState<string | null>(null);
   const selected = nodeId ?? null;
@@ -53,7 +50,7 @@ export function MemoryScreen({ tab, nodeId }: { tab: MemoryTab; nodeId?: string 
           label={t('nav.memory')}
           value={tab}
           onChange={setTab}
-          tabs={(['net', 'list', 'pending', 'journal', 'stats', 'data'] as const).map((id) => ({ id, label: t(`memoryScreen.tab_${id}`), icon: TAB_ICON[id], count: id === 'pending' ? pending : undefined }))}
+          tabs={(['net', 'list', 'journal', 'stats', 'data'] as const).map((id) => ({ id, label: t(`memoryScreen.tab_${id}`), icon: TAB_ICON[id] }))}
         />
       </div>
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
@@ -61,7 +58,6 @@ export function MemoryScreen({ tab, nodeId }: { tab: MemoryTab; nodeId?: string 
           <div className="page-inner" style={{ maxWidth: tab === 'net' ? '72rem' : undefined }}>
             {tab === 'net' && <NetTab selectedId={selected} onSelect={select} focusId={focusId} onFocus={focus} />}
             {tab === 'list' && <ListTab selectedId={selected} onSelect={select} />}
-            {tab === 'pending' && <PendingTab onSelect={select} />}
             {tab === 'journal' && <JournalTab />}
             {tab === 'stats' && <StatsTab />}
             {tab === 'data' && <DataTab />}

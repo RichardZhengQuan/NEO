@@ -2,10 +2,11 @@
 
 NEO is an open-source personal AI assistant you can make your own:
 
-- **You choose the AI.** Claude, OpenAI, Gemini, any OpenAI-compatible server (Ollama, LM Studio, vLLM, llama.cpp, OpenRouter, Groq…), or the offline demo brain. You can switch per conversation.
-- **You choose what it remembers.** Every memory is visible, editable, pinnable and forgettable. You can require approval for new memories, block topics, and use incognito conversations. Memories marked *sensitive* are only shared with models running on your own infrastructure.
+- **You choose the AI.** Claude, OpenAI, Gemini, any OpenAI-compatible server (Ollama, LM Studio, vLLM, llama.cpp, OpenRouter, Groq…). The global Text capability in Settings → AI selects the model for every turn. Fresh installs have no providers; connect an AI in Settings → AI before chatting.
+- **You choose what it remembers.** Every memory is visible, editable, pinnable and forgettable. NEO remembers what matters automatically; you can review, edit or forget it and go off the record. Memories marked *sensitive* are by default only shared with models running on your own infrastructure.
 - **You choose where it runs.** *On-device*: the desktop app embeds the NEO server and stores everything locally. *Self-hosted*: run the same server on your own machine or VPS (Node or Docker), then connect the web app, phone and CLI to it.
 - **A net of memories, like a person.** Memories are nodes of different kinds joined by weighted associations. Recall spreads activation through the net. Unused memories fade, recalled ones get stronger, and idle-time consolidation turns experiences into knowledge.
+- **Personality grows from memory.** NEO adapts its voice, reply language and way of helping through conversations. Tell it how you prefer answers or what to call you; those preferences become memories. Settings customize only its avatar, and its display name is always NEO.
 - **Tools that get things done.** Reminders backed by a reliable scheduler and notifications on every platform, tasks, notes, time, calculator, web fetch/search, memory tools and plugins.
 - **Generated UI everywhere.** The assistant answers with native UI (cards, tables, charts, forms, task and reminder widgets…) that renders on web, desktop and mobile, with a text fallback in the CLI.
 
@@ -15,7 +16,7 @@ NEO is an open-source personal AI assistant you can make your own:
 packages/
   protocol   shared contracts: zod schemas, types, pure helpers (isomorphic)   ← everything depends on this
   storage    node:sqlite database, migrations, conversation/settings/secret/device/push/provider-config stores
-  providers  model adapters (Anthropic SDK; raw fetch for OpenAI-compatible & Gemini) + mock
+  providers  model adapters (Anthropic SDK; raw fetch for OpenAI-compatible & Gemini) + internal test double
   memory     the memory net (graph store, embeddings, recall, write path, consolidation)
   tools      tool registry, productivity stores, reminder scheduler, built-in tools, plugins
   core       agent runtime (turn loop, context assembly, confirmations, memory write-back)
@@ -51,18 +52,35 @@ protocol ← client ← ui ← web ← desktop (loads the web build; imports ser
 - Tests: vitest, **offline**, colocated as `src/**/*.test.ts(x)`.
 - `node:sqlite` (Node ≥ 22.13) is the only database. No native modules.
 
-## A chat turn
+## One timeline, bounded episodes
+
+NEO has one continuous timeline: a relationship with one assistant does not need a chat list, new chats, pins or archives. Memory carries long-term context. Internally, each `conversations` row is an **episode** and its `messages` stay together as a contiguous block. Episodes bound model context and give prompt caches a stable system prompt and toolset without making the user manage threads.
+
+The server selects the episode on each send. It starts a new episode when the gap since its last message is at least `timeline.episodeGapMinutes` (60 by default), its history plus the incoming turn would exceed `agent.contextTokenBudget`, a user deletion closed it, or off-record mode changes. The episode's system prompt and toolset are frozen once; a new episode can adopt changed tool permissions. Every turn uses the global AI Text capability, with no per-episode model override or generated title.
+
+If the immediately previous episode ended less than 24 hours ago, the first user message includes a hidden context part quoting the last at most six messages with timestamps. It is rendered once, persisted, and replayed verbatim. Recalled memories still accompany every turn. Recent context follows the same sensitive-content policy as memory context and is never put in the system prompt. Off-record text never carries into a normal episode.
+
+Storage migration v5 preserves existing conversations and messages, using the first message's time as the episode start (creation time for empty episodes). Existing pinned, archived and incognito conversations become closed past episodes; overlapping episodes stay as contiguous blocks ordered by start time rather than interleaving their messages. Legacy incognito episodes are marked off-record but non-ephemeral, so cleanup cannot delete existing data. The original ids remain memory provenance ids. Message FTS indexes visible text, with triggers maintaining it on append, streaming updates and deletion.
+
+Storage migration v6 adds a singleton `timeline_state` row with the private session's original start time and current episode id. `POST /api/timeline/off-record/start` closes the normal episode and creates an empty private episode. Repeated starts return the existing state. Episode closure, deletion and rotation cannot disable private mode; only explicit end or the existing 12-hour purge does so. `GET /api/timeline/off-record` restores client state, and the global `timeline.off_record { active }` event updates other devices.
+
+New off-record episodes are ephemeral. They allow recall without reinforcement or association writes, but no memory extraction or memory writes. Every send, UI action and confirmation uses the persisted mode, even when its source is an older normal message. Result messages and updated widget copies go into the active private episode. Normal source messages retain their pre-start content. A pending normal turn's continuation moves into the private episode when start takes effect. `POST /api/timeline/off-record/end` cancels and settles private work, then hard-deletes all ephemeral off-record episodes, messages and FTS rows. Startup and a minute timer expire the whole session strictly after 12 hours from its original start, including its newer rotated episodes. Deleting timeline messages keeps derived memories and reports their count; source-based forgetting is a separate user action.
+
+Dependency Rule: Frameworks & Drivers (SQLite and HTTP) → Interface Adapters (stores and routes) → Use Cases (core episode selection and turns) → Entities (protocol contracts). Core depends on protocol abstractions, so episode policy has no dependency on the concrete server or database.
+
+## A timeline turn
 
 ```
-client ──POST /api/conversations/:id/messages──▶ server ──▶ runtime.send()
+client ──POST /api/timeline/messages──▶ server ──▶ runtime.sendTimeline()
+                                                            │ 0. resolve a usable provider; fail with no_provider before transcript writes if none
                                                             │ 1. persist user message (with a context part, see below)
-                                                            │ 2. recall memories (unless incognito / recall off)
-                                                            │ 3. resolve model; freeze system prompt + toolset on first turn
+                                                            │ 2. recall memories (unless recall off; no reinforcement off the record)
+                                                            │ 3. resolve global Text model; freeze system prompt + toolset on episode first turn
                                                             │ 4. loop ≤ maxSteps:
                                                             │      provider.chat(stream) → text/reasoning deltas → events
                                                             │      tool calls → permission → (confirm?) → execute → results/ui parts
                                                             │ 5. persist assistant message; turn.finished
-                                                            │ 6. async: memory.observe(turn) → memory.written event
+                                                            │ 6. async: memory.observe(turn) unless off-record → memory.written event
 client ◀──────────── WebSocket events (all devices) ◀───────┘   (and/or SSE for this turn)
 ```
 
@@ -70,17 +88,17 @@ client ◀──────────── WebSocket events (all devices) �
 
 Prompt caching and preserved thinking (for example, Anthropic models bind thinking blocks to the exact conversation prefix) both need the transcript to be **append-only**. Each request must be a byte-identical prefix of the next one. So:
 
-1. **System prompt** = persona + standing instructions + tool/UI guidance. It is built **once**, at the first turn, and stored on the conversation (`conversation.systemPrompt`). It never contains the time, memories or anything else that changes. Persona edits apply to new conversations.
-2. **Toolset** is frozen at the first turn (`conversation.toolset`). It is the set of tool names whose permission was not `deny`. A tool that is later set to `deny` stays declared, and calls to it are refused at execution time. Tools added later are offered only in new conversations.
+1. **System prompt** = fixed NEO identity and behavior + tool/UI guidance. It is built **once**, at the first turn, and stored on the episode (`conversation.systemPrompt`). It never contains the time, memories or anything else that changes. Personality grows from recalled `assistant-style` preference memories in per-turn context, rather than settings or system-prompt edits.
+2. **Toolset** is frozen at the first turn (`conversation.toolset`). It is the set of tool names whose permission was not `deny`. A tool that is later set to `deny` stays declared, and calls to it are refused at execution time. Tools added later are offered only in new episodes.
 3. **Per-turn context** (current date/time/timezone and recalled memories) is rendered **once** into a `context` part at the start of the user message (`<neo_context>…</neo_context>`). It is persisted and replayed verbatim. Clients hide context parts.
-4. **History trimming** drops whole turns **from the front** only (oldest first), once the estimated history exceeds `agent.contextTokenBudget`. It never edits the middle.
+4. **Episode boundaries** keep history bounded before a user message is appended. Ordinary timeline turns replay the complete current episode; persisted history is never rewritten. Internal legacy callers retain front-only whole-turn trimming.
 5. **Model switches**: reasoning parts carry `provider`/`model`. Adapters replay opaque reasoning data only to the same provider+model and drop it otherwise. If a provider rejects replayed reasoning anyway (signature/prefix mismatch), the adapter strips reasoning blocks from the history and retries once.
 
 ### Generative UI
 
 The model shows UI by calling the `render_ui` tool with `{ blocks: UIBlock[] }`. Blocks are validated against `UIBlockSchema` plus depth, size and URL safety limits. Valid blocks are appended to the assistant message as `ui` parts, and the tool result tells the model what was shown. Models without tool calling may emit ```neo-ui fenced JSON instead; core extracts it with `extractInlineUI`. Tools may also return `ui` blocks directly (for example, `create_reminder` returns a live reminder widget).
 
-User interactions go to `POST /api/conversations/:id/ui-action` with `{messageId, uiId, actionId, values}`. The server looks the action up **in the stored message**; client-sent action definitions are never trusted. Then:
+User interactions go to `POST /api/timeline/ui-action` with `{messageId, uiId, actionId, values}`. The server looks the action up **in the stored message**; client-sent action definitions are never trusted. Then:
 
 - `message`: a new turn with that text.
 - `event`: a new turn whose user message holds a `ui_event` part (the model sees a description of it).
@@ -95,6 +113,8 @@ User interactions go to `POST /api/conversations/:id/ui-action` with `{messageId
 2. sends **Web Push** (VAPID) to every subscribed browser/PWA, so it works when the tab is closed,
 3. the **desktop** app shows an OS notification from its main process,
 4. the **mobile** app also schedules reminders as on-device local notifications, so they fire even when the server is unreachable.
+
+Reminder and notification links use `{ messageId }` and `neo://timeline/<messageId>`, so following a source opens the message in the timeline instead of a chat. Legacy reminder links are backfilled by tools migration v6, retaining their original storage column.
 
 ### Memory
 
@@ -114,8 +134,9 @@ The data directory holds `neo.db` (SQLite; WAL), `key` (32-byte master key for s
 
 ## Security model
 
-- Single owner per server. Every API route except `/api/health` requires `Authorization: Bearer <token>` (owner or device token). The WebSocket authenticates with its first message. Device tokens are stored hashed and are revocable.
+- Single owner per server. Every API route except `/api/health` and the single-use-state-protected OpenRouter OAuth callback requires `Authorization: Bearer <token>` (owner or device token). OpenRouter sign-in starts and cancellation require the owner token. The WebSocket authenticates with its first message. Device tokens are stored hashed and are revocable.
 - API keys entered in the app are encrypted at rest (AES-256-GCM, key file in the data dir) and never returned to clients.
+- ChatGPT plan sign-in is local-mode only. Owner-only start/status/cancel routes manage a separate one-shot `127.0.0.1:<port>/callback` listener, PKCE and verified ID tokens. OAuth credentials stay in encrypted secret storage; re-authorisation opens a one-time loopback redirect so the ID-token hint never appears in NEO API JSON. The Responses adapter receives access tokens from a serialized refresh manager.
 - Tools have a risk class and a per-tool permission (`auto` / `confirm` / `deny`). `dangerous` tools default to `confirm`. Confirmations time out as denied.
 - Third-party content (web pages, search results) is wrapped in `<untrusted_content>` and the system prompt tells the model to treat it as data. Memory extraction only reads user and assistant text, never raw tool output, which limits memory poisoning.
 - `web_fetch` blocks private, loopback and link-local addresses unless running in local mode with `allowPrivateNetwork`. It also caps size and time.

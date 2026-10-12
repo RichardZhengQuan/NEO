@@ -5,7 +5,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { DEMO_PROVIDER, NeoConfigSchema, NeoError, PROVIDER_PRESETS, deepMerge, type NeoConfig } from '@neo/protocol';
+import { AI_CAPABILITIES, NeoConfigSchema, NeoError, PROVIDER_PRESETS, deepMerge, type NeoConfig } from '@neo/protocol';
 import type { LoadConfigOptions } from './index.js';
 import { validatePushAllowedHosts } from './push-policy.js';
 
@@ -85,7 +85,7 @@ export function loadConfig(options: LoadConfigOptions = {}): NeoConfig {
   const rawProviders: Record<string, unknown>[] =
     Array.isArray((raw as Record<string, unknown>)['providers'])
       ? ([...(raw as Record<string, unknown[]>)['providers']!] as Record<string, unknown>[])
-      : [{ ...DEMO_PROVIDER }];
+      : [];
 
   if (env['ANTHROPIC_API_KEY']) {
     upsertEnvProvider(rawProviders, 'anthropic', {
@@ -137,6 +137,7 @@ export function loadConfig(options: LoadConfigOptions = {}): NeoConfig {
 
   try {
     const config: NeoConfigWithPushHosts = NeoConfigSchema.parse(raw);
+    removeLegacyDemo(config);
     const push = raw['push'];
     if (typeof push === 'object' && push !== null && 'allowedHosts' in push) {
       config.push.allowedHosts = validatePushAllowedHosts(push.allowedHosts);
@@ -148,5 +149,29 @@ export function loadConfig(options: LoadConfigOptions = {}): NeoConfig {
     return config;
   } catch (err) {
     throw NeoError.from(err, 'config_error');
+  }
+}
+
+/** Retire the old default without clearing references to a real provider named demo. */
+export function removeLegacyDemo(config: NeoConfig): void {
+  const hadDemo = config.providers.some(provider => provider.id === 'demo' && provider.kind === 'mock');
+  config.providers = config.providers.filter(provider => !(provider.id === 'demo' && provider.kind === 'mock'));
+  if (!hadDemo || config.providers.some(provider => provider.id === 'demo' && provider.kind !== 'mock') || !config.settings) return;
+  clearDemoSettings(config.settings);
+}
+
+/** Sanitize retired references in boot settings without changing historical migrations. */
+export function clearDemoSettings(settings: Record<string, unknown>): void {
+  const ai = settings.ai;
+  if (ai && typeof ai === 'object' && 'capabilities' in ai && ai.capabilities && typeof ai.capabilities === 'object') {
+    const capabilities = ai.capabilities as Record<string, unknown>;
+    for (const capability of AI_CAPABILITIES) {
+      const ref = capabilities[capability];
+      if (ref && typeof ref === 'object' && 'provider' in ref && ref.provider === 'demo') capabilities[capability] = null;
+    }
+  }
+  for (const key of ['defaultModel', 'memoryModel', 'titleModel', 'embedding']) {
+    const value = settings[key];
+    if (value && typeof value === 'object' && 'provider' in value && value.provider === 'demo') settings[key] = null;
   }
 }

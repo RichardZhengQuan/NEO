@@ -601,6 +601,24 @@ describe('Anthropic retries and errors', () => {
 // ───────────────────────────── keys, models, test() ─────────────────────────────
 
 describe('Anthropic keys, listModels, test()', () => {
+  it('does not reflect malformed model data or invalid model-entry errors', async () => {
+    const f = fakeFetch([
+      () => new Response(KEY, { headers: { 'Content-Type': 'application/json' } }),
+      () => jsonResponse({ data: [{ id: {} }], has_more: false }),
+    ]);
+    const a = new AnthropicAdapter(config(), { fetch: f });
+    const error = await a.listModels().catch((err: unknown) => err);
+    expect(error).toMatchObject({ code: 'provider_error', message: 'Anthropic returned invalid model data.' });
+    expect(error).not.toHaveProperty('cause');
+    expect(await a.listModels()).toEqual([]);
+  });
+
+  it('rejects credential echoes in model ids', async () => {
+    const f = fakeFetch(() => jsonResponse({ data: [{ id: KEY }], has_more: false }));
+    const a = new AnthropicAdapter(config(), { fetch: f });
+    await expect(a.listModels()).rejects.toMatchObject({ code: 'provider_error', message: 'Anthropic returned invalid model data.' });
+  });
+
   it('a missing key is provider_auth at call time, without a network call', async () => {
     const f = fakeFetch(simpleReply);
     const a = new AnthropicAdapter(config({ apiKey: undefined }), { fetch: f });

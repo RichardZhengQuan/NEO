@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import webpush from 'web-push';
 import { NeoError } from '@neo/protocol';
-import type { Clock, DeviceStore, Logger, Notification, NotificationStore, PushSubscriptionStore } from '@neo/protocol';
+import type { Clock, ConversationStore, DeviceStore, Logger, Notification, NotificationStore, PushSubscriptionStore } from '@neo/protocol';
 import type { Notifier } from './index.js';
 import type { EventHub } from './events.js';
 import { isAllowedPushEndpoint } from './push-policy.js';
@@ -60,6 +60,7 @@ export interface NotifierOptions {
   vapidKeys: VapidKeys | null;
   pushSubject: string;
   devices?: DeviceStore;
+  conversations?: ConversationStore;
   allowedHosts?: readonly string[];
 }
 
@@ -69,7 +70,14 @@ export function createNotifier(opts: NotifierOptions): Notifier {
     async notify(input): Promise<Notification> {
       let stored: Notification;
       try {
-        stored = notifications.create({ ...input, createdAt: input.createdAt ?? opts.clock(), data: input.data ?? null });
+        const data = input.data ? { ...input.data } : null;
+        if (data && typeof data.conversationId === 'string') {
+          const message = opts.conversations?.messages(data.conversationId, { limit: 1 })[0];
+          if (typeof data.messageId !== 'string' && message) data.messageId = message.id;
+          delete data.conversationId;
+        }
+        if (data && typeof data.messageId === 'string') data.url = `neo://timeline/${encodeURIComponent(data.messageId)}`;
+        stored = notifications.create({ ...input, createdAt: input.createdAt ?? opts.clock(), data });
       } catch (error) {
         throw NeoError.from(error);
       }

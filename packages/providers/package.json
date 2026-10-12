@@ -1,7 +1,7 @@
 {
   "name": "@neo/providers",
   "version": "0.1.0",
-  "description": "Model provider adapters for NEO: Anthropic, OpenAI & OpenAI-compatible (Ollama, LM Studio, vLLM, OpenRouter…), Gemini, and an offline mock.",
+  "description": "Model provider adapters for NEO: Anthropic, OpenAI & OpenAI-compatible (Ollama, LM Studio, vLLM, OpenRouter…), Gemini, and an internal scripted test double.",
   "license": "MIT",
   "type": "module",
   "exports": {

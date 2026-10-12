@@ -15,19 +15,19 @@ afterEach(() => {
 
 describe('renderEvent', () => {
   it('text.delta returns delta line', () => {
-    const ev: AgentEvent = { type: 'text.delta', conversationId: 'c', turnId: 't', messageId: 'm', text: 'hello' };
+    const ev: AgentEvent = { type: 'text.delta', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm', text: 'hello' };
     const lines = renderEvent(ev);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({ text: 'hello', delta: true });
   });
 
   it('reasoning.delta is hidden by default', () => {
-    const ev: AgentEvent = { type: 'reasoning.delta', conversationId: 'c', turnId: 't', messageId: 'm', text: 'thinking…' };
+    const ev: AgentEvent = { type: 'reasoning.delta', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm', text: 'thinking…' };
     expect(renderEvent(ev, {})).toHaveLength(0);
   });
 
   it('reasoning.delta shown with showReasoning', () => {
-    const ev: AgentEvent = { type: 'reasoning.delta', conversationId: 'c', turnId: 't', messageId: 'm', text: 'thinking…' };
+    const ev: AgentEvent = { type: 'reasoning.delta', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm', text: 'thinking…' };
     const lines = renderEvent(ev, { showReasoning: true });
     expect(lines.length).toBeGreaterThan(0);
     expect(lines[0]?.text).toContain('thinking…');
@@ -35,7 +35,7 @@ describe('renderEvent', () => {
 
   it('tool.started returns chip line', () => {
     const ev: AgentEvent = {
-      type: 'tool.started', conversationId: 'c', turnId: 't', messageId: 'm',
+      type: 'tool.started', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
       toolCallId: 'tc1', name: 'create_reminder', title: 'Create reminder', input: {},
     };
     const lines = renderEvent(ev);
@@ -45,7 +45,7 @@ describe('renderEvent', () => {
 
   it('tool.finished ok returns check chip', () => {
     const ev: AgentEvent = {
-      type: 'tool.finished', conversationId: 'c', turnId: 't', messageId: 'm',
+      type: 'tool.finished', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
       toolCallId: 'tc1', name: 'create_reminder', isError: false, summary: 'Created for 5 PM',
     };
     const lines = renderEvent(ev);
@@ -54,7 +54,7 @@ describe('renderEvent', () => {
 
   it('tool.finished error returns error chip', () => {
     const ev: AgentEvent = {
-      type: 'tool.finished', conversationId: 'c', turnId: 't', messageId: 'm',
+      type: 'tool.finished', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
       toolCallId: 'tc1', name: 'web_fetch', isError: true, summary: 'Network error',
     };
     const lines = renderEvent(ev);
@@ -63,7 +63,7 @@ describe('renderEvent', () => {
 
   it('memory.recalled returns summary line', () => {
     const ev: AgentEvent = {
-      type: 'memory.recalled', conversationId: 'c', turnId: 't',
+      type: 'memory.recalled', episodeId: 'c', conversationId: 'c', turnId: 't',
       items: [{ id: 'mem1', kind: 'fact', label: 'I like cats', score: 0.9, reason: 'query' }],
     };
     const lines = renderEvent(ev);
@@ -71,13 +71,13 @@ describe('renderEvent', () => {
   });
 
   it('memory.recalled is empty when no items', () => {
-    const ev: AgentEvent = { type: 'memory.recalled', conversationId: 'c', turnId: 't', items: [] };
+    const ev: AgentEvent = { type: 'memory.recalled', episodeId: 'c', conversationId: 'c', turnId: 't', items: [] };
     expect(renderEvent(ev)).toHaveLength(0);
   });
 
   it('turn.finished emits usage line', () => {
     const ev: AgentEvent = {
-      type: 'turn.finished', conversationId: 'c', turnId: 't',
+      type: 'turn.finished', episodeId: 'c', conversationId: 'c', turnId: 't',
       stopReason: 'end', usage: { inputTokens: 100, outputTokens: 50 },
     };
     const lines = renderEvent(ev);
@@ -88,7 +88,7 @@ describe('renderEvent', () => {
 
   it('turn.failed emits error line', () => {
     const ev: AgentEvent = {
-      type: 'turn.failed', conversationId: 'c', turnId: 't',
+      type: 'turn.failed', episodeId: 'c', conversationId: 'c', turnId: 't',
       error: { code: 'internal', message: 'Something broke' },
     };
     const lines = renderEvent(ev);
@@ -97,8 +97,8 @@ describe('renderEvent', () => {
   });
 
   it('message.completed returns empty', () => {
-    const msg = { id: 'm', conversationId: 'c', role: 'assistant' as const, parts: [], createdAt: 0, status: 'complete' as const };
-    const ev: AgentEvent = { type: 'message.completed', conversationId: 'c', turnId: 't', message: msg };
+    const msg = { id: 'm', episodeId: 'c', conversationId: 'c', role: 'assistant' as const, parts: [], createdAt: 0, status: 'complete' as const };
+    const ev: AgentEvent = { type: 'message.completed', episodeId: 'c', conversationId: 'c', turnId: 't', message: msg };
     expect(renderEvent(ev)).toHaveLength(0);
   });
 });
@@ -106,16 +106,16 @@ describe('renderEvent', () => {
 describe('renderEvents', () => {
   it('renders a full scripted event sequence', () => {
     const events: AgentEvent[] = [
-      { type: 'turn.started', conversationId: 'c', turnId: 't', assistantMessageId: 'a',
+      { type: 'turn.started', episodeId: 'c', conversationId: 'c', turnId: 't', assistantMessageId: 'a',
         model: { provider: 'anthropic', model: 'claude-opus-5-5' },
-        userMessage: { id: 'u', conversationId: 'c', role: 'user', parts: [], createdAt: 0, status: 'complete' } },
-      { type: 'text.delta', conversationId: 'c', turnId: 't', messageId: 'a', text: 'Hello' },
-      { type: 'text.delta', conversationId: 'c', turnId: 't', messageId: 'a', text: ', world!' },
-      { type: 'tool.started', conversationId: 'c', turnId: 't', messageId: 'a',
+        userMessage: { id: 'u', episodeId: 'c', conversationId: 'c', role: 'user', parts: [], createdAt: 0, status: 'complete' } },
+      { type: 'text.delta', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'a', text: 'Hello' },
+      { type: 'text.delta', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'a', text: ', world!' },
+      { type: 'tool.started', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'a',
         toolCallId: 'tc1', name: 'get_time', title: 'Get current time', input: {} },
-      { type: 'tool.finished', conversationId: 'c', turnId: 't', messageId: 'a',
+      { type: 'tool.finished', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'a',
         toolCallId: 'tc1', name: 'get_time', isError: false, summary: '2026-10-10 20:15' },
-      { type: 'turn.finished', conversationId: 'c', turnId: 't', stopReason: 'end',
+      { type: 'turn.finished', episodeId: 'c', conversationId: 'c', turnId: 't', stopReason: 'end',
         usage: { inputTokens: 10, outputTokens: 20 } },
     ];
     const text = renderEvents(events);

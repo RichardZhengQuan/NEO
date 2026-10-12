@@ -40,7 +40,7 @@ describe('detectPlatform', () => {
 });
 
 function reminder(id: string, dueAt: number, status: Reminder['status'] = 'scheduled', notes: string | null = null): Reminder {
-  return { id, title: `R ${id}`, notes, dueAt, timezone: 'UTC', recurrence: null, status, firedCount: 0, lastFiredAt: null, conversationId: null, createdAt: 0, updatedAt: 0 };
+  return { id, title: `R ${id}`, notes, dueAt, timezone: 'UTC', recurrence: null, status, firedCount: 0, lastFiredAt: null, messageId: null, createdAt: 0, updatedAt: 0 };
 }
 
 describe('local notification planning', () => {
@@ -77,6 +77,12 @@ describe('local notification planning', () => {
     expect(p).toEqual({ id: notificationIdFor('rem_x'), reminderId: 'rem_x', title: 'R rem_x', body: 'Bring snacks', at: now + 60_000, url: 'neo://reminders/rem_x' });
     const [q] = planReminderNotifications([reminder('rem_y', now + 1)], now, { defaultBody: "It's time" });
     expect(q!.body).toBe("It's time");
+  });
+
+  it('opens a reminder notification at its timeline source message', () => {
+    const source = { ...reminder('rem_source', now + 1), messageId: 'msg_source' };
+    const [p] = planReminderNotifications([source], now);
+    expect(p!.url).toBe('neo://timeline/msg_source');
   });
 
   it('finds notifications to cancel', () => {

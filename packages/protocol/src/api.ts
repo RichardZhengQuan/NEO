@@ -5,7 +5,9 @@
  */
 import { z } from 'zod';
 import { NeoSettingsSchema, type NeoSettings } from './config.js';
-import { ModelRefSchema, UserInputPartSchema, type Conversation, type Message } from './content.js';
+import type { AiSettings } from './ai.js';
+import type { ErrorShape } from './errors.js';
+import { UserInputPartSchema, type Message, type TimelineMessage } from './content.js';
 import type { ToolConfirmation } from './events.js';
 import type { UiActionConfirmation } from './services.js';
 import { MemoryExportSchema, MemoryNodePatchSchema, RememberInputSchema } from './memory.js';
@@ -42,35 +44,67 @@ export interface ListResponse<T> {
   nextCursor?: string | null;
 }
 
-// ───────────────────────────── conversations ─────────────────────────────
+// ───────────────────────────── timeline ─────────────────────────────
 
-export const CreateConversationRequestSchema = z.object({
-  title: z.string().max(200).optional(),
-  model: ModelRefSchema.nullable().optional(),
-  incognito: z.boolean().optional(),
-});
-export type CreateConversationRequest = z.infer<typeof CreateConversationRequestSchema>;
-
-export const UpdateConversationRequestSchema = z.object({
-  title: z.string().min(1).max(200).optional(),
-  model: ModelRefSchema.nullable().optional(),
-  pinned: z.boolean().optional(),
-  archived: z.boolean().optional(),
-});
-export type UpdateConversationRequest = z.infer<typeof UpdateConversationRequestSchema>;
-
-export interface ConversationWithMessages {
-  conversation: Conversation;
-  messages: Message[];
-  /** True when older messages exist (use ?before=<createdAt>). */
-  hasMore: boolean;
+export interface TimelineQuery {
+  before?: string;
+  limit?: number;
+  /** A timeline message id or ISO date. */
+  around?: string;
 }
+
+export interface EpisodeBoundary {
+  episodeId: string;
+  startedAt: number;
+  offRecord: boolean;
+}
+
+export interface TimelinePage {
+  /** Episode blocks by start time, messages oldest-first inside each block. */
+  items: TimelineMessage[];
+  /** Boundaries whose first message occurs in this page. */
+  episodes: EpisodeBoundary[];
+  nextCursor: string | null;
+}
+
+export interface TimelineSearchSnippet {
+  text: string;
+  /** Ascending, nonoverlapping UTF-16 offsets in text; end is exclusive. */
+  highlights: [start: number, end: number][];
+}
+
+export interface TimelineSearchHit {
+  messageId: string;
+  episodeId: string;
+  createdAt: number;
+  snippet: TimelineSearchSnippet;
+}
+
+export interface TimelineDeleteResult {
+  deleted: number;
+  messageIds: string[];
+  /** Memories are retained until the user chooses forget-by-source. */
+  derivedMemories: number;
+}
+
+export const OffRecordStateSchema = z.object({
+  active: z.boolean(),
+  episodeId: z.string().min(1).nullable(),
+  startedAt: z.number().int().nonnegative().nullable(),
+});
+export type OffRecordState = z.infer<typeof OffRecordStateSchema>;
+export const StartOffRecordRequestSchema = z.object({}).strict();
+export const StartOffRecordResponseSchema = OffRecordStateSchema;
+export type StartOffRecordResponse = OffRecordState;
+export const EndOffRecordResponseSchema = z.object({ deleted: z.number().int().nonnegative() });
+export type EndOffRecordResponse = z.infer<typeof EndOffRecordResponseSchema>;
 
 export const SendMessageRequestSchema = z
   .object({
     text: z.string().max(100_000).optional(),
     parts: z.array(UserInputPartSchema).max(20).optional(),
-    model: ModelRefSchema.optional(),
+    // Legacy entry hint; authoritative clients use explicit start/end.
+    offRecord: z.boolean().optional(),
   })
   .refine((r) => Boolean(r.text?.trim()) || Boolean(r.parts?.length), 'Provide text or parts');
 export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>;
@@ -78,6 +112,7 @@ export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>;
 /** 202 response. With `Accept: text/event-stream` the server instead streams the turn's AgentEvents as SSE. */
 export interface SendMessageResponse {
   turnId: string;
+  episodeId: string;
   userMessage: Message;
   assistantMessageId: string;
 }
@@ -94,7 +129,7 @@ export const UiActionRequestSchema = z.object({
 export type UiActionRequest = z.infer<typeof UiActionRequestSchema>;
 
 export type UiActionResponse =
-  | { kind: 'turn'; turnId: string; assistantMessageId: string; userMessage: Message }
+  | { kind: 'turn'; turnId: string; episodeId: string; assistantMessageId: string; userMessage: Message }
   | { kind: 'tool'; output: unknown; isError: boolean; summary?: string }
   | { kind: 'client'; action: UIAction }
   | { kind: 'confirm'; confirmation: UiActionConfirmation }
@@ -110,6 +145,8 @@ export const CreateMemoryRequestSchema = RememberInputSchema;
 export const UpdateMemoryRequestSchema = MemoryNodePatchSchema;
 export const IdsRequestSchema = z.object({ ids: z.array(z.string().min(1)).min(1).max(1000) });
 export type IdsRequest = z.infer<typeof IdsRequestSchema>;
+export const ForgetBySourceRequestSchema = z.object({ messageIds: z.array(z.string().min(1)).min(1).max(1000) });
+export type ForgetBySourceRequest = z.infer<typeof ForgetBySourceRequestSchema>;
 export const LinkMemoryRequestSchema = z.object({
   from: z.string().min(1),
   to: z.string().min(1),
@@ -142,6 +179,8 @@ export const MarkReadRequestSchema = z.object({ ids: z.union([z.array(z.string()
  */
 export const CreateProviderRequestSchema = ProviderConfigSchema.omit({ apiKeySecret: true }).extend({
   id: ProviderConfigSchema.shape.id.optional(),
+  /** Verify the connection and choose capabilities from the live model list before saving. */
+  simple: z.boolean().optional(),
 });
 export type CreateProviderRequest = z.input<typeof CreateProviderRequestSchema>;
 export const UpdateProviderRequestSchema = ProviderConfigSchema.omit({ id: true, kind: true, apiKeySecret: true }).partial();
@@ -157,10 +196,32 @@ export const TestProviderRequestSchema = z.object({
 
 export interface ProvidersResponse {
   items: ProviderView[];
-  /** The model NEO uses when a conversation has none. */
+  ai?: AiSettings;
+  /** Compatibility mirror of the global Text capability. */
   defaultModel: { provider: string; model: string } | null;
 }
 export type ModelsResponse = ListResponse<ModelInfo>;
+
+export interface OpenRouterStartResponse {
+  url: string;
+  state: string;
+  expiresAt: number;
+}
+export const CancelOpenRouterRequestSchema = z.object({ state: z.string().min(1).max(200) });
+
+export const StartChatGPTRequestSchema = z.object({ providerId: ProviderConfigSchema.shape.id.optional() });
+export interface ChatGPTStartResponse {
+  url: string;
+  state: string;
+  expiresAt: number;
+}
+export const CancelChatGPTRequestSchema = z.object({ state: z.string().min(1).max(200) });
+/** No credentials or account claims leave the server through sign-in status. */
+export interface ChatGPTStatusResponse {
+  status: 'waiting' | 'connected' | 'failed' | 'cancelled';
+  provider?: ProviderView;
+  error?: ErrorShape;
+}
 
 // ───────────────────────────── settings, tools, devices, push ─────────────────────────────
 

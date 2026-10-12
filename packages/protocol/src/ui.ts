@@ -345,7 +345,7 @@ export const TasksBlockSchema = z.object({
     .max(100),
 });
 
-/** Shows memories NEO just formed or recalled, with approve/forget controls. */
+/** Shows memories NEO just formed or recalled, with forget controls. */
 export const MemoryBlockSchema = z.object({
   ...blockId,
   type: z.literal('memory'),
@@ -358,7 +358,7 @@ export const MemoryBlockSchema = z.object({
         kind: z.string().max(30),
         label: z.string().max(300),
         content: z.string().max(2000).optional(),
-        status: z.enum(['active', 'pending', 'archived', 'superseded']).optional(),
+        status: z.enum(['active', 'archived', 'superseded']).optional(),
       }),
     )
     .min(1)
@@ -820,7 +820,7 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       break;
     case 'memory':
       push(`🧠 ${block.title ?? 'Memory'}${block.note ? ` — ${block.note}` : ''}`);
-      for (const n of block.nodes) push(`  • [${n.kind}] ${n.label}${n.status === 'pending' ? ' (awaiting approval)' : ''}`);
+      for (const n of block.nodes) push(`  • [${n.kind}] ${n.label}`);
       break;
   }
   return lines.join('\n');
@@ -834,7 +834,7 @@ export function uiBlocksToText(blocks: UIBlock[]): string {
 
 /**
  * Built-in controls of live widgets (task checkboxes, reminder snooze/done,
- * memory approve/reject/forget). Clients send these action ids to the
+ * memory forget). Clients send these action ids to the
  * ui-action endpoint; the server resolves them against the STORED block with
  * {@link resolveWidgetAction}, so a client can only act on items the block shows.
  */
@@ -842,8 +842,6 @@ export const widgetActionId = {
   taskToggle: (taskId: string) => `task.toggle:${taskId}`,
   reminderSnooze: (minutes: number) => `reminder.snooze:${minutes}`,
   reminderComplete: () => 'reminder.complete',
-  memoryApprove: (nodeId: string) => `memory.approve:${nodeId}`,
-  memoryReject: (nodeId: string) => `memory.reject:${nodeId}`,
   memoryForget: (nodeId: string) => `memory.forget:${nodeId}`,
 } as const;
 
@@ -876,8 +874,6 @@ export function resolveWidgetAction(root: UIBlock, actionId: string, values?: Re
       return { id: actionId, label: 'Done', kind: 'tool', tool: 'complete_reminder', input: { id: b.reminderId } };
     }
     if (b.type === 'memory' && verb.startsWith('memory.') && b.nodes.some((n) => n.id === arg)) {
-      if (verb === 'memory.approve') return { id: actionId, label: 'Remember', kind: 'tool', tool: 'approve_memory', input: { ids: [arg] } };
-      if (verb === 'memory.reject') return { id: actionId, label: "Don't remember", kind: 'tool', tool: 'reject_memory', input: { ids: [arg] } };
       if (verb === 'memory.forget')
         return { id: actionId, label: 'Forget', kind: 'tool', tool: 'forget', input: { ids: [arg] }, style: 'danger', confirm: 'Forget this memory for good?' };
     }

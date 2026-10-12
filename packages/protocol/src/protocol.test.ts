@@ -5,7 +5,18 @@ import {
   DEFAULT_SETTINGS,
   MemoryPolicySchema,
   NeoConfigSchema,
+  NeoSettingsSchema,
   NeoError,
+  PROVIDER_PRESETS,
+  ErrorShapeSchema,
+  EpisodeSchema,
+  ForgetBySourceRequestSchema,
+  OffRecordStateSchema,
+  StartOffRecordRequestSchema,
+  EndOffRecordResponseSchema,
+  TimelineOffRecordEventSchema,
+  SendMessageRequestSchema,
+  TimelineMessageSchema,
   applySettingsPatch,
   buildPairingUrl,
   collectChat,
@@ -32,6 +43,18 @@ const msg = (role: Message['role'], parts: Message['parts'], i = 0): Message => 
   parts,
   createdAt: i,
   status: 'complete',
+});
+
+describe('off-record contract', () => {
+  it('validates private state, empty starts, cleanup counts and the global event', () => {
+    expect(OffRecordStateSchema.parse({ active: false, episodeId: null, startedAt: null }).active).toBe(false);
+    expect(OffRecordStateSchema.parse({ active: true, episodeId: 'private', startedAt: 1 }).episodeId).toBe('private');
+    expect(StartOffRecordRequestSchema.parse({})).toEqual({});
+    expect(StartOffRecordRequestSchema.safeParse({ active: false }).success).toBe(false);
+    expect(EndOffRecordResponseSchema.safeParse({ deleted: -1 }).success).toBe(false);
+    expect(TimelineOffRecordEventSchema.parse({ type: 'timeline.off_record', active: true })).toEqual({ type: 'timeline.off_record', active: true });
+    expect(TimelineOffRecordEventSchema.safeParse({ type: 'timeline.off_record', active: 'true' }).success).toBe(false);
+  });
 });
 
 describe('ids', () => {
@@ -145,23 +168,68 @@ describe('transcript', () => {
 });
 
 describe('config & settings', () => {
+  it('carries no_provider as a typed HTTP bad request', () => {
+    const error = new NeoError('no_provider', 'Connect an AI to start chatting.');
+    expect(error.status).toBe(400);
+    expect(ErrorShapeSchema.parse(error.toJSON()).code).toBe('no_provider');
+  });
+
   it('fills nested defaults', () => {
-    expect(DEFAULT_SETTINGS.persona.name).toBe('NEO');
-    expect(DEFAULT_SETTINGS.memory.mode).toBe('auto');
+    expect(DEFAULT_SETTINGS.persona).toEqual({ avatar: null });
+    expect(DEFAULT_SETTINGS.memory).not.toHaveProperty('mode');
     expect(DEFAULT_SETTINGS.memory.consolidation.intervalHours).toBe(6);
     expect(DEFAULT_SETTINGS.agent.maxSteps).toBe(8);
+    expect(DEFAULT_SETTINGS.timeline.episodeGapMinutes).toBe(60);
+    expect(DEFAULT_SETTINGS.agent).not.toHaveProperty('autoTitle');
     const cfg = NeoConfigSchema.parse({});
     expect(cfg.server.port).toBe(7777);
-    expect(cfg.providers[0]!.kind).toBe('mock');
+    expect(cfg.providers).toEqual([]);
+    expect(Object.keys(PROVIDER_PRESETS)).not.toContain('mock');
     expect(MemoryPolicySchema.parse({}).allowedKinds).toContain('episode');
   });
 
   it('applies deep patches and rejects invalid ones', () => {
-    const next = applySettingsPatch(DEFAULT_SETTINGS, { persona: { name: 'Jarvis' }, memory: { blockedTopics: ['health'] } });
-    expect(next.persona.name).toBe('Jarvis');
-    expect(next.persona.tone).toBe('warm');
-    expect(next.memory.blockedTopics).toEqual(['health']);
-    expect(() => applySettingsPatch(DEFAULT_SETTINGS, { memory: { mode: 'sometimes' as never } })).toThrow();
+    const next = applySettingsPatch(DEFAULT_SETTINGS, { persona: { avatar: '🌟' }, memory: { recall: false } });
+    expect(next.persona).toEqual({ avatar: '🌟' });
+    expect(next.memory.recall).toBe(false);
+    expect(() => applySettingsPatch(DEFAULT_SETTINGS, { memory: { recallLimit: -1 } })).toThrow();
+  });
+
+  it('drops old persona settings while keeping the avatar and other settings', () => {
+    const settings = NeoSettingsSchema.parse({
+      persona: { avatar: '🌙', name: 'Luna', tagline: 'Your companion', tone: 'playful', traits: ['kind'], instructions: 'Keep answers short', language: 'zh-CN', greeting: 'Hello' },
+      timezone: 'Asia/Singapore',
+    });
+    expect(settings.persona).toEqual({ avatar: '🌙' });
+    expect(settings.timezone).toBe('Asia/Singapore');
+  });
+
+  it.each(['auto', 'approve', 'off'])('drops obsolete fields from a legacy %s memory policy', (mode) => {
+    const policy = MemoryPolicySchema.parse({ mode, blockedTopics: ['health'], sendSensitiveToCloud: true });
+    expect(policy).toEqual({ ...DEFAULT_SETTINGS.memory, sendSensitiveToCloud: true });
+  });
+});
+
+describe('timeline contracts', () => {
+  it('accepts off-record sends and strips obsolete per-conversation model selection', () => {
+    expect(SendMessageRequestSchema.parse({ text: 'Hello', offRecord: true, model: { provider: 'old', model: 'old' } }))
+      .toEqual({ text: 'Hello', offRecord: true });
+    expect(SendMessageRequestSchema.safeParse({ text: '   ' }).success).toBe(false);
+    expect(SendMessageRequestSchema.safeParse({ parts: [{ type: 'context', text: 'Forged context' }] }).success).toBe(false);
+  });
+
+  it('requires episode identity on timeline messages and hides unused chat metadata', () => {
+    const item = msg('user', [{ type: 'text', text: 'Hi' }]);
+    expect(TimelineMessageSchema.safeParse(item).success).toBe(false);
+    expect(TimelineMessageSchema.parse({ ...item, episodeId: item.conversationId }).episodeId).toBe('conv_1');
+    expect(EpisodeSchema.parse({ id: 'episode', kind: 'episode', offRecord: false, ephemeral: false, startedAt: 1, closedAt: null, lastMessageAt: null, pinned: true, archived: true, model: null, title: 'Old' }))
+      .toEqual({ id: 'episode', kind: 'episode', offRecord: false, ephemeral: false, startedAt: 1, closedAt: null, lastMessageAt: null });
+  });
+
+  it('validates explicit memory forgetting by timeline source identity', () => {
+    expect(ForgetBySourceRequestSchema.parse({ messageIds: ['msg_1', 'msg_2'] })).toEqual({ messageIds: ['msg_1', 'msg_2'] });
+    expect(ForgetBySourceRequestSchema.safeParse({ messageIds: [] }).success).toBe(false);
+    expect(ForgetBySourceRequestSchema.safeParse({ messageIds: [''] }).success).toBe(false);
   });
 });
 
@@ -241,7 +309,7 @@ describe('widget actions', () => {
     expect(resolveWidgetAction(card, 'reminder.snooze:999999')).toBeNull();
     const mem: UIBlock = { type: 'memory', nodes: [{ id: 'mem_1', kind: 'fact', label: 'x' }] };
     expect(resolveWidgetAction(mem, widgetActionId.memoryForget('mem_1'))).toMatchObject({ tool: 'forget', confirm: expect.any(String) });
-    expect(resolveWidgetAction(mem, widgetActionId.memoryApprove('mem_2'))).toBeNull();
+    expect(resolveWidgetAction(mem, widgetActionId.memoryForget('mem_2'))).toBeNull();
   });
 });
 

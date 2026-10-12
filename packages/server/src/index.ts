@@ -18,6 +18,7 @@ import {
   type Notification,
   type ProductivityStores,
   type ProviderRegistry,
+  type ProviderConfig,
   type PushSubscriptionStore,
   type ReminderScheduler,
   type SecretStore,
@@ -26,6 +27,7 @@ import {
 } from '@neo/protocol';
 import type { NeoDatabase, ProviderConfigStore } from '@neo/storage';
 import type { MockScript } from '@neo/providers';
+import type { ChatGPTAuthOptions, ChatGPTTokenManager } from './chatgpt-auth.js';
 
 // ── Re-export implementations ────────────────────────────────────────────────
 export { loadConfig } from './config.js';
@@ -54,8 +56,19 @@ export interface Notifier {
   notify(notification: import('@neo/protocol').NotificationInput): Promise<import('@neo/protocol').Notification>;
 }
 
+export interface OpenRouterOptions {
+  /** Injectable auth/model API origin; production defaults to OpenRouter. */
+  baseUrl?: string;
+  authorizationUrl?: string;
+}
+
 export interface NeoServices {
   config: NeoConfig;
+  openRouter?: OpenRouterOptions;
+  chatGPT?: ChatGPTAuthOptions;
+  chatGPTTokens?: ChatGPTTokenManager;
+  /** Invalidate pending callbacks when a connection is explicitly removed. */
+  cancelChatGPTSignIns?(providerId: string): void;
   logger: Logger;
   clock: Clock;
   /** Owner token (from config or generated into <dataDir>/token on first boot). */
@@ -82,9 +95,14 @@ export interface NeoServices {
 }
 
 export interface CreateServicesOptions {
+  openRouter?: OpenRouterOptions;
+  /** Injectable loopback fakes for ChatGPT OAuth and model tests. */
+  chatGPT?: ChatGPTAuthOptions;
   logger?: Logger;
   clock?: Clock;
-  /** Script for mock providers (tests, demo). */
+  /** Internal test providers, never read from user config or persisted settings. */
+  mockProviders?: ProviderConfig[];
+  /** Explicit script required for internal mock providers. */
   mockScript?: MockScript;
   /** Use an in-memory database (tests). */
   inMemory?: boolean;

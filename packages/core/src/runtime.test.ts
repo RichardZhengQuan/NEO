@@ -29,6 +29,7 @@ import {
   type ModelCapabilities,
   type NewConversation,
   type NeoSettings,
+  type OffRecordState,
   type NeoSettingsPatch,
   type ObservedTurn,
   type PermissionLevel,
@@ -155,6 +156,28 @@ class FakeConversationStore implements ConversationStore {
   deleteMessage(id: string): boolean {
     return this.msgMap.delete(id);
   }
+  private privateState: OffRecordState = { active: false, episodeId: null, startedAt: null };
+  offRecordState(): OffRecordState { return structuredClone(this.privateState); }
+  setOffRecordState(state: OffRecordState): void { this.privateState = structuredClone(state); }
+  currentEpisode(): Conversation | null { return null; }
+  latestEpisode(): Conversation | null { return this.list().at(0) ?? null; }
+  createEpisode(input: { offRecord?: boolean } = {}): Conversation { return this.create({ ...input, ephemeral: input.offRecord === true }); }
+  closeEpisode(id: string): Conversation { return this.update(id, { closedAt: Date.now() }); }
+  purgeOffRecord(): number { return 0; }
+  offRecordEpisodes(): Conversation[] { return []; }
+  timeline(): { items: never[]; episodes: never[]; nextCursor: null } { return { items: [], episodes: [], nextCursor: null }; }
+  searchMessages(): never[] { return []; }
+  messagesInRange(range: { from?: number; to?: number }): Message[] {
+    return [...this.msgMap.values()]
+      .filter((message) => message.createdAt >= (range.from ?? -Infinity) && message.createdAt <= (range.to ?? Infinity))
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+  deleteRange(range: { from?: number; to?: number }): Message[] {
+    const messages = this.messagesInRange(range);
+    for (const message of messages) this.deleteMessage(message.id);
+    return messages;
+  }
+
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -312,7 +335,7 @@ class FakeMemoryService implements MemoryService {
 
   async observe(turn: ObservedTurn): Promise<MemoryWriteResult> {
     this.observeCalls.push(turn);
-    return { created: [], updated: [], superseded: [], pending: [], linked: 0 };
+    return { created: [], updated: [], superseded: [], linked: 0 };
   }
 
   // Stub out the rest of the interface
@@ -322,8 +345,8 @@ class FakeMemoryService implements MemoryService {
   async update(): Promise<never> { throw new Error('not implemented'); }
   async forget(): Promise<number> { return 0; }
   async findForForget(): Promise<never[]> { return []; }
-  async approve(): Promise<number> { return 0; }
-  async reject(): Promise<number> { return 0; }
+  async findBySource(): Promise<never[]> { return []; }
+  async forgetBySource(): Promise<number> { return 0; }
   async link(): Promise<never> { throw new Error('not implemented'); }
   async unlink(): Promise<boolean> { return false; }
   async graph(): Promise<never> { throw new Error('not implemented'); }
@@ -472,7 +495,7 @@ function makeEnv(settingsPatch?: NeoSettingsPatch): TestEnv {
   });
 
   const runtime = new AgentRuntime({ conversations, settings, providers, memory, tools, logger, clock });
-  // Unnamed, like conversations created by the apps (a user-given title disables auto-title).
+  // Keep the legacy title column present but unused by the runtime.
   const conv = conversations.create();
 
   return { conversations, settings, providers, memory, tools, clock, runtime, conv };
@@ -891,7 +914,7 @@ describe('Frozen system prompt + toolset', () => {
 });
 
 describe('Incognito mode', () => {
-  it('does not call memory.recall for incognito conversation', async () => {
+  it('allows memory recall for legacy off-record episodes', async () => {
     const { providers, runtime, conversations, memory } = makeEnv();
     const incognitoConv = conversations.create({ title: 'Incognito', incognito: true });
 
@@ -904,7 +927,7 @@ describe('Incognito mode', () => {
     // Give async tasks time to settle
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(memory.recallCalls.length).toBe(0);
+    expect(memory.recallCalls.length).toBe(1);
   });
 
   it('does not call memory.observe for incognito conversation', async () => {
@@ -922,7 +945,7 @@ describe('Incognito mode', () => {
     expect(memory.observeCalls.length).toBe(0);
   });
 
-  it('includes incognito note in context block', async () => {
+  it('includes the off-record note in context block', async () => {
     const { providers, runtime, conversations } = makeEnv();
     const incognitoConv = conversations.create({ title: 'Incognito', incognito: true });
 
@@ -935,7 +958,7 @@ describe('Incognito mode', () => {
     // toChatMessages converts context parts to plain text parts, so check the
     // raw stored user message instead of the provider's chat messages.
     const contextPart = handle.userMessage.parts.find((p) => p.type === 'context') as { type: 'context'; text: string } | undefined;
-    expect(contextPart?.text).toContain('Incognito');
+    expect(contextPart?.text).toContain('Off the record');
   });
 });
 
@@ -1177,100 +1200,57 @@ describe('ChatRequest shape', () => {
   });
 });
 
-describe('Auto-title', () => {
-  it('sends a title-generation request after the first turn', async () => {
-    const { providers, runtime, conv } = makeEnv({ agent: { autoTitle: true } });
-
+describe('Titles remain unused', () => {
+  it('never requests a title or changes the stored title after a turn', async () => {
+    const { providers, runtime, conversations, conv } = makeEnv();
     providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Hello!')));
-    // The title generation also calls chat; add a title response
-    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Test Chat')));
-
     const handle = await runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Hello' }] });
-    await collectEvents(handle.events);
     await handle.done;
-
-    // Allow async title generation to complete
-    await new Promise((r) => setTimeout(r, 100));
-
-    // A second chat request should have been made with metadata.purpose='title'
-    const titleReq = providers.fakeAdapter.requests.find((r) => r.metadata?.purpose === 'title');
-    expect(titleReq).toBeDefined();
-    expect(titleReq?.maxTokens).toBe(30);
-  });
-
-  it('updates conversation title after first turn', async () => {
-    const { providers, runtime, conversations, conv } = makeEnv({ agent: { autoTitle: true } });
-
-    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Hello!')));
-    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('My New Title')));
-
-    const handle = await runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Hello' }] });
-    await collectEvents(handle.events);
-    await handle.done;
-
-    await new Promise((r) => setTimeout(r, 100));
-
-    const updatedConv = conversations.get(conv.id)!;
-    expect(updatedConv.title).toBe('My New Title');
-  });
-
-  it('does not run auto-title after subsequent turns', async () => {
-    const { providers, runtime, conv } = makeEnv({ agent: { autoTitle: true } });
-
-    // First turn
-    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Hello!')));
-    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Title')));
-
-    const handle1 = await runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'First' }] });
-    await collectEvents(handle1.events);
-    await handle1.done;
-    await new Promise((r) => setTimeout(r, 100));
-
-    const reqCountAfterFirst = providers.fakeAdapter.requests.length;
-
-    // Second turn
-    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Turn 2')));
-    const handle2 = await runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Second' }] });
-    await collectEvents(handle2.events);
-    await handle2.done;
-    await new Promise((r) => setTimeout(r, 100));
-
-    // Only 1 new request for the second turn (no title req)
-    const newRequests = providers.fakeAdapter.requests.slice(reqCountAfterFirst);
-    const titleReq = newRequests.find((r) => r.metadata?.purpose === 'title');
-    expect(titleReq).toBeUndefined();
+    await new Promise((r) => setImmediate(r));
+    expect(providers.fakeAdapter.requests).toHaveLength(1);
+    expect(conversations.get(conv.id)!.title).toBe(conv.title);
   });
 });
 
 describe('Model resolution errors', () => {
-  it('throws config_error when no provider is configured', async () => {
-    const { conversations } = makeEnv();
-    // Create a registry that always throws
-    const brokenProviders: ProviderRegistry = {
-      get: () => undefined,
-      list: () => [],
-      resolve: () => { throw new NeoError('not_found', 'No provider found'); },
-      upsert: () => { throw new NeoError('not_found', 'No provider found'); },
-      remove: () => false,
-    };
+  it.each(['empty', 'disabled', 'no-model', 'stale-model'] as const)(
+    'fails before changing the transcript when the provider state is %s',
+    async (state) => {
+      const { runtime, conversations, providers, memory, conv, settings } = makeEnv();
+      const existing: Message = {
+        id: 'msg_existing', conversationId: conv.id, role: 'user',
+        parts: [{ type: 'text', text: 'Earlier message' }], createdAt: 1, status: 'complete',
+      };
+      conversations.appendMessage(existing);
+      const previousConversation = { ...conversations.get(conv.id)! };
+      const previousMessages = structuredClone(conversations.messages(conv.id));
+      const events: AgentEvent[] = [];
+      runtime.subscribe((event) => events.push(event));
+      const available = providers.list();
+      if (state === 'disabled') available[0]!.config.enabled = false;
+      if (state === 'no-model') available[0]!.config.defaultModel = '';
+      const list = vi.spyOn(providers, 'list').mockReturnValue(state === 'empty' || state === 'stale-model' ? [] : available);
+      if (state === 'stale-model') settings.update({ defaultModel: { provider: 'removed', model: 'removed-model' } });
 
-    const brokenRuntime = new AgentRuntime({
-      conversations,
-      settings: new FakeSettingsStore(),
-      providers: brokenProviders,
-      memory: new FakeMemoryService(),
-      tools: new FakeToolRegistry(),
-      logger: silentLogger,
-    });
+      await expect(runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Hi' }] }))
+        .rejects.toMatchObject({ code: 'no_provider', status: 400, message: expect.stringContaining('Connect an AI') });
+      expect(conversations.messages(conv.id)).toEqual(previousMessages);
+      expect(conversations.get(conv.id)).toEqual(previousConversation);
+      expect(runtime.activeTurns()).toEqual([]);
+      expect(memory.recallCalls).toEqual([]);
+      expect(events).toEqual([]);
 
-    const conv = conversations.create({ title: 'Test' });
-
-    // resolveDefaultModel() throws config_error when no provider is enabled,
-    // which propagates synchronously out of startTurn, so send() rejects.
-    await expect(
-      brokenRuntime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Hi' }] }),
-    ).rejects.toMatchObject({ code: 'config_error' });
-  });
+      // A rejected send leaves no reservation behind; connecting an AI permits the next turn.
+      list.mockRestore();
+      providers.fakeAdapter.config.enabled = true;
+      providers.fakeAdapter.config.defaultModel = 'fake-model';
+      settings.update({ defaultModel: null });
+      providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Connected')));
+      const handle = await runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Try again' }] });
+      await handle.done;
+      expect(conversations.messages(conv.id)[0]).toEqual(existing);
+    },
+  );
 });
 
 describe('handleUiAction', () => {

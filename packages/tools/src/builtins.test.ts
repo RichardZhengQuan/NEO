@@ -28,6 +28,7 @@ function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
     toolCallId: 'tc_1',
     conversationId: 'conv_42',
+    messageId: 'msg_42',
     signal: new AbortController().signal,
     now: () => NOW,
     timezone: TZ,
@@ -48,7 +49,7 @@ function node(id: string, label: string, extra: Partial<MemoryNode> = {}): Memor
 }
 
 /** A recording fake MemoryService (only the methods the tools use do anything). */
-function fakeMemory(opts: { pending?: boolean; recall?: boolean } = {}) {
+function fakeMemory(opts: { recall?: boolean } = {}) {
   const nodes = new Map<string, MemoryNode>();
   const calls: { method: string; args: unknown }[] = [];
   let n = 0;
@@ -58,7 +59,7 @@ function fakeMemory(opts: { pending?: boolean; recall?: boolean } = {}) {
     },
     async remember(input: RememberInput) {
       calls.push({ method: 'remember', args: input });
-      const m = node(`mem_${++n}`, input.label ?? input.content.slice(0, 40), { content: input.content, status: opts.pending ? 'pending' : 'active', sensitivity: input.sensitivity ?? 'normal' });
+      const m = node(`mem_${++n}`, input.label ?? input.content.slice(0, 40), { content: input.content, status: 'active', sensitivity: input.sensitivity ?? 'normal' });
       nodes.set(m.id, m);
       return m;
     },
@@ -80,19 +81,11 @@ function fakeMemory(opts: { pending?: boolean; recall?: boolean } = {}) {
       for (const id of ids) if (nodes.delete(id)) k++;
       return k;
     },
-    async approve(ids: string[]) {
-      calls.push({ method: 'approve', args: ids });
-      return ids.length;
-    },
-    async reject(ids: string[]) {
-      calls.push({ method: 'reject', args: ids });
-      return ids.length;
-    },
   };
   return { memory: memory as unknown as MemoryService, nodes, calls };
 }
 
-function setup(memoryOpts: { pending?: boolean; recall?: boolean } = {}, webSearch?: { provider: 'searxng'; baseUrl: string }) {
+function setup(memoryOpts: { recall?: boolean } = {}, webSearch?: { provider: 'searxng'; baseUrl: string }) {
   const db = openDatabase(':memory:');
   migrate(db, 'tools', toolsMigrations);
   const stores = createProductivityStores(db, { clock: () => NOW, defaultTimezone: TZ });
@@ -121,7 +114,7 @@ describe('catalogue', () => {
       create_task: ['write', 'auto'], list_tasks: ['read', 'auto'], update_task: ['write', 'auto'], delete_task: ['dangerous', 'confirm'],
       create_note: ['write', 'auto'], search_notes: ['read', 'auto'], get_note: ['read', 'auto'], update_note: ['write', 'auto'],
       replace_note: ['dangerous', 'confirm'], delete_note: ['dangerous', 'confirm'], remember: ['write', 'auto'], recall: ['read', 'auto'], forget: ['dangerous', 'confirm'],
-      approve_memory: ['write', 'auto'], reject_memory: ['write', 'auto'], web_fetch: ['external', 'auto'],
+      web_fetch: ['external', 'auto'],
       web_search: ['external', 'auto'], render_ui: ['read', 'auto'],
     };
     const tools = registry.list();
@@ -130,10 +123,9 @@ describe('catalogue', () => {
       expect([t.risk, t.defaultPermission], t.name).toEqual(expected[t.name]);
       expect(t.description.length, t.name).toBeGreaterThan(60);
       if (t.risk === 'dangerous') expect(typeof t.describeCall, t.name).toBe('function');
-      expect(Boolean(t.uiOnly), t.name).toBe(t.name === 'approve_memory' || t.name === 'reject_memory');
+      expect(Boolean(t.uiOnly), t.name).toBe(false);
       expect(Boolean(t.untrustedOutput), t.name).toBe(t.name === 'web_fetch' || t.name === 'web_search');
     }
-    expect(registry.specs().map((s) => s.name)).not.toContain('approve_memory');
   });
 
   it('web_search is only offered when a provider is configured', () => {
@@ -175,7 +167,7 @@ describe('reminder tools', () => {
     expect(res.ui![0]).toMatchObject({ type: 'reminder', reminderId: r.id, dueAt: Date.UTC(2026, 9, 11, 1), timezone: TZ, status: 'scheduled' });
     expect(res.summary).toMatch(/Call mom/);
     expect(res.summary).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
-    expect(t.stores.reminders.get(String(r.id))?.conversationId).toBe('conv_42');
+    expect(t.stores.reminders.get(String(r.id))?.messageId).toBe('msg_42');
   });
 
   it('create_reminder refuses times in the past and unparseable times', async () => {
@@ -364,13 +356,13 @@ describe('memory tools', () => {
     expect(forgotten.sensitive === true).toBe(allowSensitive);
   });
 
-  it('remember: tool source with conversation id, memory card with pending status', async () => {
-    const t = setup({ pending: true });
+  it('remember: tool source with conversation id, memory card with active status', async () => {
+    const t = setup();
     const res = await t.run('remember', { content: 'The user is allergic to peanuts', label: 'Peanut allergy', kind: 'fact', importance: 0.9 });
     expect(t.mem.calls[0]).toMatchObject({ method: 'remember', args: { source: { by: 'tool', conversationId: 'conv_42' }, label: 'Peanut allergy' } });
     expectValidUi(res);
-    expect(res.ui![0]).toMatchObject({ type: 'memory', nodes: [{ label: 'Peanut allergy', status: 'pending' }] });
-    expect(res.output).toMatchObject({ status: 'pending' });
+    expect(res.ui![0]).toMatchObject({ type: 'memory', nodes: [{ label: 'Peanut allergy', status: 'active' }] });
+    expect(res.output).toMatchObject({ status: 'active' });
   });
 
   it('remember: long content still gives a valid card', async () => {
@@ -418,12 +410,7 @@ describe('memory tools', () => {
     expect((await t.run('forget', { ids: [id] }, { origin: 'ui' })).output).toMatchObject({ forgotten: ['Tea'] });
   });
 
-  it('approve/reject are UI-only', async () => {
-    const t = setup();
-    expect((await t.run('approve_memory', { ids: ['mem_1'] })).isError).toBe(true);
-    expect((await t.run('approve_memory', { ids: ['mem_1'] }, { origin: 'ui' })).isError).toBeFalsy();
-    expect((await t.run('reject_memory', { ids: ['mem_1'] }, { origin: 'ui' })).isError).toBeFalsy();
-  });
+
 });
 
 describe('render_ui', () => {
@@ -455,4 +442,55 @@ describe('render_ui', () => {
     expect(bad.isError).toBe(true);
     expect(errorOf(bad)).toMatch(/series/);
   });
+});
+
+
+it('off-record tool recall never reinforces or writes associations', async () => {
+  const t = setup();
+  const result = await t.run('recall', { query: 'gardening' }, { offRecord: true });
+  expect(result.isError).not.toBe(true);
+  expect(t.mem.calls).toContainEqual({ method: 'recall', args: expect.objectContaining({ text: 'gardening', reinforce: false }) });
+});
+
+it('recall keeps reinforcement disabled if private mode starts while memory is reading', async () => {
+  const t = setup();
+  let privateMode = false;
+  const context = ctx();
+  Object.defineProperty(context, 'offRecord', { get: () => privateMode });
+  const recall = t.mem.memory.recall.bind(t.mem.memory);
+  t.mem.memory.recall = async query => {
+    expect(query.reinforce).toBeUndefined();
+    privateMode = true;
+    expect(query.reinforce).toBe(false);
+    return recall(query);
+  };
+  await t.registry.get('recall')!.execute({ query: 'gardening' }, context);
+  expect(t.mem.calls).toContainEqual({ method: 'recall', args: expect.objectContaining({ reinforce: false }) });
+});
+
+it.each([
+  ['remember', { content: 'A private fact' }],
+  ['forget', { query: 'gardening' }],
+])('off-record %s refuses memory writes before accessing memory', async (name, input) => {
+  const t = setup();
+  const result = await t.run(name as string, input, { offRecord: true });
+  expect(result.isError).toBe(true);
+  expect(result.output).toMatchObject({ code: 'forbidden' });
+  expect(t.mem.calls).toEqual([]);
+});
+
+it.each([false, true])('forget rechecks privacy after an awaited %s lookup', async byId => {
+  const t = setup();
+  await t.run('remember', { content: 'A lasting gardening preference', label: 'Gardening' });
+  const id = [...t.mem.nodes.keys()][0]!;
+  let privateMode = false;
+  const context = ctx();
+  Object.defineProperty(context, 'offRecord', { get: () => privateMode });
+  const get = t.mem.memory.get.bind(t.mem.memory);
+  const find = t.mem.memory.findForForget.bind(t.mem.memory);
+  t.mem.memory.get = async value => { privateMode = true; return get(value); };
+  t.mem.memory.findForForget = async (query, limit) => { privateMode = true; return find(query, limit); };
+  await expect(t.registry.get('forget')!.execute(byId ? { ids: [id] } : { query: 'gardening' }, context)).rejects.toMatchObject({ code: 'forbidden' });
+  expect(t.mem.calls.some(call => call.method === 'forget')).toBe(false);
+  expect(t.mem.nodes.has(id)).toBe(true);
 });

@@ -213,6 +213,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   capabilities(model: string): ModelCapabilities {
     const current = isCurrentClaudeModel(model);
     return {
+      text: true,
       tools: true,
       vision: true,
       reasoning: current,
@@ -465,13 +466,15 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const models: ModelInfo[] = [];
       for await (const m of sdk.models.list({ limit: 100 }, { signal })) {
+        if (!m || typeof m.id !== 'string' || !m.id) continue;
+        if (redact(m.id, [apiKey]) !== m.id) throw new NeoError('provider_error', 'Anthropic returned invalid model data.');
         if (m.lifecycle === 'retired') continue;
         const fallback = this.capabilities(m.id);
         const caps = m.capabilities;
         models.push({
           id: m.id,
           provider: this.id,
-          label: m.display_name || m.id,
+          label: redact(typeof m.display_name === 'string' && m.display_name ? m.display_name : m.id, [apiKey]),
           capabilities: {
             ...fallback,
             vision: caps ? caps.image_input.supported : fallback.vision,
@@ -483,6 +486,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       }
       return models;
     } catch (err) {
+      if (err instanceof SyntaxError || err instanceof TypeError) throw new NeoError('provider_error', 'Anthropic returned invalid model data.');
       throw this.mapError(err, signal, apiKey);
     }
   }

@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NeoClient } from '@neo/client';
 import type { Reminder, ServerEvent } from '@neo/protocol';
-import { DEFAULT_SETTINGS } from '@neo/protocol';
+import { DEFAULT_SETTINGS, type ProviderView } from '@neo/protocol';
 import { buildMessages, createTranslator } from '@neo/ui';
 import { appDictionaries } from '../i18n.js';
 import { EventSequencer, handleServerEvent, runReminderAction, type EventContext } from './events.js';
-import { useConversations } from './conversations.js';
+import { emptyEntry, useTimeline } from './timeline.js';
 import { useData } from './data.js';
 import { useToasts } from './notifications.js';
 import { useSession } from './session.js';
@@ -22,7 +22,7 @@ const reminder: Reminder = {
   status: 'fired',
   firedCount: 1,
   lastFiredAt: 1000,
-  conversationId: null,
+  messageId: null,
   createdAt: 0,
   updatedAt: 0,
 };
@@ -33,7 +33,6 @@ function fakeClient() {
       snooze: vi.fn(async (id: string) => ({ ...reminder, id, status: 'scheduled' as const, dueAt: 9999 })),
       complete: vi.fn(async (id: string) => ({ ...reminder, id, status: 'completed' as const })),
     },
-    memory: { stats: vi.fn(async () => ({ pending: 3 })) },
   };
 }
 
@@ -44,7 +43,7 @@ function context(over: Partial<EventContext> = {}) {
     t,
     locale: 'en',
     assistantName: () => 'NEO',
-    activeConversationId: () => null,
+    timelineActive: () => false,
     openLink: vi.fn(),
     syncReminders: vi.fn(),
     debounce: (_key, fn) => fn(),
@@ -55,8 +54,8 @@ function context(over: Partial<EventContext> = {}) {
 }
 
 beforeEach(() => {
-  useConversations.setState({ conversations: {}, entries: {}, listLoaded: false, archivedLoaded: false });
-  useData.setState({ reminders: {}, tasks: {}, notes: {}, memoryVersion: 0, pendingMemories: 0, notifications: [], unreadNotifications: 0 });
+  useTimeline.setState(emptyEntry(), true);
+  useData.setState({ reminders: {}, tasks: {}, notes: {}, memoryVersion: 0, notifications: [], unreadNotifications: 0 });
   useToasts.setState({ toasts: [] });
   useSession.setState({ settings: null });
 });
@@ -81,20 +80,20 @@ describe('EventSequencer', () => {
 });
 
 describe('handleServerEvent', () => {
-  it('routes agent events to the conversation cache', () => {
+  it('routes agent events to the single timeline', () => {
     const { ctx } = context();
     handleServerEvent(
       {
         type: 'turn.started',
-        conversationId: 'conv_1',
+        episodeId: 'conv_1', conversationId: 'conv_1',
         turnId: 'turn_1',
-        userMessage: { id: 'msg_u', conversationId: 'conv_1', role: 'user', parts: [{ type: 'text', text: 'hi' }], createdAt: 1, status: 'complete' },
+        userMessage: { id: 'msg_u', episodeId: 'conv_1', conversationId: 'conv_1', role: 'user', parts: [{ type: 'text', text: 'hi' }], createdAt: 1, status: 'complete' },
         assistantMessageId: 'msg_a',
-        model: { provider: 'demo', model: 'neo-demo' },
+        model: { provider: 'test', model: 'neo-test' },
       },
       ctx,
     );
-    expect(useConversations.getState().entries.conv_1!.turn?.turnId).toBe('turn_1');
+    expect(useTimeline.getState().turn?.turnId).toBe('turn_1');
   });
 
   it('reminder.fired stores the reminder, re-plans local notifications and shows an actionable toast', async () => {
@@ -140,35 +139,26 @@ describe('handleServerEvent', () => {
     expect(useData.getState().notes.note_1).toBeUndefined();
   });
 
-  it('tool.confirmation for another conversation shows a review toast; resolution removes it', () => {
-    const { ctx } = context({ activeConversationId: () => 'conv_other' });
-    const confirmation = { id: 'cnf_1', conversationId: 'conv_1', turnId: 't', messageId: 'm', toolCallId: 'tc_1', name: 'forget', title: 'Forget', input: {}, description: 'Forget 2 memories', risk: 'dangerous' as const, requestedAt: 0, expiresAt: 1 };
-    handleServerEvent({ type: 'tool.confirmation', conversationId: 'conv_1', turnId: 't', confirmation }, ctx);
-    expect(useConversations.getState().entries.conv_1!.confirmations).toHaveLength(1);
+  it('tool.confirmation away from the timeline shows a review toast; resolution removes it', () => {
+    const { ctx } = context({ timelineActive: () => false });
+    const confirmation = { id: 'cnf_1', episodeId: 'conv_1', conversationId: 'conv_1', turnId: 't', messageId: 'm', toolCallId: 'tc_1', name: 'forget', title: 'Forget', input: {}, description: 'Forget 2 memories', risk: 'dangerous' as const, requestedAt: 0, expiresAt: 1 };
+    handleServerEvent({ type: 'tool.confirmation', episodeId: 'conv_1', conversationId: 'conv_1', turnId: 't', confirmation }, ctx);
+    expect(useTimeline.getState().confirmations).toHaveLength(1);
     const toast = useToasts.getState().toasts[0]!;
     expect(toast.body).toBe('Forget 2 memories');
     expect(toast.key).toBe('confirm:cnf_1');
     void toast.actions![0]!.onClick();
-    expect(ctx.openLink).toHaveBeenCalledWith('neo://chat/conv_1');
-    handleServerEvent({ type: 'tool.confirmation_resolved', conversationId: 'conv_1', turnId: 't', toolCallId: 'tc_1', approved: true, reason: 'user' }, ctx);
+    expect(ctx.openLink).toHaveBeenCalledWith('neo://timeline?messageId=m');
+    handleServerEvent({ type: 'tool.confirmation_resolved', episodeId: 'conv_1', conversationId: 'conv_1', turnId: 't', toolCallId: 'tc_1', approved: true, reason: 'user' }, ctx);
     expect(useToasts.getState().toasts).toHaveLength(0);
-    expect(useConversations.getState().entries.conv_1!.confirmations).toHaveLength(0);
+    expect(useTimeline.getState().confirmations).toHaveLength(0);
   });
 
-  it('no toast for a confirmation in the conversation on screen', () => {
-    const { ctx } = context({ activeConversationId: () => 'conv_1' });
-    const confirmation = { id: 'cnf_2', conversationId: 'conv_1', turnId: 't', messageId: 'm', toolCallId: 'tc_1', name: 'forget', title: 'Forget', input: {}, description: 'x', risk: 'dangerous' as const, requestedAt: 0, expiresAt: 1 };
-    handleServerEvent({ type: 'tool.confirmation', conversationId: 'conv_1', turnId: 't', confirmation }, ctx);
+  it('no toast for a confirmation while the timeline is on screen', () => {
+    const { ctx } = context({ timelineActive: () => true });
+    const confirmation = { id: 'cnf_2', episodeId: 'conv_1', conversationId: 'conv_1', turnId: 't', messageId: 'm', toolCallId: 'tc_1', name: 'forget', title: 'Forget', input: {}, description: 'x', risk: 'dangerous' as const, requestedAt: 0, expiresAt: 1 };
+    handleServerEvent({ type: 'tool.confirmation', episodeId: 'conv_1', conversationId: 'conv_1', turnId: 't', confirmation }, ctx);
     expect(useToasts.getState().toasts).toHaveLength(0);
-  });
-
-  it('memory.written with pending items refreshes the badge and offers a review', async () => {
-    const { ctx, client } = context();
-    handleServerEvent({ type: 'memory.written', conversationId: 'conv_1', turnId: 't', created: [], updated: [], pending: [{ id: 'mem_1', kind: 'fact', label: 'Vegetarian', status: 'pending' }] }, ctx);
-    await vi.waitFor(() => expect(useData.getState().pendingMemories).toBe(3));
-    expect(client.memory.stats).toHaveBeenCalled();
-    expect(useToasts.getState().toasts[0]!.title).toBe('NEO wants to remember 1 thing');
-    expect(useConversations.getState().entries.conv_1!.notices.t).toBeTruthy();
   });
 
   it('memory.changed bumps the memory version', () => {
@@ -190,11 +180,33 @@ describe('handleServerEvent', () => {
     expect(useSession.getState().settings?.theme).toBe('dark');
   });
 
-  it('conversation.deleted removes the conversation', () => {
+  it('replaces a reauthorized connection and clears its stale model cache', () => {
     const { ctx } = context();
-    useConversations.setState({ conversations: { conv_9: { id: 'conv_9' } as never } });
-    handleServerEvent({ type: 'conversation.deleted', conversationId: 'conv_9' }, ctx);
-    expect(useConversations.getState().conversations.conv_9).toBeUndefined();
+    const provider: ProviderView = { id: 'chatgpt', kind: 'chatgpt', label: 'ChatGPT', enabled: true, hasApiKey: false, isLocal: false };
+    useSession.setState({ providers: { items: [{ ...provider, needsReauthorization: true }], defaultModel: null }, models: { chatgpt: [] } });
+    handleServerEvent({ type: 'provider.connected', provider }, ctx);
+    expect(useSession.getState().providers?.items).toEqual([provider]);
+    expect(useSession.getState().models.chatgpt).toBeUndefined();
+  });
+
+  it.each(['subscription_sharing_invalid_user', 'invalid_grant'])('refreshes account state after %s and ignores a stale session response', async (reason) => {
+    let resolve!: (value: { items: ProviderView[]; defaultModel: null }) => void;
+    const list = vi.fn().mockReturnValue(new Promise((done) => { resolve = done; }));
+    const { ctx } = context({ client: { providers: { list } } as unknown as NeoClient });
+    useSession.setState({ providers: { items: [], defaultModel: null }, sessionEpoch: 1 });
+    handleServerEvent({ type: 'turn.failed', episodeId: 'conv_1', conversationId: 'conv_1', turnId: 't', error: { code: 'provider_auth', message: 'Disconnected; sign in again.', details: { reason } } }, ctx);
+    expect(list).toHaveBeenCalledOnce();
+    useSession.setState({ sessionEpoch: 2 });
+    resolve({ items: [{ id: 'chatgpt', kind: 'chatgpt', enabled: true, hasApiKey: false, isLocal: false, needsReauthorization: true }], defaultModel: null });
+    await Promise.resolve();
+    expect(useSession.getState().providers?.items).toEqual([]);
+  });
+
+  it('episode deletion removes its metadata', () => {
+    const { ctx } = context();
+    useTimeline.setState({ episodes: { conv_9: { episodeId: 'conv_9', startedAt: 1, offRecord: false } } });
+    handleServerEvent({ type: 'conversation.deleted', episodeId: 'conv_9', conversationId: 'conv_9' }, ctx);
+    expect(useTimeline.getState().episodes.conv_9).toBeUndefined();
   });
 });
 

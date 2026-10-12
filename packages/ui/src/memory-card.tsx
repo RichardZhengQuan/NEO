@@ -1,6 +1,6 @@
 /**
  * MemoryNodeCard — one memory: kind, status, label, content, retention, and
- * the controls the user has over it (approve/reject, pin, edit, open, forget,
+ * the controls the user has over it (pin, edit, open, forget,
  * restore).
  */
 import type { ReactElement } from 'react';
@@ -14,8 +14,6 @@ export interface MemoryNodeCardProps {
   node: MemoryNode;
   /** Current retention R ∈ [0, 1]; shows the strength meter. */
   retention?: number;
-  onApprove?: () => void;
-  onReject?: () => void;
   /** Asks for confirmation first. */
   onForget?: () => void;
   onTogglePin?: () => void;
@@ -31,8 +29,6 @@ export interface MemoryNodeCardProps {
 export function MemoryNodeCard({
   node,
   retention,
-  onApprove,
-  onReject,
   onForget,
   onTogglePin,
   onEdit,
@@ -44,7 +40,6 @@ export function MemoryNodeCard({
   const t = useT();
   const confirm = useConfirm();
   const status = node.status;
-  const isPending = status === 'pending';
   const pct = retention === undefined ? null : Math.round(Math.max(0, Math.min(1, retention)) * 100);
 
   return (
@@ -98,24 +93,14 @@ export function MemoryNodeCard({
         </div>
       )}
 
-      {((isPending && (onApprove || onReject)) || (!isPending && onForget) || (status === 'archived' && onRestore)) && (
+      {(onForget || (status === 'archived' && onRestore)) && (
         <div className="neo-mem-card__actions">
-          {isPending && onApprove && (
-            <Button size="sm" variant="primary" icon="check" onClick={onApprove}>
-              {t('memory.remember')}
-            </Button>
-          )}
-          {isPending && onReject && (
-            <Button size="sm" variant="ghost" onClick={onReject}>
-              {t('memory.dont_remember')}
-            </Button>
-          )}
           {status === 'archived' && onRestore && (
             <Button size="sm" variant="secondary" icon="archive-restore" onClick={onRestore}>
               {t('memory.restore')}
             </Button>
           )}
-          {!isPending && onForget && (
+          {onForget && (
             <Button
               size="sm"
               variant="ghost"

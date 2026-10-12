@@ -1,11 +1,11 @@
 /**
- * One agent turn (docs/ARCHITECTURE.md "A chat turn", docs/IMPLEMENTATION_PLAN.md WP-core).
+ * One agent turn (docs/ARCHITECTURE.md "A timeline turn").
  *
  * startTurn() — called by AgentRuntime.send() with the conversation already
  * reserved and the model resolved:
- *   1. freeze the system prompt and toolset on the conversation's first turn
- *      (an incognito conversation's toolset leaves out the memory tools);
- *   2. recall memories (unless incognito / recall off; failures are ignored);
+ *   1. freeze the system prompt and toolset on the episode's first turn
+ *      (off-record episodes leave out memory writes);
+ *   2. recall memories (unless recall is off; failures are ignored);
  *   3. persist the user message [context part, ...parts] and an empty streaming
  *      assistant message, emit turn.started (+ memory.recalled);
  *   4. run the step loop in the background and return the TurnHandle.
@@ -15,7 +15,7 @@
  * reasoning, text, tool calls, ui blocks and tool results. Then it finalizes the
  * message (complete | error | cancelled), releases the conversation, emits the
  * terminal events, resolves `done`, and — for completed turns only — starts the
- * async post-turn work (memory write-back, auto-title).
+ * async memory write-back.
  *
  * Invariants:
  * - Append-only transcript: the system prompt and tool specs are identical for
@@ -41,6 +41,7 @@ import {
   toolSpec,
   validateUIBlocks,
   extractInlineUI,
+  episodeOf,
   wrapUntrusted,
   type AgentEvent,
   type ChatRequest,
@@ -58,6 +59,7 @@ import {
   type ModelRef,
   type NeoSettings,
   type ProviderAdapter,
+  type ProviderRegistry,
   type ReasoningPart,
   type RecalledMemory,
   type SettingsStore,
@@ -80,17 +82,17 @@ import type { ConfirmationManager, ConfirmationOutcome } from './confirmations.j
 import { EventQueue } from './event-queue.js';
 import { trimHistory } from './history.js';
 import { buildContextBlock, buildSystemPrompt } from './prompt.js';
-import { generateTitle, isUnnamedTitle } from './title.js';
 
 /** Streaming text is persisted at most this often; structural parts and step ends are persisted immediately. */
 const PERSIST_INTERVAL_MS = 250;
 /** How much of the previous assistant reply is passed to recall as context (semantic nudge only), for continuity. */
 const RECALL_PREVIOUS_REPLY_CHARS = 300;
 /**
- * The model's memory tools. An incognito conversation neither reads nor writes memory, so its
- * frozen toolset never includes them (the model can't remember, recall or forget from it).
+ * Off-record episodes can recall existing memories but cannot write or forget them.
  */
-const MEMORY_TOOLS: ReadonlySet<string> = new Set(['remember', 'recall', 'forget']);
+const MEMORY_WRITE_TOOLS: ReadonlySet<string> = new Set(['remember', 'forget']);
+
+type EventInput<T = AgentEvent> = T extends AgentEvent ? Omit<T, 'episodeId'> : never;
 
 const MSG = {
   unknown: (name: string) => `Unknown tool "${name}".`,
@@ -109,6 +111,7 @@ const MSG = {
 export interface TurnServices {
   conversations: ConversationStore;
   settings: SettingsStore;
+  providers: ProviderRegistry;
   memory: MemoryService;
   tools: ToolRegistry;
   confirmations: ConfirmationManager;
@@ -124,6 +127,7 @@ export interface TurnRecord {
   conversationId: string;
   startedAt: number;
   controller: AbortController;
+  enterOffRecord?(episode: Conversation): void;
 }
 
 export interface TurnPlan {
@@ -134,6 +138,12 @@ export interface TurnPlan {
   adapter: ProviderAdapter;
   model: string;
   settings: NeoSettings;
+  /** Preflight context is rendered once and used both for budget checks and persistence. */
+  context?: ContentPart;
+  recalled?: RecalledMemory[];
+  recentContext?: ContentPart;
+  /** Timeline episodes retain their whole prefix; legacy internal sends may trim. */
+  timeline?: boolean;
   /** Frees the conversation for the next send(). Called exactly once, before the terminal event. */
   release(): void;
 }
@@ -146,32 +156,34 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
   const history = conversations.messages(conversationId);
 
   // 1. Freeze the system prompt and toolset on the first turn (append-only transcript).
-  //    Incognito conversations never get the memory tools.
+  //    Off-record episodes omit memory writes while allowing recall.
   let systemPrompt = conv.systemPrompt;
   let toolset = conv.toolset;
   if (systemPrompt === null || toolset === null) {
-    const specs = caps.tools ? tools.specs().filter((s) => !(conv.incognito && MEMORY_TOOLS.has(s.name))) : [];
-    systemPrompt ??= buildSystemPrompt({ persona: settings.persona, tools: specs, nativeTools: caps.tools });
+    const specs = caps.tools ? tools.specs().filter((s) => !((conv.offRecord ?? conv.incognito) && MEMORY_WRITE_TOOLS.has(s.name))) : [];
+    systemPrompt ??= buildSystemPrompt({ tools: specs, nativeTools: caps.tools });
     toolset ??= specs.map((s) => s.name);
     conversations.update(conversationId, { systemPrompt, toolset });
   }
 
   // 2. Recall.
   const allowSensitive = adapter.isLocal || settings.memory.sendSensitiveToCloud;
-  const recalled = await recallMemories(services, conv, settings, plan.parts, history, allowSensitive);
+  const prepared = plan.context && plan.recalled
+    ? { context: plan.context, recalled: plan.recalled }
+    : await prepareTurnContext(services, conv, settings, plan.parts, history, allowSensitive);
+  const { context, recalled } = prepared;
 
   // 3. Persist the user message (with its context part) and the streaming assistant message.
   const now = clock();
   const lastCreatedAt = history.reduce((max, m) => Math.max(max, m.createdAt), Number.NEGATIVE_INFINITY);
   const createdAt = Math.max(now, lastCreatedAt + 1); // keeps the transcript ordered even if the clock steps back
   const modelRef: ModelRef = { provider: adapter.id, model };
-  const contextText = buildContextBlock({ now, timezone: settings.timezone, locale: settings.locale, memories: recalled, incognito: conv.incognito });
-  const sensitiveContext = recalled.some(({ node }) => node.sensitivity === 'sensitive');
   const userMessage = conversations.appendMessage({
     id: newId('msg', now),
     conversationId,
+    episodeId: conversationId,
     role: 'user',
-    parts: [{ type: 'context', text: contextText, ...(sensitiveContext ? { sensitive: true } : {}) }, ...plan.parts],
+    parts: [context, ...(plan.recentContext ? [plan.recentContext] : []), ...plan.parts],
     createdAt,
     turnId,
     status: 'complete',
@@ -179,6 +191,7 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
   const assistantMessage: Message = {
     id: newId('msg', now),
     conversationId,
+    episodeId: conversationId,
     role: 'assistant',
     parts: [],
     createdAt: createdAt + 1,
@@ -205,12 +218,10 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
     allowSensitive,
     userMessage,
     assistantMessage,
-    // Titles are generated once, after the first completed turn of a conversation the user has not named.
-    titleEligible:
-      settings.agent.autoTitle && isUnnamedTitle(conv.title) && !history.some((m) => m.role === 'assistant' && m.status === 'complete'),
     logger: logger.child({ conversationId, turnId }),
   });
 
+  record.enterOffRecord = (episode) => runner.enterOffRecord(episode);
   runner.emit({ type: 'turn.started', conversationId, turnId, userMessage, assistantMessageId: assistantMessage.id, model: modelRef });
   if (recalled.length) {
     runner.emit({
@@ -225,10 +236,32 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
   return {
     turnId,
     conversationId,
+    episodeId: conversationId,
     userMessage,
     assistantMessageId: assistantMessage.id,
     events: runner.queue,
     done: runner.done,
+  };
+}
+
+export async function prepareTurnContext(
+  services: TurnServices,
+  conversation: Conversation,
+  settings: NeoSettings,
+  parts: readonly ContentPart[],
+  history: readonly Message[],
+  allowSensitive: boolean,
+  reinforce?: boolean,
+): Promise<{ context: ContentPart; recalled: RecalledMemory[] }> {
+  const recalled = await recallMemories(services, conversation, settings, parts, history, allowSensitive, reinforce);
+  const sensitive = recalled.some(({ node }) => node.sensitivity === 'sensitive');
+  return {
+    recalled,
+    context: {
+      type: 'context',
+      text: buildContextBlock({ now: services.clock(), timezone: settings.timezone, locale: settings.locale, memories: recalled, offRecord: conversation.offRecord ?? conversation.incognito }),
+      ...(sensitive ? { sensitive: true } : {}),
+    },
   };
 }
 
@@ -251,14 +284,14 @@ async function recallMemories(
   parts: readonly ContentPart[],
   history: readonly Message[],
   allowSensitive: boolean,
+  reinforce?: boolean,
 ): Promise<RecalledMemory[]> {
   const policy = settings.memory;
-  if (conv.incognito || !policy.recall) return [];
+  if (!policy.recall) return [];
   // What the user said drives recall. The tail of the previous reply is only context: it nudges
   // the semantic query ("what else?" stays on topic) but never seeds keyword or entity matches,
   // so NEO's own wording can't pull memories in.
   const text = inputText(parts).trim();
-  if (!text) return [];
   const previousMessage = [...history].reverse().find((m) => m.role === 'assistant');
   const previousReply = previousMessage && !(containsSensitive(previousMessage) && !allowSensitive) ? textOf(previousMessage.parts).trim() : '';
   const context = previousReply.slice(-RECALL_PREVIOUS_REPLY_CHARS).trim();
@@ -270,6 +303,7 @@ async function recallMemories(
       limit: policy.recallLimit,
       tokenBudget: policy.recallTokenBudget,
       allowSensitive,
+      ...((conv.offRecord ?? conv.incognito) || reinforce === false ? { reinforce: false } : {}),
       now: services.clock(),
     });
     return result.items;
@@ -289,7 +323,6 @@ interface RunnerInit {
   allowSensitive: boolean;
   userMessage: Message;
   assistantMessage: Message;
-  titleEligible: boolean;
   logger: Logger;
 }
 
@@ -302,12 +335,15 @@ class TurnRunner {
   private readonly init: RunnerInit;
   private readonly logger: Logger;
   private readonly signal: AbortSignal;
-  private readonly conversationId: string;
+  private conversationId: string;
   private readonly turnId: string;
-  private readonly messageId: string;
+  private messageId: string;
   private readonly toolset: ReadonlySet<string>;
   /** Specs of the frozen toolset, computed once so every request carries identical bytes. */
   private readonly toolSpecs: ToolSpec[];
+  private previousHistory: Message[] = [];
+  private privateTurn = false;
+  private readonly memoryExecutions = new Set<AbortController>();
 
   /** The assistant message's parts. Part objects are replaced, never mutated. */
   private parts: ContentPart[] = [];
@@ -330,6 +366,7 @@ class TurnRunner {
     this.conversationId = init.plan.record.conversationId;
     this.turnId = init.plan.record.turnId;
     this.messageId = init.assistantMessage.id;
+    this.privateTurn = (init.plan.conversation.offRecord ?? init.plan.conversation.incognito) || services.conversations.offRecordState().active;
     this.toolset = new Set(init.toolset);
     this.toolSpecs = init.caps.tools ? this.buildToolSpecs() : [];
     this.lastPersistAt = services.clock();
@@ -338,7 +375,41 @@ class TurnRunner {
     });
   }
 
-  emit(event: AgentEvent): void {
+  enterOffRecord(episode: Conversation): void {
+    if (this.conversationId === episode.id || this.init.plan.conversation.ephemeral) return;
+    this.privateTurn = true;
+    for (const controller of this.memoryExecutions) controller.abort();
+    const store = this.services.conversations;
+    this.previousHistory = store.messages(this.conversationId).filter((message) => message.id !== this.messageId);
+    const answered = new Set(this.parts.flatMap((part) => part.type === 'tool_result' ? [part.toolCallId] : []));
+    const zh = this.init.plan.settings.locale.startsWith('zh');
+    const closedCalls = this.parts.flatMap((part): ContentPart[] => {
+      if (part.type !== 'tool_call' || answered.has(part.id)) return [];
+      return [{
+        type: 'tool_result', toolCallId: part.id, name: part.name,
+        output: { error: zh ? '此操作已转入不留记录模式继续。' : 'This action continued off the record.' },
+        isError: true, summary: zh ? '转入不留记录模式' : 'Continued off record',
+      }];
+    });
+    const publicParts: ContentPart[] = [...this.parts, ...closedCalls];
+    const previous = store.updateMessage(this.messageId, { parts: publicParts, status: 'complete', usage: this.usage });
+    this.emit({ type: 'message.completed', conversationId: this.conversationId, turnId: this.turnId, message: previous });
+    const now = this.services.clock();
+    const continuation = store.appendMessage({ ...this.snapshot('streaming', null), id: newId('msg', now), conversationId: episode.id, episodeId: episode.id, createdAt: now });
+    this.messageId = continuation.id;
+    this.conversationId = episode.id;
+    this.init.plan.record.conversationId = episode.id;
+    this.init.plan.conversation = episode;
+    this.init.assistantMessage = continuation;
+    this.emit({ type: 'message.completed', conversationId: this.conversationId, turnId: this.turnId, message: continuation });
+  }
+
+  private offRecord(): boolean {
+    return this.privateTurn ||= this.services.conversations.offRecordState().active;
+  }
+
+  emit(input: EventInput): void {
+    const event = { ...input, episodeId: this.conversationId } as AgentEvent;
     this.queue.push(event);
     this.services.broadcast(event);
   }
@@ -414,7 +485,7 @@ class TurnRunner {
   private buildRequest(finalStep: boolean): ChatRequest {
     const { plan, caps, systemPrompt } = this.init;
     const agent = plan.settings.agent;
-    const stored = this.services.conversations.messages(this.conversationId);
+    const stored = [...this.previousHistory, ...this.services.conversations.messages(this.conversationId)];
     const current: Message = {
       ...this.init.assistantMessage,
       parts: [...this.parts],
@@ -424,7 +495,7 @@ class TurnRunner {
       ? stored.map((m) => (m.id === this.messageId ? current : m))
       : [...stored, current];
     const omitSensitiveContext = !plan.adapter.isLocal && !this.services.settings.get().memory.sendSensitiveToCloud;
-    const trimmed = trimHistory(history, agent.contextTokenBudget);
+    const trimmed = plan.timeline ? history : trimHistory(history, agent.contextTokenBudget);
     // What this model reads shapes its answer: if it was shown anything sensitive, the answer is sensitive too.
     if (!omitSensitiveContext && trimmed.some(containsSensitive)) this.sawSensitive = true;
     const messages = toChatMessages(trimmed, { dropReasoning: !caps.reasoning, omitSensitiveContext });
@@ -438,8 +509,9 @@ class TurnRunner {
       signal: this.signal,
     };
     // Tools stay declared on the final step (the transcript references them); only the choice changes.
-    if (this.toolSpecs.length) {
-      request.tools = this.toolSpecs;
+    const toolSpecs = this.offRecord() ? this.toolSpecs.filter((spec) => !MEMORY_WRITE_TOOLS.has(spec.name)) : this.toolSpecs;
+    if (toolSpecs.length) {
+      request.tools = toolSpecs;
       request.toolChoice = finalStep ? 'none' : 'auto';
     }
     if (agent.temperature !== null) request.temperature = agent.temperature;
@@ -564,6 +636,7 @@ class TurnRunner {
     const def = tools.get(call.name);
     if (finalStep) return this.refuse(call, MSG.finalStep, 'Not run');
     if (!def) return this.refuse(call, MSG.unknown(call.name), 'Unknown tool');
+    if (this.offRecord() && MEMORY_WRITE_TOOLS.has(call.name)) return this.refuse(call, 'Memory writes are unavailable off the record.', 'Not available');
     if (!this.toolset.has(call.name) || def.uiOnly || !this.init.caps.tools) return this.refuse(call, MSG.unavailable(call.name), 'Not available');
 
     const permission = tools.permissionFor(call.name);
@@ -579,15 +652,18 @@ class TurnRunner {
       // Approval cannot revive a tool revoked while its confirmation was pending;
       // in particular, an "always" answer must never overwrite a new denial.
       if (tools.permissionFor(call.name) === 'deny') return this.refuse(call, MSG.declined, 'Declined');
+      if (this.offRecord() && MEMORY_WRITE_TOOLS.has(call.name)) return this.refuse(call, 'Memory writes are unavailable off the record.', 'Not available');
       if (outcome.always) this.allowAlways(call.name);
       if (this.signal.aborted) return;
     }
 
     if (tools.permissionFor(call.name) === 'deny') return this.refuse(call, MSG.declined, 'Declined');
+    if (this.offRecord() && MEMORY_WRITE_TOOLS.has(call.name)) return this.refuse(call, 'Memory writes are unavailable off the record.', 'Not available');
 
     // Registries may validate asynchronously before calling the implementation.
     // Keep revocation observable by that registry's post-validation signal check.
     const executionController = new AbortController();
+    if (MEMORY_WRITE_TOOLS.has(call.name)) this.memoryExecutions.add(executionController);
     const executionSignal = AbortSignal.any([this.signal, executionController.signal]);
     const revokeIfDenied = (settings: NeoSettings): void => {
       if (settings.tools.permissions[call.name] === 'deny' || tools.permissionFor(call.name) === 'deny') executionController.abort();
@@ -622,6 +698,7 @@ class TurnRunner {
       if (executionController.signal.aborted) return this.refuse(call, MSG.declined, 'Declined');
       result = { isError: true, output: { error: NeoError.from(err, 'tool_error').message } };
     } finally {
+      this.memoryExecutions.delete(executionController);
       unsubscribe();
     }
     if (this.signal.aborted) return;
@@ -631,15 +708,17 @@ class TurnRunner {
 
   private toolContext(call: ToolCallPart, signal = this.signal): ToolContext {
     const { settings } = this.init.plan;
+    const runner = this;
     return {
       toolCallId: call.id,
-      conversationId: this.conversationId,
-      messageId: this.messageId,
+      get conversationId() { return runner.conversationId; },
+      get messageId() { return runner.messageId; },
       signal,
       now: this.services.clock,
       timezone: settings.timezone,
       locale: settings.locale,
       allowSensitive: this.init.allowSensitive,
+      get offRecord() { return runner.offRecord(); },
       origin: 'model',
       logger: this.logger.child({ tool: call.name, toolCallId: call.id }),
     };
@@ -651,6 +730,7 @@ class TurnRunner {
     const confirmation: ToolConfirmation = {
       id: newId('cnf', requestedAt),
       conversationId: this.conversationId,
+      episodeId: this.conversationId,
       turnId: this.turnId,
       messageId: this.messageId,
       toolCallId: call.id,
@@ -833,7 +913,7 @@ class TurnRunner {
     if (preview) {
       try {
         const conversation = conversations.update(this.conversationId, { preview, lastMessageAt: clock() });
-        this.emit({ type: 'conversation.updated', conversation });
+        this.emit({ type: 'conversation.updated', conversation: episodeOf(conversation) });
       } catch (err) {
         this.logger.warn('could not update the conversation preview', { error: String(err) });
       }
@@ -864,8 +944,7 @@ class TurnRunner {
    * and a cancel often means "I did not mean to send that".
    */
   private afterTurn(final: Message): void {
-    if (!this.init.plan.conversation.incognito) void this.observe(final);
-    if (this.init.titleEligible) void this.autoTitle(final);
+    if (!this.offRecord()) void this.observe(final);
   }
 
   private async observe(final: Message): Promise<void> {
@@ -880,29 +959,14 @@ class TurnRunner {
       });
       const created = result.created.map(summarizeNode);
       const updated = result.updated.map(summarizeNode);
-      const pending = result.pending.map(summarizeNode);
-      if (created.length || updated.length || pending.length) {
-        this.services.broadcast({ type: 'memory.written', conversationId: this.conversationId, turnId: this.turnId, created, updated, pending });
+      if (created.length || updated.length) {
+        this.services.broadcast({ type: 'memory.written', conversationId: this.conversationId, episodeId: this.conversationId, turnId: this.turnId, created, updated });
       }
     } catch (err) {
       this.logger.warn('memory observe failed', { error: String(err) });
     }
   }
 
-  private async autoTitle(final: Message): Promise<void> {
-    const { conversations } = this.services;
-    const { adapter, model, conversation } = this.init.plan;
-    if (final.sensitive && !adapter.isLocal && !this.services.settings.get().memory.sendSensitiveToCloud) return;
-    try {
-      const title = await generateTitle(adapter, model, inputText(this.init.userMessage.parts), textOf(final.parts));
-      // Respect a rename (or deletion) that happened while the turn or the title request ran.
-      const current = conversations.get(this.conversationId);
-      if (!title || !current || current.title !== conversation.title) return;
-      this.services.broadcast({ type: 'conversation.updated', conversation: conversations.update(this.conversationId, { title }) });
-    } catch (err) {
-      this.logger.warn('auto-title failed', { error: String(err) });
-    }
-  }
 }
 
 // ───────────────────────────── helpers ─────────────────────────────

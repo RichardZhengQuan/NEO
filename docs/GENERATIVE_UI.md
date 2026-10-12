@@ -45,7 +45,7 @@ Every rendered block becomes a `ui` part `{ type: 'ui', id: 'ui_…', block, too
 | `countdown` | `label`, `until` (epoch ms), `doneText` | live ticking |
 | `reminder` | `reminderId`, `title`, `dueAt`, `timezone`, `recurrenceText`, `status` | **live widget**: Snooze 10 min / 1 h, Done |
 | `tasks` | `title`, `listId`, `tasks[{id,title,done,dueAt,priority}]` | **live widget**: checkboxes |
-| `memory` | `title`, `note`, `nodes[{id,kind,label,content,status}]` | Remember / Don't remember (pending), Forget (active) |
+| `memory` | `title`, `note`, `nodes[{id,kind,label,content,status}]` | Forget (active) |
 
 Limits: at most 50 top-level blocks, 300 blocks per message, nesting depth 8, action ids unique within a message. Tones are `neutral | accent | info | success | warning | danger`. Icons are lucide-style names (`bell`, `calendar`, `check-circle`, `map-pin`, `brain`…) or a single emoji.
 
@@ -61,9 +61,11 @@ Limits: at most 50 top-level blocks, 300 blocks per message, nesting depth 8, ac
 | `link` | `url` | open (in-app for `neo://…`, browser otherwise) |
 | `copy` | `text` | copy to clipboard |
 
-The model-written `confirm` text can provide an extra client prompt, but it never authorizes execution. For live widgets the client sends the reserved ids from `widgetActionId` (`task.toggle:<id>`, `reminder.snooze:<min>`, `reminder.complete`, `memory.approve:<id>`, `memory.reject:<id>`, `memory.forget:<id>`). The server resolves them against the **stored** block with `resolveWidgetAction`, so a client can only touch items the block actually shows.
+The model-written `confirm` text can provide an extra client prompt, but it never authorizes execution. For live widgets the client sends the reserved ids from `widgetActionId` (`task.toggle:<id>`, `reminder.snooze:<min>`, `reminder.complete`, `memory.forget:<id>`). The server resolves them against the **stored** block with `resolveWidgetAction`, so a client can only touch items the block actually shows.
 
-Request: `POST /api/conversations/:id/ui-action { messageId, uiId, actionId, values?, confirmationToken? }`.
+Request: `POST /api/timeline/ui-action { messageId, uiId, actionId, values?, confirmationToken? }`.
+
+Privacy comes from persisted server mode, so this request needs no client privacy field. After `POST /api/timeline/off-record/start`, actions and approvals from older normal messages execute privately. Message/event results and direct tool widget copies belong to the active ephemeral private episode, leaving the normal source unchanged. Memory writes are rejected, including tokens issued before start; recall does not reinforce or associate memories. End settles this work and deletes the private messages. Reloads read `GET /api/timeline/off-record`; connected clients receive `timeline.off_record { active }`.
 
 For a tool whose permission is `confirm` or risk is `dangerous`, the first request validates the tool input and returns a server-written confirmation without executing:
 

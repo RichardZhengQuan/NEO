@@ -19,7 +19,7 @@ export const MemoryKindSchema = z.enum([
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 export const MEMORY_KINDS = MemoryKindSchema.options;
 
-export const MemoryStatusSchema = z.enum(['active', 'pending', 'archived', 'superseded']);
+export const MemoryStatusSchema = z.enum(['active', 'archived', 'superseded']);
 export type MemoryStatus = z.infer<typeof MemoryStatusSchema>;
 
 /** Sensitive memories are only shared with models on the user's own infrastructure (unless allowed). */
@@ -46,6 +46,7 @@ export const STRUCTURAL_EDGE_TYPES: readonly EdgeType[] = ['about', 'part_of', '
 export const MemorySourceSchema = z.object({
   by: z.enum(['user', 'assistant', 'extraction', 'consolidation', 'import', 'tool']),
   conversationId: z.string().nullable().optional(),
+  /** Timeline message identity; conversationId remains the internal episode id. */
   messageId: z.string().nullable().optional(),
   note: z.string().max(500).optional(),
 });
@@ -125,15 +126,11 @@ export interface MemoryNodeDetail {
 // ───────────────────────────── policy ─────────────────────────────
 
 export const MemoryPolicySchema = z.object({
-  /** auto: remember silently · approve: new memories wait for the user's OK · off: never write. */
-  mode: z.enum(['auto', 'approve', 'off']).default('auto'),
   /** Recall memories into context each turn. */
   recall: z.boolean().default(true),
   recallLimit: z.number().int().min(0).max(50).default(12),
   recallTokenBudget: z.number().int().min(0).max(8000).default(1500),
   minScore: z.number().min(0).max(1).default(0.15),
-  /** Topics NEO must never store (e.g. "health", "finances"). */
-  blockedTopics: z.array(z.string().max(100)).default([]),
   allowedKinds: z.array(MemoryKindSchema).default([...MEMORY_KINDS]),
   storeEpisodes: z.boolean().default(true),
   /** Allow sensitive memories to be sent to cloud models. */
@@ -210,10 +207,8 @@ export interface MemoryWriteResult {
   created: MemoryNode[];
   updated: MemoryNode[];
   superseded: MemoryNode[];
-  /** Created with status 'pending' because policy.mode is 'approve'. */
-  pending: MemoryNode[];
   linked: number;
-  /** Why nothing was written (policy off, incognito, blocked topic…). */
+  /** Why nothing was written (incognito, nothing worth remembering…). */
   skipped?: string;
 }
 
@@ -295,7 +290,6 @@ export interface MemoryStats {
   byKind: Record<MemoryKind, number>;
   byStatus: Record<MemoryStatus, number>;
   edges: number;
-  pending: number;
   lastConsolidationAt: number | null;
   embeddingModel: string;
 }
@@ -319,7 +313,7 @@ export interface ImportReport {
 }
 
 export type MemoryChangeEvent = {
-  type: 'created' | 'updated' | 'deleted' | 'pending' | 'consolidated';
+  type: 'created' | 'updated' | 'deleted' | 'consolidated';
   nodeIds: string[];
 };
 
@@ -328,18 +322,19 @@ export interface MemoryService {
   recall(query: RecallQuery): Promise<RecallResult>;
   /** Write path after a turn: extract, dedupe/merge, supersede, link. Respects policy & incognito. */
   observe(turn: ObservedTurn): Promise<MemoryWriteResult>;
-  /** Explicit "remember this". Respects policy.mode ('approve' → pending) unless source.by === 'user'. */
-  remember(input: RememberInput): Promise<MemoryNode>;
+  /** Explicit "remember this". Memories are active immediately. */
+  /** Cancellation is rechecked before the write, after embedding. */
+  remember(input: RememberInput, signal?: AbortSignal): Promise<MemoryNode>;
   search(query: MemorySearchQuery): Promise<{ items: MemoryNode[]; total: number }>;
   get(id: string): Promise<MemoryNodeDetail | null>;
   update(id: string, patch: MemoryNodePatch): Promise<MemoryNode>;
   /** Hard delete (nodes + their edges + vectors). Returns number deleted. */
   forget(ids: string[]): Promise<number>;
+  /** Memories whose provenance names one of these timeline messages. */
+  findBySource(messageIds: string[]): Promise<MemoryNode[]>;
+  forgetBySource(messageIds: string[]): Promise<number>;
   /** Find memories matching a natural-language description (for "forget everything about X"). */
   findForForget(query: string, limit?: number): Promise<MemoryNode[]>;
-  approve(ids: string[]): Promise<number>;
-  /** Reject pending memories (deletes them). */
-  reject(ids: string[]): Promise<number>;
   link(from: string, to: string, type: EdgeType, weight?: number): Promise<MemoryEdge>;
   unlink(edgeId: string): Promise<boolean>;
   graph(query: GraphQuery): Promise<MemoryGraph>;

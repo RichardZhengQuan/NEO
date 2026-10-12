@@ -1,19 +1,15 @@
 /**
- * Settings → Memory: what NEO may remember and how (mode, recall, blocked
- * topics, kinds, episodes, sensitive memories, consolidation).
+ * Settings → Memory: what NEO may remember (recall, kinds,
+ * episodes, sensitive memories, consolidation).
  */
 import type { ReactElement } from 'react';
-import { MEMORY_KINDS, type MemoryPolicy, type NeoSettingsPatch } from '@neo/protocol';
-import { Button, Chip, Icon, Select, Switch, useT } from '@neo/ui';
+import { MEMORY_KINDS, type NeoSettingsPatch } from '@neo/protocol';
+import { Button, Chip, Select, Switch, useT } from '@neo/ui';
 import { openLink } from '../../actions/links.js';
-import { ChipInput } from '../../components/ChipInput.js';
 import { errorMessage } from '../../lib/errors.js';
 import { pushToast } from '../../state/notifications.js';
 import { updateSettings, useSession } from '../../state/session.js';
-import { BLOCKED_SUGGESTIONS } from '../OnboardingScreen.js';
 import { Section, SettingRow } from './common.js';
-
-const MODE_ICON: Record<MemoryPolicy['mode'], string> = { auto: 'sparkles', approve: 'check-square', off: 'eye-off' };
 
 export function MemorySection(): ReactElement {
   const t = useT();
@@ -24,42 +20,19 @@ export function MemorySection(): ReactElement {
   return (
     <>
       <Section
-        title={t('memorySettings.mode')}
-        description={t('memorySettings.mode_help')}
+        title={t('memorySettings.title')}
+        description={t('memorySettings.help')}
         actions={
           <Button size="sm" variant="secondary" icon="brain" onClick={() => openLink('neo://memory')}>
             {t('memorySettings.open')}
           </Button>
         }
       >
-        <div role="radiogroup" aria-label={t('memorySettings.mode')} style={{ display: 'grid', gap: '0.5rem' }}>
-          {(['auto', 'approve', 'off'] as const).map((m) => (
-            <button key={m} type="button" role="radio" aria-checked={policy.mode === m} className="option-card" onClick={() => save({ mode: m })}>
-              <span className="option-card__icon">
-                <Icon name={MODE_ICON[m]} size={18} />
-              </span>
-              <span style={{ flex: 1 }}>
-                <span className="option-card__title">{t(`memoryMode.${m}.title`)}</span>
-                <span className="option-card__text">{t(`memoryMode.${m}.text`)}</span>
-              </span>
-              {policy.mode === m && <Icon name="check" size={16} className="option-check" />}
-            </button>
-          ))}
-        </div>
+        <p className="neo-help" style={{ margin: 0 }}>{t('memoryMode.auto.text')}</p>
       </Section>
 
       <Section title={t('memorySettings.privacy')} description={t('memorySettings.privacy_help')}>
         <div className="neo-card" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-          <ChipInput
-            label={t('memoryPolicy.blocked')}
-            values={policy.blockedTopics}
-            onChange={(v) => save({ blockedTopics: v })}
-            placeholder={t('memoryPolicy.blocked_placeholder')}
-            suggestions={BLOCKED_SUGGESTIONS.map((k) => t(`topic.${k}`))}
-            help={t('memoryPolicy.blocked_help')}
-            max={50}
-            maxLength={100}
-          />
           <Switch checked={policy.sendSensitiveToCloud} onChange={(v) => save({ sendSensitiveToCloud: v })} label={t('memoryPolicy.sensitive_cloud')} description={t('memoryPolicy.sensitive_cloud_help')} />
           <div className="neo-field">
             <span className="neo-label">{t('memorySettings.kinds')}</span>

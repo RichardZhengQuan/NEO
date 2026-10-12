@@ -71,18 +71,19 @@ describe('parseCliArgs', () => {
 
     it('parses all flags', () => {
       const r = parseCliArgs(['chat', '--server', 'http://localhost:9000', '--token', 'tok123',
-        '--conversation', 'conv-abc', '--model', 'anthropic/claude-3-opus',
-        '--incognito', '--show-reasoning']);
+        '--off-record', '--show-reasoning']);
       expect(r).toMatchObject({
         cmd: 'chat',
         server: 'http://localhost:9000',
         token: 'tok123',
-        conversation: 'conv-abc',
-        model: 'anthropic/claude-3-opus',
-        incognito: true,
+        offRecord: true,
         showReasoning: true,
       });
     });
+  });
+
+  it.each(['--conversation', '--model', '--incognito'])('rejects removed chat option %s', (flag) => {
+    expect(parseCliArgs(['chat', flag])).toHaveProperty('error');
   });
 
   // ── init ──

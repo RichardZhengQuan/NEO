@@ -9,7 +9,7 @@ import { useLoader } from '../../hooks/useLoader.js';
 import { useData } from '../../state/data.js';
 import { requireClient } from '../../state/session.js';
 
-const STATUSES: MemoryStatus[] = ['active', 'pending', 'archived', 'superseded'];
+const STATUSES: MemoryStatus[] = ['active', 'archived', 'superseded'];
 
 function Tile({ icon, label, value, caption }: { icon: string; label: string; value: string; caption?: string }): ReactElement {
   return (
@@ -37,7 +37,7 @@ export function StatsTab(): ReactElement {
       <EmptyState icon="alert-circle" title={t('common.error')} />
     ) : (
       <div className="stat-grid">
-        {[0, 1, 2, 3].map((i) => (
+        {[0, 1, 2].map((i) => (
           <Skeleton key={i} height={92} style={{ borderRadius: 16 }} />
         ))}
       </div>
@@ -49,7 +49,6 @@ export function StatsTab(): ReactElement {
       <div className="stat-grid">
         <Tile icon="brain" label={t('stats.total')} value={n(stats.total)} caption={t('stats.active', { n: n(stats.byStatus.active ?? 0) })} />
         <Tile icon="link" label={t('stats.links')} value={n(stats.edges)} />
-        <Tile icon="check-square" label={t('stats.pending')} value={n(stats.pending)} />
         <Tile
           icon="moon-star"
           label={t('stats.last_consolidation')}
