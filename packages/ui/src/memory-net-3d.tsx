@@ -6,6 +6,7 @@ import { buildMemoryNet3DLayout, countMemories, toolUseFocusId } from './memory-
 import { createMemoryNetScene, defaultToolUseLabels, type MemoryNetScene } from './memory-net-3d-scene.js';
 import { useLocale, useT } from './i18n.js';
 import { Icon } from './icons.js';
+import { memoryLabel } from './memory-card.js';
 import { IconButton, Skeleton } from './primitives.js';
 
 export interface MemoryNet3DProps extends MemoryGraphViewProps {
@@ -135,7 +136,7 @@ export function MemoryNet3D({ graph, selectedId = null, highlightIds, onSelect, 
         {hovered && hover && (
           <div className="neo-graph__tooltip" role="tooltip" style={{ left: Math.max(0, Math.min(hover.x, (hostRef.current?.clientWidth || 640) - 240)), top: Math.max(0, Math.min(hover.y, (hostRef.current?.clientHeight || height) - 120)) }}>
             <span className="neo-kind" data-kind={hovered.kind}>{t(`memory.kind.${hovered.kind}`)}</span>
-            <strong>{hovered.sensitivity === 'sensitive' && <Icon name="lock" size={12} />} {hovered.label}</strong>
+            <strong>{hovered.sensitivity === 'sensitive' && <Icon name="lock" size={12} />} {memoryLabel(hovered, t)}</strong>
             <span>{date(hovered.createdAt)} · {t('memory.retention', { pct: Math.round(hovered.retention * 100) })}</span>
           </div>
         )}
@@ -175,7 +176,7 @@ export function MemoryNet3D({ graph, selectedId = null, highlightIds, onSelect, 
           <IconButton icon="maximize" label={t('memory.graph_fit')} size="sm" onClick={() => sceneRef.current?.fit()} />
           <IconButton icon="arrow-up" label={t('memory.graph_jump_now')} size="sm" onClick={() => sceneRef.current?.now()} />
         </div>
-        <span className="neo-sr" aria-live="polite">{focusedToolUse ? `${toolUseLabels[focusedToolUse.category]}: ${focusedToolUse.title}, ${date(focusedToolUse.at)}` : focused ? `${focused.label}, ${t(`memory.kind.${focused.kind}`)}, ${date(focused.createdAt)}` : ''}</span>
+        <span className="neo-sr" aria-live="polite">{focusedToolUse ? `${toolUseLabels[focusedToolUse.category]}: ${focusedToolUse.title}, ${date(focusedToolUse.at)}` : focused ? `${memoryLabel(focused, t)}, ${t(`memory.kind.${focused.kind}`)}, ${date(focused.createdAt)}` : ''}</span>
       </div>
       {showLegend && <GraphLegend />}
     </div>

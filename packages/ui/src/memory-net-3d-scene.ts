@@ -2,6 +2,7 @@
 import type * as Three from 'three';
 import type { MemoryKind, ToolUseEvent } from '@neo/protocol';
 import type { TranslateFn } from './i18n.js';
+import { memoryLabel } from './memory-card.js';
 import { memoryKindColor } from './memory-graph.js';
 import { stepMemoryInTime, toolUseFocusId, type MemoryNet3DLayout, type Net3DToolMarker } from './memory-net-3d-layout.js';
 import { iconPaths } from './icons.js';
@@ -217,7 +218,7 @@ export function createMemoryNetScene(T: SceneThree, options: SceneOptions): Memo
       if (node.threadEndY !== undefined && node.threadEndY > node.y) {
         line(node, { x: node.x, y: node.threadEndY, z: node.z }, 0.18, [node.id], false, `--neo-kind-${node.node.kind}`);
       }
-      addLabel(`${node.node.sensitivity === 'sensitive' ? '🔒 ' : ''}${node.node.label}`, node.x, node.y, node.z, node.id, node.node.importance);
+      addLabel(`${node.node.sensitivity === 'sensitive' ? '🔒 ' : ''}${memoryLabel(node.node, t)}`, node.x, node.y, node.z, node.id, node.node.importance);
     }
     for (const edge of layout.edges) {
       const structural = ['about', 'part_of', 'derived_from', 'supersedes', 'precedes'].includes(edge.edge.type);
@@ -229,7 +230,7 @@ export function createMemoryNetScene(T: SceneThree, options: SceneOptions): Memo
     }
     for (const gap of layout.timeScale.gaps) addLabel('≈', 0, gap.y, 0, null, 2, true);
     addLabel(t('memory.graph_now'), 0, layout.timeScale.maxY + 8, 0, null, 200, true);
-    if (layout.spine) addLabel(`${layout.spine.sensitivity === 'sensitive' ? '🔒 ' : ''}${layout.spine.label}`, 0, layout.timeScale.maxY + 8, 0, layout.spine.id, 5, true, true);
+    if (layout.spine) addLabel(`${layout.spine.sensitivity === 'sensitive' ? '🔒 ' : ''}${memoryLabel(layout.spine, t)}`, 0, layout.timeScale.maxY + 8, 0, layout.spine.id, 5, true, true);
 
     const updatePalette = () => {
       const css = getComputedStyle(host);

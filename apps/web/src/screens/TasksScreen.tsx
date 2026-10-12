@@ -1,6 +1,7 @@
 /**
- * Tasks: lists (Inbox + your own), quick add, check off, inline details
- * (notes, due date, priority, move to list), completed toggle.
+ * Tasks NEO keeps track of: lists (Inbox + the ones NEO made), check off,
+ * inline details (notes, due date, priority, move to list), completed toggle.
+ * There is no manual add: you tell NEO, the way you would tell a person.
  */
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { INBOX_LIST_ID, type Task, type TaskList } from '@neo/protocol';
@@ -163,20 +164,18 @@ function TaskRow({ task, subtasks, lists, expanded, onToggleExpand, highlight }:
   );
 }
 
-function ListEditor({ list, open, onClose }: { list: TaskList | null; open: boolean; onClose: () => void }): ReactElement {
+function ListEditor({ list, open, onClose }: { list: TaskList; open: boolean; onClose: () => void }): ReactElement {
   const t = useT();
-  const [name, setName] = useState(list?.name ?? '');
+  const [name, setName] = useState(list.name);
   const [saving, setSaving] = useState(false);
   const save = async () => {
     const epoch = currentSessionEpoch();
     if (!name.trim()) return;
     setSaving(true);
     try {
-      const client = requireClient();
-      const saved = list ? await client.tasks.updateList(list.id, { name: name.trim() }) : await client.tasks.createList({ name: name.trim() });
+      const saved = await requireClient().tasks.updateList(list.id, { name: name.trim() });
       if (!isCurrentSession(epoch)) return;
       upsertTaskList(saved);
-      if (!list) navigate({ name: 'tasks', listId: saved.id });
       onClose();
     } catch (err) {
       pushToast({ tone: 'error', title: errorMessage(err, t) });
@@ -189,14 +188,14 @@ function ListEditor({ list, open, onClose }: { list: TaskList | null; open: bool
       open={open}
       onClose={onClose}
       size="sm"
-      title={list ? t('tasks.rename_list') : t('tasks.new_list')}
+      title={t('tasks.rename_list')}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
             {t('common.cancel')}
           </Button>
           <Button variant="primary" onClick={() => void save()} loading={saving} disabled={!name.trim()}>
-            {list ? t('common.save') : t('tasks.create_list')}
+            {t('common.save')}
           </Button>
         </>
       }
@@ -220,11 +219,9 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
   const tasks = useData((s) => s.tasks);
   const lists = useData((s) => s.taskLists);
   const loaded = useData((s) => s.tasksLoaded);
-  const [draft, setDraft] = useState('');
-  const [adding, setAdding] = useState(0);
   const [showDone, setShowDone] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(taskId ?? null);
-  const [listModal, setListModal] = useState<TaskList | 'new' | null>(null);
+  const [listModal, setListModal] = useState<TaskList | null>(null);
 
   useEffect(() => {
     void loadTasks(requireClient()).catch((err) => pushToast({ tone: 'error', title: errorMessage(err, t) }));
@@ -247,24 +244,6 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
   const childrenOf = (id: string) => inList.filter((x) => x.parentId === id).sort((a, b) => a.order - b.order);
   const open = top.filter((x) => !x.done).sort((a, b) => b.priority - a.priority || (a.dueAt ?? Infinity) - (b.dueAt ?? Infinity) || a.order - b.order);
   const done = top.filter((x) => x.done).sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0));
-
-  // Clears the field right away so several tasks can be typed in a row.
-  const add = async () => {
-    const epoch = currentSessionEpoch();
-    const title = draft.trim();
-    if (!title) return;
-    setDraft('');
-    setAdding((n) => n + 1);
-    try {
-      const saved = await requireClient().tasks.create({ title, listId: currentId });
-      if (isCurrentSession(epoch)) upsertTask(saved);
-    } catch (err) {
-      setDraft((current) => current || title);
-      pushToast({ tone: 'error', title: errorMessage(err, t) });
-    } finally {
-      setAdding((n) => n - 1);
-    }
-  };
 
   const deleteList = async (list: TaskList) => {
     const epoch = currentSessionEpoch();
@@ -290,10 +269,6 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
           {counts.get(l.id) ? <span className="neo-help">{counts.get(l.id)}</span> : null}
         </button>
       ))}
-      <button type="button" className="nav-item" style={{ width: '100%', marginTop: '0.5rem' }} onClick={() => setListModal('new')}>
-        <Icon name="plus" size={16} />
-        {t('tasks.new_list')}
-      </button>
     </nav>
   ) : (
     <div className="neo-tags" style={{ flexWrap: 'nowrap', overflowX: 'auto', padding: '0.75rem 1rem 0', scrollbarWidth: 'none' }} role="group" aria-label={t('tasks.lists')}>
@@ -303,9 +278,6 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
           {counts.get(l.id) ? ` · ${counts.get(l.id)}` : ''}
         </Chip>
       ))}
-      <Chip icon="plus" onClick={() => setListModal('new')}>
-        {t('tasks.new_list')}
-      </Chip>
     </div>
   );
 
@@ -330,20 +302,6 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
         <div className="page-body">
           <div className="page-inner">
             {desktop && <h2 className="h-section" style={{ marginBottom: '1rem' }}>{listName(current, t)}</h2>}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void add();
-              }}
-              style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}
-            >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <TextField icon="plus" value={draft} onChange={setDraft} ariaLabel={t('tasks.add')} placeholder={t('tasks.add_placeholder', { list: listName(current, t) })} maxLength={1000} />
-              </div>
-              <Button type="submit" variant="primary" loading={adding > 0 && !draft.trim()} disabled={!draft.trim()}>
-                {t('tasks.add')}
-              </Button>
-            </form>
             {!loaded ? (
               <div style={{ display: 'grid', gap: '0.5rem' }}>
                 <Skeleton height={52} />
@@ -385,7 +343,7 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
           </div>
         </div>
       </div>
-      {listModal && <ListEditor key={listModal === 'new' ? 'new' : listModal.id} list={listModal === 'new' ? null : listModal} open onClose={() => setListModal(null)} />}
+      {listModal && <ListEditor key={listModal.id} list={listModal} open onClose={() => setListModal(null)} />}
     </div>
   );
 }

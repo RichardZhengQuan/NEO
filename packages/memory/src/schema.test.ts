@@ -46,7 +46,7 @@ describe('memory migration v2', () => {
       const activeFts = db.prepare("SELECT * FROM memory_fts WHERE node_id IN ('mem_active', 'mem_other') ORDER BY node_id").all();
       const activeEdges = db.prepare("SELECT * FROM memory_edges WHERE src = 'mem_active' AND dst = 'mem_other'").all();
 
-      expect(migrate(db, 'memory', memoryMigrations).applied).toEqual([2]);
+      expect(migrate(db, 'memory', memoryMigrations).applied).toEqual([2, 3]);
       expect(db.prepare('SELECT * FROM memory_nodes ORDER BY id').all()).toEqual(activeRows);
       expect(db.prepare('SELECT * FROM memory_vectors ORDER BY node_id').all()).toEqual(activeVectors);
       expect(db.prepare('SELECT * FROM memory_fts ORDER BY node_id').all()).toEqual(activeFts);

@@ -4,9 +4,14 @@
  * restore).
  */
 import type { ReactElement } from 'react';
-import type { MemoryNode } from '@neo/protocol';
+import { SELF_MEMORY_ID, type MemoryNode } from '@neo/protocol';
 import { Icon } from './icons.js';
-import { useT } from './i18n.js';
+import { useT, type TranslateFn } from './i18n.js';
+
+/** A memory's display label: the self node, the centre of the net, is "You". */
+export function memoryLabel(node: Pick<MemoryNode, 'id' | 'label'>, t: TranslateFn): string {
+  return node.id === SELF_MEMORY_ID ? t('memory.self') : node.label;
+}
 import { Button, IconButton } from './primitives.js';
 import { useConfirm } from './confirm.js';
 
@@ -75,10 +80,10 @@ export function MemoryNodeCard({
       <h3 className="neo-mem-card__label">
         {onOpen ? (
           <button type="button" className="neo-mem-card__label-btn" onClick={onOpen}>
-            {node.label}
+            {memoryLabel(node, t)}
           </button>
         ) : (
-          node.label
+          memoryLabel(node, t)
         )}
       </h3>
 

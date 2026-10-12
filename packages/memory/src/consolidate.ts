@@ -9,7 +9,7 @@
  */
 import { z } from 'zod';
 import type { ConsolidationReport, MemoryKind, MemoryNode } from '@neo/protocol';
-import { newId, STRUCTURAL_EDGE_TYPES } from '@neo/protocol';
+import { newId, SELF_MEMORY_ID, STRUCTURAL_EDGE_TYPES } from '@neo/protocol';
 import { toNum } from '@neo/storage';
 import { MEMORY_CONSTANTS } from './constants.js';
 import type { MemoryContext } from './context.js';
@@ -166,11 +166,12 @@ function prune(ctx: MemoryContext, now: number, report: ConsolidationReport): vo
 async function discoverLinks(ctx: MemoryContext, now: number, lastRun: number, report: ConsolidationReport, signal: AbortSignal | undefined): Promise<void> {
   const { db } = ctx;
   const changedIds = (
-    db.prepare(`SELECT id FROM memory_nodes WHERE status = 'active' AND updated_at >= ? ORDER BY updated_at DESC LIMIT 500`).all(lastRun) as { id: string }[]
+    db.prepare(`SELECT id FROM memory_nodes WHERE status = 'active' AND updated_at >= ? AND id != ? ORDER BY updated_at DESC LIMIT 500`).all(lastRun, SELF_MEMORY_ID) as { id: string }[]
   ).map((r) => r.id);
   if (!changedIds.length) return;
   const vectorOf = (id: string) => ctx.vectors.find(ctx.embedder.id, ctx.localEmbedder.id, id);
-  const targets = (db.prepare(`SELECT id FROM memory_nodes WHERE status = 'active'`).all() as { id: string }[])
+  // The self node links by meaning ("about the user"), never by similarity.
+  const targets = (db.prepare(`SELECT id FROM memory_nodes WHERE status = 'active' AND id != ?`).all(SELF_MEMORY_ID) as { id: string }[])
     .map((r) => ({ id: r.id, v: vectorOf(r.id) }))
     .filter((t): t is { id: string; v: Float32Array } => !!t.v);
   const linkedStmt = db.prepare(`SELECT dst AS other FROM memory_edges WHERE src = ? UNION SELECT src AS other FROM memory_edges WHERE dst = ?`);
@@ -274,7 +275,8 @@ function mergeEntity(ctx: MemoryContext, a: MemoryNode, b: MemoryNode, now: numb
 async function mergeEntities(ctx: MemoryContext, now: number, report: ConsolidationReport, changed: Set<string>, signal: AbortSignal | undefined): Promise<void> {
   const { db } = ctx;
   const entities = (
-    db.prepare(`SELECT * FROM memory_nodes WHERE kind = 'entity' AND status = 'active' ORDER BY created_at ASC, rowid ASC`).all() as unknown as NodeRow[]
+    // The self node is never merged into (or with) a named entity.
+    db.prepare(`SELECT * FROM memory_nodes WHERE kind = 'entity' AND status = 'active' AND id != ? ORDER BY created_at ASC, rowid ASC`).all(SELF_MEMORY_ID) as unknown as NodeRow[]
   ).map(rowToNode);
   if (entities.length < 2) return;
   const vectors = ctx.vectors.all(ctx.embedder.id);
@@ -364,13 +366,14 @@ async function abstractEpisodes(
     .filter((e) => e.status === 'active' || fadedNow.has(e.id));
   if (!episodes.length) return;
 
-  // Greedy clustering in time order: centroid similarity or a shared entity.
+  // Greedy clustering in time order: centroid similarity or a shared entity. Every episode
+  // hangs on the self node, so it is not an entity episodes can share.
   const vectors = ctx.vectors.all(ctx.embedder.id);
-  const mentionStmt = db.prepare(`SELECT dst FROM memory_edges WHERE src = ? AND type IN ('mentions', 'about')`);
+  const mentionStmt = db.prepare(`SELECT dst FROM memory_edges WHERE src = ? AND type IN ('mentions', 'about') AND dst != ?`);
   const clusters: Cluster[] = [];
   for (const ep of episodes) {
     const v = vectors.get(ep.id);
-    const ents = new Set((mentionStmt.all(ep.id) as { dst: string }[]).map((r) => r.dst));
+    const ents = new Set((mentionStmt.all(ep.id, SELF_MEMORY_ID) as { dst: string }[]).map((r) => r.dst));
     const home = clusters.find((c) => {
       if (v && c.centroid) {
         let norm = 0;

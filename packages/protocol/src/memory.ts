@@ -128,6 +128,14 @@ export const MemoryEdgeSchema = z.object({
 });
 export type MemoryEdge = z.infer<typeof MemoryEdgeSchema>;
 
+/**
+ * The user's own node: the centre of the net. Every episode, and every other
+ * memory written about the user ("The user …"), links to it with an `about`
+ * edge, the way a person's memories hang together around their sense of self.
+ * It only shapes the net: recall never seeds, spreads through or returns it.
+ */
+export const SELF_MEMORY_ID = 'mem_self';
+
 /** Compact form used in events and UI. */
 export interface MemoryNodeSummary {
   id: string;
