@@ -550,6 +550,12 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     expect((await app.request('/manifest.webmanifest')).headers.get('Content-Type')).toBe('application/manifest+json');
     expect((await app.request('/app.js')).headers.get('Cache-Control')).toContain('immutable');
     expect((await app.request('/leak.txt')).status).toBe(404);
+    // A missing file is a 404, never the shell: caches would keep the HTML as that file.
+    for (const path of ['/assets/dog-abc.webp', '/missing.js']) {
+      const response = await app.request(path);
+      expect(response.status).toBe(404);
+      expect(response.headers.get('Content-Type')).not.toContain('text/html');
+    }
     expect((await app.request('/api/unknown', { headers: { Authorization: `Bearer ${OWNER_TOKEN}` } })).status).toBe(404);
     expect((await app.request('/api', { headers: { Authorization: `Bearer ${OWNER_TOKEN}` } })).status).toBe(404);
   });

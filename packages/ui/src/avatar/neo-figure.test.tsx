@@ -52,6 +52,38 @@ describe('NeoFigure', () => {
     expect(screen.getByRole('img', { name: 'Cat' }).tagName).toBe('IMG');
   });
 
+  it('keeps retrying a failed figure in the background and returns to it once it loads', () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = render(<NeoFigure kind="dog" />);
+      const src = container.querySelector('img')!.getAttribute('src');
+      fireEvent.error(screen.getByRole('img', { name: 'Dog' }));
+      expect(container.querySelector('.neo-avfig__portrait')).not.toBeNull();
+      expect(container.querySelector('img')).toBeNull();
+
+      act(() => { vi.advanceTimersByTime(1000); });
+      const probe = container.querySelector('img')!;
+      expect(probe.getAttribute('src')).toBe(src);
+      expect(probe.hidden).toBe(true);
+      expect(screen.getByRole('img', { name: 'Dog' }).classList.contains('neo-av')).toBe(true);
+
+      fireEvent.error(probe);
+      expect(container.querySelector('img')).toBeNull();
+      act(() => { vi.advanceTimersByTime(2999); });
+      expect(container.querySelector('img')).toBeNull();
+      act(() => { window.dispatchEvent(new Event('online')); });
+      fireEvent.load(container.querySelector('img')!);
+
+      const figure = screen.getByRole('img', { name: 'Dog' });
+      expect(figure.tagName).toBe('IMG');
+      expect(figure.getAttribute('src')).toBe(src);
+      expect(container.querySelector('.neo-avfig__portrait')).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders the artwork without a rim-light filter', () => {
     const { container } = render(<NeoFigure kind="girl" />);
     const root = container.querySelector('.neo-avfig') as HTMLElement;
@@ -373,7 +405,8 @@ describe('NeoFigure', () => {
       fireEvent.error(screen.getByRole('img', { name: 'Cat' }));
       expect(screen.getByRole('img', { name: 'Cat' }).classList.contains('neo-av')).toBe(true);
       expect(container.querySelector('img')).toBeNull();
-      expect(vi.getTimerCount()).toBe(0);
+      // Only the background retry is pending; no glitch burst is scheduled.
+      expect(vi.getTimerCount()).toBe(1);
       expect(container.querySelector('.neo-avfig')!.hasAttribute('data-glitch')).toBe(false);
     });
   });

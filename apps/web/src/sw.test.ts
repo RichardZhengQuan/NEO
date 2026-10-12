@@ -176,6 +176,24 @@ describe('service worker caching (allow-list only)', () => {
     expect(sw.fetch).not.toHaveBeenCalled();
   });
 
+  it('never caches an HTML fallback page under an asset URL', async () => {
+    const asset = request('/neo/assets/dog-abc.webp');
+    const html = { 'Content-Type': 'text/html; charset=utf-8' };
+    sw.fetch.mockResolvedValueOnce(response('<!doctype html>', { headers: html }));
+    expect(await (await sw.fetchEvent(asset))?.text()).toBe('<!doctype html>');
+    sw.fetch.mockResolvedValueOnce(response('<!doctype html>', { headers: html }));
+    await sw.fetchEvent(request('/neo/manifest.webmanifest'));
+    expect(sw.caches.allUrls()).toEqual([]);
+    // Once the file is back, the next request reaches the network and caches it.
+    sw.fetch.mockResolvedValueOnce(response('webp', { headers: { 'Content-Type': 'image/webp' } }));
+    expect(await (await sw.fetchEvent(asset))?.text()).toBe('webp');
+    expect(sw.caches.allUrls()).toEqual([asset.url]);
+    // The shell itself is still HTML and still cached.
+    sw.fetch.mockResolvedValueOnce(response('<!doctype html>', { headers: html }));
+    await sw.fetchEvent(request('/neo/', { mode: 'navigate' }));
+    expect(sw.caches.allUrls()).toContain(`${SCOPE}index.html`);
+  });
+
   it('does not store responses marked no-store or private, or that vary on credentials', async () => {
     const cases: Record<string, string>[] = [{ 'Cache-Control': 'no-store' }, { 'Cache-Control': 'private, max-age=60' }, { Vary: 'Authorization' }];
     for (const headers of cases) {
@@ -197,6 +215,7 @@ describe('service worker caching (allow-list only)', () => {
   });
 
   it('precaches only the static shell on install, and purges old NEO caches on activate', async () => {
+    await sw.caches.open('neo-shell-v3');
     await sw.caches.open('neo-shell-v2');
     await sw.caches.open('neo-shell-v1');
     await sw.caches.open('neo-meta');
@@ -210,6 +229,7 @@ describe('service worker caching (allow-list only)', () => {
     const names = await sw.caches.keys();
     expect(names).not.toContain('neo-shell-v1');
     expect(names).not.toContain('neo-shell-v2');
+    expect(names).not.toContain('neo-shell-v3');
     expect(names).toContain('neo-meta');
     expect(names.some((n) => /^neo-shell-v\d+$/.test(n))).toBe(true);
     expect(sw.clients.claim).toHaveBeenCalled();

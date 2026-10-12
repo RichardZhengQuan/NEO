@@ -41,6 +41,39 @@ describe('measured avatar orbit geometry', () => {
     expect(withCard.portrait).toEqual(plain.portrait);
   });
 
+  it.each([
+    { name: 'desktop', area: rect(0, 0, 1000, 742), frame: rect(55, 40, 529, 678), fallback: rect(144, 203, 352, 352), card: rect(680, 496, 264, 214) },
+    { name: 'phone', area: rect(0, 0, 390, 644), frame: rect(8, 56, 374, 580), fallback: rect(19, 170, 352, 352), card: undefined },
+  ])('rings a $name portrait fallback below its face, inside the stage', ({ area, frame, fallback, card }) => {
+    const geometry = avatarOrbitGeometry({ frame, fallback, area, clearance: card })!;
+    const { x, y, rx, ry } = geometry.portrait;
+    const radius = geometry.portraitRadius;
+    const bottom = fallback.top + fallback.height;
+    expect(y).toBeGreaterThanOrEqual(bottom);
+    expect(geometry.focusedPortraitMinY).toBe(bottom + radius + 8);
+    for (let degree = 0; degree < 360; degree++) {
+      const theta = degree * Math.PI / 180;
+      const point = { x: x + rx * Math.cos(theta), y: y + ry * Math.sin(theta) };
+      expect(point.y + radius + 12).toBeLessThanOrEqual(area.height + 1e-9);
+      expect(point.x - radius - 12).toBeGreaterThanOrEqual(-1e-9);
+      expect(point.x + radius + 12).toBeLessThanOrEqual(area.width + 1e-9);
+      // Rear targets pass behind the portrait; front ones never cover it.
+      if (Math.sin(theta) < 0) continue;
+      const clearBelow = point.y - radius - 8 >= bottom - 1e-9;
+      const clearBeside = Math.abs(point.x - (fallback.left + fallback.width / 2)) - radius - 8 >= fallback.width / 2 - 1e-9;
+      expect(clearBelow || clearBeside).toBe(true);
+      if (card) {
+        const verticalGap = point.y + radius + 6 + 24 <= card.top || point.y - radius - 6 - 24 >= card.top + card.height;
+        expect(verticalGap || point.x + radius + 6 + 24 <= card.left).toBe(true);
+      }
+    }
+  });
+
+  it('keeps the torso ellipse when a portrait fallback leaves no room for a ring below it', () => {
+    const props = { frame: rect(8, 56, 374, 580), area: rect(0, 0, 390, 644) };
+    expect(avatarOrbitGeometry({ ...props, fallback: rect(19, 280, 352, 352) })).toEqual(avatarOrbitGeometry(props));
+  });
+
   it.each([[927, 977], [1280, 800], [1440, 900], [1920, 1080]].flatMap(([width, height]) =>
     Object.entries({ robot: 225, boy: 171, girl: 158, cat: 295, dog: 307 }).map(([kind, halfWidth]) => ({ width: width!, height: height!, kind, halfWidth })),
   ))('keeps $kind circles spaced and contained on a $width×$height cropped-artwork stage for 45 seconds', ({ width, height, halfWidth }) => {
