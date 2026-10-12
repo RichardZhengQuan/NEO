@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>NEO · The personal AI that grows with you</title>
+    <meta name="description" content="NEO is an open-source personal AI that grows with you: one continuous timeline instead of chats, memory that works like yours, and a personality it learns from you." />
+    <meta name="theme-color" content="#1C1C1C" />
+    <meta name="color-scheme" content="dark" />
+    <meta property="og:title" content="NEO · The personal AI that grows with you" />
+    <meta property="og:description" content="An open-source personal AI that grows with you." />
+    <meta property="og:type" content="website" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="preload" as="image" href="assets/figures/girl.webp" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="home" data-motion="on" data-kind="girl">
+      <nav class="topnav" aria-label="NEO">
+        <a href="https://github.com/RichardZhengQuan/NEO/tree/main/docs" target="_blank" rel="noopener" data-i18n="nav.docs">Docs</a>
+        <a href="https://github.com/RichardZhengQuan/NEO" target="_blank" rel="noopener" data-i18n="nav.github">GitHub</a>
+        <button type="button" class="lang" lang="zh-CN" aria-label="切换到中文">中文</button>
+      </nav>
+
+      <section class="card" aria-labelledby="title">
+        <div class="card-top">
+          <span class="card-label" data-i18n="card.label">Open source · MIT</span>
+          <span class="card-count">v0.1</span>
+        </div>
+        <p class="terminal">
+          <span class="visually-hidden" data-i18n="card.terminal">hi, i'm neo_</span>
+          <span class="terminal-copy" aria-hidden="true"><span class="terminal-text">hi, i'm neo_</span><span class="terminal-cursor">█</span></span>
+        </p>
+        <div class="card-body">
+          <h1 id="title" data-i18n="card.title">An open-source personal AI that grows with you.</h1>
+          <ol class="pillars">
+            <li>
+              <span class="pillar-index" aria-hidden="true">01</span>
+              <h2 data-i18n="pillar.1.title">No chats, just one story</h2>
+              <p data-i18n="pillar.1.text">NEO keeps one continuous timeline with you, like a person would, and picks up where you left off. Go off the record any time.</p>
+            </li>
+            <li>
+              <span class="pillar-index" aria-hidden="true">02</span>
+              <h2 data-i18n="pillar.2.title">Memory that works like yours</h2>
+              <p data-i18n="pillar.2.text">It remembers what matters on its own, is reminded of related things, and lets the rest fade.</p>
+            </li>
+            <li>
+              <span class="pillar-index" aria-hidden="true">03</span>
+              <h2 data-i18n="pillar.3.title">A personality that grows</h2>
+              <p data-i18n="pillar.3.text">No name or tone settings. NEO learns how you like to talk by talking with you. You only choose its face.</p>
+            </li>
+          </ol>
+        </div>
+        <div class="card-footer">
+          <a class="btn btn--primary" href="https://github.com/RichardZhengQuan/NEO#quick-start" target="_blank" rel="noopener" data-i18n="cta.start">Get started</a>
+          <a class="btn btn--secondary" href="https://github.com/RichardZhengQuan/NEO/blob/main/docs/MEMORY.md" target="_blank" rel="noopener" data-i18n="cta.memory">How memory works</a>
+        </div>
+      </section>
+
+      <!-- The print stage: everything here except the orbit buttons is decoration. -->
+      <div class="stage">
+        <div class="backdrop" aria-hidden="true">
+          <span class="hazard hazard--left"></span>
+          <div class="tabs stage-tabs"><span></span><span></span><span></span></div>
+        </div>
+
+        <div class="wordmark" aria-hidden="true">
+          <svg viewBox="-1 -75 184 76" preserveAspectRatio="xMidYMid meet">
+            <text id="wordmark-glyph" x="0" y="0" font-size="100" letter-spacing="-2.5">NEO</text>
+            <use href="#wordmark-glyph" class="wordmark-registration" />
+          </svg>
+        </div>
+
+        <div class="figure-frame">
+          <span class="figure" data-kind="girl">
+            <img class="figure-color" src="assets/figures/girl.webp" alt="" width="768" height="1152" decoding="async" draggable="false" />
+            <img class="figure-ink" alt="" width="768" height="1152" decoding="async" draggable="false" aria-hidden="true" />
+          </span>
+        </div>
+
+        <div class="orbit" role="radiogroup" aria-labelledby="orbit-label" data-orbit-motion="running">
+          <span id="orbit-label" class="visually-hidden" data-i18n="orbit.label">Choose NEO's look</span>
+          <div class="orbit-area" aria-hidden="true"></div>
+          <svg class="orbit-path orbit-path--back" aria-hidden="true" focusable="false"><path /></svg>
+          <svg class="orbit-path orbit-path--front" aria-hidden="true" focusable="false"><path /></svg>
+          <button type="button" class="orbit-node" role="radio" aria-checked="false" tabindex="-1" data-kind="robot" data-i18n-label="avatar.robot" aria-label="Robot" title="Robot"><span class="orbit-visual"><img src="assets/portraits/robot.webp" alt="" width="384" height="384" /></span></button>
+          <button type="button" class="orbit-node" role="radio" aria-checked="false" tabindex="-1" data-kind="cat" data-i18n-label="avatar.cat" aria-label="Cat" title="Cat"><span class="orbit-visual"><img src="assets/portraits/cat.webp" alt="" width="384" height="384" /></span></button>
+          <button type="button" class="orbit-node" role="radio" aria-checked="false" tabindex="-1" data-kind="dog" data-i18n-label="avatar.dog" aria-label="Dog" title="Dog"><span class="orbit-visual"><img src="assets/portraits/dog.webp" alt="" width="384" height="384" /></span></button>
+          <button type="button" class="orbit-node" role="radio" aria-checked="false" tabindex="-1" data-kind="boy" data-i18n-label="avatar.boy" aria-label="Boy" title="Boy"><span class="orbit-visual"><img src="assets/portraits/boy.webp" alt="" width="384" height="384" /></span></button>
+          <button type="button" class="orbit-node" role="radio" aria-checked="true" tabindex="0" data-kind="girl" data-i18n-label="avatar.girl" aria-label="Girl" title="Girl"><span class="orbit-visual"><img src="assets/portraits/girl.webp" alt="" width="384" height="384" /></span></button>
+        </div>
+      </div>
+
+      <div class="hud" aria-hidden="true">
+        <span class="hud-corner hud-corner--tl"></span><span class="hud-corner hud-corner--tr"></span>
+        <span class="hud-corner hud-corner--bl"></span><span class="hud-corner hud-corner--br"></span>
+        <span class="hud-brand">NEO://<span class="hud-brand-long">PERSONAL_AI v0.1</span></span>
+        <span class="hud-status">PERSONAL AI · v0.1</span>
+        <span class="hud-avatar">AVATAR // <span class="hud-avatar-name">GIRL</span></span>
+      </div>
+
+    </main>
+    <script src="main.js" defer></script>
+  </body>
+</html>
