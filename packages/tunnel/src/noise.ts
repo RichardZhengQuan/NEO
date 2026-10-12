@@ -26,11 +26,35 @@ function keyBytes(key: Uint8Array): Uint8Array {
   return key.slice();
 }
 
+function keyPairBytes(key: KeyPair): KeyPair {
+  return { privateKey: keyBytes(key.privateKey), publicKey: keyBytes(key.publicKey) };
+}
+
+function checkKeyPair(key: KeyPair): KeyPair {
+  if (!equalBytes(publicKeyFromPrivate(key.privateKey), key.publicKey)) throw new NoiseError('Mismatched Noise keypair');
+  return key;
+}
+
 function copyKeyPair(key: KeyPair): KeyPair {
-  const privateKey = keyBytes(key.privateKey);
-  const publicKey = keyBytes(key.publicKey);
-  if (!equalBytes(publicKeyFromPrivate(privateKey), publicKey)) throw new NoiseError('Mismatched Noise keypair');
-  return { publicKey, privateKey };
+  return checkKeyPair(keyPairBytes(key));
+}
+
+/**
+ * Servers build a responder per session from one long-lived static pair, so its curve check runs once per
+ * pair object rather than per session. A digest of the checked bytes catches later in-place changes
+ * without keeping another copy of the private key.
+ */
+const checkedStaticKeys = new WeakMap<KeyPair, Uint8Array>();
+
+function copyStaticKeyPair(key: KeyPair): KeyPair {
+  const copy = keyPairBytes(key);
+  const digest = sha256(concatBytes(copy.privateKey, copy.publicKey));
+  const checked = checkedStaticKeys.get(key);
+  if (!checked || !equalBytes(checked, digest)) {
+    checkKeyPair(copy);
+    checkedStaticKeys.set(key, digest);
+  }
+  return copy;
 }
 
 export function generateKeyPair(): KeyPair {
@@ -240,17 +264,22 @@ export class NkInitiator {
   }
 }
 
+/**
+ * Construction does no curve work once the static pair has been checked: a session whose peer never sends
+ * message 1 (a relay Open or LAN connection left idle until the handshake timeout) costs only hashing.
+ */
 export class NkResponder {
   private state: 'read' | 'write' | 'done' | 'failed' = 'read';
   private readonly staticKey: KeyPair;
-  private readonly ephemeral: KeyPair;
+  /** An injected ephemeral is checked, and a missing one generated, only by writeMessage2. */
+  private readonly ephemeral: KeyPair | null;
   private readonly symmetric: SymmetricState;
   private remoteEphemeral: Uint8Array | null = null;
 
   constructor(options: { staticKey: KeyPair; prologue: Uint8Array; ephemeral?: KeyPair }) {
     try {
-      this.staticKey = copyKeyPair(options.staticKey);
-      this.ephemeral = options.ephemeral ? copyKeyPair(options.ephemeral) : generateKeyPair();
+      this.staticKey = copyStaticKeyPair(options.staticKey);
+      this.ephemeral = options.ephemeral ? keyPairBytes(options.ephemeral) : null;
       this.symmetric = new SymmetricState(options.prologue, this.staticKey.publicKey);
     } catch (error) {
       throw noiseError(error);
@@ -280,9 +309,10 @@ export class NkResponder {
       this.state = 'failed';
       checkMessage(payload);
       if (payload.length > NOISE_MAX_MESSAGE - 48) throw new NoiseError('Invalid Noise message length');
-      this.symmetric.mixHash(this.ephemeral.publicKey);
-      this.symmetric.mixKey(x25519.getSharedSecret(this.ephemeral.privateKey, this.remoteEphemeral));
-      const message = concatBytes(this.ephemeral.publicKey, this.symmetric.encryptAndHash(payload));
+      const ephemeral = this.ephemeral ? checkKeyPair(this.ephemeral) : generateKeyPair();
+      this.symmetric.mixHash(ephemeral.publicKey);
+      this.symmetric.mixKey(x25519.getSharedSecret(ephemeral.privateKey, this.remoteEphemeral));
+      const message = concatBytes(ephemeral.publicKey, this.symmetric.encryptAndHash(payload));
       const transport = this.symmetric.split(false);
       this.state = 'done';
       return { message, transport };
