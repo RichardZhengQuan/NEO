@@ -26,6 +26,7 @@ import { useReducedMotion } from '../components/cyber/useReducedMotion.js';
 import { useSceneTransition } from '../components/cyber/useSceneTransition.js';
 import { useModelLabel } from '../components/ModelLabel.js';
 import { ProviderSetup } from '../components/ProviderSetup.js';
+import { PairPhoneDialog } from '../components/PairPhoneDialog.js';
 import { errorMessage } from '../lib/errors.js';
 import { STORAGE_KEYS, readString, writeString } from '../lib/storage.js';
 import { getPlatform, type NotificationStatus } from '../platform/index.js';
@@ -255,6 +256,7 @@ function DoneStep({ back, finish }: { back: () => void; finish: () => Promise<vo
   const model = useModelLabel(modelRef);
   const connected = !!modelRef && !!providers?.items.some((p) => p.id === modelRef.provider && p.enabled && !p.needsReauthorization && p.kind !== 'mock');
   const [busy, setBusy] = useState(false);
+  const [pairing, setPairing] = useState(false);
   useEffect(() => {
     void loadProviders().catch(() => undefined);
   }, []);
@@ -291,6 +293,8 @@ function DoneStep({ back, finish }: { back: () => void; finish: () => Promise<vo
       <p className="neo-help" style={{ marginTop: '1rem' }}>
         {t('onboarding.done.hint')}
       </p>
+      {getPlatform().kind !== 'capacitor' && <Button variant="secondary" icon="qr-code" disabled={busy} onClick={() => setPairing(true)}>{t('devices.pair')}</Button>}
+      {pairing && <PairPhoneDialog onClose={() => setPairing(false)} onPaired={() => undefined} />}
     </StepFrame>
   );
 }

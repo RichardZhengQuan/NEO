@@ -15,6 +15,8 @@ NEO is an open-source personal AI assistant you can make your own:
 ```
 packages/
   protocol   shared contracts: zod schemas, types, pure helpers (isomorphic)   ← everything depends on this
+  tunnel     isomorphic Noise NK channels, framed HTTP/WS transport and server dispatch
+  relay      Node WebSocket relay: authenticated registrations and opaque ciphertext forwarding
   storage    node:sqlite database, migrations, conversation/settings/secret/device/push/provider-config stores
   providers  model adapters (Anthropic SDK; raw fetch for OpenAI-compatible & Gemini) + internal test double
   memory     the memory net (graph store, embeddings, recall, write path, consolidation)
@@ -38,6 +40,9 @@ protocol ← storage ← tools ──┤
 protocol ← providers ────────┼─ server ← cli
 protocol ← core ─────────────┘     ↑
 protocol ← client ← ui ← web ← desktop (loads the web build; imports server + client)
+protocol ← tunnel ──────────┬─ server
+                            ├─ relay (standalone ciphertext forwarder)
+                            └─ web (encrypted phone transport)
 ```
 
 `core` depends only on `protocol` interfaces (`ConversationStore`, `ProviderRegistry`, `MemoryService`, `ToolRegistry`, `SettingsStore`). The server wires the concrete implementations together. This is why every package can be built and tested on its own with fakes.
@@ -120,21 +125,98 @@ Reminder and notification links use `{ messageId }` and `neo://timeline/<message
 
 See [MEMORY.md](MEMORY.md). Recall happens before the model call, and write-back happens after the turn (async, never blocks the reply). Consolidation runs on a timer (`memory.consolidation.intervalHours`) and on demand.
 
+## Phones: pairing and the encrypted tunnel
+
+The owner opens **Settings → Devices → Pair a phone**. A v2 QR link carries a
+one-time code (five-minute expiry) and a public server address and/or a tunnel
+route. Tunnel links include the server's id, pinned static public key and
+reachable LAN addresses and/or a configured relay URL. A phone claims the code for its own revocable bearer
+token. Public HTTPS is preferred; otherwise the phone uses a present tunnel
+route, or a direct HTTP address when no tunnel is provided.
+
+`@neo/tunnel` uses `Noise_NK_25519_ChaChaPoly_SHA256`. NK fits this pairing flow:
+the phone already knows the server's pinned static X25519 key, so the handshake
+authenticates the server and establishes fresh session keys with forward
+secrecy. The phone's identity is authenticated afterward by its bearer token
+inside the encrypted channel. A wrong pinned key cannot open the channel.
+
+Each outer WebSocket binary message carries one Noise message. Encrypted
+plaintext frames have a type byte, a four-byte stream id and payload. Separate
+streams multiplex HTTP requests, streamed responses (including SSE), and text
+messages for the existing `/api/ws` event connection. Protocol contracts and
+limits live in `packages/protocol/src/tunnel.ts`; crypto and framing live in
+`packages/tunnel`.
+
+When phone access is enabled, the server opens a separate LAN listener at
+`ws://<address>:7778/v1/tunnel` by default. Every ordinary HTTP request on that
+listener receives 404. It accepts only the encrypted tunnel protocol and
+dispatches decrypted requests into the same Hono app; routes, bearer auth,
+body limits and errors are reused. Tunneled event sockets run the existing
+first-message auth, subscriptions, rate limits and revocation handler. Turning
+phone access off closes the listener and all its LAN sessions. If the preferred
+port is occupied, an available port is advertised in the QR instead.
+
+For away-from-home access, `@neo/relay` is a separate, self-hostable Node
+WebSocket server. Both the computer and the phone connect out to it. The
+computer opens `/v1/server`, receives a fresh 32-byte challenge, and registers
+by signing `RELAY_REGISTER_CONTEXT` plus that challenge with its Ed25519 key.
+The relay verifies the signature and that `serverId` is derived from the
+signing public key using `SERVER_ID_CONTEXT`. An earlier signature cannot be
+replayed, and another key cannot claim the id. A genuine new registration
+replaces the previous socket and closes its phones.
+
+Phones open `/v1/connect/<serverId>`. The relay allocates an id per live phone,
+announces `Open` (phone IP for limits), and wraps each Noise message in a
+five-byte `Data` header; `Close` ends that phone connection. The computer
+creates a separate `MessageLink` and Noise session for each phone, dispatching
+through the same HTTP and event handlers as LAN. The relay only pipes opaque
+bytes: pairing codes, bearer tokens, API requests and conversations remain
+encrypted between phone and computer. The relay can see IP addresses, server
+ids, traffic timing and sizes, and can interrupt availability.
+
+The phone tries advertised LAN addresses first, then the relay. The computer
+reconnects with jittered exponential backoff after relay failures. A configured
+relay URL remains in status and pairing routes while connecting so phones can
+retry. Only the owner changes the relay setting: null selects the server's
+default, an empty string disables it, and a URL overrides it. NEO has no public
+relay yet, so `tunnel.relayUrl` defaults to an empty string. See
+[self-hosting a relay](DEPLOYMENT.md#self-hosting-a-relay).
+
+The relay caps registrations, concurrent connections, message sizes and each
+phone's combined byte rate in both directions. It disconnects idle phones,
+terminates servers that miss a ping, and closes slow phone connections when
+destination queues exceed their cap. Limits apply per IP, per server and
+globally. Logs contain events and counts, never payloads, and truncate server
+ids to eight characters. The NEO connector also caps concurrent relay sessions
+at 256. A relay or LAN session does no X25519 work until the phone's first
+handshake message arrives (the static key is checked once, not per session),
+so Opens or connections that never handshake cost no curve operations before
+their handshake timeout. Disabling phone access closes both
+listeners/connectors and their live sessions.
+
+The data-directory file `tunnel-identity.json` stores the static X25519 and
+Ed25519 signing keys, written atomically with mode 0600. Corrupt identities are
+quarantined and replaced with a warning; existing phones must pair again.
+In-memory test services create a fresh identity without writing a file.
+
 ## Deployment modes
 
 | | On-device (`mode: local`) | Self-hosted (`mode: server`) |
 |---|---|---|
 | Runs | inside the desktop app, or `neo serve` on your laptop | `neo serve` / Docker on your server |
 | Binds | 127.0.0.1 (random port in the desktop app) | `server.host` (e.g. 0.0.0.0) behind TLS (Caddy/nginx) |
-| Auth | owner token (desktop app injects it) | owner token + per-device tokens (pairing QR) |
+| Phone access | encrypted LAN listener (7778 by default), with an optional outbound relay | public HTTPS first, or LAN-first encrypted tunnel with relay fallback |
+| Auth | owner token (desktop app injects it); paired phones use device tokens inside the tunnel | owner token + per-device tokens (one-time pairing QR) |
 | Models | local (Ollama) or cloud | local or cloud |
 | Data | `~/.neo` or the app's userData dir | `dataDir` volume |
 
-The data directory holds `neo.db` (SQLite; WAL), `key` (32-byte master key for secrets, mode 0600), `token` (owner token), `vapid.json` (web push keys) and `plugins/`. Back up the whole directory.
+The data directory holds `neo.db` (SQLite; WAL), `key` (32-byte master key for secrets, mode 0600), `token` (owner token), `vapid.json` (web push keys), `tunnel-identity.json` (static tunnel and relay-signing keys, mode 0600) and `plugins/`. Back up the whole directory.
 
 ## Security model
 
-- Single owner per server. Every API route except `/api/health` and the single-use-state-protected OpenRouter OAuth callback requires `Authorization: Bearer <token>` (owner or device token). OpenRouter sign-in starts and cancellation require the owner token. The WebSocket authenticates with its first message. Device tokens are stored hashed and are revocable.
+- Single owner per server. Every API route except `/api/health`, the single-use `/api/pairing/claim` and the single-use-state-protected OpenRouter OAuth callback requires `Authorization: Bearer <token>` (owner or device token). OpenRouter sign-in starts and cancellation require the owner token. The WebSocket authenticates with its first message. Device tokens are stored hashed and are revocable.
+- Phone access is off by default and only the owner can change it. Pairing on an on-device server enables it. The LAN port serves no plaintext API; Noise authenticates the pinned server key, then existing bearer authentication runs inside the channel. Forwarded headers from tunnel clients are discarded, and connections, streams, bodies and auth failures are bounded.
+- Relay registration proves ownership of the Ed25519 key that derives the server id, using a fresh challenge. Relay payloads stay end-to-end encrypted; the relay sees routing and traffic metadata, never bearer tokens or conversations, and never logs payloads. Connection, rate, idle and queue limits bound resource use. Proxy IP headers are trusted only when explicitly configured behind a trusted proxy.
 - API keys entered in the app are encrypted at rest (AES-256-GCM, key file in the data dir) and never returned to clients.
 - ChatGPT plan sign-in is local-mode only. Owner-only start/status/cancel routes manage a separate one-shot `127.0.0.1:<port>/callback` listener, PKCE and verified ID tokens. OAuth credentials stay in encrypted secret storage; re-authorisation opens a one-time loopback redirect so the ID-token hint never appears in NEO API JSON. The Responses adapter receives access tokens from a serialized refresh manager.
 - Tools have a risk class and a per-tool permission (`auto` / `confirm` / `deny`). `dangerous` tools default to `confirm`. Confirmations time out as denied.

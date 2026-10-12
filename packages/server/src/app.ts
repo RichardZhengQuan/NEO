@@ -13,6 +13,8 @@ import type { StorageDeviceStore } from '@neo/storage';
 import './types.js';
 import { createAuthMiddleware, getClientIp, IpFailureLimiter, ownerOnly } from './auth.js';
 import { registerHealth } from './routes/health.js';
+import { PairingService } from './pairing.js';
+import { registerPairing, registerPairingClaim } from './routes/pairing.js';
 import { registerTimeline } from './routes/conversations.js';
 import { registerMemory } from './routes/memory.js';
 import { registerReminders } from './routes/reminders.js';
@@ -23,10 +25,13 @@ import { registerProviders } from './routes/providers.js';
 import { openRouterRoutes } from './routes/openrouter.js';
 import { registerChatGPT } from './routes/chatgpt.js';
 import { registerSettings } from './routes/settings.js';
+import { registerPhoneAccess } from './routes/phone-access.js';
 import { registerTools } from './routes/tools.js';
 import { registerDevices } from './routes/devices.js';
 import { registerPush } from './routes/push.js';
 import { createWsHandler, revokeDeviceWebSockets, WS_MAX_PAYLOAD } from './ws.js';
+import { createTunnelHandler } from './tunnel/dispatch.js';
+import { createPhoneAccess } from './tunnel/manager.js';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -46,6 +51,11 @@ export function createApp(services: NeoServices): NeoApp {
   // Set the limit before any socket can be upgraded or buffered.
   wss.options.maxPayload = WS_MAX_PAYLOAD;
   const limiter = new IpFailureLimiter(services.clock);
+  const pairing = new PairingService(services.clock);
+  const handler = createTunnelHandler({ app, wsEvents: (peer) => createWsHandler(devices, services.events, services.logger, {
+    ip: peer.via === 'relay' ? `relay:${peer.ip}` : peer.ip, limiter,
+  }) });
+  const phoneAccess = createPhoneAccess({ services, handler });
   const unsubscribeRevoke = (devices as Partial<StorageDeviceStore>).onRevoke?.(id => revokeDeviceWebSockets(services.events, id));
   if (unsubscribeRevoke) {
     const close = services.close.bind(services);
@@ -95,6 +105,7 @@ export function createApp(services: NeoServices): NeoApp {
   const openRouter = openRouterRoutes(services);
   openRouter.registerPublic(app);
   registerHealth(app, services);
+  registerPairingClaim(app, services, pairing);
   app.get('/api/ws', upgradeWebSocket(c => createWsHandler(devices, services.events, services.logger, {
     ip: getClientIp(c, config.server.trustProxy), limiter,
   }), { onError: error => services.logger.debug('WebSocket transport error', { error: String(error) }) }));
@@ -114,9 +125,14 @@ export function createApp(services: NeoServices): NeoApp {
   registerNotifications(app, services);
   registerProviders(app, services);
   registerSettings(app, services);
+  app.on('PATCH', '/api/phone-access', ownerOnly());
+  registerPhoneAccess(app, services, phoneAccess);
   registerTools(app, services);
   app.on('POST', '/api/devices', ownerOnly());
   registerDevices(app, services);
+  app.on('POST', '/api/pairing', ownerOnly());
+  app.on('DELETE', '/api/pairing/:id', ownerOnly());
+  registerPairing(app, services, pairing, phoneAccess);
   registerPush(app, services, config.push.vapidPublicKey ?? null);
 
   if (config.server.webDir) {
@@ -148,5 +164,5 @@ export function createApp(services: NeoServices): NeoApp {
     });
   }
   app.notFound((c) => c.json({ code: 'not_found', message: 'Route not found' }, 404));
-  return { app, injectWebSocket(server: Server) { injectWebSocket(server); } };
+  return { app, phoneAccess, injectWebSocket(server: Server) { injectWebSocket(server); } };
 }

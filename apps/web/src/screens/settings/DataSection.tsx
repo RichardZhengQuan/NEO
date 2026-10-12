@@ -27,6 +27,7 @@ export function DataSection(): ReactElement {
   const [to, setTo] = useState('');
   const [invalidRange, setInvalidRange] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const tunnel = useSession((s) => s.credentials?.tunnel);
   const desktop = getPlatform().kind === 'electron';
   const mac = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.userAgent);
   const mod = mac ? '⌘' : 'Ctrl';
@@ -70,7 +71,7 @@ export function DataSection(): ReactElement {
       <Section title={t('dataSettings.server')} description={desktop ? t('dataSettings.on_device') : t('dataSettings.server_help')}>
         <div className="neo-card">
           <SettingRow label={t('dataSettings.address')}>
-            <span style={{ fontFamily: 'var(--neo-font-mono)', fontSize: '0.8125rem', overflowWrap: 'anywhere' }}>{serverUrl}</span>
+            <span style={{ fontFamily: 'var(--neo-font-mono)', fontSize: '0.8125rem', overflowWrap: 'anywhere' }}>{tunnel ? t('dataSettings.source_tunnel') : serverUrl}</span>
           </SettingRow>
           {health && (
             <SettingRow label={t('dataSettings.version')}>
@@ -82,7 +83,7 @@ export function DataSection(): ReactElement {
           )}
           {source && (
             <SettingRow label={t('dataSettings.connected_via')}>
-              <span>{t(`dataSettings.source_${source}`)}</span>
+              <span>{t(tunnel ? 'dataSettings.source_tunnel' : `dataSettings.source_${source}`)}</span>
             </SettingRow>
           )}
         </div>

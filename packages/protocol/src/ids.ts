@@ -19,6 +19,7 @@ export const ID_PREFIXES = [
   'dev', // device
   'push', // push subscription
   'cnf', // confirmation (single-use approval nonce)
+  'pair', // pairing session (one-time phone pairing code)
 ] as const;
 
 export type IdPrefix = (typeof ID_PREFIXES)[number];

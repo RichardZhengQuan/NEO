@@ -1,8 +1,14 @@
 /** Review tests for nextOccurrence. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RecurrenceSchema, type RecurrenceInput } from '@neo/protocol';
 import { nextOccurrence } from './recurrence.js';
 import { utcToZoned, zonedTimeToUtc } from './time.js';
+
+// Spy on the wall-clock conversion (it still runs for real): every candidate occurrence costs one call.
+vi.mock('./time.js', async (original) => {
+  const actual = await original<typeof import('./time.js')>();
+  return { ...actual, zonedTimeToUtc: vi.fn(actual.zonedTimeToUtc) };
+});
 
 const utc = (y: number, mo: number, d: number, h = 0, mi = 0) => Date.UTC(y, mo - 1, d, h, mi);
 const rule = (r: RecurrenceInput) => RecurrenceSchema.parse(r);
@@ -55,15 +61,19 @@ describe('nextOccurrence: daily', () => {
     expect(nextOccurrence(rule({ freq: 'daily', byWeekday: [1, 2, 3, 4, 5] }), utc(2026, 10, 9, 9), utc(2026, 10, 9, 9), tz)).toBe(utc(2026, 10, 12, 9));
   });
 
-  it('collapses a long downtime in one step, quickly', () => {
+  it('collapses a long downtime in one step: ten idle years cost what one idle day does', () => {
     const tz = 'Asia/Shanghai';
-    const anchor = zonedTimeToUtc({ year: 2016, month: 1, day: 1, hour: 9, minute: 0 }, tz);
     const now = utc(2026, 10, 10, 12, 15);
-    const started = performance.now();
-    for (let i = 0; i < 200; i++) {
+    const anchorAt = (year: number, month: number, day: number) => zonedTimeToUtc({ year, month, day, hour: 9, minute: 0 }, tz);
+    // Count the candidates nextOccurrence checks (one wall-clock conversion each) instead of timing it.
+    const candidates = (anchor: number) => {
+      vi.mocked(zonedTimeToUtc).mockClear();
       expect(nextOccurrence(rule({ freq: 'daily' }), anchor, now, tz)).toBe(utc(2026, 10, 11, 1));
-    }
-    expect(performance.now() - started).toBeLessThan(500);
+      return vi.mocked(zonedTimeToUtc).mock.calls.length;
+    };
+    const afterOneDay = candidates(anchorAt(2026, 10, 9));
+    expect(candidates(anchorAt(2025, 10, 10))).toBe(afterOneDay);
+    expect(candidates(anchorAt(2016, 1, 1))).toBe(afterOneDay);
   });
 });
 

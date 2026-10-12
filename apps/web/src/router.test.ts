@@ -38,6 +38,7 @@ describe('parseRoute', () => {
     ['#/onboarding', { name: 'onboarding' }],
     ['#/pair?token=abc&server=https%3A%2F%2Fneo.example.com', { name: 'pair', token: 'abc', serverUrl: 'https://neo.example.com' }],
     ['#/pair?token=abc', { name: 'pair', token: 'abc' }],
+    ['#/pair?v=2&code=abc_123&server=https%3A%2F%2Fneo.example.com', { name: 'pair', version: '2', code: 'abc_123', serverUrl: 'https://neo.example.com' }],
     ['#/unknown/thing', { name: 'timeline' }],
   ])('%s', (hash, expected) => {
     const route = parseRoute(hash);
@@ -66,6 +67,7 @@ describe('routeToHash', () => {
     { name: 'settings', section: 'ai' },
     { name: 'settings', section: 'avatar' },
     { name: 'pair', token: 't', serverUrl: 'https://a.b' },
+    { name: 'pair', version: '2', code: 'pairing_code', serverUrl: 'https://a.b' },
   ])('round-trips %j', (route) => {
     expect(parseRoute(routeToHash(route))).toMatchObject(route);
   });
@@ -85,6 +87,7 @@ describe('neoUrlToRoute', () => {
     ['neo://settings/notifications', { name: 'settings', section: 'notifications' }],
     ['NEO://Chat', { name: 'timeline' }],
     ['neo://pair?server=https%3A%2F%2Fhome.example&token=tok', { name: 'pair', token: 'tok', serverUrl: 'https://home.example' }],
+    ['neo://pair?v=2&code=pairing_code&server=https%3A%2F%2Fhome.example', { name: 'pair', version: '2', code: 'pairing_code', serverUrl: 'https://home.example' }],
     ['neo://elsewhere/x', null],
     ['https://example.com', null],
   ])('%s', (url, expected) => {

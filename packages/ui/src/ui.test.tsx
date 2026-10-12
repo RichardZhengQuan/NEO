@@ -369,10 +369,14 @@ describe('block actions', () => {
   it('reminder widget snooze and done use the reserved ids', async () => {
     const { calls, onAction } = capture();
     wrap(<BlockRenderer block={{ type: 'reminder', reminderId: 'rem_1', title: 'Stretch', dueAt: Date.now() + 60_000, status: 'scheduled' }} uiId="ui_r" onAction={onAction} />);
+    // While one action runs the other buttons are disabled, and React re-enables them only once it has settled
+    // and re-rendered, which can land after a waitFor on `calls` has returned. A click on a still-disabled
+    // button would be lost, so wait for the next button itself.
+    const enabled = (name: string) => waitFor(() => expect(screen.getByRole('button', { name })).toHaveProperty('disabled', false));
     fireEvent.click(screen.getByText('Snooze 10 min'));
-    await waitFor(() => expect(calls).toHaveLength(1));
+    await enabled('Snooze 1 h');
     fireEvent.click(screen.getByText('Snooze 1 h'));
-    await waitFor(() => expect(calls).toHaveLength(2));
+    await enabled('Done');
     fireEvent.click(screen.getByText('Done'));
     await waitFor(() => expect(calls).toHaveLength(3));
     expect(calls.map((c) => c.action.id)).toEqual(['reminder.snooze:10', 'reminder.snooze:60', 'reminder.complete']);
@@ -395,9 +399,8 @@ describe('block actions', () => {
       />,
     );
     fireEvent.click(screen.getByText('Forget'));
-    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(await screen.findByText('Forgotten')).toBeTruthy();
     expect(calls.map((c) => c.action.id)).toEqual(['memory.forget:mem_c']);
-    expect(screen.getByText('Forgotten')).toBeTruthy();
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
   });

@@ -231,7 +231,7 @@ describe('timeline responses are scoped to their session', () => {
     } } } as unknown as NeoClient;
     useSession.setState({ wsStatus: 'idle' });
     const sending = sendMessage(client, { text: 'Hello' }, t);
-    startSession('https://new.example', 'token', 'manual');
+    startSession({ serverUrl: 'https://new.example', token: 'token' }, 'manual');
     expect(signal?.aborted).toBe(true);
     resolveEvent();
     await finished;
@@ -352,7 +352,7 @@ describe('message and range deletion', () => {
     const confirm = vi.fn().mockResolvedValue(true);
     const deleting = deleteMessage(client, 'delete_me', t, confirm);
     await vi.waitFor(() => expect(deleteOne).toHaveBeenCalledOnce());
-    startSession('https://new.example', 'token', 'manual');
+    startSession({ serverUrl: 'https://new.example', token: 'token' }, 'manual');
     useTimeline.setState({ messages: [timelineMessage('delete_me')] });
     finish({ deleted: 1, messageIds: ['delete_me'], derivedMemories: 3 });
     expect(await deleting).toBe(false);
@@ -449,7 +449,7 @@ it('keeps privacy ended after a refresh failure and offers a guarded refresh ret
   toast.actions![0]!.onClick();
   await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2));
   expect(endOffRecord).toHaveBeenCalledOnce();
-  startSession('https://new.example', 'token', 'manual');
+  startSession({ serverUrl: 'https://new.example', token: 'token' }, 'manual');
   toast.actions![0]!.onClick();
   expect(list).toHaveBeenCalledTimes(2);
 });
@@ -462,7 +462,7 @@ it('a delayed privacy refresh cannot overwrite a newer session', async () => {
   useTimeline.setState({ offRecord: true });
   const ending = setOffRecord(client, false, t);
   await vi.waitFor(() => expect(list).toHaveBeenCalledOnce());
-  startSession('https://new.example', 'token', 'manual');
+  startSession({ serverUrl: 'https://new.example', token: 'token' }, 'manual');
   const current = timelineMessage('current');
   useTimeline.setState({ messages: [current] });
   complete({ items: [], episodes: [], nextCursor: null });
@@ -501,7 +501,7 @@ describe('authoritative off-record start', () => {
     let entered!: (state: { active: boolean; episodeId: string; startedAt: number }) => void;
     const client = { timeline: { startOffRecord: vi.fn().mockReturnValue(new Promise((resolve) => { entered = resolve; })) } } as unknown as NeoClient;
     const starting = setOffRecord(client, true, t);
-    startSession('https://new.example', 'token', 'manual');
+    startSession({ serverUrl: 'https://new.example', token: 'token' }, 'manual');
     entered({ active: true, episodeId: 'old-private', startedAt: 10 });
     await starting;
     expect(useTimeline.getState()).toMatchObject({ offRecord: false, startingOffRecord: false, episodes: {} });

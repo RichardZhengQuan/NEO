@@ -1,0 +1,30 @@
+{
+  "name": "@neo/tunnel",
+  "version": "0.1.0",
+  "description": "End-to-end-encrypted tunnel between a phone and its NEO server (Noise NK over WebSockets, LAN or relay). Works in browsers, Node, Electron and Capacitor.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*",
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0"
+  }
+}

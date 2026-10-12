@@ -9,18 +9,21 @@
  * @capacitor/app. Plugins are imported lazily so web bundles stay lean.
  */
 import type { NeoClient } from '@neo/client';
-import { STORAGE_KEYS, readString, writeString } from '../lib/storage.js';
+import { STORAGE_KEYS, readJson, readString, writeJson, writeString } from '../lib/storage.js';
 import { planReminderNotifications, staleNotificationIds } from './local-notifications.js';
 import type { NotificationStatus, PlatformBridge, PlatformContext } from './types.js';
 
 const ACTION_TYPE = 'neo-reminder';
 
-const STRINGS: Record<'en' | 'zh', { snooze: string; done: string; body: string }> = {
-  en: { snooze: 'Snooze 10 min', done: 'Done', body: "It's time" },
-  zh: { snooze: '10 分钟后提醒', done: '完成', body: '时间到了' },
+const STRINGS: Record<'en' | 'zh', { snooze: string; done: string; body: string; scanInstructions: string }> = {
+  en: { snooze: 'Snooze 10 min', done: 'Done', body: "It's time", scanInstructions: 'Point the camera at the code on your computer' },
+  zh: { snooze: '10 分钟后提醒', done: '完成', body: '时间到了', scanInstructions: '将相机对准电脑上的二维码' },
 };
 
 type Os = 'ios' | 'android' | 'web';
+
+const isPairLink = (url: string) => /^neo:\/\/pair(?:[/?#]|$)/i.test(url);
+const handledLaunchLinks = new Set<string>();
 
 export function createCapacitorBridge(os: Os): PlatformBridge {
   let strings = STRINGS.en;
@@ -114,6 +117,58 @@ export function createCapacitorBridge(os: Os): PlatformBridge {
       return os === 'android' ? 'Android phone' : 'iPhone';
     },
 
+    async scanQrCode() {
+      try {
+        const { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } = await import('@capacitor/barcode-scanner');
+        const result = await CapacitorBarcodeScanner.scanBarcode({
+          hint: CapacitorBarcodeScannerTypeHint.QR_CODE,
+          scanInstructions: strings.scanInstructions,
+          scanButton: false,
+        });
+        return result.ScanResult || null;
+      } catch {
+        return null;
+      }
+    },
+
+    watchPairLinks(onLink) {
+      let disposed = false;
+      let handle: { remove(): Promise<void> } | null = null;
+      void (async () => {
+        try {
+          const { App } = await import('@capacitor/app');
+          const next = await App.addListener('appUrlOpen', ({ url }) => {
+            if (!disposed && isPairLink(url)) onLink(url);
+          });
+          if (disposed) void next.remove();
+          else handle = next;
+        } catch {
+          // Plugin not installed in this shell.
+        }
+      })();
+      return () => {
+        disposed = true;
+        if (handle) void handle.remove();
+      };
+    },
+
+    async launchLink() {
+      try {
+        const { App } = await import('@capacitor/app');
+        const result = await App.getLaunchUrl();
+        const url = result?.url;
+        if (!url || !isPairLink(url)) return null;
+        const stored = readJson<{ last: string; handled: string[] }>(STORAGE_KEYS.pairingLaunchLink);
+        const handled = Array.isArray(stored?.handled) ? stored.handled.filter((value) => typeof value === 'string') : [];
+        if (handledLaunchLinks.has(url) || stored?.last === url || handled.includes(url)) return null;
+        handledLaunchLinks.add(url);
+        writeJson(STORAGE_KEYS.pairingLaunchLink, { last: url, handled: [...handled, url] });
+        return url;
+      } catch {
+        return null;
+      }
+    },
+
     openExternal(url) {
       // Capacitor opens http(s) in the system browser when navigating away.
       window.open(url, '_blank', 'noopener,noreferrer');
@@ -172,7 +227,7 @@ export function createCapacitorBridge(os: Os): PlatformBridge {
           const { App } = await import('@capacitor/app');
           keep(
             await App.addListener('appUrlOpen', ({ url }) => {
-              if (/^neo:\/\/pair/i.test(url)) ctx.onPairLink(url);
+              if (isPairLink(url)) ctx.onPairLink(url);
               else ctx.openLink(url);
             }),
           );

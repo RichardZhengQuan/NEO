@@ -8,7 +8,7 @@ import type { NeoSettings } from './config.js';
 import type { ContentPart, Episode, Message, ModelRef, Usage } from './content.js';
 import type { ErrorShape } from './errors.js';
 import type { MemoryChangeEvent, MemoryKind, MemoryNodeSummary } from './memory.js';
-import type { Note, Notification, Reminder, ReminderFiring, Task } from './productivity.js';
+import type { Device, Note, Notification, Reminder, ReminderFiring, Task } from './productivity.js';
 import type { ProviderView, StopReason } from './providers.js';
 import type { ToolRisk } from './tools.js';
 
@@ -96,7 +96,9 @@ export type ServerEvent =
   | { type: 'memory.changed'; change: MemoryChangeEvent }
   | { type: 'notification.created'; notification: Notification }
   | { type: 'provider.connected'; provider: ProviderView; state?: string }
-  | { type: 'settings.updated'; settings: NeoSettings };
+  | { type: 'settings.updated'; settings: NeoSettings }
+  /** A phone claimed a pairing code (`POST /api/pairing/claim`); closes the matching QR dialog. */
+  | { type: 'device.paired'; device: Device; pairingId: string };
 
 export type ServerEventType = ServerEvent['type'];
 

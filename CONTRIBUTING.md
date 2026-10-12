@@ -35,8 +35,10 @@ Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In short:
 - Throw `NeoError` (from `@neo/protocol`) across package boundaries. Inject `Clock` and `Logger` instead of calling `Date.now()` or `console` in library code.
 - Tests use vitest, sit next to the code (`src/**/*.test.ts`), and run **offline and deterministic**: fake clocks, fake fetch, in-memory SQLite.
 - The one exception, a Docker image smoke test (`packages/cli/src/docker.test.ts`), builds and runs the real image; it only runs with `NEO_DOCKER_TEST=1`.
+- The memory recall benchmarks ("recall stays fast", at 10k nodes in `packages/memory/src/review.test.ts` and at 1000 nodes in `memory.test.ts`) assert a median wall-clock time, so by default they only fail above 1 s and 2 s: parallel suites (`pnpm -r test`, CI) slow them several-fold. When you change recall or the memory schema, check the real 200 ms budget (20 ms at 1000 nodes, since recall scales linearly) on an otherwise idle machine with `NEO_PERF_STRICT=1 pnpm --filter @neo/memory test -t "recall stays fast"`.
 - Keep transcripts append-only. Per-turn context goes into the user message's `context` part, never into the system prompt (see "Context assembly" in the architecture doc).
 - Privacy is a feature: anything touching memory must respect the policy table at the end of [docs/MEMORY.md](docs/MEMORY.md).
+- For performance, assert the property itself rather than a wall-clock time where you can: the recurrence catch-up test counts the candidates `nextOccurrence` checks, and the `htmlToText` linearity test compares equal amounts of work at two input sizes. Parallel suites (`pnpm -r test`, CI) slow every timing sample several-fold, so tests that do time things take the median of several runs after a warm-up and by default only fail on a gross regression. `NEO_PERF_STRICT=1` applies the tight bounds, for an otherwise idle machine: `NEO_PERF_STRICT=1 pnpm --filter @neo/tools test -t "is linear"`.
 
 ## Pull requests
 

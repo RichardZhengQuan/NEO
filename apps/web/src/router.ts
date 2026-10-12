@@ -8,7 +8,8 @@
  *   #/tasks · #/tasks/<listId> · #/tasks/<taskId>
  *   #/notes · #/notes/<noteId>
  *   #/settings · #/settings/<section>
- *   #/connect · #/onboarding · #/pair?token=…&server=…
+ *   #/connect · #/onboarding · #/pair?token=…&server=… (v1)
+ *   #/pair?v=2&code=…&server=… (single-use pairing code)
  *
  * `neo://` links (notifications, generative UI) map onto the same routes.
  */
@@ -29,7 +30,7 @@ export type Route =
   | { name: 'settings'; section?: SettingsSection }
   | { name: 'connect' }
   | { name: 'onboarding' }
-  | { name: 'pair'; token?: string; serverUrl?: string };
+  | { name: 'pair'; token?: string; serverUrl?: string; code?: string; version?: string };
 
 export type RouteName = Route['name'];
 
@@ -78,7 +79,7 @@ function routeFrom(segments: string[], query: URLSearchParams): Route {
     case 'onboarding':
       return { name: 'onboarding' };
     case 'pair':
-      return { name: 'pair', token: query.get('token') ?? undefined, serverUrl: query.get('server') ?? query.get('url') ?? undefined };
+      return { name: 'pair', token: query.get('token') ?? undefined, serverUrl: query.get('server') ?? query.get('url') ?? undefined, code: query.get('code') ?? undefined, version: query.get('v') ?? undefined };
     default:
       return { name: 'timeline' };
   }
@@ -123,6 +124,8 @@ export function routeToHash(route: Route): string {
       return '#/onboarding';
     case 'pair': {
       const q = new URLSearchParams();
+      if (route.version) q.set('v', route.version);
+      if (route.code) q.set('code', route.code);
       if (route.token) q.set('token', route.token);
       if (route.serverUrl) q.set('server', route.serverUrl);
       const s = q.toString();

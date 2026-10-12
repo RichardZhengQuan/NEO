@@ -45,7 +45,7 @@ const provider: ProviderView = { id: 'old', kind: 'ollama', label: 'Old provider
 
 beforeEach(() => {
   vi.clearAllMocks();
-  startSession('https://a.example', 'a', 'manual');
+  startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
   useSession.setState({ settings: DEFAULT_SETTINGS });
 });
 afterEach(cleanup);
@@ -61,7 +61,7 @@ describe('screen mutations after a server switch (F10)', () => {
     expect(client.tasks.update).toHaveBeenCalledWith(task.id, { done: true });
     expect(useData.getState().tasks[task.id]!.done).toBe(true);
     unmount();
-    startSession('https://b.example', 'b', 'manual');
+    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     await act(async () => {
       if (outcome === 'resolve') response.resolve({ ...task, done: true });
       else response.reject(new Error('A failed'));
@@ -80,7 +80,7 @@ describe('screen mutations after a server switch (F10)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create reminder' }));
     expect(client.reminders.create).toHaveBeenCalledTimes(1);
     unmount();
-    startSession('https://b.example', 'b', 'manual');
+    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     await act(async () => { response.resolve({ id: 'rem_a', title: 'A', notes: null, dueAt: 1000, timezone: 'UTC', recurrence: null, status: 'scheduled', firedCount: 0, lastFiredAt: null, messageId: null, createdAt: 0, updatedAt: 0 }); });
     expect(useData.getState().reminders).toEqual({});
   });
@@ -94,7 +94,7 @@ describe('screen mutations after a server switch (F10)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Disable Old provider' }));
     expect(client.providers.update).toHaveBeenCalledWith('old', { enabled: false });
     unmount();
-    const b = startSession('https://b.example', 'b', 'manual');
+    const b = startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     await act(async () => { response.resolve({ ...provider, enabled: false }); });
     expect(b.providers.list).not.toHaveBeenCalled();
     expect(useSession.getState().providers).toBeNull();
@@ -110,7 +110,7 @@ describe('screen mutations after a server switch (F10)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
     expect(client.providers.create).toHaveBeenCalledTimes(1);
     unmount();
-    const b = startSession('https://b.example', 'b', 'manual');
+    const b = startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
     await act(async () => { response.resolve(provider); });
     expect(b.providers.list).not.toHaveBeenCalled();
     expect(b.providers.models).not.toHaveBeenCalled();

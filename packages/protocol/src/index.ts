@@ -18,3 +18,5 @@ export * from './config.js';
 export * from './events.js';
 export * from './services.js';
 export * from './api.js';
+export * from './pairing.js';
+export * from './tunnel.js';

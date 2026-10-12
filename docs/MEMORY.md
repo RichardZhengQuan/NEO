@@ -223,7 +223,7 @@ Normal turns reinforce. Off-record automatic and tool recall do not write reinfo
 
    `similarity` is the blended vector similarity for vector seeds (else 0). The result also reports `seeds` (count), `considered` (nodes that got activation) and `tookMs`.
 
-Recall is a brute-force scan over the cached vectors plus a few indexed queries; the test suite keeps a 10k-node net with edges under 200 ms.
+Recall is a brute-force scan over the cached vectors plus a few indexed queries; on an idle machine a 10k-node net with edges recalls in under 200 ms (median), which the test suite checks with `NEO_PERF_STRICT=1` (by default it allows 1 s, so parallel test runs don't make it flaky).
 
 ## Write path: `observe(turn)`
 

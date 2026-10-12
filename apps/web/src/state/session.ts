@@ -4,8 +4,8 @@
  */
 import { create } from 'zustand';
 import { applySettingsPatch, type HealthResponse, type ModelInfo, type NeoSettings, type NeoSettingsPatch, type ProvidersResponse } from '@neo/protocol';
-import { NeoClient, type ConnectionStatus } from '@neo/client';
-import type { ConnectionSource } from '../connection.js';
+import type { NeoClient, ConnectionStatus } from '@neo/client';
+import { createServerClient, type ConnectionSource, type Credentials } from '../connection.js';
 import { STORAGE_KEYS, writeString } from '../lib/storage.js';
 import { resetTimeline } from './timeline.js';
 import { useData } from './data.js';
@@ -18,6 +18,7 @@ export interface ConnectHint {
   reason: 'none' | 'unauthorized' | 'pair-failed' | 'same-origin' | 'manual';
   serverUrl?: string;
   token?: string;
+  tunnel?: Credentials['tunnel'];
 }
 
 export interface SessionState {
@@ -25,6 +26,7 @@ export interface SessionState {
   connectHint: ConnectHint | null;
   client: NeoClient | null;
   serverUrl: string | null;
+  credentials: Credentials | null;
   source: ConnectionSource | null;
   health: HealthResponse | null;
   settings: NeoSettings | null;
@@ -44,6 +46,7 @@ export const useSession = create<SessionState>(() => ({
   connectHint: null,
   client: null,
   serverUrl: null,
+  credentials: null,
   source: null,
   health: null,
   settings: null,
@@ -98,13 +101,14 @@ function resetSessionData(): void {
   setDrawer(false);
 }
 
-export function startSession(serverUrl: string, token: string, source: ConnectionSource): NeoClient {
-  const client = new NeoClient({ baseUrl: serverUrl, token });
+export function startSession(credentials: Credentials, source: ConnectionSource): NeoClient {
+  const client = createServerClient(credentials);
   resetSessionData();
-  resetTimeline(serverUrl);
+  resetTimeline(credentials.serverUrl);
   useSession.setState((s) => ({
     client,
-    serverUrl,
+    serverUrl: credentials.serverUrl,
+    credentials,
     source,
     phase: 'booting',
     connectHint: null,
@@ -120,7 +124,7 @@ export function startSession(serverUrl: string, token: string, source: Connectio
 
 export function showConnect(hint: ConnectHint): void {
   resetSessionData();
-  useSession.setState((s) => ({ phase: 'connect', connectHint: hint, client: null, settings: null, health: null, wsStatus: 'idle', providers: null, models: {}, sessionEpoch: s.sessionEpoch + 1 }));
+  useSession.setState((s) => ({ phase: 'connect', connectHint: hint, client: null, credentials: null, settings: null, health: null, wsStatus: 'idle', providers: null, models: {}, sessionEpoch: s.sessionEpoch + 1 }));
 }
 
 export function setSettings(settings: NeoSettings): void {

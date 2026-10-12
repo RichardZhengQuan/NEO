@@ -1,0 +1,35 @@
+{
+  "name": "@neo/relay",
+  "version": "0.1.0",
+  "description": "NEO relay: forwards end-to-end-encrypted tunnel traffic between phones and NEO servers. Sees only ciphertext. Self-hostable.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "neo-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "neo-relay": "./dist/main.js"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@neo/protocol": "workspace:*",
+    "@neo/tunnel": "workspace:*",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2"
+  }
+}
