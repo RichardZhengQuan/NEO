@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MemoryEdge, MemoryGraph, MemoryKind, ToolUseEvent } from '@neo/protocol';
 import {
+  countMemories,
   buildMemoryNet3DLayout,
   createMemoryTimeScale,
   generateMemoryTimeTicks,
@@ -285,5 +286,13 @@ describe('tool-use spine markers', () => {
     expect(layout.toolMarkers).toHaveLength(2);
     expect(layout.toolMarkers.every((marker) => Number.isFinite(marker.y))).toBe(true);
     expect(layout.timeOrder).not.toContain(toolUseFocusId('bad'));
+  });
+});
+
+describe('memory counts', () => {
+  it('leaves out the self node so the net agrees with Stats', () => {
+    expect(countMemories([{ id: 'mem_self' }, { id: 'mem_a' }, { id: 'mem_b' }])).toBe(2);
+    expect(countMemories([{ id: 'mem_a' }])).toBe(1);
+    expect(countMemories([])).toBe(0);
   });
 });

@@ -4,7 +4,7 @@
  */
 import { useMemo, useState, type ReactElement } from 'react';
 import { MEMORY_KINDS, type MemoryKind, type ToolUseEvent } from '@neo/protocol';
-import { Button, Chip, EmptyState, GraphLegend, Icon, IconButton, MemoryNet3D, Skeleton, Switch, TextField, useT } from '@neo/ui';
+import { Button, Chip, EmptyState, GraphLegend, Icon, IconButton, MemoryNet3D, Skeleton, Switch, TextField, countMemories, useT } from '@neo/ui';
 import { useDebounced, useLoader } from '../../hooks/useLoader.js';
 import { useIsDesktop } from '../../hooks/useMediaQuery.js';
 import { useData } from '../../state/data.js';
@@ -139,7 +139,7 @@ export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId:
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
             <GraphLegend />
             <span className="neo-help" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}><Icon name="book" size={14} />{t('memoryNet.tool_uses_legend')}</span>
-            <span className="neo-help">{t('memoryNet.counts', { nodes: graph.data.nodes.length, edges: graph.data.edges.length })}</span>
+            <span className="neo-help">{t('memoryNet.counts', { nodes: countMemories(graph.data.nodes), edges: graph.data.edges.length })}</span>
           </div>
           {showToolUses && Boolean(toolUses.error) && <div role="status" className="neo-help">{t('memoryNet.tool_uses_error')} <Button variant="ghost" size="sm" onClick={() => void toolUses.reload()}>{t('common.retry')}</Button></div>}
           <p className="neo-help" style={{ margin: 0 }}>

@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { ToolUseEvent } from '@neo/protocol';
 import { GraphLegend, MemoryGraphView, type MemoryGraphViewProps } from './memory-graph.js';
-import { buildMemoryNet3DLayout, toolUseFocusId } from './memory-net-3d-layout.js';
+import { buildMemoryNet3DLayout, countMemories, toolUseFocusId } from './memory-net-3d-layout.js';
 import { createMemoryNetScene, defaultToolUseLabels, type MemoryNetScene } from './memory-net-3d-scene.js';
 import { useLocale, useT } from './i18n.js';
 import { Icon } from './icons.js';
@@ -113,7 +113,7 @@ export function MemoryNet3D({ graph, selectedId = null, highlightIds, onSelect, 
         style={{ height }}
         role="group"
         tabIndex={0}
-        aria-label={t('memory.graph_3d_aria', { nodes: graph.nodes.length, edges: graph.edges.length })}
+        aria-label={t('memory.graph_3d_aria', { nodes: countMemories(graph.nodes), edges: graph.edges.length })}
         aria-busy={phase === 'loading'}
         onKeyDown={(event) => {
           if (event.key === 'Escape' && openToolGroup) {

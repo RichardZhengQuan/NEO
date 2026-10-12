@@ -1,5 +1,13 @@
 import type { MemoryEdge, MemoryGraph, MemoryKind, MemoryNode, ToolUseEvent } from '@neo/protocol';
 
+/** The user's own node (`SELF_MEMORY_ID` in @neo/protocol): drawn as the time spine, never counted as a memory. */
+export const SELF_ID = 'mem_self';
+
+/** Memories shown in the net, leaving out the self node so counts match Stats. */
+export function countMemories(nodes: readonly { id: string }[]): number {
+  return nodes.reduce((n, node) => (node.id === SELF_ID ? n : n + 1), 0);
+}
+
 const DAY = 86_400_000;
 const KINDS: readonly MemoryKind[] = ['entity', 'fact', 'preference', 'goal', 'skill', 'episode', 'summary'];
 
@@ -177,7 +185,7 @@ function hashId(id: string): number {
 
 /** Oldest first, with stable ties. The self spine is not a memory to step through. */
 export function memoryTimeOrder(nodes: readonly Pick<MemoryNode, 'id' | 'createdAt'>[]): string[] {
-  return nodes.filter((node) => node.id !== 'mem_self').slice()
+  return nodes.filter((node) => node.id !== SELF_ID).slice()
     .sort((a, b) => finite(a.createdAt, 0) - finite(b.createdAt, 0) || a.id.localeCompare(b.id))
     .map((node) => node.id);
 }
@@ -191,8 +199,8 @@ export function stepMemoryInTime(order: readonly string[], currentId: string | n
 
 /** All forces act only on x/z. The simulation finishes before any frame is drawn. */
 export function buildMemoryNet3DLayout(graph: MemoryGraph, options: MemoryNet3DLayoutOptions = {}): MemoryNet3DLayout {
-  const spine = graph.nodes.find((node) => node.id === 'mem_self') ?? null;
-  const memories = graph.nodes.filter((node) => node.id !== 'mem_self').slice().sort((a, b) => a.id.localeCompare(b.id));
+  const spine = graph.nodes.find((node) => node.id === SELF_ID) ?? null;
+  const memories = graph.nodes.filter((node) => node.id !== SELF_ID).slice().sort((a, b) => a.id.localeCompare(b.id));
   const timestamps = memories.flatMap((node) => node.kind === 'entity' && node.lastAccessedAt !== null && node.lastAccessedAt > node.createdAt
     ? [node.createdAt, node.lastAccessedAt] : [node.createdAt]);
   const toolUses = (options.toolUses ?? []).filter((event) => Number.isFinite(event.at));
@@ -203,7 +211,7 @@ export function buildMemoryNet3DLayout(graph: MemoryGraph, options: MemoryNet3DL
   const linkedToSelf = new Map<string, number>();
   for (const edge of graph.edges) {
     if (!spine) continue;
-    const id = edge.from === 'mem_self' ? edge.to : edge.to === 'mem_self' ? edge.from : null;
+    const id = edge.from === SELF_ID ? edge.to : edge.to === SELF_ID ? edge.from : null;
     if (id) linkedToSelf.set(id, Math.max(linkedToSelf.get(id) ?? 0, clamp(finite(edge.weight, 0), 0, 1)));
   }
   const initialRadius = 40 + Math.sqrt(memories.length) * 3;
@@ -292,11 +300,11 @@ export function buildMemoryNet3DLayout(graph: MemoryGraph, options: MemoryNet3DL
       edges.push({ edge, from: { x: from.x, y: from.y, z: from.z }, to: { x: to.x, y: to.y, z: to.z }, spoke: false });
       continue;
     }
-    const memory = edge.from === 'mem_self' ? to : edge.to === 'mem_self' ? from : undefined;
+    const memory = edge.from === SELF_ID ? to : edge.to === SELF_ID ? from : undefined;
     if (!spine || !memory) continue;
     const origin = { x: 0, y: edge.type === 'about' ? memory.y : timeScale.yAt(spine.createdAt), z: 0 };
     const point = { x: memory.x, y: memory.y, z: memory.z };
-    edges.push({ edge, from: edge.from === 'mem_self' ? origin : point, to: edge.from === 'mem_self' ? point : origin, spoke: edge.type === 'about' });
+    edges.push({ edge, from: edge.from === SELF_ID ? origin : point, to: edge.from === SELF_ID ? point : origin, spoke: edge.type === 'about' });
   }
   return {
     nodes: positioned,
