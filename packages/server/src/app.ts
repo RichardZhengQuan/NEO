@@ -150,6 +150,9 @@ export function createApp(services: NeoServices): NeoApp {
       const resolved = await realpath(candidate).catch(() => null);
       if (resolved && resolved !== root && !resolved.startsWith(`${root}${sep}`)) throw new NeoError('not_found', 'File not found');
       const isFile = resolved && await stat(resolved).then((s) => s.isFile(), () => false);
+      // Only app routes fall back to the shell. A missing file (an asset mid-rebuild)
+      // must 404, or the browser and service worker take the HTML for that file.
+      if (!isFile && extname(pathname)) throw new NeoError('not_found', 'File not found');
       const file = isFile ? resolved : resolve(root, 'index.html');
       // Verify fallback too: symlinks must never expose files outside the app.
       const actual = await realpath(file).catch(() => { throw new NeoError('not_found', 'Web app not found'); });
