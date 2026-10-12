@@ -1,4 +1,4 @@
-import { fromJson, type Migration } from './db.js';
+import { fromJson, type Migration, type NeoDatabase } from './db.js';
 
 /** Tables owned by @neo/storage (namespace 'storage'). */
 export const storageMigrations: Migration[] = [
@@ -130,4 +130,97 @@ export const storageMigrations: Migration[] = [
       }
     },
   },
+  {
+    version: 4,
+    name: 'retire legacy default demo provider',
+    up: retireLegacyDemoProvider,
+  },
+  {
+    version: 5,
+    name: 'continuous timeline episodes and message search',
+    up: `
+      ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'episode';
+      ALTER TABLE conversations ADD COLUMN off_record INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE conversations ADD COLUMN ephemeral INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE conversations ADD COLUMN started_at INTEGER;
+      ALTER TABLE conversations ADD COLUMN closed_at INTEGER;
+      UPDATE conversations SET
+        off_record = incognito,
+        started_at = COALESCE((SELECT MIN(created_at) FROM messages WHERE conversation_id = conversations.id), created_at),
+        last_message_at = (SELECT MAX(created_at) FROM messages WHERE conversation_id = conversations.id),
+        closed_at = COALESCE((SELECT MAX(created_at) FROM messages WHERE conversation_id = conversations.id), updated_at);
+      CREATE INDEX episodes_by_start ON conversations (started_at, id);
+      CREATE INDEX ephemeral_episodes_by_start ON conversations (ephemeral, off_record, started_at);
+      CREATE INDEX messages_by_time ON messages (created_at, id);
+
+      CREATE VIRTUAL TABLE message_fts USING fts5(message_id UNINDEXED, text, tokenize = 'unicode61');
+      INSERT INTO message_fts (rowid, message_id, text)
+        SELECT messages.rowid, messages.id,
+          COALESCE((SELECT group_concat(json_extract(value, '$.text'), '')
+                    FROM json_each(messages.parts) WHERE json_extract(value, '$.type') = 'text'), '')
+        FROM messages;
+      CREATE TRIGGER message_fts_insert AFTER INSERT ON messages BEGIN
+        INSERT INTO message_fts (rowid, message_id, text) VALUES (new.rowid, new.id,
+          COALESCE((SELECT group_concat(json_extract(value, '$.text'), '')
+                    FROM json_each(new.parts) WHERE json_extract(value, '$.type') = 'text'), ''));
+      END;
+      CREATE TRIGGER message_fts_update AFTER UPDATE OF parts ON messages BEGIN
+        DELETE FROM message_fts WHERE rowid = old.rowid;
+        INSERT INTO message_fts (rowid, message_id, text) VALUES (new.rowid, new.id,
+          COALESCE((SELECT group_concat(json_extract(value, '$.text'), '')
+                    FROM json_each(new.parts) WHERE json_extract(value, '$.type') = 'text'), ''));
+      END;
+      CREATE TRIGGER message_fts_delete AFTER DELETE ON messages BEGIN
+        DELETE FROM message_fts WHERE rowid = old.rowid;
+      END;
+    `,
+  },
+  {
+    version: 6,
+    name: 'persist timeline off-record state',
+    up: `
+      CREATE TABLE timeline_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        off_record_started_at INTEGER,
+        private_episode_id TEXT REFERENCES conversations (id) ON DELETE SET NULL
+      );
+      INSERT INTO timeline_state (id, off_record_started_at, private_episode_id)
+        VALUES (1, NULL, NULL);
+      UPDATE timeline_state SET
+        private_episode_id = (SELECT id FROM conversations
+          WHERE off_record = 1 AND ephemeral = 1 AND closed_at IS NULL ORDER BY started_at DESC, rowid DESC LIMIT 1),
+        off_record_started_at = (SELECT started_at FROM conversations
+          WHERE off_record = 1 AND ephemeral = 1 AND closed_at IS NULL ORDER BY started_at DESC, rowid DESC LIMIT 1);
+    `,
+  },
 ];
+
+/** Startup can retire orphan references after checking config-file providers as well. */
+export function retireLegacyDemoProvider(db: NeoDatabase, retireOrphanReferences = false): void {
+  const row = db.prepare('SELECT config FROM provider_configs WHERE id = ?').get('demo') as { config: string } | undefined;
+  const parsedProvider = fromJson<unknown>(row?.config, null);
+  const provider = parsedProvider && typeof parsedProvider === 'object' ? parsedProvider as Record<string, unknown> : {};
+  const legacy = provider.id === 'demo' && provider.kind === 'mock';
+  const preserveReferences = provider.id === 'demo' && provider.kind !== 'mock';
+  if (legacy) db.prepare('DELETE FROM provider_configs WHERE id = ?').run('demo');
+  const pointsAtDemo = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return false;
+    const ref = value as Record<string, unknown>;
+    return !preserveReferences && ref.provider === 'demo' && (legacy || retireOrphanReferences);
+  };
+  const settings = db.prepare('SELECT value FROM settings WHERE key = ?').get('settings') as { value: string } | undefined;
+  const parsedSettings = fromJson<unknown>(settings?.value, null);
+  const value = parsedSettings && typeof parsedSettings === 'object' ? parsedSettings as Record<string, unknown> : {};
+  let changed = false;
+  for (const key of ['defaultModel', 'memoryModel', 'titleModel', 'embedding']) {
+    if (!pointsAtDemo(value[key])) continue;
+    value[key] = null;
+    changed = true;
+  }
+  if (changed) db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(JSON.stringify(value), 'settings');
+  const conversations = db.prepare('SELECT id, model FROM conversations WHERE model IS NOT NULL').all() as { id: string; model: string }[];
+  for (const conversation of conversations) {
+    if (pointsAtDemo(fromJson(conversation.model, null))) db.prepare('UPDATE conversations SET model = NULL WHERE id = ?').run(conversation.id);
+  }
+  // Historical message models and parts remain byte-identical for replay.
+}

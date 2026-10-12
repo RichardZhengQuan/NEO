@@ -8,15 +8,21 @@ NEO's memory is a **network**, not a list of notes. Like human memory, it has
 - **forgetting curves**: unused memories fade (retention `R = e^(−Δt/S)`). Each recall strengthens a memory more when it was nearly forgotten (the spacing effect);
 - **consolidation ("sleep")**: in idle time, NEO prunes faded links, archives faded memories, links similar ones, merges duplicate entities, and abstracts clusters of episodes into lasting knowledge. A **dream journal** shows what changed;
 - **belief revision**: new information *supersedes* old beliefs instead of silently overwriting them ("you used to prefer aisle seats");
-- **provenance**: every memory knows where it came from (conversation, message, and whether extraction, the user, a tool or consolidation wrote it).
+- **personality grows from preferences**: requests about reply length, language, tone and conversational names become `preference` memories tagged `assistant-style`, so NEO adapts through conversations;
+- **provenance**: every memory knows where it came from (timeline episode, message, and whether extraction, the user, a tool or consolidation wrote it).
 
-And because it's *your* assistant, **you control all of it**. You can see the whole net, edit, pin, forget, export and import it. You can require approval before anything is remembered, block topics, keep sensitive memories away from cloud models (and cloud embedders), and use incognito conversations.
+And because it's *your* assistant, **you control all of it**. You can see the whole net, edit, pin, forget, export and import it. NEO remembers what matters automatically. You can review, edit or forget anything in Memory, keep sensitive memories away from cloud models (and cloud embedders), and go off the record.
 
 Public API: `MemoryService` in `@neo/protocol` (`memory.ts`). Implementation: `@neo/memory` (`packages/memory/src`). Constants: `MEMORY_CONSTANTS` and `BASE_STABILITY_DAYS`, defined in `constants.ts` and re-exported from `index.ts`; names below refer to them, and [Constants](#constants) lists every value.
 
 ## Data model (SQLite, migration namespace `memory`)
 
-One migration, version 1 (`initial`), in `schema.ts`:
+Migrations in `schema.ts`:
+
+- Version 1 (`initial`): the net tables below; this migration stays unchanged.
+- Version 2 (`remove unapproved memories`): deletes legacy `pending` nodes, their FTS rows, vectors and every touching edge explicitly, including when foreign keys are disabled, and redacts related dream-journal notes. Never-approved memories are discarded rather than activated. Existing active nodes are unchanged.
+
+The current data model:
 
 ```sql
 CREATE TABLE IF NOT EXISTS memory_nodes (
@@ -35,14 +41,14 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
   last_accessed_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,         -- moves on edits only, never on reinforcement
-  status TEXT NOT NULL,                -- active|pending|archived|superseded
+  status TEXT NOT NULL,                -- active|archived|superseded
   pinned INTEGER NOT NULL DEFAULT 0,
   sensitivity TEXT NOT NULL DEFAULT 'normal',   -- normal|sensitive
   source TEXT NOT NULL,                -- JSON MemorySource {by, conversationId?, messageId?, note?}
   embedding_model TEXT,                -- model id of the stored vector; NULL = needs (re-)embedding
   valid_until INTEGER,
   consolidated_at INTEGER,
-  metadata TEXT                        -- JSON; revisions keep {reason?}, pending ones also {supersedes: <id>}
+  metadata TEXT                        -- JSON; revisions keep {reason?}
 );
 CREATE INDEX IF NOT EXISTS memory_nodes_by_status ON memory_nodes (status, kind);
 CREATE INDEX IF NOT EXISTS memory_nodes_by_label ON memory_nodes (kind, norm_label);
@@ -80,7 +86,7 @@ CREATE TABLE IF NOT EXISTS memory_journal (
 
 CREATE TABLE IF NOT EXISTS memory_meta (
   key TEXT PRIMARY KEY,
-  value TEXT NOT NULL                  -- only key today: lastConsolidationAt (epoch ms)
+  value TEXT NOT NULL                  -- lastConsolidationAt (epoch ms), versioned startup migration markers
 );
 ```
 
@@ -100,7 +106,7 @@ CREATE TABLE IF NOT EXISTS memory_meta (
 - `createProviderEmbedder(adapter, model)`, id `<provider>:<model>`, wraps the provider's embeddings endpoint (OpenAI `text-embedding-3-small`, Ollama `nomic-embed-text`, Gemini `gemini-embedding-001`, …). It sends batches of 64, checks that the count matches, that values are finite and that dimensions never change, and L2-normalizes. `isLocal` is the adapter's own `isLocal === true`. An embedder that doesn't say it is local is treated as remote.
 - `LocalFallbackEmbedder(512)`, id **`local-hash2-512`**, is a `HashingEmbedder` under its own id (`local-` + the hashing embedder's id). When the main embedder is remote, it embeds every text that must stay on the device (see below). The separate id keeps its vectors in a **separate vector space**.
 
-**Which embedder a text goes to.** `localEmbedder = embedder` when the main embedder is local, else a `LocalFallbackEmbedder`. A memory **must stay on the device** (`keepLocal`) when the main embedder is remote and the memory is either sensitive (unless `policy.sendSensitiveToCloud`) or pending approval. Its text, and the names of entities created for it, go only to `local-hash2-512`, and its vector is stored under that model id. Vectors of different models are never compared with each other, even when they have the same dimensions: dedupe (also the same-turn dedupe), MMR, link discovery and entity merging only compare vectors of the same model, and recall embeds the query in each space (see [Read path](#read-path-recallquery)).
+**Which embedder a text goes to.** `localEmbedder = embedder` when the main embedder is local, else a `LocalFallbackEmbedder`. A memory **must stay on the device** (`keepLocal`) when the main embedder is remote and the memory is sensitive (unless `policy.sendSensitiveToCloud`). Its text, and the names of entities created for it, go only to `local-hash2-512`, and its vector is stored under that model id. Vectors of different models are never compared with each other, even when they have the same dimensions: dedupe (also the same-turn dedupe), MMR, link discovery and entity merging only compare vectors of the same model, and recall embeds the query in each space (see [Read path](#read-path-recallquery)).
 
 **Cache.** One `Map<nodeId, Float32Array>` per model id, loaded lazily from `memory_vectors`. Writers compute embeddings before their transaction, write the vector rows inside it, and update the cache only after commit, so a rollback never leaves a stale vector in the cache. A zero vector (some endpoints return one) is kept as-is: it matches nothing, but the node counts as embedded. A corrupt blob counts as missing.
 
@@ -108,7 +114,7 @@ CREATE TABLE IF NOT EXISTS memory_meta (
 
 - at service start and after a live embedder change, including a new version of the hashing embedder (`hash-512` → `hash2-512`, `local-hash-512` → `local-hash2-512`); changes to embedding settings or the selected provider rebuild the live embedder, and an unavailable provider falls back to `hash2-512`;
 - after any write that couldn't embed (embedder failure), or whose vector was computed in another space than the one the node belongs to (a merge that replaced a sensitive memory's content, see [the create path](#the-create-path));
-- after a node moved place (approved, or became sensitive);
+- after a node became sensitive;
 - when `sendSensitiveToCloud` is switched on (sensitive memories move to the main embedder), and when it is switched off again: sensitive memories embedded by the main embedder get `embedding_model = NULL`, their main-model vectors leave the cache at once, and they are re-embedded on the device (their text is not sent anywhere);
 - as the first step of consolidation.
 
@@ -121,12 +127,12 @@ Recall keeps working meanwhile: a node without a vector just isn't a vector seed
 - **Reinforcement on use**:
   `S ← min(maxStabilityDays, S × (1 + stabilityGain × (1 − R_now)) + stabilityEpsilonDays)`; `accessCount += 1`; `lastAccessedAt = max(now, lastAccessedAt)`.
   Recalling a nearly forgotten memory almost doubles its stability, while recalling a fresh one barely changes it (the spacing effect). Reinforcement is an access, not an edit, so `updated_at` and the FTS row don't change. It is applied:
-  - to memories recalled with `reinforce !== false` while the mode isn't `off`;
+  - to memories recalled with `reinforce !== false`;
   - when a create merges into an existing memory (re-mention, a duplicate `remember`);
   - by an extracted `update` op;
   - by an extracted `reinforce` op (active memories only).
 - **Edges**: effective weight `w_eff = w × 0.5^(Δt / edgeHalfLifeDays)` for the non-structural types (`related`, `mentions`, `similar`, `causes`, `contradicts`), with `Δt` = days since `last_reinforced_at`. Structural types keep `w`.
-- **Hebbian co-activation**: after a reinforcing recall, the selected memories whose strongest seed source was the query itself (vector, keyword or entity, but not the pinned "core" or profile seeds, so always-on memories don't get wired to everything) are ranked by score. Every pair among the top `hebbianPairs` (5) gets its `related` edge (either direction) strengthened: `w ← min(1, w_eff + hebbianRate × (1 − w_eff))`, `coactivations += 1`, `last_reinforced_at = now`. A missing edge is created at `hebbianRate` with `coactivations = 1`.
+- **Hebbian co-activation**: after a reinforcing recall, the selected memories whose strongest seed source was the query itself (vector, keyword or entity, but not the pinned "core" or profile seeds) are ranked by score. Always-on `assistant-style` preferences are excluded even when they also match the query, so they don't get wired to everything. Every pair among the top `hebbianPairs` (5) gets its `related` edge (either direction) strengthened: `w ← min(1, w_eff + hebbianRate × (1 − w_eff))`, `coactivations += 1`, `last_reinforced_at = now`. A missing edge is created at `hebbianRate` with `coactivations = 1`.
 
 ## Read path: `recall(query)`
 
@@ -136,13 +142,13 @@ recall({ text, context?, conversationId?, limit?, tokenBudget?, kinds?, allowSen
 
 - `text` is what the user said. It drives every seed source (semantic, keyword, entity, profile).
 - `context` is optional surrounding text. It can only nudge the semantic similarity up, and it never feeds keyword, entity or profile seeds, so NEO's own wording can't flood recall.
-- `conversationId` is the conversation being answered.
+- `conversationId` is the internal timeline episode id being answered. `source.messageId` resolves directly to a timeline message, even after the episode closes.
 - `limit` defaults to `policy.recallLimit` (12) and `tokenBudget` to `policy.recallTokenBudget` (1500).
-- An empty `text` or `limit = 0` returns nothing.
+- `limit = 0` returns nothing. Empty `text` (for example, an image-only turn) recalls only active assistant-style preferences; it does not embed the query or spread activation.
 
 **Callers.**
 
-- **Core**, before each turn, unless the conversation is incognito or `policy.recall` is false. It passes:
+- **Core**, before each turn, unless `policy.recall` is false; off-record recall is read-only (`reinforce: false`). It passes:
   - `text`: the user's text parts plus the descriptions of UI events (tags removed);
   - `context`: the last ≤ 300 characters of the previous assistant reply;
   - `conversationId`;
@@ -150,11 +156,11 @@ recall({ text, context?, conversationId?, limit?, tokenBudget?, kinds?, allowSen
   - `allowSensitive = chatAdapter.isLocal || policy.sendSensitiveToCloud`.
 
   A failure is logged and the turn continues without memories.
-- **The model's `recall` tool**: `{ text: query, limit: limit ?? 8 (≤ 20), allowSensitive, conversationId }`. When `policy.recall` is false (read on every call), it doesn't recall and answers `{ memories: [], note: "Memory recall is turned off …" }`: a normal result, not an error the model would retry. Incognito conversations don't have the tool (see [Privacy rules](#privacy-rules-summary)).
+- **The model's `recall` tool**: `{ text: query, limit: limit ?? 8 (≤ 20), allowSensitive, conversationId }`. When `policy.recall` is false (read on every call), it doesn't recall and answers `{ memories: [], note: "Memory recall is turned off …" }`: a normal result, not an error the model would retry. Off-record episodes keep the recall tool but disable reinforcement (see [Privacy rules](#privacy-rules-summary)).
 
-Both reinforce.
+Normal turns reinforce. Off-record automatic and tool recall do not write reinforcement or associations.
 
-1. **Candidates**: `status = 'active'` (plus `archived` with `includeArchived`) and not expired (`valid_until IS NULL OR valid_until > now`). With `kinds`, only those kinds. **Sensitive memories are excluded unless `allowSensitive`**. With a `conversationId`, **that conversation's own episodes are excluded**: they are already in the transcript (working memory). Facts learned in it, and other conversations' episodes, stay recallable. Pending and superseded memories are never recalled. Every seed source and every spreading step is restricted to candidates.
+1. **Candidates**: `status = 'active'` (plus `archived` with `includeArchived`) and not expired (`valid_until IS NULL OR valid_until > now`). With `kinds`, only those kinds. **Sensitive memories are excluded unless `allowSensitive`**. With a `conversationId`, **that timeline episode's own memory episodes are excluded**: they are already in the transcript (working memory). Facts learned in it, and other timeline episodes' memories, stay recallable. Superseded memories are never recalled. Every seed source and every spreading step is restricted to candidates.
 2. **Seeds** (a node's seed activation is the max over the sources, and the winning source names it):
    - *Vector*: the query is embedded per space. In the main space, `text` goes always, and `context` only if the main embedder is local, or `allowSensitive` is false, or `sendSensitiveToCloud` is set (a local model's reply may quote sensitive memories). When the main embedder is remote, the query is also embedded in the `local-hash2-512` space, with the context. Each candidate is compared in the space of its stored vector (main if it has one, else local). The **blended similarity** is
 
@@ -186,6 +192,7 @@ Both reinforce.
 
      Chit-chat like "I like it" is not a profile question. When it is one, the top `profileSeedLimit` (8) active candidates of kinds fact, preference, goal and entity (within the `kinds` filter), ranked by `importance × R` (ties by id), seed at `profileActivation` (0.35). Every candidate filter still applies (sensitivity, conversation, expiry).
    - *Core*: up to `pinnedAlwaysLimit` (6) pinned candidates, highest importance first (ties by id), get at least `pinnedActivationFloor` (0.3).
+   - *Assistant style*: up to 5 active `preference` candidates tagged `assistant-style` are included on every recall, even for unrelated queries. Newest preferences come first, with strength breaking ties. They receive priority within the total recall limit and token budget; expired, superseded, archived and disallowed sensitive memories are excluded. They do not participate in Hebbian co-activation.
 3. **Spreading activation** (`spreadHops` = 2 hops, decay `D = spreadDecay` = 0.5):
    ```
    A ← seeds; frontier ← seeds
@@ -203,13 +210,14 @@ Both reinforce.
    `via` for a node is the chain of back-pointers to a seed (at most `spreadHops + 1` steps). It answers "why do you remember this?".
 4. **Score**: `strength = strengthBase + weightRetention·R + weightImportance·importance + weightConfidence·confidence` (0.5 … 1.0), then `score = A × strength × (pinned ? pinnedBoost : 1)`. Activation gates everything: an irrelevant memory never surfaces just because it's important. Nodes with `score < policy.minScore` (0.15) are dropped.
 5. **Select**: from the top `max(8 × limit, 64)` by score (ties by id), MMR with `λ = mmrLambda` (0.7) repeatedly picks `argmax λ·score − (1−λ)·maxSim(selected)`. `maxSim` only compares vectors of the same model. Selection stops at `limit` items. Under the token budget (`estimateTokens(label + " " + content)` = ⌈chars / 4⌉), a memory that doesn't fit in what's left is skipped, and smaller ones may still fill the budget.
-6. **Reinforce**: `recall` itself is a pure read. Afterwards the service applies reinforcement to the selected nodes and Hebbian co-activation among the selected query seeds. It skips this when `reinforce === false` or `policy.mode === 'off'` (with memory off, nothing is written, not even strength). A failure there is logged, not thrown.
+6. **Reinforce**: `recall` itself is a pure read. Afterwards the service applies reinforcement to the selected nodes and Hebbian co-activation among the selected query seeds. It skips this when `reinforce === false`. A failure there is logged, not thrown.
 7. **Explain**: `reason` is one of:
    - `"matches what you said"`
    - `"shares keywords"`
    - `"mentions <entity label>"`
    - `"part of your profile"`
    - `"pinned core memory"`
+   - `"assistant-style preference"`
    - `"linked via <label> (<edge type>)"`
    - `"linked memory"`
 
@@ -219,25 +227,22 @@ Recall is a brute-force scan over the cached vectors plus a few indexed queries;
 
 ## Write path: `observe(turn)`
 
-Core calls it after every **completed** turn of a non-incognito conversation, off the critical path. Failed and cancelled turns are not observed. The service runs `observe` calls **one at a time** (a queue), so episode order, dedupe and entity upserts stay coherent. It never throws: errors are logged and returned as `skipped: 'memory error'`.
+Core calls it after every **completed** turn of a normal timeline episode, off the critical path. Failed and cancelled turns are not observed. The service runs `observe` calls **one at a time** (a queue), so episode order, dedupe and entity upserts stay coherent. It never throws: errors are logged and returned as `skipped: 'memory error'`.
 
-1. `policy.mode === 'off'` → `skipped: 'memory is off'`.
-2. **Texts**:
+1. **Texts**:
    - **User text**: the text parts of the user message plus `describeUiEvent` for `ui_event` parts. Never the `context` part (recalled memories).
    - **Assistant text**: the text parts of the reply.
 
    Each is truncated to `maxTurnTextChars` (4,000). An empty user text → `skipped: 'nothing to remember'`. **Tool outputs are never read** (protection against memory poisoning), with one exception: the `id` returned by NEO's own `remember` tool, and the memory ids returned by its `recall` tool. They are only used to look memories up in the net (see same-turn dedupe and NEO-07 below).
-3. **Extraction**: with a memory model, unless the turn must stay off the cloud (NEO-07); otherwise, or when the model call fails or its reply is unusable, the **offline extractor**.
+2. **Extraction**: with a memory model, unless the turn must stay off the cloud (NEO-07); otherwise, or when the model call fails or its reply is unusable, the **offline extractor**.
    - **Model path**: one `chat` call with `system = EXTRACTION_PROMPT` (below), `responseFormat: 'json'`, `temperature: 0`, `maxTokens: 1500`, `metadata: { purpose: 'memory-extract' }`, and a hard timeout of `llmTimeoutMs` (90 s) so a hung model can't stall the write queue. The memory model is `settings.memoryModel ?? settings.defaultModel` (else the first enabled provider's default model), resolved on every call. Its `isLocal` comes from the provider adapter.
    - **Related memories** given to the model: first, the memories the `remember` tool wrote in this turn, so the model reinforces them instead of creating them again. Then `recall({ text: userText, limit: 10, reinforce: false, allowSensitive, now })`, where `allowSensitive = llm.isLocal || policy.sendSensitiveToCloud` (no `conversationId`). Sensitive memories are filtered from both lists unless `allowSensitive`. At most 10 are listed.
-   - **Input format** (the user message of the call; five sections separated by a blank line):
+   - **Input format** (the user message of the call; four sections separated by a blank line):
 
      ```text
      Existing related memories (id | kind | label | content):
      - mem_… | fact | <label on one line> | <content on one line, ≤ 500 chars>
      …                                              (or "Existing related memories: none")
-
-     Blocked topics (never store): <topics, comma-separated, or "none">
 
      Allowed memory kinds: <kinds, comma-separated>
 
@@ -248,7 +253,7 @@ Core calls it after every **completed** turn of a non-incognito conversation, of
      NEO: <assistant text>
      ```
 
-     In the exchange, line endings are normalized and **every continuation line is indented by two spaces**. So a line starting with `User: ` or `NEO: ` is always a speaker marker: a reply that itself contains `"\nNEO: "` can't be mistaken for one. The demo brain in `@neo/providers` parses this format.
+     In the exchange, line endings are normalized and **every continuation line is indented by two spaces**. So a line starting with `User: ` or `NEO: ` is always a speaker marker: a reply that itself contains `"\nNEO: "` can't be mistaken for one. The scripted test fixture parses this format to check extraction boundaries.
    - **Reply parsing**: the first JSON object in the reply, read leniently: inside a ```` ```json ```` fence, or after prose, skipping stray braces and braces inside strings, with trailing commas tolerated (up to 64 candidate objects tried). The reply must have the documented shape, meaning a `memories` array or an `episode` key (null counts). Otherwise it is a failed extraction and the offline extractor runs. Each operation and link is validated on its own with zod, and invalid ones are dropped. An invalid *optional* field (importance, sensitivity, entities, tags, entityType, validUntil, a supersede's kind, an episode's label or summary) is dropped instead of failing the operation. Limits:
      - label ≤ 300, content ≤ 10,000, entityType ≤ 40 characters;
      - entities ≤ 20 names of ≤ 120 chars, tags ≤ 20 of ≤ 60, both deduplicated;
@@ -257,18 +262,18 @@ Core calls it after every **completed** turn of a non-incognito conversation, of
      - `validUntil` as an ISO string or epoch ms.
 
      Create kinds are fact, preference, entity, skill or goal. A supersede `kind` may also be `summary`; absent or invalid means the old node's kind. Link types are `related`, `causes`, `part_of` or `contradicts`.
-4. **Filters** (always, also on model output):
+3. **Filters** (always, also on model output):
    - **Labels** are cleaned into titles: double quotes removed, punctuation stripped at both ends. If nothing is left, the label is derived from the content.
-   - **create**: dropped when `validUntil ≤ now`, when its kind isn't in `allowedKinds`, or when its label, content, entities or tags mention a blocked topic or contain a secret.
-   - **update**: dropped on a blocked topic or secret in its label or content.
+   - **create**: dropped when `validUntil ≤ now`, when its kind isn't in `allowedKinds`, or when its label, content, entities or tags contain a secret.
+   - **update**: dropped on a secret in its label or content.
    - **supersede**: the same, and also when it names a kind outside `allowedKinds`.
    - **reinforce**: dropped when it targets a memory the `remember` tool wrote in this turn (it is already as strong as this turn makes it).
-   - **Episode**: kept only if the extractor returned one, `policy.storeEpisodes` is set, `episode` is an allowed kind, the user text mentions no blocked topic, and its label and content pass the topic and secret filters.
-   - If no episode, op or link is left: `skipped: 'blocked topic'` when the user text mentions one, else `'nothing worth remembering'`.
+   - **Episode**: kept only if the extractor returned one, `policy.storeEpisodes` is set, `episode` is an allowed kind, and its label and content pass the secret filter.
+   - If no episode, op or link is left: `skipped: 'nothing worth remembering'`.
 
-   See [Text rules](#text-rules) for blocked topics and secrets.
-5. **Embeddings**, before the transaction: the episode text, every create/update/supersede text and every new entity name are embedded where the resulting memory may go (`keepLocal`, using the status the write will have and the sensitivity it will end up with). A failed embedding leaves the vector for background re-embedding.
-6. **Apply in one transaction**. `status = policy.mode === 'approve' ? 'pending' : 'active'`. `source = { by: 'extraction', conversationId, messageId: <user message id> }`.
+   See [Text rules](#text-rules) for secrets.
+4. **Embeddings**, before the transaction: the episode text, every create/update/supersede text and every new entity name are embedded where the resulting memory may go (`keepLocal`, using the sensitivity it will end up with). A failed embedding leaves the vector for background re-embedding.
+5. **Apply in one transaction**. `status = 'active'`. `source = { by: 'extraction', conversationId, messageId: <user message id> }`.
    - **episode** (first):
      - `label` = the cleaned label (≤ 80; derived from the summary or user text if empty);
      - `content` = the model's `summary` or, without one, **only the user's words**: `"User: <user text>"` (UI-event tags removed, whitespace collapsed, ≤ 600 chars). NEO's reply is never stored in an episode, so its wording doesn't become recallable text;
@@ -282,8 +287,8 @@ Core calls it after every **completed** turn of a non-incognito conversation, of
        So "I've been seeing a therapist for my depression since March." gives a sensitive episode even without a memory model: it is recalled only with `allowSensitive` and embedded on the device while the main embedder is remote.
 
      It gets a `precedes` edge (weight 1) from the latest earlier non-superseded episode of the same conversation.
-   - **create** `{kind, label, content, importance (0.5), sensitivity?, entities?, entityType?, tags?, validUntil?}`: first the **same-turn check** (below), then the [create path](#the-create-path) with `confidence = extractionConfidence` (0.8), the episode as provenance, and `status`.
-   - **update** `{id, label?, content, reason?, sensitivity?}`: the node must exist and be active or pending. In approve mode, an update of an *active* memory becomes a **pending revision** (see [Approve mode](#approve-mode-in-depth)). Otherwise it is applied in place:
+   - **create** `{kind, label, content, importance (0.5), sensitivity?, entities?, entityType?, tags?, validUntil?}`: first the **same-turn check** (below), then the [create path](#the-create-path) with `confidence = extractionConfidence` (0.8) and the episode as provenance.
+   - **update** `{id, label?, content, reason?, sensitivity?}`: the node must exist and be active. The update is applied in place:
      - label and content are set;
      - `confidence = min(1, c + 0.05)`;
      - `sensitivity = stricter(old, op)` (an update can make a memory sensitive, never less sensitive);
@@ -295,7 +300,7 @@ Core calls it after every **completed** turn of a non-incognito conversation, of
      - `sensitivity = stricter(old, op)`;
      - `metadata.reason` holds the reason (≤ 500 chars).
 
-     It gets a `new —supersedes→ old` edge (1.0), copies of the old node's outgoing `about` edges (with their weights), and `derived_from` the episode (0.5). When `status` is active, the old node becomes `superseded` right away with `confidence × 0.5`. In approve mode the revision is pending and the old belief is untouched (see below).
+     It gets a `new —supersedes→ old` edge (1.0), copies of the old node's outgoing `about` edges (with their weights), and `derived_from` the episode (0.5). The old node becomes `superseded` right away with `confidence × 0.5`.
    - **reinforce** `{id}`: reinforcement, active nodes only.
    - **links** `{from, to, type, weight?}`: each endpoint resolves, in order, to:
      1. a node touched in this turn (by id or normalized label);
@@ -303,16 +308,15 @@ Core calls it after every **completed** turn of a non-incognito conversation, of
      3. an entity by name or alias.
 
      The edge is added unless it (or, for symmetric types, its reverse) exists or it is a self-loop. Default weight 0.5.
-7. Return `MemoryWriteResult`:
+6. Return `MemoryWriteResult`:
    - `created`: new active nodes, including the episode;
-   - `pending`: new pending nodes and revisions;
    - `updated`: merges and in-place updates;
-   - `superseded`: old beliefs replaced in auto mode;
+   - `superseded`: old beliefs replaced;
    - `linked`: the number of links added.
 
-   After commit, `onChange` emits `created`, `pending`, `updated` and `deleted` with the node ids, and core broadcasts `memory.written`.
+   After commit, `onChange` emits `created`, `updated` and `deleted` with the node ids, and core broadcasts `memory.written`.
 
-**Same-turn dedupe against `remember` tool writes.** When the user says "Remember that I'm vegetarian", the chat model often calls `remember` during the turn, and extraction then sees the same fact again. A memory the `remember` tool wrote in this turn (an `id` from a successful `remember` tool result, still active or pending) **is** the memory an extracted `create` restates when:
+**Same-turn dedupe against `remember` tool writes.** When the user says "Remember that I'm vegetarian", the chat model often calls `remember` during the turn, and extraction then sees the same fact again. A memory the `remember` tool wrote in this turn (an `id` from a successful `remember` tool result, still active) **is** the memory an extracted `create` restates when:
 
 - the kinds match (fact and preference count as one), **and**
 - either:
@@ -325,22 +329,22 @@ This rule is deliberately looser than `dedupeSimilarity`: within one turn, both 
 
 Shared by `observe`, `remember` and consolidation (`createOrMerge`).
 
-1. **Target**: a create of kind `entity` first looks for an entity with that name (`norm_label` or an alias, case-insensitive, preferring active over pending/archived and older over newer, never superseded). Otherwise, **dedupe**: the active or pending node of the same kind with the highest `cos ≥ dedupeSimilarity` (0.92) in the same vector space, or, failing that, one with the same normalized label *and* content.
+1. **Target**: a create of kind `entity` first looks for an entity with that name (`norm_label` or an alias, case-insensitive, preferring active over archived and older over newer, never superseded). Otherwise, **dedupe**: the active node of the same kind with the highest `cos ≥ dedupeSimilarity` (0.92) in the same vector space, or, failing that, one with the same normalized label *and* content.
 2. **Merge** into the target:
    - reinforce it;
    - `importance = max`, `confidence = max`;
    - **sensitivity raised** to sensitive if the incoming write is sensitive.
 
-   When the target may be edited, also:
+   Also:
    - replace its content unless the new text adds nothing (empty, equal, the `Entity: <name>` placeholder, or already contained in the old content), and re-embed it **where the merged memory belongs**: the incoming vector was computed where the *write* belongs, so it is stored only when that is the same space; otherwise the node is re-embedded in the background (a normal restatement that replaces a sensitive memory's content is re-embedded on the device);
    - pin it if the write pins;
    - union the tags (≤ 20);
    - set an entity's type if it had none;
    - set `validUntil`.
 
-   The target may be edited unless the write is pending and the target isn't. In approve mode, a merge into an active memory only reinforces it, and raises importance, confidence and sensitivity. An active write that merges into a pending memory approves it, and into an archived one restores it.
+   A write that merges into an archived entity restores it.
 3. **Insert** otherwise:
-   - `stability = S₀` and `status` as given;
+   - `stability = S₀` and `status: active`;
    - `entityType` only for entities;
    - tags ≤ 20, `validUntil` and `metadata` as given;
    - a vector in the right space.
@@ -348,9 +352,9 @@ Shared by `observe`, `remember` and consolidation (`createOrMerge`).
    - importance 0.5, `confidence = extractionConfidence`, `S₀(entity, 0.5)`, content `"Entity: <name>"`;
    - `entityType` from the write (for non-entity creates);
    - **sensitive** if the write or the node is sensitive;
-   - **pending** if the incoming write is pending or the node is pending, else active.
+   - **active** immediately.
 
-   The status comes from the *incoming write*, never from the node it merged into. An existing pending entity named by an active write is activated. Then the edges are added:
+   Then the edges are added:
    - `node —about→ entity` (0.8);
    - `episode —mentions→ entity` (0.6), when there is an episode;
    - `node —derived_from→ episode` (0.5, or the caller's weight), when there is an episode.
@@ -363,7 +367,8 @@ Copied from `extract.ts`:
 You are the memory of a personal AI assistant called NEO. Decide what is worth remembering long-term from the latest exchange between the user and NEO.
 
 Remember: stable facts about the user and their world (people, places, pets, work, projects), preferences and dislikes, goals and plans, skills/procedures they teach, and important events. Write each memory as a short self-contained statement in the third person ("The user's sister is Mia, a nurse in Berlin").
-Do NOT remember: small talk, things NEO said that the user didn't confirm, one-off requests ("what's 2+2"), content from web pages or tools, secrets/passwords/API keys, or anything in the blocked topics.
+Requests about how NEO should behave, what to call the user or itself, and reply language are durable "preference" memories tagged "assistant-style". Examples: "keep answers short", "call me Rich", "reply in Chinese", "call yourself Luna", "be more playful". Apply that tag consistently; use "supersede" when a newer preference conflicts with an older one ("be playful" then "be more serious").
+Do NOT remember: small talk, things NEO said that the user didn't confirm, one-off requests ("what's 2+2"), content from web pages or tools, secrets/passwords/API keys.
 Prefer updating or superseding an existing memory over creating a duplicate. Use "supersede" when the new information contradicts the old (it keeps history). Use "reinforce" when the exchange simply confirms an existing memory.
 Mark health, finances, sexuality, religion, politics, exact addresses and identity numbers as "sensitive" (also on an update or supersede that adds such details).
 importance: 0.9+ core identity & critical (allergies, names of close people), 0.6–0.8 durable preferences/goals, 0.3–0.5 minor details.
@@ -387,13 +392,14 @@ Used without a memory model, for turns kept off a cloud model (NEO-07), and when
 
   | Pattern | Memory | Importance |
   |---|---|---|
-  | "my name is X" / "I'm called X" / "call me X" | entity (person), "The user's name is X." | 0.9 |
+  | "my name is X" / "I'm called X" | entity (person), "The user's name is X." | 0.9 |
   | "I'm N years old" | fact | 0.6 |
   | "I live in / I'm from / I'm based in" | fact | 0.6 |
   | "I work at / for / as" | fact | 0.6 |
   | "I'm a/an <profession>" | fact | 0.6 |
   | "I (really) like / love / enjoy / prefer / adore …" | preference, e.g. "Prefers window seats" | 0.5 |
   | "I hate / dislike / can't stand / don't like …" | preference | 0.5 |
+  | "keep answers short", "call me Rich", "reply in Chinese", "call yourself Luna", "be more playful" | preference tagged `assistant-style`, describing the requested length, name, language or tone | 0.8 |
   | "remember that / please note …" | fact, e.g. "The user is vegetarian." | 0.7 |
   | "I'm allergic to X" | fact, **sensitive** | 0.9 |
   | "I have / I've been diagnosed with <condition>" | fact, **sensitive** | 0.8 |
@@ -410,18 +416,27 @@ Used without a memory model, for turns kept off a cloud model (NEO-07), and when
 
   Otherwise there is no episode: greetings, thanks, questions (including "what do you remember about me?") and very short texts leave nothing. The episode's content is the user's text only (`"User: …"`), importance 0.3.
 
+### Assistant-style preferences
+
+Both extraction paths store durable behavior requests as `preference` memories with the shared `assistant-style` tag. The normal memory write path adds this tag to recognized model and `remember`-tool writes even if the model omits it. Aspect tags such as `assistant-style:length`, `assistant-style:language`, `assistant-style:user-name`, `assistant-style:assistant-name` and `assistant-style:tone` identify what the preference controls. A newer contradictory preference uses the existing `supersedes` history instead of leaving both versions active; for example, "be more serious" replaces "be playful". Compatible preferences can remain together.
+
+These memories appear first in recalled context, up to a fixed limit of five and within the overall item and token budgets. Their context is persisted in each user message and replayed verbatim. Incognito and disabled recall still bypass recall; privacy, kind and expiry filters still apply. No preference text is added to the fixed system prompt, and style preferences are excluded from Hebbian wiring.
+
+### Startup migration from persona settings
+
+The server's new versioned startup migration `persona-settings-to-memory:v1` captures the old settings blob before persona validation drops removed fields. It writes non-default name (`"The user calls me <name>"`), tone (other than warm), traits (other than curious/warm/direct), reply language (other than auto), and nonempty standing instructions as preferences tagged `assistant-style`. Custom traits are seeded individually with `assistant-style:traits` so a later opposing preference can supersede one trait without losing compatible ones. Their source is `{ by: 'user', note: 'migrated from persona settings' }`. Tagline and greeting are dropped without creating memories. Avatar remains in settings.
+
+Standing instructions are split into individual directives, preserving titles, initials, domains and decimal numbers, and seeded after the other fields so that they retain precedence over conflicting settings. Writes use the normal memory path, including dedupe, supersession and sensitivity detection. Credential-bearing directives are excluded by the existing secret filter, with a warning that contains no user text; safe directives still migrate. Each completed directive has a content-hash progress key in `memory_meta`, and the completion marker and stripped settings are committed together. First-boot settings and the preserved raw persona also commit atomically. Running startup again creates nothing new; an ordinary failure leaves the raw fields available for a retry. Existing SQLite schema migration versions are unchanged.
+
 ## `remember(input)` and `update(id, patch)`
 
 `remember` is explicit memory, from the memory UI (`source.by === 'user'`) or the model's `remember` tool (`source.by === 'tool'`, the default). The input is validated (`RememberInputSchema`).
 
-- Mode `off` → `NeoError('forbidden')` for every source.
 - `content` is trimmed and must be non-empty. `label = label?.trim() || deriveLabel(content)`, ≤ 300 chars. `kind` defaults to `fact`.
 - **Secrets** in the label, content, entities or tags are always refused with `bad_request`.
 - **From the tool**:
-  - a blocked topic → `forbidden`;
   - a kind outside `allowedKinds` → `forbidden`;
-  - status `pending` in approve mode.
-- **From the user**: always active, and the blocked-topic and allowed-kind checks are skipped, because it's the user's own edit.
+- **From the user**: always active, and the allowed-kind check is skipped, because it's the user's own edit.
 - **Sensitivity**: `sensitive` when the input says so, or when the label, content or tags look sensitive (`looksSensitive`: health, finances, identity documents, …), else `normal`. An explicit `normal` only wins when it comes from the user (`source.by === 'user'`, the memory UI): the model's `remember` tool can raise sensitivity, never lower it. So a tool call that stores "The user takes insulin for type 1 diabetes" without `sensitivity` stores a sensitive memory, embedded on the device while the main embedder is remote.
 - The write goes through [the create path](#the-create-path) with:
   - `importance` defaulting to 0.8 and `confidence = userConfidence` (0.95);
@@ -433,38 +448,14 @@ Used without a memory model, for turns kept off a cloud model (NEO-07), and when
 
 - Secrets in the label, content, aliases or tags → `bad_request`.
 - A text change re-embeds where the edited memory now belongs.
-- `status: 'active'` on a pending memory is an **approval**.
 - Restoring an archived memory sets `lastAccessedAt = now`.
 - The user may raise or lower sensitivity. The vector then moves to the right space.
-
-## Approve mode in depth
-
-With `policy.mode === 'approve'`, nothing new becomes part of the active net without the user's OK:
-
-- **New memories are pending**: extracted creates, episodes, facts and summaries from consolidation, and `remember` calls from the tool. Pending memories are never recalled. While the main embedder is remote, they are embedded on the device only.
-- **Entities follow the incoming write.** An entity created for a pending write is pending, even when the write deduped into an *active* memory. So approve mode never creates active entities.
-- **Merges don't edit active memories.** A pending write that dedupes into an active memory only reinforces it, and raises its importance, confidence and sensitivity. It never changes its content, tags, pin or expiry. A merge into another pending memory edits that pending memory in place.
-- **Pending revisions.**
-  - An extracted `update` of an active memory, or a `supersede` of any memory, creates a new pending node with `metadata.supersedes = <old id>` and the `supersedes` edge. The old belief stays active and unchanged.
-  - An `update` of a memory that is itself pending is applied in place.
-- **Not gated**: extracted `reinforce` ops and `links` apply immediately.
-- **`approve(ids)`** (also `update(id, {status: 'active'})` and the inline memory card), for each pending node:
-  1. It becomes active.
-  2. A revision drops `metadata.supersedes` and applies the supersession now: the old node becomes `superseded`, with `confidence × 0.5`.
-  3. Its vector moves to the main embedder if it no longer has to stay local.
-
-  Then every pending entity linked to an approved node becomes active once **every** node linked to it is active.
-- **`reject(ids)`**:
-  1. The pending nodes are hard-deleted. A rejected revision leaves the old belief untouched.
-  2. Their pending entity neighbors are deleted when nothing links to them any more, and activated when everything still linked to them is active.
-  3. Like `forget`, the same transaction **redacts the dream journal**: the lines that name a deleted memory (a rejected one, or an orphaned entity deleted with it) are rewritten into the neutral form (see forget). Consolidation output in approve mode is pending, so this is how a rejected "Learned: …" line loses its text.
 
 ## Consolidation: `consolidate()`
 
 `consolidate({ now?, force?, signal? })`.
 
 - **Single-flight**: while a run is in flight, every call (forced or not) returns that run's promise.
-- **Memory off**: when `policy.mode` is `off`, every call, forced ("Consolidate now") or not, returns a report with id `'skipped'` and the note "Skipped: memory is off". Nothing is re-embedded, archived, pruned, linked, merged or abstracted, and nothing is journaled: with memory off, nothing is written.
 - **Not forced**: returns a report with id `'skipped'` (not journaled) when `policy.consolidation.enabled` is false ("Skipped: consolidation is turned off"), or when less than `policy.consolidation.intervalHours` (default 6) has passed since `lastConsolidationAt` ("Skipped: too soon since the last consolidation").
 - **Forced** ("Consolidate now"): ignores both checks.
 - **Server timer**: checks every 15 minutes, and runs when consolidation is enabled and the interval has passed since `lastConsolidationAt ?? 0`.
@@ -480,15 +471,15 @@ Steps, in order:
 
    Archived memories are not recalled, but stay searchable and restorable.
 2. **Prune**: delete non-structural edges with `w_eff < edgeFloor` (0.02). `edgesDecayed` counts the surviving non-structural edges whose `w_eff < 0.999 × w`.
-3. **Discover links**: for the active or pending nodes updated since the last completed run (all on the first run; at most 500, most recent first), add `similar` edges (weight `min(1, sim)`) to the top `similarLinksPerNode` (3) **active** nodes in the same vector space with `sim ≥ similarLinkThreshold` (0.8), skipping nodes already linked to it by any edge.
-4. **Merge entities**: active or pending entities, oldest first. A newer entity `b` merges into an older `a` when their entity types don't conflict (both set and different → never) and they either share a normalized name (label or alias) or have main-model vectors with `cos ≥ entityMergeSimilarity` (0.95). The merge:
+3. **Discover links**: for the active nodes updated since the last completed run (all on the first run; at most 500, most recent first), add `similar` edges (weight `min(1, sim)`) to the top `similarLinksPerNode` (3) **active** nodes in the same vector space with `sim ≥ similarLinkThreshold` (0.8), skipping nodes already linked to it by any edge.
+4. **Merge entities**: active entities, oldest first. A newer entity `b` merges into an older `a` when their entity types don't conflict (both set and different → never) and they either share a normalized name (label or alias) or have main-model vectors with `cos ≥ entityMergeSimilarity` (0.95). The merge:
    - moves `b`'s edges to `a`. A duplicate edge is combined into one with the max effective weight and summed coactivations, and self-loops are dropped;
    - sets `a.aliases = a.aliases ∪ {b.label} ∪ b.aliases` (≤ 20);
    - takes `b`'s content if `a`'s is the placeholder, or appends it when it adds something;
    - unions the tags and takes the max of importance, confidence and stability;
    - sums `accessCount` and takes the latest `lastAccessedAt`;
    - pins if either is pinned;
-   - makes the result **sensitive if either was**, and active if either was;
+   - makes the result **sensitive if either was**, and remains active;
    - deletes `b`.
 
    Survivors are re-embedded where they belong.
@@ -496,11 +487,11 @@ Steps, in order:
    1. **Select**: unconsolidated episodes that are active, or that the fade step archived in this same run (like sleep, consolidation learns from the day's experiences before they're gone). Sensitive episodes are included **only** when the model is local or `sendSensitiveToCloud`.
    2. **Cluster** greedily in time order. An episode joins the first cluster whose centroid (sum of main-model vectors) has `cos ≥ consolidationClusterThreshold` (0.75) with it, or with which it shares an entity (`mentions`/`about` target).
    3. **Choose clusters**: those of ≥ 2 episodes, or a single episode older than `singleEpisodeAbstractDays` (7), at most `maxClustersPerRun` (20) per run, oldest first.
-   4. **Ask the model** once per cluster (`CONSOLIDATION_PROMPT` below, JSON mode, `temperature: 0`, `maxTokens: 1000`, `metadata.purpose = 'memory-consolidate'`, the same 90 s timeout, the run's abort signal). The user content lists the blocked topics, the allowed kinds and the episodes as `- [YYYY-MM-DD] <label>: <content ≤ 600 chars>`.
-   5. **Filter the reply**: a summary is kept only if `summary` is an allowed kind; facts must be an allowed kind (fact, preference, skill or goal). Anything mentioning a blocked topic or containing a secret (in label, content or entities) is dropped.
+   4. **Ask the model** once per cluster (`CONSOLIDATION_PROMPT` below, JSON mode, `temperature: 0`, `maxTokens: 1000`, `metadata.purpose = 'memory-consolidate'`, the same 90 s timeout, the run's abort signal). The user content lists the allowed kinds and the episodes as `- [YYYY-MM-DD] <label>: <content ≤ 600 chars>`.
+   5. **Filter the reply**: a summary is kept only if `summary` is an allowed kind; facts must be an allowed kind (fact, preference, skill or goal). Anything containing a secret (in label, content or entities) is dropped.
    6. **Store** each item **through the create path**, so the usual dedupe and merging, entity upserts and vectors in the right space apply:
       - `confidence = extractionConfidence`, importance defaulting to 0.5;
-      - `status` pending in approve mode;
+      - `status: active`;
       - **sensitive if any episode of the cluster was** (or the fact is marked so);
       - `source = { by: 'consolidation', note: 'Abstracted from N conversation(s)' }`.
 
@@ -535,7 +526,7 @@ You are the memory of a personal AI assistant called NEO. While the user is away
 From the episodes below, return:
 - "summary": one short self-contained third-person statement of what these episodes have in common, or null when they share nothing lasting;
 - "facts": durable facts, preferences, skills or goals about the user and their world that the episodes clearly support, each a short self-contained statement in the third person.
-Never invent what the episodes do not support. Never include secrets or anything in the blocked topics. Mark health, finances, sexuality, religion, politics, exact addresses and identity numbers as "sensitive".
+Never invent what the episodes do not support. Never include secrets. Mark health, finances, sexuality, religion, politics, exact addresses and identity numbers as "sensitive".
 importance: 0.9+ core identity & critical, 0.6–0.8 durable preferences/goals, 0.3–0.5 minor details.
 Return ONLY a JSON object:
 {"summary": {"label": string, "content": string, "importance": number} | null,
@@ -545,7 +536,7 @@ Return ONLY a JSON object:
 ## Other operations
 
 - **search** `{query?, kinds?, status?, tags?, pinned?, limit (20, ≤ 500), offset, sort?}`:
-  - The default status filter is `active` + `pending`. Tags match exactly, case-insensitively.
+  - The default status filter is `active`. Tags match exactly, case-insensitively.
   - With a query, it runs a hybrid FTS + vector search, `relevance = 0.5·lexical_norm + 0.5·max(0, sim)`:
     - the FTS side ORs the query's non-stopword words, ranked by bm25 and normalized against the best hit (top 1,000);
     - the vector side compares the query embedded in each space, and a vector-only match needs `sim ≥ seedSimilarityFloor` (0.2).
@@ -555,9 +546,9 @@ Return ONLY a JSON object:
 - **graph**:
   - With `centerId`: a BFS over edges in both directions to `depth` (default 2, ≤ 4). The center plus up to `limit − 1` (default limit 150, ≤ 1000) visible nodes, ranked by `importance × R`.
   - Without a center: the top `limit` visible nodes by `importance + R + min(degree, 10)/10`.
-  - Visible means `active` and `pending`; `archived` and `superseded` only with `includeArchived`.
+  - Visible means `active`; `archived` and `superseded` only with `includeArchived`.
   - Edges among the returned nodes. Nodes carry `retention`.
-- **findForForget(query, limit = 20)**: searches active, pending and archived memories:
+- **findForForget(query, limit = 20)**: searches active and archived memories:
   - an entity named in the request (whole word, ≥ 2 chars or CJK) scores 2;
   - memories `about` that entity score 1.5 ("forget everything about Mia");
   - direct matches (an FTS hit on a meaningful word, with forget phrasing like "forget", "everything" and "memories" ignored, or `sim ≥ forgetSimilarity` (0.35)) score `0.5·lexical + 0.5·sim`.
@@ -571,19 +562,14 @@ Return ONLY a JSON object:
   - Vectors are kept only when the export's `embeddingModel` equals the current embedder's id. Otherwise the nodes are re-embedded.
   - `replace` wipes nodes, edges, vectors and FTS first (not the journal).
   - Imported nodes keep their status and sensitivity. Import doesn't apply the extraction filters.
-- **stats**: counts by kind and status, edges, pending, `lastConsolidationAt`, and the main embedder's id.
-- **policy**: the server passes `settings.memory` at startup and on every settings change (`setPolicy`). An invalid policy is logged and validated **field by field** with `MemoryPolicySchema`: every valid field is kept and every invalid one falls back to its default. In `consolidation` each sub-field is checked on its own, in `blockedTopics` and `allowedKinds` invalid entries are dropped (one bad entry never clears the other blocked topics), and unknown fields are dropped. Switching `sendSensitiveToCloud` moves sensitive vectors between the spaces (see [re-embedding](#embeddings-and-vector-spaces)).
-- **onChange**: emits `created | updated | deleted | pending | consolidated` with node ids, after commit. A throwing listener doesn't affect writes or other listeners. The server forwards them as `memory.changed` events.
+- **stats**: counts by kind and status, edges, `lastConsolidationAt`, and the main embedder's id.
+- **policy**: memory always remembers automatically; there is no mode field. Stored legacy `mode` and `blockedTopics` fields are dropped during settings validation without affecting the remaining settings. The server passes `settings.memory` at startup and on every settings change (`setPolicy`). An invalid policy is logged and validated **field by field** with `MemoryPolicySchema`: every valid field is kept and every invalid one falls back to its default. In `consolidation` each sub-field is checked on its own, in `allowedKinds` invalid entries are dropped, and unknown fields are dropped. Switching `sendSensitiveToCloud` moves sensitive vectors between the spaces (see [re-embedding](#embeddings-and-vector-spaces)).
+- **onChange**: emits `created | updated | deleted | consolidated` with node ids, after commit. A throwing listener doesn't affect writes or other listeners. The server forwards them as `memory.changed` events.
 
 ## Text rules
 
-- **Normalization** (`normalizeText`, used for `norm_label`, names and topics): NFKC, lower case, whitespace collapsed, trimmed.
+- **Normalization** (`normalizeText`, used for `norm_label`, names): NFKC, lower case, whitespace collapsed, trimmed.
 - **Whole-word matching** (`containsTerm`): letters, marks, digits and `_` are word characters. The boundary is only checked on sides where the term itself starts or ends with a word character, so "C++" and "Zoë" work. Terms containing Han, Hiragana, Katakana or Hangul match as plain substrings.
-- **Blocked topics** (`mentionsBlockedTopic`):
-  - The text and each topic are normalized, and blank topics are ignored.
-  - A topic matches as whole words, with an English plural suffix (`s`/`es`) allowed after it, so "art" doesn't block "party" and "health" doesn't block "healthy".
-  - A single-word English topic also matches its singular ("finances" blocks "finance", "allergies" blocks "allergy").
-  - Multi-word topics match as phrases. CJK topics match as substrings.
 - **Secrets** (`hasCredentials`), refused on every write path except import:
   - `sk-…` keys (≥ 16 chars), AWS `AKIA…` ids, GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Slack `xox…-` tokens, Google `AIza…` keys and PEM private-key headers;
   - "password / passwd / passcode / passphrase / pwd / pin code" followed by `is`, `was`, `:` or `=`, and the Chinese 密码/口令/密碼 followed by 是/为/:/=;
@@ -597,7 +583,7 @@ Return ONLY a JSON object:
 
 Where memory text can leave the device, and what keeps it in:
 
-- **Chat model context**: recall excludes sensitive memories unless `allowSensitive`. Core sets it only when the chat model is local or `sendSensitiveToCloud` is on. Memory tools flag results that expose sensitive memories; assistant messages are flagged when their model actually saw sensitive content. On cloud replay with sharing off, flagged context, tool output and private-derived assistant text, reasoning and tool arguments are withheld while call/result pairing is preserved. Stored messages are unchanged. The same policy excludes private-derived previous replies from recall context and prevents cloud title generation from re-sending a private answer after sharing is revoked. Storage migration v2 backfills legacy assistant flags from existing sensitive context/results. Legacy recall/remember results remain normal when their ids identify existing normal nodes; unknown or deleted memory references and successful forget labels are withheld conservatively because their original sensitivity cannot be recovered. Empty memory results remain normal.
+- **Chat model context**: recall excludes sensitive memories unless `allowSensitive`. Core sets it only when the chat model is local or `sendSensitiveToCloud` is on. Memory tools flag results that expose sensitive memories; assistant messages are flagged when their model actually saw sensitive content. On cloud replay with sharing off, flagged context, tool output and private-derived assistant text, reasoning and tool arguments are withheld while call/result pairing is preserved. Stored messages are unchanged. The same policy excludes private-derived previous replies from recall context and governs cross-episode recent conversation context. Storage migration v2 backfills legacy assistant flags from existing sensitive context/results. Legacy recall/remember results remain normal when their ids identify existing normal nodes; unknown or deleted memory references and successful forget labels are withheld conservatively because their original sensitivity cannot be recovered. Empty memory results remain normal.
 - **Extraction model** (NEO-07): when the memory model is in the cloud and `sendSensitiveToCloud` is off, a **sensitive turn is extracted offline** (heuristics), and the cloud model never sees it. A turn is sensitive when any of these holds:
   - either message or a tool result is flagged `sensitive: true`, even if its source memory has since been forgotten;
   - the user message's context part is flagged `sensitive: true`;
@@ -609,8 +595,8 @@ Where memory text can leave the device, and what keeps it in:
   For turns that do go to a model, the related memories (including the `remember` tool's) are filtered to normal ones unless the model is local or `sendSensitiveToCloud`.
 - **Consolidation model**: sensitive episodes are only abstracted by a local model or with `sendSensitiveToCloud`. Knowledge derived from a cluster that contains a sensitive episode is sensitive.
 - **Episodes**: the episode of a sensitive turn is sensitive (see the write path), so it is kept away from cloud chat models and cloud embedders like any sensitive memory.
-- **Embedder**: while the main embedder is remote, sensitive memories (unless `sendSensitiveToCloud`) and pending memories, and the entity names created for them, are embedded **only** by `local-hash2-512`, in their own vector space. Their vectors are never compared with main-model vectors.
-  - When such a memory is approved, or `sendSensitiveToCloud` is switched on, it is re-embedded by the main embedder. Switching it off again moves the sensitive memories back: their main-model vectors stop being used at once, and they are re-embedded by `local-hash2-512`.
+- **Embedder**: while the main embedder is remote, sensitive memories (unless `sendSensitiveToCloud`), and the entity names created for them, are embedded **only** by `local-hash2-512`, in their own vector space. Their vectors are never compared with main-model vectors.
+  - When `sendSensitiveToCloud` is switched on, sensitive memories are re-embedded by the main embedder. Switching it off again moves the sensitive memories back: their main-model vectors stop being used at once, and they are re-embedded by `local-hash2-512`.
   - A memory that becomes sensitive (an update, a merge, a same-turn restatement) moves its vector to the device; a merge never stores a vector computed in the wrong space.
   - The recall `context` (the previous reply) goes to a remote embedder only when sensitive memories aren't in play or are allowed in the cloud. The user's own query text is embedded by the main embedder in every case.
 - **Sensitivity only goes up** on automatic paths: an extracted `update` or `supersede`, a merge (create path, same-turn dedupe against a `remember` tool memory, or entity merge), or a new entity attached to a sensitive memory can make a memory sensitive, never normal. The model's `remember` tool can't store sensitive-looking content as normal either. Only the user can lower it, in the memory UI (or by passing `sensitivity: 'normal'` to `remember` from it).
@@ -656,6 +642,8 @@ Where memory text can leave the device, and what keeps it in:
 | `entityMergeSimilarity` | `0.95` | entity merge by vector |
 | `profileSeedLimit` | `8` | profile seeds for broad "about me" questions |
 | `profileActivation` | `0.35` | their activation |
+| `assistantStyleSeedLimit` | `5` | always-on assistant-style preferences per recall |
+| `assistantStyleActivation` | `0.35` | their minimum activation; selected before MMR within budgets |
 | `llmTimeoutMs` | `90000` | hard timeout of extraction / consolidation calls |
 | `maxTurnTextChars` | `4000` | user / assistant text truncation before extraction |
 | `episodeMinChars` | `15` | offline episodes need statements of at least this many characters |
@@ -685,15 +673,19 @@ Fixed values in code:
 
 | Control | Effect |
 |---|---|
-| Incognito conversation | No recall and no write-back: core never calls `recall`/`observe` for it, and the context block tells the model so. Its toolset, frozen at the first turn, leaves out the memory tools `remember`, `recall` and `forget`, so the model can't use memory from it either (a call is refused as not available). |
-| `mode: approve` | Every new memory is `pending` until approved (inline memory card, Memory → Pending): extracted ones, episodes, entities, revisions of existing beliefs, consolidation output and `remember` tool calls. Pending memories are never recalled and are embedded on the device only. The user's own UI writes are active. |
-| `mode: off` | Nothing is written: `observe` writes nothing, `remember` throws `forbidden`, recall neither reinforces nor wires associations, and consolidation is skipped entirely, also when forced (no fading, pruning, linking, merging, abstraction or journal entry). Automatic recall still works unless `recall: false`. |
+| Off the record | Persisted server mode covers sends, generated-UI actions and confirmations, including those from normal messages. Recall stays available without reinforcement or association writes. No extraction, `remember` or `forget` writes are allowed. Results belong to the active ephemeral private episode; explicit end deletes them, and startup/periodic cleanup expires the session after 12 hours from its original start. Migrated incognito episodes are retained as non-ephemeral past episodes. |
 | `recall: false` | No memories are recalled into the context of new turns, and the model's `recall` tool answers that memory recall is turned off (without recalling). |
-| `blockedTopics` | Never stored: the extraction and consolidation models are told the topics, and every extracted or consolidated item and every tool `remember` is filtered (whole words with plurals, CJK as substrings). A user message mentioning one stores no episode. |
 | `allowedKinds` | Other kinds are dropped from extraction and consolidation; the `remember` tool gets `forbidden`. |
 | `storeEpisodes: false` | No episodes are stored. |
 | Secrets | Passwords, API keys and tokens, private keys and card numbers are never stored by extraction, consolidation, `remember` or `update` (the last two answer `bad_request`). Import is not filtered. |
 | `sensitive` | Recalled only for local chat models unless `sendSensitiveToCloud`. Never shown to a cloud extraction or consolidation model (sensitive turns are extracted offline). Embedded on the device while the main embedder is remote (also again after `sendSensitiveToCloud` is switched off). Episodes of sensitive turns, and `remember` calls with sensitive-looking content, are sensitive. Sensitivity is only ever raised automatically. |
 | Forget | Hard delete of the memories and their superseded history, with edges, vectors and FTS rows. Dream-journal lines that name them are redacted. |
-| Reject | Hard delete of pending memories and the pending entities only they used. Dream-journal lines that name them are redacted. |
 | Export | Your whole net as JSON, any time (embeddings optional). |
+
+## Timeline provenance and deletion
+
+The public conversation API is replaced by one timeline. Storage conversation ids stay unchanged and mean episode ids in `MemorySource.conversationId`; `messageId` identifies a timeline message. Extraction records the user message id, and model tools record their source assistant message id. Source links open the timeline at the message.
+
+Deleting a message or inclusive date range deletes the transcript rows, their parts and message FTS entries. It closes a touched current episode so the cached prefix is never reused after deletion. Memories remain until explicitly forgotten. The response reports `derivedMemories` and `messageIds`; `POST /api/memory/forget-by-source` accepts those ids, finds direct sources and transitive `derived_from` memories (including summaries), and uses the existing hard-forget path with superseded history and journal redaction. Missing source messages do not invalidate surviving memory provenance.
+
+Recent cross-episode conversation is a separate persisted user-message context part, limited to six messages and less than 24 hours. Extraction never reads context parts, so recalled facts or quoted old replies do not become new memories merely by replaying them. Sensitive-derived replies follow the cloud replay policy, and ephemeral off-record context is never copied back into the normal timeline.

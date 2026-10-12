@@ -169,6 +169,8 @@ export type MessageStatus = z.infer<typeof MessageStatusSchema>;
 export const MessageSchema = z.object({
   id: z.string(),
   conversationId: z.string(),
+  /** Public timeline identity; conversationId is retained for internal provenance. */
+  episodeId: z.string().optional(),
   role: RoleSchema,
   parts: z.array(ContentPartSchema),
   createdAt: z.number(),
@@ -187,9 +189,9 @@ export const ConversationSchema = z.object({
   title: z.string(),
   createdAt: z.number(),
   updatedAt: z.number(),
-  /** Model for this conversation; null → settings.defaultModel. */
+  /** Legacy storage field; every new turn uses the global Text capability. */
   model: ModelRefSchema.nullable(),
-  /** Incognito: nothing is recalled from or written to memory. */
+  /** Legacy storage field; offRecord controls new episodes. */
   incognito: z.boolean(),
   pinned: z.boolean(),
   archived: z.boolean(),
@@ -200,8 +202,41 @@ export const ConversationSchema = z.object({
   lastMessageAt: z.number().nullable(),
   /** First ~120 chars of the latest visible text. */
   preview: z.string().nullable(),
+  kind: z.literal('episode').optional(),
+  offRecord: z.boolean().optional(),
+  /** Only newly created off-record episodes are ephemeral. */
+  ephemeral: z.boolean().optional(),
+  startedAt: z.number().optional(),
+  closedAt: z.number().nullable().optional(),
 });
 export type Conversation = z.infer<typeof ConversationSchema>;
+
+/** An episode's public metadata has no chat title, pin, archive or model override. */
+export const EpisodeSchema = z.object({
+  id: z.string(),
+  kind: z.literal('episode'),
+  offRecord: z.boolean(),
+  ephemeral: z.boolean(),
+  startedAt: z.number(),
+  closedAt: z.number().nullable(),
+  lastMessageAt: z.number().nullable(),
+});
+export type Episode = z.infer<typeof EpisodeSchema>;
+
+export const TimelineMessageSchema = MessageSchema.extend({ episodeId: z.string() });
+export type TimelineMessage = z.infer<typeof TimelineMessageSchema>;
+
+export function episodeOf(conversation: Conversation): Episode {
+  return {
+    id: conversation.id,
+    kind: 'episode',
+    offRecord: conversation.offRecord ?? conversation.incognito,
+    ephemeral: conversation.ephemeral ?? false,
+    startedAt: conversation.startedAt ?? conversation.createdAt,
+    closedAt: conversation.closedAt ?? null,
+    lastMessageAt: conversation.lastMessageAt,
+  };
+}
 
 // ───────────────────────────── helpers ─────────────────────────────
 

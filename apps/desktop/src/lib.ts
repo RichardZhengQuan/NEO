@@ -116,6 +116,10 @@ export function deepLinkToHash(url: string): string {
       case 'tasks':     return id ? `#/tasks/${id}`     : '#/tasks';
       case 'notes':     return id ? `#/notes/${id}`     : '#/notes';
       case 'memory':    return id ? `#/memory/${id}`    : '#/memory';
+      case 'timeline': {
+        const messageId = parsed.searchParams.get('messageId') ?? id;
+        return messageId ? `#/timeline?messageId=${encodeURIComponent(messageId)}` : '#/timeline';
+      }
       case 'chat':      return id ? `#/chat/${id}`      : '#/chat';
       default:          return '#/';
     }

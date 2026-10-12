@@ -19,7 +19,7 @@ pnpm dev        # builds the CLI and its dependencies, then runs `neo serve` on 
 pnpm dev:web    # Vite dev server; proxies /api to :7777
 ```
 
-With no API key, pick **Demo mode** during onboarding. The offline demo brain exercises reminders, tasks, notes, memory and generated UI without any model.
+Connect a provider during onboarding, or choose **Skip for now** and connect later in **Settings → AI**. Fresh installs have no providers. Offline tests inject a scripted mock adapter explicitly; it is unavailable through user configuration or the API.
 
 ## How the code is organized
 

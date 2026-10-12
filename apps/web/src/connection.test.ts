@@ -8,7 +8,7 @@ import { createTunnelTransport, tunnelBaseUrl } from '@neo/tunnel';
 import { appDictionaries } from './i18n.js';
 import { PhoneAccessCard } from './screens/settings/PhoneAccessCard.js';
 import { useSession } from './state/session.js';
-import { bootstrapConnection, checkHealth, claimPairingCode, consumePairingLink, createServerClient, credentialsFromInput, forgetToken, loadCredentials, normalizeServerUrl, refreshTunnelRoute, saveCredentials, verifyCredentials, type BootstrapDeps, type Credentials } from './connection.js';
+import { bootstrapConnection, browserBootstrapDeps, checkHealth, claimPairingCode, consumePairingLink, createServerClient, credentialsFromInput, forgetToken, loadCredentials, normalizeServerUrl, refreshTunnelRoute, saveCredentials, verifyCredentials, type BootstrapDeps, type Credentials } from './connection.js';
 
 vi.mock('@neo/tunnel', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@neo/tunnel')>();
@@ -24,6 +24,19 @@ const tunnel: TunnelRoute = { serverId: 'a'.repeat(32), publicKey: 'b'.repeat(43
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.localStorage.clear(); });
 
 const code = 'bootstrap_pairing_code_123456';
+
+it('clears a consumed pairing link into the home timeline without adding history', () => {
+  const oldHash = window.location.hash;
+  window.history.replaceState(null, '', '#/pair?token=paired-token');
+  const historyLength = window.history.length;
+  try {
+    browserBootstrapDeps().clearPairHash();
+    expect(window.location.hash).toBe('#/');
+    expect(window.history.length).toBe(historyLength);
+  } finally {
+    window.history.replaceState(null, '', oldHash || '#/');
+  }
+});
 
 function deps(over: Partial<BootstrapDeps> = {}): BootstrapDeps & { saved: Credentials | null } {
   const state = { saved: null as Credentials | null };

@@ -1,6 +1,6 @@
 /**
  * Text helpers shared by the read and write paths: normalization, Unicode-aware
- * term matching (entities, blocked topics), the secret filter, the lexical
+ * term matching (entities), the secret filter, the lexical
  * query builder and the "broad question about me" detector.
  */
 
@@ -45,31 +45,6 @@ export function containsTerm(text: string, term: string, plural = false): boolea
     if (isWordChar(term[term.length - 1]) && isWordChar(text[end])) continue;
     return true;
   }
-}
-
-/** Singular variants of an English topic word, so "finances" also blocks "finance". */
-function topicVariants(topic: string): string[] {
-  const out = [topic];
-  if (hasCJK(topic) || topic.includes(' ')) return out;
-  if (topic.endsWith('ies') && topic.length > 4) out.push(`${topic.slice(0, -3)}y`);
-  else if (/(?:s|x|z|ch|sh)es$/.test(topic)) out.push(topic.slice(0, -2));
-  else if (topic.endsWith('s') && !/(?:ss|us|is)$/.test(topic) && topic.length > 4) out.push(topic.slice(0, -1));
-  return out;
-}
-
-/**
- * True when `text` mentions one of the blocked topics: case-insensitive whole
- * words (plurals included), substrings for CJK. Blank topics are ignored.
- */
-export function mentionsBlockedTopic(text: string, blockedTopics: readonly string[]): boolean {
-  if (!blockedTopics.length || !text) return false;
-  const haystack = normalizeText(text);
-  for (const raw of blockedTopics) {
-    const topic = normalizeText(raw);
-    if (!topic) continue;
-    if (topicVariants(topic).some((t) => containsTerm(haystack, t, true))) return true;
-  }
-  return false;
 }
 
 // ─────────────────────────────── secrets ────────────────────────────────

@@ -385,6 +385,77 @@ describe('Ollama', () => {
 });
 
 describe('OpenAI listModels and embed', () => {
+  it('does not expose malformed model-response text in errors or connection tests', async () => {
+    const { a } = make(() => new Response(KEY, { headers: { 'Content-Type': 'application/json' } }));
+    const error = await a.listModels().catch((err: unknown) => err);
+    expect(error).toMatchObject({ code: 'provider_error', message: 'OpenAI returned invalid model data.' });
+    expect(error).not.toHaveProperty('cause');
+    expect(await a.test()).toMatchObject({ ok: false, error: 'OpenAI returned invalid model data.' });
+  });
+
+  it.each([null, { data: null }, { data: KEY }])('rejects malformed model-list structures safely: %j', async (body) => {
+    const { a } = make(() => jsonResponse(body));
+    await expect(a.listModels()).rejects.toMatchObject({ code: 'provider_error', message: 'OpenAI returned invalid model data.' });
+  });
+
+  it('ignores invalid entries and redacts echoed credentials in labels', async () => {
+    const { a } = make(() => jsonResponse({ data: [null, 42, KEY, { id: {} }, { id: 'gpt-5', name: `Model ${KEY}` }] }));
+    const models = await a.listModels();
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({ id: 'gpt-5', label: 'Model [redacted]' });
+    expect(JSON.stringify(models)).not.toContain(KEY);
+  });
+
+  it('rejects credential echoes in model ids instead of returning them', async () => {
+    const { a } = make(() => jsonResponse({ data: [{ id: KEY }] }));
+    await expect(a.listModels()).rejects.toMatchObject({ code: 'provider_error', message: 'OpenAI returned invalid model data.' });
+  });
+
+  it('validates and redacts Ollama model listings too', async () => {
+    const { a } = make(() => new Response(KEY, { headers: { 'Content-Type': 'application/json' } }), { kind: 'ollama' });
+    await expect(a.listModels()).rejects.toMatchObject({ code: 'provider_error', message: 'Ollama returned invalid model data.' });
+  });
+
+  it('distinguishes dedicated capability models from chat models in the listing', async () => {
+    const ids = ['gpt-5', 'text-embedding-3-small', 'whisper-1', 'gpt-4o-mini-transcribe', 'tts-1', 'gpt-4o-mini-tts', 'dall-e-3', 'gpt-image-1', 'sora-2', 'gpt-4o-realtime-preview', 'gpt-audio', 'omni-moderation-latest'];
+    const { a } = make(() => jsonResponse({ data: ids.map((id) => ({ id })) }));
+    const models = await a.listModels();
+    expect(models.filter((m) => m.capabilities.text).map((m) => m.id)).toEqual(['gpt-5']);
+    expect(models.filter((m) => m.capabilities.embeddings).map((m) => m.id)).toEqual(['text-embedding-3-small']);
+    expect(models.filter((m) => m.capabilities.speechToText).map((m) => m.id)).toEqual(['whisper-1', 'gpt-4o-mini-transcribe']);
+    expect(models.filter((m) => m.capabilities.textToSpeech).map((m) => m.id)).toEqual(['tts-1', 'gpt-4o-mini-tts']);
+    expect(models.filter((m) => m.capabilities.image).map((m) => m.id)).toEqual(['dall-e-3', 'gpt-image-1']);
+    expect(models.filter((m) => m.capabilities.video).map((m) => m.id)).toEqual(['sora-2']);
+    expect(models.filter((m) => !m.capabilities.text).every((m) => !m.capabilities.tools && !m.capabilities.vision && !m.capabilities.reasoning)).toBe(true);
+  });
+
+  it('uses OpenRouter modality metadata without treating image or audio input as generation support', async () => {
+    const { a, f } = make(() => jsonResponse({ data: [
+      { id: 'vendor/general', name: 'General', architecture: { input_modalities: ['text', 'image', 'audio'], output_modalities: ['text'] }, supported_parameters: ['tools', 'reasoning'], context_length: 256_000, top_provider: { max_completion_tokens: 32_000 } },
+      { id: 'vendor/image', architecture: { input_modalities: ['text', 'image'], output_modalities: ['image'] }, supported_parameters: [] },
+      { id: 'vendor/speech', architecture: { input_modalities: ['text'], output_modalities: ['audio'] } },
+      { id: 'vendor/video', architecture: { input_modalities: ['text'], output_modalities: ['video'] } },
+      { id: 'vendor/vector', architecture: { input_modalities: ['text'], output_modalities: ['embedding'] } },
+    ] }), { kind: 'openai-compatible', baseUrl: 'https://openrouter.ai/api/v1' });
+    const models = await a.listModels();
+    expect(f.calls[0]!.url).toBe('https://openrouter.ai/api/v1/models');
+    expect(models[0]).toMatchObject({ label: 'General', capabilities: { text: true, tools: true, vision: true, reasoning: true, speechToText: true, textToSpeech: false, image: false, video: false, contextWindow: 256_000, maxOutputTokens: 32_000 } });
+    expect(models[1]!.capabilities).toMatchObject({ text: false, tools: false, vision: false, image: true, speechToText: false });
+    expect(models[2]!.capabilities).toMatchObject({ text: false, textToSpeech: true, speechToText: false });
+    expect(models[3]!.capabilities).toMatchObject({ text: false, video: true });
+    expect(models[4]!.capabilities).toMatchObject({ text: false, embeddings: true });
+    expect(a.capabilities('vendor/image')).toEqual(models[1]!.capabilities);
+  });
+
+  it('preserves custom chat-model fallback and refreshes listing metadata', async () => {
+    const { a } = make([
+      () => jsonResponse({ data: [{ id: 'local-model', architecture: { input_modalities: ['text'], output_modalities: ['image'] } }] }),
+      () => jsonResponse({ data: [{ id: 'local-model' }] }),
+    ], { kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:1234/v1', apiKey: undefined });
+    expect((await a.listModels())[0]!.capabilities.text).toBe(false);
+    expect((await a.listModels())[0]!.capabilities).toMatchObject({ text: true, tools: true, image: false });
+  });
+
   it('lists models with the key', async () => {
     const { a, f } = make(() => jsonResponse({ data: [{ id: 'gpt-5' }, { id: 'text-embedding-3-small' }] }));
     const models = await a.listModels();

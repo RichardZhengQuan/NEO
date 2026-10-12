@@ -36,6 +36,7 @@ import {
   newCallId,
   parseRetryAfter,
   redact,
+  readModelData,
   resolveApiKey,
   testByListingModels,
   throwIfAborted,
@@ -260,6 +261,7 @@ export class GeminiAdapter implements ProviderAdapter {
   private readonly options: ProviderOptions;
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: string;
+  private readonly listedCapabilities = new Map<string, ModelCapabilities>();
 
   constructor(config: ProviderConfig, options: ProviderOptions = {}) {
     this.id = config.id;
@@ -271,11 +273,22 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   capabilities(model: string): ModelCapabilities {
+    const listed = this.listedCapabilities.get(modelPath(model));
+    if (listed) return listed;
     const embeddings = /embed/i.test(model);
+    const textToSpeech = /(?:^|-)tts(?:-|$)/i.test(model);
+    const image = /^(?:models\/)?imagen-|gemini-.*-image(?:-|$)/i.test(model);
+    const video = /^(?:models\/)?veo-/i.test(model);
+    const text = !embeddings && !textToSpeech && !video && !/^(?:models\/)?imagen-/i.test(model);
     return {
-      tools: !embeddings,
-      vision: !embeddings,
-      reasoning: THINKING_MODEL_RE.test(model),
+      text,
+      speechToText: false,
+      textToSpeech,
+      image,
+      video,
+      tools: text && !image,
+      vision: text,
+      reasoning: text && THINKING_MODEL_RE.test(model),
       embeddings,
       contextWindow: 1_048_576,
       maxOutputTokens: THINKING_MODEL_RE.test(model) ? 65_536 : 8_192,
@@ -416,28 +429,41 @@ export class GeminiAdapter implements ProviderAdapter {
   async listModels(signal?: AbortSignal): Promise<ModelInfo[]> {
     const headers = this.headers();
     const models: ModelInfo[] = [];
+    this.listedCapabilities.clear();
     let pageToken: string | undefined;
     for (let page = 0; page < 20; page++) {
       const url = `${this.baseUrl}/models?pageSize=200${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
-      const json = (await (await this.get(url, headers, signal)).json()) as { models?: Record<string, unknown>[]; nextPageToken?: string };
-      for (const m of json.models ?? []) {
+      const json = await readModelData(await this.get(url, headers, signal), 'Gemini', 'models', signal);
+      for (const m of (json['models'] as unknown[]).filter(isPlainObject)) {
         const methods = Array.isArray(m['supportedGenerationMethods']) ? (m['supportedGenerationMethods'] as string[]) : [];
-        if (!methods.includes('generateContent') && !methods.includes('streamGenerateContent')) continue;
-        const id = modelPath(String(m['name'] ?? ''));
+        const generatesContent = methods.includes('generateContent') || methods.includes('streamGenerateContent');
+        const embeddings = methods.includes('embedContent') || methods.includes('batchEmbedContents');
+        const id = typeof m['name'] === 'string' ? modelPath(m['name']) : '';
         if (!id) continue;
+        if (this.clean(id) !== id) throw new NeoError('provider_error', 'Gemini returned invalid model data.');
         const caps = this.capabilities(id);
+        if (!generatesContent && !embeddings && !(caps.image && methods.includes('predict')) && !(caps.video && methods.includes('predictLongRunning'))) continue;
+        const text = generatesContent && caps.text !== false;
+        const capabilities = {
+          ...caps,
+          text,
+          tools: !!text && caps.tools,
+          vision: !!text && caps.vision,
+          reasoning: !!text && caps.reasoning,
+          embeddings,
+          contextWindow: typeof m['inputTokenLimit'] === 'number' && Number.isInteger(m['inputTokenLimit']) && m['inputTokenLimit'] > 0 ? m['inputTokenLimit'] : caps.contextWindow,
+          maxOutputTokens: typeof m['outputTokenLimit'] === 'number' && Number.isInteger(m['outputTokenLimit']) && m['outputTokenLimit'] > 0 ? m['outputTokenLimit'] : caps.maxOutputTokens,
+        };
+        this.listedCapabilities.set(id, capabilities);
         models.push({
           id,
           provider: this.id,
-          label: typeof m['displayName'] === 'string' ? m['displayName'] : id,
-          capabilities: {
-            ...caps,
-            contextWindow: typeof m['inputTokenLimit'] === 'number' ? m['inputTokenLimit'] : caps.contextWindow,
-            maxOutputTokens: typeof m['outputTokenLimit'] === 'number' ? m['outputTokenLimit'] : caps.maxOutputTokens,
-          },
+          label: this.clean(typeof m['displayName'] === 'string' ? m['displayName'] : id),
+          capabilities,
         });
       }
-      pageToken = json.nextPageToken || undefined;
+      pageToken = typeof json['nextPageToken'] === 'string' ? json['nextPageToken'] || undefined : undefined;
+      if (pageToken && this.clean(pageToken) !== pageToken) throw new NeoError('provider_error', 'Gemini returned invalid model data.');
       if (!pageToken) break;
     }
     return models;

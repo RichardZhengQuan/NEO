@@ -11,10 +11,37 @@ import {
   type Message,
   type MessagePatch,
   type NewConversation,
+  type OffRecordState,
+  type TimelineMessage,
+  type TimelinePage,
+  type TimelineQuery,
+  type TimelineSearchSnippet,
 } from '@neo/protocol';
 import { fromBool, fromJson, toBool, toJson, toNum, toNumOrNull, type NeoDatabase } from './db.js';
 
 type Row = Record<string, unknown>;
+
+const snippetStart = '\uE000';
+const snippetEnd = '\uE001';
+
+function toSearchSnippet(marked: string, start: string, end: string): TimelineSearchSnippet {
+  const snippet: TimelineSearchSnippet = { text: '', highlights: [] };
+  let cursor = 0;
+  for (;;) {
+    const from = marked.indexOf(start, cursor);
+    if (from === -1) {
+      snippet.text += marked.slice(cursor);
+      return snippet;
+    }
+    snippet.text += marked.slice(cursor, from);
+    const to = marked.indexOf(end, from + start.length);
+    if (to === -1) throw new Error('Unbalanced FTS snippet markers.');
+    const highlightStart = snippet.text.length;
+    snippet.text += marked.slice(from + start.length, to);
+    snippet.highlights.push([highlightStart, snippet.text.length]);
+    cursor = to + end.length;
+  }
+}
 
 function toConversation(r: Row): Conversation {
   return {
@@ -30,6 +57,11 @@ function toConversation(r: Row): Conversation {
     toolset: fromJson(r.toolset, null),
     lastMessageAt: toNumOrNull(r.last_message_at),
     preview: (r.preview as string | null) ?? null,
+    kind: 'episode',
+    offRecord: toBool(r.off_record ?? r.incognito),
+    ephemeral: toBool(r.ephemeral),
+    startedAt: toNum(r.started_at ?? r.created_at),
+    closedAt: toNumOrNull(r.closed_at),
   };
 }
 
@@ -37,6 +69,7 @@ function toMessage(r: Row): Message {
   const msg: Message = {
     id: r.id as string,
     conversationId: r.conversation_id as string,
+    episodeId: r.conversation_id as string,
     role: r.role as Message['role'],
     parts: fromJson(r.parts, []),
     createdAt: toNum(r.created_at),
@@ -52,6 +85,13 @@ function toMessage(r: Row): Message {
 
 export function createConversationStore(db: NeoDatabase, options: { clock?: Clock } = {}): ConversationStore {
   const clock = options.clock ?? systemClock;
+  const offRecordState = (): OffRecordState => {
+    const row = db.prepare('SELECT off_record_started_at, private_episode_id FROM timeline_state WHERE id = 1').get() as Row;
+    const startedAt = toNumOrNull(row.off_record_started_at);
+    return { active: startedAt !== null, episodeId: (row.private_episode_id as string | null) ?? null, startedAt };
+  };
+  // Migration fixtures also use this store against older versions of its tables.
+  const hasEpisodes = () => (db.prepare('PRAGMA table_info(conversations)').all() as Row[]).some((column) => column.name === 'started_at');
 
   const get = (id: string): Conversation | null => {
     const r = db.prepare('SELECT * FROM conversations WHERE id = ?').get(id) as Row | undefined;
@@ -65,6 +105,102 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
   const getMessage = (id: string): Message | null => {
     const r = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as Row | undefined;
     return r ? toMessage(r) : null;
+  };
+  const closeEpisode = (id: string): Conversation => {
+    const current = mustGet(id);
+    if (current.closedAt === null || current.closedAt === undefined) {
+      db.prepare('UPDATE conversations SET closed_at = ?, updated_at = ? WHERE id = ?').run(clock(), clock(), id);
+    }
+    return mustGet(id);
+  };
+  const create = (input: NewConversation = {}): Conversation => {
+    const now = clock();
+    const id = newId('conv', now);
+    const title = input.title?.trim() || 'New conversation';
+    const incognito = input.incognito ?? input.offRecord ?? false;
+    if (hasEpisodes()) {
+      db.prepare(
+        `INSERT INTO conversations (id, title, created_at, updated_at, model, incognito, off_record, ephemeral, started_at, closed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, title, now, now, toJson(input.model), fromBool(incognito), fromBool(input.offRecord ?? incognito), fromBool(input.ephemeral), now, input.closedAt ?? null);
+    } else {
+      db.prepare('INSERT INTO conversations (id, title, created_at, updated_at, model, incognito) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, title, now, now, toJson(input.model), fromBool(incognito));
+    }
+    return mustGet(id);
+  };
+  const deleteEpisode = (id: string): boolean => db.transaction(() => {
+    db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(id);
+    return toNum(db.prepare('DELETE FROM conversations WHERE id = ?').run(id).changes) > 0;
+  });
+
+  const order = '(c.started_at, c.rowid, m.created_at, m.rowid)';
+  const ascending = 'c.started_at, c.rowid, m.created_at, m.rowid';
+  const descending = 'c.started_at DESC, c.rowid DESC, m.created_at DESC, m.rowid DESC';
+  const joined = 'FROM messages m JOIN conversations c ON c.id = m.conversation_id';
+  const cursorOf = (row: Row): string => Buffer.from(JSON.stringify([
+    toNum(row.episode_start), toNum(row.episode_row), toNum(row.created_at), toNum(row.message_row),
+  ])).toString('base64url');
+  const timeline = (query: TimelineQuery = {}): TimelinePage => {
+    const limit = Math.min(Math.max(Math.floor(query.limit ?? 100), 1), 500);
+    const select = `SELECT m.*, c.started_at AS episode_start, c.rowid AS episode_row, m.rowid AS message_row, c.off_record ${joined}`;
+    let rows: Row[];
+    let hasOlder: boolean;
+    if (query.around !== undefined) {
+      if (query.before !== undefined) throw new NeoError('bad_request', 'Use either before or around.');
+      let anchor = db.prepare(`${select} WHERE m.id = ?`).get(query.around) as Row | undefined;
+      if (!anchor) {
+        const instant = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/.test(query.around) ? Date.parse(query.around) : NaN;
+        if (!Number.isFinite(instant)) throw new NeoError('not_found', 'Timeline message not found.');
+        anchor = db.prepare(`${select} ORDER BY ABS(m.created_at - ?), ${ascending} LIMIT 1`).get(instant) as Row | undefined;
+      }
+      if (!anchor) return { items: [], episodes: [], nextCursor: null };
+      const position = toNum((db.prepare(`SELECT COUNT(*) AS n ${joined} WHERE ${order} < (?, ?, ?, ?)`)
+        .get(toNum(anchor.episode_start), toNum(anchor.episode_row), toNum(anchor.created_at), toNum(anchor.message_row)) as Row).n);
+      const total = toNum((db.prepare('SELECT COUNT(*) AS n FROM messages').get() as Row).n);
+      const offset = Math.max(0, Math.min(position - Math.floor(limit / 2), total - limit));
+      rows = db.prepare(`${select} ORDER BY ${ascending} LIMIT ? OFFSET ?`).all(limit, offset) as Row[];
+      hasOlder = offset > 0;
+    } else {
+      let where = '';
+      let args: number[] = [];
+      if (query.before !== undefined) {
+        try {
+          const parsed: unknown = JSON.parse(Buffer.from(query.before, 'base64url').toString());
+          if (!Array.isArray(parsed) || parsed.length !== 4 || !parsed.every((value) => typeof value === 'number' && Number.isFinite(value))) throw new Error();
+          args = parsed as number[];
+        } catch {
+          throw new NeoError('bad_request', 'Invalid timeline cursor.');
+        }
+        where = ` WHERE ${order} < (?, ?, ?, ?)`;
+      }
+      rows = db.prepare(`${select}${where} ORDER BY ${descending} LIMIT ?`).all(...args, limit + 1) as Row[];
+      hasOlder = rows.length > limit;
+      rows = rows.slice(0, limit).reverse();
+    }
+    const episodes: TimelinePage['episodes'] = [];
+    for (const row of rows) {
+      const first = db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid LIMIT 1').get(row.conversation_id as string) as Row;
+      if (first.id === row.id) episodes.push({ episodeId: row.conversation_id as string, startedAt: toNum(row.episode_start), offRecord: toBool(row.off_record) });
+    }
+    return {
+      items: rows.map((row) => toMessage(row) as TimelineMessage),
+      episodes,
+      nextCursor: hasOlder && rows.length ? cursorOf(rows[0]!) : null,
+    };
+  };
+
+  const rangeQuery = (range: { from?: number; to?: number }): { clause: string; args: number[] } => {
+    const where: string[] = [];
+    const args: number[] = [];
+    if (range.from !== undefined) { where.push('created_at >= ?'); args.push(range.from); }
+    if (range.to !== undefined) { where.push('created_at <= ?'); args.push(range.to); }
+    return { clause: where.length ? ` WHERE ${where.join(' AND ')}` : '', args };
+  };
+
+  const messagesInRange = (range: { from?: number; to?: number }): Message[] => {
+    const { clause, args } = rangeQuery(range);
+    return (db.prepare(`SELECT * FROM messages${clause} ORDER BY created_at, rowid`).all(...args) as Row[]).map(toMessage);
   };
 
   return {
@@ -87,28 +223,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
 
     get,
 
-    create(input: NewConversation = {}) {
-      const now = clock();
-      const conv: Conversation = {
-        id: newId('conv', now),
-        title: input.title?.trim() || 'New conversation',
-        createdAt: now,
-        updatedAt: now,
-        model: input.model ?? null,
-        incognito: input.incognito ?? false,
-        pinned: false,
-        archived: false,
-        systemPrompt: null,
-        toolset: null,
-        lastMessageAt: null,
-        preview: null,
-      };
-      db.prepare(
-        `INSERT INTO conversations (id, title, created_at, updated_at, model, incognito, pinned, archived, system_prompt, toolset, last_message_at, preview)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL, NULL, NULL)`,
-      ).run(conv.id, conv.title, now, now, toJson(conv.model), fromBool(conv.incognito));
-      return conv;
-    },
+    create,
 
     update(id: string, patch: ConversationPatch) {
       const current = mustGet(id);
@@ -128,15 +243,11 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
         next.preview,
         id,
       );
+      if (hasEpisodes() && patch.closedAt !== undefined) db.prepare('UPDATE conversations SET closed_at = ? WHERE id = ?').run(patch.closedAt, id);
       return next;
     },
 
-    delete(id: string) {
-      return db.transaction(() => {
-        db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(id);
-        return toNum(db.prepare('DELETE FROM conversations WHERE id = ?').run(id).changes) > 0;
-      });
-    },
+    delete: deleteEpisode,
 
     messages(conversationId: string, options: { limit?: number; before?: number } = {}) {
       const args: (string | number)[] = [conversationId];
@@ -182,7 +293,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
           preview,
           conv.id,
         );
-        return message;
+        return { ...message, episodeId: message.conversationId };
       });
     },
 
@@ -209,7 +320,106 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
     },
 
     deleteMessage(id: string) {
-      return toNum(db.prepare('DELETE FROM messages WHERE id = ?').run(id).changes) > 0;
+      return db.transaction(() => {
+        const message = getMessage(id);
+        if (!message) return false;
+        if (hasEpisodes()) closeEpisode(message.conversationId);
+        return toNum(db.prepare('DELETE FROM messages WHERE id = ?').run(id).changes) > 0;
+      });
+    },
+
+    currentEpisode() {
+      const row = db.prepare('SELECT * FROM conversations WHERE closed_at IS NULL ORDER BY started_at DESC, rowid DESC LIMIT 1').get() as Row | undefined;
+      return row ? toConversation(row) : null;
+    },
+
+    latestEpisode() {
+      const row = db.prepare('SELECT * FROM conversations ORDER BY started_at DESC, rowid DESC LIMIT 1').get() as Row | undefined;
+      return row ? toConversation(row) : null;
+    },
+
+    createEpisode(input: { offRecord?: boolean } = {}) {
+      return db.transaction(() => {
+        const now = clock();
+        db.prepare('UPDATE conversations SET closed_at = ? WHERE closed_at IS NULL').run(now);
+        return create({ offRecord: input.offRecord ?? false, ephemeral: input.offRecord ?? false });
+      });
+    },
+
+    closeEpisode,
+
+    offRecordState,
+
+    setOffRecordState(state: OffRecordState) {
+      db.prepare('UPDATE timeline_state SET off_record_started_at = ?, private_episode_id = ? WHERE id = 1')
+        .run(state.active ? state.startedAt : null, state.active ? state.episodeId : null);
+    },
+
+    purgeOffRecord(before: number) {
+      return db.transaction(() => {
+        const state = offRecordState();
+        const expired = state.active && state.startedAt !== null && state.startedAt < before;
+        const rows = db.prepare('SELECT id FROM conversations WHERE off_record = 1 AND ephemeral = 1 AND started_at < ?')
+          .all(expired ? Number.MAX_SAFE_INTEGER : before) as Row[];
+        for (const row of rows) deleteEpisode(row.id as string);
+        if (expired) db.prepare('UPDATE timeline_state SET off_record_started_at = NULL, private_episode_id = NULL WHERE id = 1').run();
+        return rows.length;
+      });
+    },
+
+    offRecordEpisodes(before = Number.MAX_SAFE_INTEGER) {
+      return (db.prepare('SELECT * FROM conversations WHERE off_record = 1 AND ephemeral = 1 AND started_at < ? ORDER BY started_at, rowid').all(before) as Row[]).map(toConversation);
+    },
+
+    timeline,
+
+    searchMessages(query: string, limit = 50) {
+      const tokens = query.toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(Boolean).slice(0, 32);
+      if (!tokens.length) return [];
+      const match = tokens.map((token) => `"${token}"`).join(' OR ');
+      return (db.prepare(
+        `SELECT m.id, m.conversation_id, m.created_at, message_fts.rowid AS fts_rowid, message_fts.text AS source_text,
+           snippet(message_fts, 1, ?, ?, '…', 24) AS snippet
+         FROM message_fts JOIN messages m ON m.rowid = message_fts.rowid
+         WHERE message_fts MATCH ? ORDER BY bm25(message_fts), m.created_at DESC, m.rowid DESC LIMIT ?`,
+      ).all(snippetStart, snippetEnd, match, Math.min(Math.max(Math.floor(limit), 1), 500)) as Row[]).map((row) => {
+        let start = snippetStart;
+        let end = snippetEnd;
+        let marked = row.snippet as string;
+        const source = row.source_text as string;
+        if (source.includes(start) || source.includes(end)) {
+          // Preserve literal private-use characters too. Different leading/trailing
+          // characters prevent a delimiter from overlapping adjacent source text.
+          let salt = 0;
+          do {
+            start = `${snippetStart}${salt}\uE002`;
+            end = `${snippetEnd}${salt}\uE002`;
+            salt++;
+          } while (source.includes(start) || source.includes(end));
+          marked = (db.prepare(
+            `SELECT snippet(message_fts, 1, ?, ?, '…', 24) AS snippet
+             FROM message_fts WHERE message_fts MATCH ? AND rowid = ?`,
+          ).get(start, end, match, row.fts_rowid as number) as Row).snippet as string;
+        }
+        return {
+          messageId: row.id as string,
+          episodeId: row.conversation_id as string,
+          createdAt: toNum(row.created_at),
+          snippet: toSearchSnippet(marked, start, end),
+        };
+      });
+    },
+
+    messagesInRange,
+
+    deleteRange(range: { from?: number; to?: number }) {
+      return db.transaction(() => {
+        const { clause, args } = rangeQuery(range);
+        const messages = messagesInRange(range);
+        for (const id of new Set(messages.map((message) => message.conversationId))) closeEpisode(id);
+        db.prepare(`DELETE FROM messages${clause}`).run(...args);
+        return messages;
+      });
     },
   };
 }

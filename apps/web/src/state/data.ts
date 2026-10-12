@@ -1,7 +1,7 @@
 /**
  * Productivity data (reminders, tasks, notes) kept fresh by server events,
- * plus memory/notification counters. Screens load what they show; events keep
- * everything that is loaded up to date, and live widgets in chat read from here.
+ * plus memory changes and notification counters. Screens load what they show; events keep
+ * everything that is loaded up to date, and live timeline widgets read from here.
  */
 import { create } from 'zustand';
 import type { Note, Notification, Reminder, Task, TaskList } from '@neo/protocol';
@@ -18,7 +18,6 @@ export interface DataState {
   notesLoaded: boolean;
   /** Bumped on every memory change; memory views refetch when it moves. */
   memoryVersion: number;
-  pendingMemories: number;
   notifications: Notification[];
   unreadNotifications: number;
 }
@@ -32,7 +31,6 @@ export const useData = create<DataState>(() => ({
   notes: {},
   notesLoaded: false,
   memoryVersion: 0,
-  pendingMemories: 0,
   notifications: [],
   unreadNotifications: 0,
 }));
@@ -126,20 +124,10 @@ export function removeNote(id: string): void {
   });
 }
 
-// ── memory counters ──
+// ── memory changes ──
 
 export function bumpMemoryVersion(): void {
   useData.setState((s) => ({ memoryVersion: s.memoryVersion + 1 }));
-}
-
-export async function refreshPendingMemories(client: NeoClient): Promise<void> {
-  const epoch = currentSessionEpoch();
-  try {
-    const stats = await client.memory.stats();
-    if (isCurrentSession(epoch, client)) useData.setState({ pendingMemories: stats.pending });
-  } catch {
-    // Memory may be unavailable; the badge just stays as it was.
-  }
 }
 
 // ── notifications ──
@@ -163,7 +151,6 @@ export async function refreshLoadedData(client: NeoClient): Promise<void> {
     s.remindersLoaded ? loadReminders(client) : Promise.resolve(),
     s.tasksLoaded ? loadTasks(client) : Promise.resolve(),
     s.notesLoaded ? loadNotes(client) : Promise.resolve(),
-    refreshPendingMemories(client),
   ]);
   if (isCurrentSession(epoch, client)) bumpMemoryVersion();
 }

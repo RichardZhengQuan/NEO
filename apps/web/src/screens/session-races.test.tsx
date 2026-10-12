@@ -1,11 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { DEFAULT_SETTINGS, type Conversation, type ProviderView, type Reminder, type Task } from '@neo/protocol';
+import { DEFAULT_SETTINGS, deepMerge, type ProviderView, type Reminder, type Task } from '@neo/protocol';
 import { ConfirmProvider, I18nProvider } from '@neo/ui';
 import type { ReactElement } from 'react';
 import { appDictionaries } from '../i18n.js';
-import { ConversationList } from '../components/ConversationList.js';
-import { useConversations } from '../state/conversations.js';
 import { ProviderSetup } from '../components/ProviderSetup.js';
 import { useData } from '../state/data.js';
 import { startSession, useSession } from '../state/session.js';
@@ -16,10 +14,10 @@ import { AiSection } from './settings/AiSection.js';
 vi.mock('@neo/client', async (importOriginal) => ({
   ...await importOriginal<typeof import('@neo/client')>(),
   NeoClient: vi.fn(() => ({
-    conversations: { list: vi.fn() },
+    timeline: { offRecord: vi.fn().mockResolvedValue({ active: false, episodeId: null, startedAt: null }), startOffRecord: vi.fn().mockResolvedValue({ active: true, episodeId: null, startedAt: 1 }), list: vi.fn() },
     tasks: { update: vi.fn() },
     reminders: { create: vi.fn() },
-    providers: { create: vi.fn(), update: vi.fn(), list: vi.fn(), models: vi.fn() },
+    providers: { create: vi.fn(), update: vi.fn(), list: vi.fn(), models: vi.fn().mockResolvedValue({ items: [] }) },
   })),
 }));
 vi.mock('../state/data.js', async (importOriginal) => ({
@@ -43,7 +41,7 @@ function renderScreen(child: ReactElement) {
 }
 
 const task: Task = { id: 'task_a', title: 'Server A task', notes: null, listId: 'list_inbox', done: false, doneAt: null, dueAt: null, priority: 0, tags: [], order: 0, parentId: null, createdAt: 0, updatedAt: 0 };
-const provider: ProviderView = { id: 'old', kind: 'mock', label: 'Old provider', enabled: true, hasApiKey: false, isLocal: true };
+const provider: ProviderView = { id: 'old', kind: 'ollama', label: 'Old provider', enabled: true, hasApiKey: false, isLocal: true };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -83,7 +81,7 @@ describe('screen mutations after a server switch (F10)', () => {
     expect(client.reminders.create).toHaveBeenCalledTimes(1);
     unmount();
     startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
-    await act(async () => { response.resolve({ id: 'rem_a', title: 'A', notes: null, dueAt: 1000, timezone: 'UTC', recurrence: null, status: 'scheduled', firedCount: 0, lastFiredAt: null, conversationId: null, createdAt: 0, updatedAt: 0 }); });
+    await act(async () => { response.resolve({ id: 'rem_a', title: 'A', notes: null, dueAt: 1000, timezone: 'UTC', recurrence: null, status: 'scheduled', firedCount: 0, lastFiredAt: null, messageId: null, createdAt: 0, updatedAt: 0 }); });
     expect(useData.getState().reminders).toEqual({});
   });
 
@@ -91,9 +89,9 @@ describe('screen mutations after a server switch (F10)', () => {
     const client = useSession.getState().client!;
     const response = deferred<ProviderView>();
     vi.mocked(client.providers.update).mockReturnValueOnce(response.promise);
-    useSession.setState({ providers: { items: [provider], defaultModel: null } });
+    useSession.setState({ providers: { items: [provider], defaultModel: null }, settings: deepMerge(DEFAULT_SETTINGS, { ai: { mode: 'advanced' } }) });
     const { unmount } = renderScreen(<AiSection />);
-    fireEvent.click(screen.getByRole('switch', { name: 'Use Old provider' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Disable Old provider' }));
     expect(client.providers.update).toHaveBeenCalledWith('old', { enabled: false });
     unmount();
     const b = startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
@@ -108,8 +106,8 @@ describe('screen mutations after a server switch (F10)', () => {
     vi.mocked(client.providers.create).mockReturnValueOnce(response.promise);
     const onDone = vi.fn();
     const { unmount } = renderScreen(<ProviderSetup existing={[]} onDone={onDone} />);
-    fireEvent.click(screen.getByRole('button', { name: /Demo mode/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Use demo mode' }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-ant-example' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
     expect(client.providers.create).toHaveBeenCalledTimes(1);
     unmount();
     const b = startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
@@ -117,21 +115,6 @@ describe('screen mutations after a server switch (F10)', () => {
     expect(b.providers.list).not.toHaveBeenCalled();
     expect(b.providers.models).not.toHaveBeenCalled();
     expect(onDone).not.toHaveBeenCalled();
-  });
-
-  it('late archived-conversation loads cannot repopulate B', async () => {
-    const client = useSession.getState().client!;
-    const response = deferred<{ items: Conversation[] }>();
-    vi.mocked(client.conversations.list).mockReturnValueOnce(response.promise);
-    useConversations.setState({ listLoaded: true });
-    const { unmount } = renderScreen(<ConversationList activeId={undefined} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Archived chats' }));
-    expect(client.conversations.list).toHaveBeenCalledWith({ archived: true, limit: 200 });
-    unmount();
-    startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
-    await act(async () => { response.resolve({ items: [{ id: 'conv_a', title: 'A', model: null, incognito: false, pinned: false, archived: true, createdAt: 0, updatedAt: 0, systemPrompt: null, toolset: null, lastMessageAt: null, preview: null }] }); });
-    expect(useConversations.getState().conversations).toEqual({});
-    expect(useConversations.getState().archivedLoaded).toBe(false);
   });
 
 });

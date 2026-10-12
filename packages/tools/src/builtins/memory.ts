@@ -1,5 +1,5 @@
 /**
- * Memory tools: remember, recall, forget, and the UI-only approve_memory / reject_memory.
+ * Memory tools: remember, recall and forget.
  */
 import { z } from 'zod';
 import { MemoryKindSchema, NeoError, defineTool, type MemoryNode, type MemoryService, type UIBlock } from '@neo/protocol';
@@ -24,7 +24,7 @@ export function createMemoryTools(memory: MemoryService) {
       'Save something about the user to long-term memory when they ask you to remember it, or when they share a lasting fact, ' +
       'preference, goal or relationship that will clearly matter later ("I\'m allergic to peanuts", "my sister Mia lives in Lyon"). ' +
       'Write `content` as a self-contained third-person statement ("The user is allergic to peanuts"). Don\'t store passing ' +
-      'chit-chat. Depending on the user\'s settings the memory may wait for their approval; the user sees a memory card either way.',
+      'chit-chat. The user sees a memory card and can review, edit or forget it in Memory.',
     inputSchema: z.object({
       content: z.string().min(1).max(10_000).describe('Self-contained statement in third person.'),
       label: z.string().min(1).max(300).optional().describe('Short title, e.g. "Peanut allergy".'),
@@ -37,6 +37,7 @@ export function createMemoryTools(memory: MemoryService) {
     risk: 'write',
     defaultPermission: 'auto',
     async execute(input, ctx) {
+      if (ctx.offRecord) throw new NeoError('forbidden', 'Memory writes are unavailable off the record.');
       const node = await memory.remember({
         content: input.content,
         ...(input.label !== undefined ? { label: input.label } : {}),
@@ -45,21 +46,20 @@ export function createMemoryTools(memory: MemoryService) {
         ...(input.entities !== undefined ? { entities: input.entities } : {}),
         ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
         ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
-        source: { by: 'tool', conversationId: ctx.conversationId ?? null },
-      });
+        source: { by: 'tool', conversationId: ctx.conversationId ?? null, messageId: ctx.messageId ?? null },
+      }, ctx.signal);
       remember(node);
-      const pending = node.status === 'pending';
       const ui: UIBlock[] = [
         {
           type: 'memory',
-          title: pending ? 'Remember this?' : 'Remembered',
+          title: 'Remembered',
           nodes: [{ id: node.id, kind: clip(node.kind, 30), label: clip(node.label, 300), content: clip(node.content, 2000), status: node.status }],
         },
       ];
       return {
-        output: { id: node.id, label: node.label, kind: node.kind, status: node.status, ...(pending ? { note: 'Waiting for the user to approve it.' } : {}) },
+        output: { id: node.id, label: node.label, kind: node.kind, status: node.status },
         ui,
-        summary: pending ? `Asked to remember “${clip(node.label, 60)}”` : `Remembered “${clip(node.label, 60)}”`,
+        summary: `Remembered “${clip(node.label, 60)}”`,
         ...(node.sensitivity === 'sensitive' ? { sensitive: true } : {}),
       };
     },
@@ -89,6 +89,7 @@ export function createMemoryTools(memory: MemoryService) {
         text: input.query,
         limit: input.limit ?? 8,
         allowSensitive: ctx.allowSensitive,
+        get reinforce() { return ctx.offRecord ? false : undefined; },
         ...(ctx.conversationId ? { conversationId: ctx.conversationId } : {}),
       });
       const memories = result.items.map((m) => {
@@ -127,6 +128,7 @@ export function createMemoryTools(memory: MemoryService) {
       return `Forget everything matching “${clip(input.query ?? '', 80)}”`;
     },
     async execute(input, ctx) {
+      if (ctx.offRecord) throw new NeoError('forbidden', 'Memory writes are unavailable off the record.');
       let ids: string[];
       let forgotten: string[];
       let sensitive = false;
@@ -145,6 +147,8 @@ export function createMemoryTools(memory: MemoryService) {
         forgotten = found.map((n) => shown(n, ctx.allowSensitive));
         sensitive = ctx.allowSensitive && found.some((n) => n.sensitivity === 'sensitive');
       }
+      if (ctx.offRecord) throw new NeoError('forbidden', 'Memory writes are unavailable off the record.');
+      if (ctx.signal.aborted) throw new NeoError('cancelled', 'The operation was cancelled.');
       const deleted = await memory.forget(ids);
       for (const id of ids) labels.delete(id);
       if (deleted === 0) throw new NeoError('not_found', 'None of those memories exist (already forgotten?).');
@@ -152,33 +156,5 @@ export function createMemoryTools(memory: MemoryService) {
     },
   });
 
-  const approveMemory = defineTool({
-    name: 'approve_memory',
-    title: 'Approve memory',
-    description: 'Keep pending memories (the Remember button on a memory card). Only runs from the app, never from the model.',
-    inputSchema: z.object({ ids: z.array(z.string().min(1).max(64)).min(1).max(100) }),
-    risk: 'write',
-    defaultPermission: 'auto',
-    uiOnly: true,
-    async execute(input) {
-      const approved = await memory.approve(input.ids);
-      return { output: { approved, ids: input.ids }, summary: approved === 1 ? 'Memory saved' : `${approved} memories saved` };
-    },
-  });
-
-  const rejectMemory = defineTool({
-    name: 'reject_memory',
-    title: 'Reject memory',
-    description: 'Discard pending memories (the Don\'t remember button on a memory card). Only runs from the app, never from the model.',
-    inputSchema: z.object({ ids: z.array(z.string().min(1).max(64)).min(1).max(100) }),
-    risk: 'write',
-    defaultPermission: 'auto',
-    uiOnly: true,
-    async execute(input) {
-      const rejected = await memory.reject(input.ids);
-      return { output: { rejected, ids: input.ids }, summary: rejected === 1 ? 'Memory discarded' : `${rejected} memories discarded` };
-    },
-  });
-
-  return [rememberTool, recall, forget, approveMemory, rejectMemory];
+  return [rememberTool, recall, forget];
 }

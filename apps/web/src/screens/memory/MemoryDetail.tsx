@@ -1,8 +1,7 @@
 /**
  * Everything about one memory: the card, full content, how strong it is,
- * where it came from (with a link to the conversation), its associations,
- * older versions it replaced, and the controls (edit, pin, forget, restore,
- * approve / reject).
+ * where it came from (with a link to the message), its associations,
+ * older versions it replaced, and the controls (edit, pin, forget, restore).
  */
 import { useState, type ReactElement } from 'react';
 import type { MemoryEdge, MemoryNodeDetail } from '@neo/protocol';
@@ -10,7 +9,7 @@ import { Badge, Button, EmptyState, Icon, IconButton, MemoryNodeCard, Skeleton, 
 import { openLink } from '../../actions/links.js';
 import { useLoader } from '../../hooks/useLoader.js';
 import { errorMessage, httpStatus } from '../../lib/errors.js';
-import { bumpMemoryVersion, refreshPendingMemories, useData } from '../../state/data.js';
+import { bumpMemoryVersion, useData } from '../../state/data.js';
 import { pushToast } from '../../state/notifications.js';
 import { requireClient } from '../../state/session.js';
 import { MemoryEditor } from './MemoryEditor.js';
@@ -53,7 +52,6 @@ export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: s
     try {
       await fn();
       bumpMemoryVersion();
-      void refreshPendingMemories(requireClient());
       if (success) pushToast({ tone: 'success', title: success });
     } catch (err) {
       pushToast({ tone: 'error', title: errorMessage(err, t) });
@@ -97,13 +95,6 @@ export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: s
         retention={detail.retention}
         onTogglePin={() => void act(() => client.memory.update(node.id, { pinned: !node.pinned }))}
         onEdit={() => setEditing(true)}
-        onApprove={() => void act(() => client.memory.approve([node.id]), t('memoryDetail.approved'))}
-        onReject={() =>
-          void act(async () => {
-            await client.memory.reject([node.id]);
-            onClose();
-          }, t('memoryDetail.rejected'))
-        }
         onRestore={() => void act(() => client.memory.update(node.id, { status: 'active' }), t('memoryDetail.restored'))}
         onForget={() =>
           void act(async () => {
@@ -119,9 +110,9 @@ export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: s
             {t('memoryDetail.focus')}
           </Button>
         )}
-        {node.source.conversationId && (
-          <Button size="sm" variant="secondary" icon="message" onClick={() => openLink(`neo://chat/${node.source.conversationId}`)}>
-            {t('memoryDetail.open_conversation')}
+        {node.source.messageId && (
+          <Button size="sm" variant="secondary" icon="message" onClick={() => openLink(`neo://timeline/${encodeURIComponent(node.source.messageId!)}`)}>
+            {t('memoryDetail.open_message')}
           </Button>
         )}
       </div>

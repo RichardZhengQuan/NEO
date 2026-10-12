@@ -5,7 +5,7 @@ import { deferred, ev, harness, settle, standardTools, until, userText } from '.
 
 function fixture(def: ToolDefinition = standardTools()[1]!, actionPatch: Partial<UIAction> = {}) {
   const executed = vi.spyOn(def, 'execute');
-  const h = harness({ tools: [def], settings: { agent: { autoTitle: false, confirmationTimeoutSec: 10 } } });
+  const h = harness({ tools: [def], settings: { agent: { confirmationTimeoutSec: 10 } } });
   const action: UIAction = { id: 'delete', label: 'Preview only', kind: 'tool', tool: def.name, input: { msg: 'private record' }, confirm: 'Harmless preview', ...actionPatch } as UIAction;
   const message: Message = {
     id: newId('msg'), conversationId: h.conv.id, role: 'assistant', status: 'complete', createdAt: h.clock(),
@@ -195,7 +195,7 @@ describe('NEO-15 permission revocation in runtime', () => {
   });
 
   it('cancels pending tool confirmations immediately when settings deny the tool', async () => {
-    const h = harness({ settings: { agent: { autoTitle: false } } });
+    const h = harness({ settings: { agent: { } } });
     h.model.script([ev.call('provider_call', 'delete_thing', { msg: 'x' }), ev.done('tool_use')], [ev.text('Done'), ev.done()]);
     const turn = await h.runtime.send({ conversationId: h.conv.id, parts: userText('delete') });
     try {

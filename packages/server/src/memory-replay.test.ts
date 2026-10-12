@@ -28,12 +28,12 @@ async function setup(sharing = false) {
   const service = await createServices(NeoConfigSchema.parse({
     dataDir: directory,
     log: { level: 'silent' },
-    providers: [
+    settings: { memory: { storeEpisodes: false, sendSensitiveToCloud: sharing } },
+  }), {
+    mockProviders: [
       { id: 'local', kind: 'mock', local: true, enabled: true },
       { id: 'cloud', kind: 'mock', local: false, enabled: true },
     ],
-    settings: { agent: { autoTitle: false }, memory: { storeEpisodes: false, sendSensitiveToCloud: sharing } },
-  }), {
     inMemory: true,
     logger: silentLogger,
     mockScript(request, callIndex) {
@@ -74,7 +74,8 @@ describe('sensitive memory replay through the real services', () => {
   it('keeps ordinary cloud answers unflagged when sharing is off despite sensitive memories in storage', async () => {
     const { service, requests, memory } = await setup();
     expect((await service.memory.get(memory.id))?.node.sensitivity).toBe('sensitive');
-    const conversation = service.conversations.create({ model: { provider: 'cloud', model: 'cloud-model' } });
+    service.settings.update({ ai: { capabilities: { text: { provider: 'cloud', model: 'cloud-model' } } } });
+    const conversation = service.conversations.createEpisode();
     const first = await send(service, conversation.id, 'Tell me about the private atlas project');
     expect(first.sensitive).not.toBe(true);
     expect(service.conversations.getMessage(first.id)?.sensitive).not.toBe(true);
@@ -87,7 +88,8 @@ describe('sensitive memory replay through the real services', () => {
 
   it('withholds actual local recall output, quoted answers and reasoning after switching to cloud', async () => {
     const { service, requests } = await setup();
-    const conversation = service.conversations.create({ model: { provider: 'local', model: 'local-model' } });
+    service.settings.update({ ai: { capabilities: { text: { provider: 'local', model: 'local-model' } } } });
+    const conversation = service.conversations.createEpisode();
     const first = await send(service, conversation.id, 'Look deeper into my saved memories');
     const stored = service.conversations.getMessage(first.id)!;
     expect(stored.sensitive).toBe(true);
@@ -95,7 +97,7 @@ describe('sensitive memory replay through the real services', () => {
     expect(stored.parts.some((part) => part.type === 'reasoning' && part.text.includes(SECRET))).toBe(true);
     expect(JSON.stringify(requests[1])).toContain(SECRET);
 
-    service.conversations.update(conversation.id, { model: { provider: 'cloud', model: 'cloud-model' } });
+    service.settings.update({ ai: { capabilities: { text: { provider: 'cloud', model: 'cloud-model' } } } });
     const recall = vi.spyOn(service.memory, 'recall');
     const next = await send(service, conversation.id, 'Continue');
     const request = requests.find((item) => item.model === 'cloud-model')!;
@@ -111,7 +113,8 @@ describe('sensitive memory replay through the real services', () => {
 
   it('withholds previously shared cloud turns on the next request after sharing is revoked', async () => {
     const { service, requests } = await setup(true);
-    const conversation = service.conversations.create({ model: { provider: 'cloud', model: 'cloud-model' } });
+    service.settings.update({ ai: { capabilities: { text: { provider: 'cloud', model: 'cloud-model' } } } });
+    const conversation = service.conversations.createEpisode();
     const first: Message = await send(service, conversation.id, 'Look deeper into my saved memories');
     expect(first.sensitive).toBe(true);
     expect(JSON.stringify(requests[1])).toContain(SECRET);

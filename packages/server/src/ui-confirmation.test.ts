@@ -3,16 +3,17 @@ import { parseConfig, silentLogger } from '@neo/protocol';
 import type { Conversation, MemoryNode, UIPart, UiActionResponse } from '@neo/protocol';
 import { createApp } from './app.js';
 import { createServices } from './services.js';
+import { scriptedProviderOptions } from './testing/mock-options.js';
 
 it('real runtime: memory.forget widget confirms the named memory, deletes on approval and rejects replay', async () => {
   const clock = () => Date.UTC(2026, 9, 11, 12);
   const services = await createServices(parseConfig({
     dataDir: '/unwritten-neo-ui-confirmation',
     server: { authToken: 'ui-confirmation-owner-0123456789' },
-    settings: { timezone: 'UTC', locale: 'en', agent: { autoTitle: false }, memory: { enabled: false, consolidation: { enabled: false } } },
+    settings: { timezone: 'UTC', locale: 'en', memory: { enabled: false, consolidation: { enabled: false } } },
     log: { level: 'silent' },
   }), {
-    inMemory: true, logger: silentLogger, clock,
+    ...scriptedProviderOptions(), inMemory: true, logger: silentLogger, clock,
     mockScript: (request) => request.messages.at(-1)?.role === 'tool'
       ? { text: 'Remembered.' }
       : { toolCalls: [{ id: 'remember-call', name: 'remember', input: { content: 'The user prefers window seats.', label: 'Window seats' } }] },
@@ -28,9 +29,7 @@ it('real runtime: memory.forget widget confirms the named memory, deletes on app
     return response.json() as Promise<T>;
   };
   try {
-    const created = await request('/conversations', { title: 'Widget confirmation' });
-    expect(created.status).toBe(201);
-    const conversation = await created.json() as Conversation;
+    const conversation = services.conversations.createEpisode();
     const turn = await services.runtime.send({ conversationId: conversation.id, parts: [{ type: 'text', text: 'Remember my preferred seat.' }] });
     const message = await turn.done;
     expect(message.status).toBe('complete');
@@ -38,7 +37,7 @@ it('real runtime: memory.forget widget confirms the named memory, deletes on app
     if (!widget || widget.block.type !== 'memory') throw new Error('Remember tool did not create a stored memory widget');
     const node = widget.block.nodes[0]!;
     expect(node.label).toBe('Window seats');
-    const path = `/conversations/${conversation.id}/ui-action`;
+    const path = '/timeline/ui-action';
     const body = { messageId: message.id, uiId: widget.id, actionId: `memory.forget:${node.id}` };
     const result = await read<UiActionResponse>(await request(path, body));
     expect(result.kind).toBe('confirm');

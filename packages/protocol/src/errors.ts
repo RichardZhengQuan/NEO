@@ -9,6 +9,7 @@ export const ErrorCodeSchema = z.enum([
   'rate_limited',
   'provider_error',
   'provider_auth',
+  'no_provider',
   'tool_error',
   'tool_denied',
   'cancelled',
@@ -36,6 +37,7 @@ const STATUS: Record<ErrorCode, number> = {
   rate_limited: 429,
   provider_error: 502,
   provider_auth: 502,
+  no_provider: 400,
   tool_error: 500,
   tool_denied: 403,
   cancelled: 499,
@@ -96,4 +98,24 @@ export function isAbortError(err: unknown): boolean {
     'name' in err &&
     ((err as { name: unknown }).name === 'AbortError' || (err as { name: unknown }).name === 'TimeoutError')
   );
+}
+
+/** Only known codes are exposed; upstream error messages may contain credentials. */
+export function chatgptSubscriptionError(reason: string, status?: number): NeoError {
+  const details = { reason, ...(status === undefined ? {} : { status }) };
+  switch (reason) {
+    case 'subscription_sharing_usage_limit_exceeded':
+      return new NeoError('rate_limited', "You've reached the weekly limit you set for NEO in ChatGPT.", { details, retryable: false });
+    case 'subscription_sharing_usage_unavailable':
+      return new NeoError('provider_error', 'ChatGPT is temporarily unavailable. Try again later.', { details, retryable: true });
+    case 'subscription_sharing_user_not_eligible':
+      return new NeoError('provider_auth', 'Needs ChatGPT Plus or Pro.', { details, retryable: false });
+    case 'subscription_sharing_invalid_user':
+    case 'invalid_grant':
+      return new NeoError('provider_auth', 'Disconnected; sign in again.', { details, retryable: false });
+    default:
+      return new NeoError(status === 401 || status === 403 ? 'provider_auth' : status === 429 ? 'rate_limited' : 'provider_error',
+        status === 401 || status === 403 ? 'Disconnected; sign in again.' : 'ChatGPT could not complete the request. Try again later.',
+        { details: status === undefined ? undefined : { status }, retryable: status === 429 || (status !== undefined && status >= 500) });
+  }
 }

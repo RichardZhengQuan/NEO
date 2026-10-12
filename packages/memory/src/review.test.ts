@@ -114,95 +114,6 @@ async function expectNeoError(p: Promise<unknown>, code: string): Promise<void> 
 
 // ─── privacy ────────────────────────────────────────────────────────────────
 
-describe('privacy: approve mode', () => {
-  it('entities created for a pending memory are pending too and never recalled', async () => {
-    const { model } = scriptedLLM({
-      extract: () => extraction({ memories: [{ op: 'create', kind: 'fact', label: 'Sister', content: "The user's sister is Zephyrine", importance: 0.9, entities: ['Zephyrine'] }] }),
-    });
-    const { svc } = setup({ llm: model, policy: { mode: 'approve' } });
-    const res = await svc.observe(turn("My sister's name is Zephyrine."));
-    expect(res.pending).toHaveLength(1);
-
-    const recalled = await svc.recall({ text: 'Zephyrine', reinforce: false, allowSensitive: true });
-    expect(recalled.items).toHaveLength(0);
-    const entities = (await svc.search({ kinds: ['entity'], status: ['active', 'pending', 'archived'] })).items;
-    expect(entities.map((e) => e.status)).toEqual(['pending']);
-
-    await svc.approve([res.pending[0]!.id]);
-    const after = await svc.recall({ text: 'Zephyrine', reinforce: false });
-    expect(after.items.some((i) => i.node.kind === 'entity' && i.node.label === 'Zephyrine')).toBe(true);
-  });
-
-  it('a pending supersede leaves the old belief intact until approved; reject keeps it', async () => {
-    let target = '';
-    const { model } = scriptedLLM({
-      extract: () => extraction({ memories: [{ op: 'supersede', id: target, kind: 'preference', label: 'Seat', content: 'The user prefers window seats', reason: 'changed mind' }] }),
-    });
-    const { svc } = setup({ llm: model, policy: { mode: 'approve' } });
-    const old = await svc.remember({ kind: 'preference', label: 'Seat', content: 'The user prefers aisle seats', source: { by: 'user' } });
-    target = old.id;
-
-    const res = await svc.observe(turn('Actually I prefer window seats now.'));
-    expect(res.pending).toHaveLength(1);
-    let oldNow = (await svc.get(old.id))!.node;
-    expect(oldNow.status).toBe('active');
-    expect(oldNow.confidence).toBeCloseTo(old.confidence, 6);
-
-    await svc.reject([res.pending[0]!.id]);
-    oldNow = (await svc.get(old.id))!.node;
-    expect(oldNow.status).toBe('active');
-    expect(oldNow.confidence).toBeCloseTo(old.confidence, 6);
-
-    const res2 = await svc.observe(turn('Actually I prefer window seats now.', 'Noted.', T0 + 1000));
-    await svc.approve([res2.pending[0]!.id]);
-    oldNow = (await svc.get(old.id))!.node;
-    expect(oldNow.status).toBe('superseded');
-    expect(oldNow.confidence).toBeCloseTo(old.confidence * 0.5, 6);
-    const detail = await svc.get(res2.pending[0]!.id);
-    expect(detail!.history.map((h) => h.id)).toEqual([old.id]);
-  });
-
-  it('an LLM update of an active memory in approve mode does not change it before approval', async () => {
-    let target = '';
-    const { model } = scriptedLLM({
-      extract: () => extraction({ memories: [{ op: 'update', id: target, content: 'The user works at Globex as a manager', reason: 'promotion' }] }),
-    });
-    const { svc } = setup({ llm: model, policy: { mode: 'approve' } });
-    const old = await svc.remember({ kind: 'fact', label: 'Job', content: 'The user works at Globex', source: { by: 'user' } });
-    target = old.id;
-    const res = await svc.observe(turn('I got promoted to manager at Globex!'));
-    expect((await svc.get(old.id))!.node.content).toBe('The user works at Globex');
-    expect(res.pending.map((n) => n.content)).toEqual(['The user works at Globex as a manager']);
-  });
-
-  it('remember() via tool is pending in approve mode; via user is active', async () => {
-    const { svc } = setup({ policy: { mode: 'approve' } });
-    const t = await svc.remember({ content: 'The user likes tea', source: { by: 'tool' } });
-    const u = await svc.remember({ content: 'The user likes coffee', source: { by: 'user' } });
-    expect(t.status).toBe('pending');
-    expect(u.status).toBe('active');
-    expect(u.confidence).toBeCloseTo(MEMORY_CONSTANTS.userConfidence, 6);
-  });
-});
-
-describe('privacy: mode off', () => {
-  it('remember() throws forbidden for every source (spec: "Mode off throws")', async () => {
-    const { svc, db } = setup({ policy: { mode: 'off' } });
-    await expectNeoError(svc.remember({ content: 'The user likes tea', source: { by: 'user' } }), 'forbidden');
-    await expectNeoError(svc.remember({ content: 'The user likes tea', source: { by: 'tool' } }), 'forbidden');
-    expect(count(db, 'SELECT COUNT(*) n FROM memory_nodes')).toBe(0);
-  });
-
-  it('observe() writes nothing and never calls the LLM', async () => {
-    const { model, requests } = scriptedLLM({ extract: () => extraction({ memories: [{ op: 'create', kind: 'fact', label: 'x', content: 'The user likes jazz', importance: 0.5 }] }) });
-    const { svc, db } = setup({ llm: model, policy: { mode: 'off' } });
-    const res = await svc.observe(turn('I love jazz, remember that please'));
-    expect(res.skipped).toBe('memory is off');
-    expect(requests).toHaveLength(0);
-    expect(count(db, 'SELECT COUNT(*) n FROM memory_nodes')).toBe(0);
-  });
-});
-
 describe('privacy: credential filter on every write path', () => {
   it('drops "my password is …" (not only "password:")', async () => {
     const { svc, db } = setup();
@@ -238,56 +149,6 @@ describe('privacy: credential filter on every write path', () => {
     const n = await svc.remember({ content: 'The user banks with Example Bank', source: { by: 'user' } });
     await expectNeoError(svc.update(n.id, { content: 'Card 4111 1111 1111 1111' }), 'bad_request');
     expect((await svc.get(n.id))!.node.content).toBe('The user banks with Example Bank');
-  });
-});
-
-describe('privacy: blocked topics', () => {
-  it('match whole words only (no "art" in "party")', async () => {
-    const { model } = scriptedLLM({ extract: () => extraction({ memories: [{ op: 'create', kind: 'fact', label: 'Party', content: 'The user is planning a birthday party', importance: 0.5 }] }) });
-    const { svc } = setup({ llm: model, policy: { blockedTopics: ['art'] } });
-    const res = await svc.observe(turn('I am planning a birthday party'));
-    expect(res.created.filter((n) => n.kind === 'fact')).toHaveLength(1);
-  });
-
-  it('blank topics do not block everything', async () => {
-    const { model } = scriptedLLM({ extract: () => extraction({ memories: [{ op: 'create', kind: 'fact', label: 'Jazz', content: 'The user likes jazz', importance: 0.5 }] }) });
-    const { svc } = setup({ llm: model, policy: { blockedTopics: ['', '  '] } });
-    const res = await svc.observe(turn('I like jazz'));
-    expect(res.created.filter((n) => n.kind === 'fact')).toHaveLength(1);
-  });
-
-  it('match non-ASCII words, plurals and CJK', async () => {
-    const { model } = scriptedLLM({
-      extract: () =>
-        extraction({
-          memories: [
-            { op: 'create', kind: 'fact', label: 'Café', content: 'The user runs a café downtown', importance: 0.5 },
-            { op: 'create', kind: 'fact', label: 'Money', content: 'The user is worried about their finance situation', importance: 0.5 },
-            { op: 'create', kind: 'fact', label: '健康', content: '用户最近在关注健康问题', importance: 0.5 },
-          ],
-        }),
-    });
-    const { svc } = setup({ llm: model, policy: { blockedTopics: ['Café', 'finances', '健康'] } });
-    const res = await svc.observe(turn('hello there friend'));
-    expect(res.created.filter((n) => n.kind === 'fact')).toHaveLength(0);
-  });
-
-  it('apply to LLM update/supersede content, episode summaries and remember()', async () => {
-    let target = '';
-    const { model } = scriptedLLM({
-      extract: () =>
-        extraction({
-          episode: { label: 'Chat', summary: 'NEO and the user talked about religion', importance: 0.4 },
-          memories: [{ op: 'update', id: target, content: 'The user volunteers at a religion class', reason: 'x' }],
-        }),
-    });
-    const { svc, db } = setup({ llm: model, policy: { blockedTopics: ['religion'] } });
-    const n = await svc.remember({ content: 'The user volunteers on weekends', source: { by: 'user' } });
-    target = n.id;
-    await svc.observe(turn('I volunteer on weekends, what do you think?'));
-    const rows = db.prepare('SELECT content, label FROM memory_nodes').all() as { content: string; label: string }[];
-    expect(rows.some((r) => /religion/i.test(r.content + r.label))).toBe(false);
-    await expectNeoError(svc.remember({ content: 'The user studies religion', source: { by: 'tool' } }), 'forbidden');
   });
 });
 
@@ -359,13 +220,6 @@ describe('privacy: forget, reject and replace are true hard deletes', () => {
     expect(ids.has(current.id) || ids.has(old.id)).toBe(false);
   });
 
-  it('reject drops the vector from the cache (no embeddings of rejected memories in exports)', async () => {
-    const { svc } = setup({ policy: { mode: 'approve' } });
-    const n = await svc.remember({ content: 'The user is secretly planning to quit', source: { by: 'tool' } });
-    await svc.reject([n.id]);
-    expect((await vectorIds(svc)).has(n.id)).toBe(false);
-  });
-
   it('import(replace) clears vectors of the replaced net', async () => {
     const { svc } = setup();
     const old = await svc.remember({ content: 'The user hates mushrooms', source: { by: 'user' } });
@@ -390,8 +244,8 @@ describe('privacy: findForForget', () => {
     expect(found).not.toContain(trip.id);
   });
 
-  it('includes pending and archived memories', async () => {
-    const { svc } = setup({ policy: { mode: 'approve' } });
+  it('includes active and archived memories', async () => {
+    const { svc } = setup();
     const p = await svc.remember({ content: 'Mia is allergic to cats', source: { by: 'tool' } });
     const a = await svc.remember({ content: 'Mia visited in March', source: { by: 'user' } });
     await svc.update(a.id, { status: 'archived' });
@@ -737,36 +591,7 @@ describe('write: observe', () => {
   });
 });
 
-describe('write: approve / reject / link', () => {
-  it('reject removes orphaned pending entities of the rejected memory only', async () => {
-    const { model } = scriptedLLM({
-      extract: () =>
-        extraction({
-          memories: [
-            { op: 'create', kind: 'entity', label: 'Kyoto', content: 'A city the user loves', importance: 0.6 },
-            { op: 'create', kind: 'fact', label: 'Mia nurse', content: 'Mia works night shifts as a nurse', importance: 0.6, entities: ['Mia'] },
-          ],
-        }),
-    });
-    const { svc } = setup({ llm: model, policy: { mode: 'approve' } });
-    const res = await svc.observe(turn('I love Kyoto. Mia works night shifts.'));
-    const fact = res.pending.find((n) => n.kind === 'fact')!;
-    await svc.reject([fact.id]);
-    const entities = (await svc.search({ kinds: ['entity'], status: ['pending', 'active'] })).items.map((n) => n.label);
-    expect(entities).toEqual(['Kyoto']);
-  });
-
-  it('a pending entity becomes active once every memory linked to it is settled', async () => {
-    const { svc } = setup({ policy: { mode: 'approve' } });
-    const a = await svc.remember({ content: 'Mia likes tennis', entities: ['Mia'], source: { by: 'tool' } });
-    const b = await svc.remember({ content: 'Mia lives in Berlin', entities: ['Mia'], source: { by: 'tool' } });
-    await svc.approve([a.id]);
-    let mia = (await svc.search({ kinds: ['entity'], status: ['pending', 'active'] })).items[0]!;
-    expect(mia.status).toBe('pending');
-    await svc.reject([b.id]);
-    mia = (await svc.search({ kinds: ['entity'], status: ['pending', 'active'] })).items[0]!;
-    expect(mia.status).toBe('active');
-  });
+describe('write: link and revisions', () => {
 
   it('link() validates endpoints and refuses self-loops', async () => {
     const { svc } = setup();
@@ -962,27 +787,6 @@ describe('consolidation', () => {
     expect(derived.every((n) => n.sensitivity === 'sensitive')).toBe(true);
   });
 
-  it('filters abstraction output through blocked topics and follows approve mode', async () => {
-    const { model } = scriptedLLM({
-      consolidate: () =>
-        abstraction(
-          [
-            { kind: 'fact', label: 'Salary', content: 'The user talks about salary often', importance: 0.6 },
-            { kind: 'preference', label: 'Hiking', content: 'The user likes long hikes', importance: 0.6 },
-          ],
-          { label: 'Money talk', content: 'The user discusses salary and hiking', importance: 0.5 },
-        ),
-    });
-    const { svc, tickDays } = setup({ llm: model, policy: { blockedTopics: ['salary'], mode: 'approve' } });
-    await svc.remember({ kind: 'episode', label: 'Hike day 1', content: 'Hiked the mountains today outdoors nature', importance: 0.5, source: { by: 'user' } });
-    await svc.remember({ kind: 'episode', label: 'Hike day 2', content: 'Hiked the mountains again outdoors nature', importance: 0.5, source: { by: 'user' } });
-    tickDays(1);
-    await svc.consolidate({ force: true });
-    const all = (await svc.search({ status: ['active', 'pending'] })).items;
-    expect(all.some((n) => /salary/i.test(n.label + n.content))).toBe(false);
-    expect(all.find((n) => n.label === 'Hiking')?.status).toBe('pending');
-  });
-
   it('links similar memories to active nodes only and moves entity edges without duplicates', async () => {
     const { svc, db } = setup();
     const mia = await svc.remember({ kind: 'entity', label: 'Mia', content: 'Entity: Mia', source: { by: 'user' } });
@@ -1028,10 +832,10 @@ describe('graph and search', () => {
     expect(g3.nodes.some((n) => n.status === 'archived')).toBe(true);
   });
 
-  it('search finds pending and archived memories by query, sorts by relevance, filters exact tags and counts all matches', async () => {
-    const { svc } = setup({ policy: { mode: 'approve' } });
-    const pending = await svc.remember({ content: 'The user is learning the cello', source: { by: 'tool' } });
-    expect((await svc.search({ query: 'cello' })).items.map((n) => n.id)).toEqual([pending.id]);
+  it('search finds active and archived memories by query, sorts by relevance, filters exact tags and counts all matches', async () => {
+    const { svc } = setup();
+    const active = await svc.remember({ content: 'The user is learning the cello', source: { by: 'tool' } });
+    expect((await svc.search({ query: 'cello' })).items.map((n) => n.id)).toEqual([active.id]);
     const archived = await svc.remember({ content: 'The user played violin as a kid', source: { by: 'user' } });
     await svc.update(archived.id, { status: 'archived' });
     expect((await svc.search({ query: 'violin', status: ['archived'] })).items.map((n) => n.id)).toEqual([archived.id]);
@@ -1244,18 +1048,6 @@ describe('review: more', () => {
     for (const q of ['who am I?', 'what do I like', '我是谁']) {
       expect((await svc.recall({ text: q, reinforce: false })).items.length, q).toBe(1);
     }
-  });
-
-  it('with memory off, recall works but neither reinforces nor learns associations', async () => {
-    const { svc, db, tickDays } = setup();
-    const a = await svc.remember({ kind: 'entity', label: 'Alpha', content: 'Entity: Alpha', source: { by: 'user' } });
-    await svc.remember({ kind: 'entity', label: 'Beta', content: 'Entity: Beta', source: { by: 'user' } });
-    svc.setPolicy({ ...DEFAULT_MEMORY_POLICY, mode: 'off' });
-    tickDays(2);
-    const r = await svc.recall({ text: 'alpha beta', reinforce: true });
-    expect(r.items).toHaveLength(2);
-    expect((await svc.get(a.id))!.node.accessCount).toBe(0);
-    expect(count(db, 'SELECT COUNT(*) n FROM memory_edges')).toBe(0);
   });
 
   it('consolidation still abstracts episodes that fade in the same run', async () => {

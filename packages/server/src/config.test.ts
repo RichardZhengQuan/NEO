@@ -27,8 +27,41 @@ describe('loadConfig', () => {
     expect(cfg.mode).toBe('local');
     expect(cfg.server.port).toBe(7777);
     expect(cfg.server.host).toBe('127.0.0.1');
-    expect(Array.isArray(cfg.providers)).toBe(true);
+    expect(cfg.providers).toEqual([]);
     expect(cfg.dataDir).toBe(join(homedir(), '.neo'));
+  });
+
+  it('drops the old default demo and clears its initial model references on load', () => {
+    const dir = makeTempDir();
+    const path = join(dir, 'config.json');
+    const ref = { provider: 'demo', model: 'neo-demo' };
+    writeFileSync(path, JSON.stringify({
+      providers: [{ id: 'demo', kind: 'mock', enabled: true, defaultModel: 'neo-demo' }],
+      settings: { defaultModel: ref, memoryModel: ref, titleModel: ref, embedding: ref },
+    }));
+    const config = loadConfig({ path, env: {} });
+    expect(config.providers).toEqual([]);
+    expect(config.settings).toMatchObject({ defaultModel: null, memoryModel: null, titleModel: null, embedding: null });
+  });
+
+  it('preserves a real provider that happens to be named demo', () => {
+    const ref = { provider: 'demo', model: 'real-model' };
+    const config = loadConfig({ env: {}, overrides: {
+      providers: [{ id: 'demo', kind: 'ollama', enabled: true, defaultModel: 'real-model' }],
+      settings: { defaultModel: ref, memoryModel: ref },
+    } });
+    expect(config.providers[0]).toMatchObject({ id: 'demo', kind: 'ollama' });
+    expect(config.settings).toMatchObject({ defaultModel: ref, memoryModel: ref });
+  });
+
+  it('keeps a real model choice when a legacy demo entry shares its id', () => {
+    const ref = { provider: 'demo', model: 'real-model' };
+    const config = loadConfig({ env: {}, overrides: {
+      providers: [{ id: 'demo', kind: 'mock', enabled: true }, { id: 'demo', kind: 'ollama', enabled: true, defaultModel: 'real-model' }],
+      settings: { defaultModel: ref },
+    } });
+    expect(config.providers).toHaveLength(1);
+    expect(config.settings?.defaultModel).toEqual(ref);
   });
 
   it('reads a config file', () => {

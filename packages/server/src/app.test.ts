@@ -122,38 +122,36 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     expect((await app.request('/api/settings', { headers: { Authorization: `Bearer ${OWNER_TOKEN}` } })).status).toBe(200);
   });
 
-  it('handles conversations, newest-message pagination, CRUD and cancel-before-delete', async () => {
-    const conv = await json<Conversation>(await f.request('/api/conversations', 'POST', { title: 'Trip', model: { provider: 'conv-provider', model: 'trip-model' } }), 201);
-    for (let i = 1; i <= 4; i++) f.services.conversations.appendMessage({ id: `message-${i}`, conversationId: conv.id, role: 'user', parts: [{ type: 'text', text: String(i) }], createdAt: f.time.now + i, status: 'complete' });
-    const page = await json<{ messages: Message[]; hasMore: boolean }>(await f.request(`/api/conversations/${conv.id}?limit=2`));
-    expect(page.messages.map((m) => m.id)).toEqual(['message-3', 'message-4']);
-    expect(page.hasMore).toBe(true);
-    const older = await json<{ messages: Message[]; hasMore: boolean }>(await f.request(`/api/conversations/${conv.id}?limit=2&before=${f.time.now + 3}`));
-    expect(older.messages.map((m) => m.id)).toEqual(['message-1', 'message-2']);
-    expect(older.hasMore).toBe(false);
-    const updated = await json<Conversation>(await f.request(`/api/conversations/${conv.id}`, 'PATCH', { title: 'Hiking', pinned: true, archived: true }));
-    expect(updated).toMatchObject({ title: 'Hiking', pinned: true, archived: true });
-    expect(await json(await f.request('/api/conversations?archived=1&query=Hiking&limit=1'))).toMatchObject({ items: [{ id: conv.id }] });
-    expect(await json(await f.request(`/api/conversations/${conv.id}/cancel`, 'POST', {}))).toEqual({ cancelled: true });
-    expect((await f.request(`/api/conversations/${conv.id}`, 'DELETE')).status).toBe(204);
-    expect(f.services.runtime.cancelConversation).toHaveBeenCalledWith(conv.id);
-    expect((await f.request(`/api/conversations/${conv.id}`)).status).toBe(404);
-    expect(f.services.events.since(0).filter((e) => e.event.type === 'conversation.deleted')).toHaveLength(1);
+  it('lists the timeline in pages and closes an episode when a message is deleted', async () => {
+    const episode = f.services.conversations.createEpisode();
+    for (let i = 1; i <= 4; i++) f.services.conversations.appendMessage({ id: `message-${i}`, conversationId: episode.id, role: 'user', parts: [{ type: 'text', text: String(i) }], createdAt: f.time.now + i, status: 'complete' });
+    const page = await json<import('@neo/protocol').TimelinePage>(await f.request('/api/timeline?limit=2'));
+    expect(page.items.map(message => message.id)).toEqual(['message-3', 'message-4']);
+    expect(page.nextCursor).toBeTruthy();
+    const older = await json<import('@neo/protocol').TimelinePage>(await f.request(`/api/timeline?limit=2&before=${encodeURIComponent(page.nextCursor!)}`));
+    expect(older.items.map(message => message.id)).toEqual(['message-1', 'message-2']);
+    expect(older.nextCursor).toBeNull();
+    expect(older.episodes).toMatchObject([{ episodeId: episode.id }]);
+    expect(await json(await f.request('/api/timeline/messages/message-3', 'DELETE'))).toEqual({ deleted: 1, messageIds: ['message-3'], derivedMemories: 0 });
+    expect(f.services.conversations.currentEpisode()).toBeNull();
+    expect((await f.request('/api/timeline/messages/message-3', 'DELETE')).status).toBe(404);
   });
 
-  it('sends 202 and SSE, preserves model precedence and never forwards a disconnect signal', async () => {
+  it('sends 202 and SSE with episode ids and never forwards a disconnect signal', async () => {
     const conv = f.services.conversations.create({ model: { provider: 'conversation', model: 'chosen' } });
     f.services.settings.update({ defaultModel: { provider: 'default', model: 'fallback' } });
-    const sent = await json<{ turnId: string; userMessage: Message; assistantMessageId: string }>(await f.request(`/api/conversations/${conv.id}/messages`, 'POST', { text: 'Hello', parts: [] }), 202);
+    const sent = await json<import('@neo/protocol').SendMessageResponse>(await f.request('/api/timeline/messages', 'POST', { text: 'Hello', parts: [] }), 202);
+    expect(sent.episodeId).toBe(conv.id);
+    expect(sent.userMessage.episodeId).toBe(conv.id);
     expect(sent.userMessage.parts).toEqual([{ type: 'text', text: 'Hello' }]);
-    expect(f.services.runtime.send).toHaveBeenLastCalledWith({ conversationId: conv.id, parts: [{ type: 'text', text: 'Hello' }], model: undefined });
-    const stream = await f.request(`/api/conversations/${conv.id}/messages`, 'POST', { parts: [{ type: 'text', text: 'Stream' }], model: { provider: 'explicit', model: 'chosen' } }, OWNER_TOKEN, { Accept: 'text/event-stream' });
+    expect(f.services.runtime.sendTimeline).toHaveBeenLastCalledWith({ parts: [{ type: 'text', text: 'Hello' }], offRecord: undefined });
+    const stream = await f.request('/api/timeline/messages', 'POST', { parts: [{ type: 'text', text: 'Stream' }] }, OWNER_TOKEN, { Accept: 'text/event-stream' });
     expect(stream.headers.get('Content-Type')).toContain('text/event-stream');
     const text = await stream.text();
     expect(text).toContain('event: turn.started\ndata: {');
     expect(text).toContain('event: text.delta\ndata: {');
     expect(text).toContain('event: turn.finished\ndata: {');
-    expect(vi.mocked(f.services.runtime.send).mock.calls.at(-1)?.[0]).not.toHaveProperty('signal');
+    expect(vi.mocked(f.services.runtime.sendTimeline).mock.calls.at(-1)?.[0]).not.toHaveProperty('signal');
   });
 
   it('F09: text+image parts — merges body.text into parts when no text part exists', async () => {
@@ -161,7 +159,7 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     const img = { type: 'image', mediaType: 'image/png', data: 'base64abc' };
     // Client sends text alongside image parts (the fixed composeBody format).
     const res = await json<{ userMessage: Message }>(
-      await f.request(`/api/conversations/${conv.id}/messages`, 'POST', {
+      await f.request('/api/timeline/messages', 'POST', {
         parts: [{ type: 'text', text: 'Describe this' }, img],
       }),
       202,
@@ -177,7 +175,7 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     const img = { type: 'image', mediaType: 'image/png', data: 'base64legacy' };
     // Old client sends text separately; server must merge them.
     const res = await json<{ userMessage: Message }>(
-      await f.request(`/api/conversations/${conv.id}/messages`, 'POST', {
+      await f.request('/api/timeline/messages', 'POST', {
         text: 'Describe this',
         parts: [img],
       }),
@@ -190,19 +188,19 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     const conv = f.services.conversations.create();
     const img = { type: 'image', mediaType: 'image/png', data: 'base64img' };
     const res = await json<{ userMessage: Message }>(
-      await f.request(`/api/conversations/${conv.id}/messages`, 'POST', { parts: [img] }),
+      await f.request('/api/timeline/messages', 'POST', { parts: [img] }),
       202,
     );
     expect(res.userMessage.parts).toEqual([img]);
   });
 
-  it('does not cancel a turn in another conversation using its turnId', async () => {
+  it('cancels only a matching active turn', async () => {
     const conv = f.services.conversations.create();
     vi.mocked(f.services.runtime.activeTurns).mockReturnValue([{ conversationId: 'other', turnId: 'turn-other', startedAt: f.time.now }]);
-    expect(await json(await f.request(`/api/conversations/${conv.id}/cancel`, 'POST', { turnId: 'turn-other' }))).toEqual({ cancelled: false });
+    expect(await json(await f.request('/api/timeline/cancel', 'POST', { turnId: 'unknown' }))).toEqual({ cancelled: false });
     expect(f.services.runtime.cancel).not.toHaveBeenCalled();
     vi.mocked(f.services.runtime.activeTurns).mockReturnValue([{ conversationId: conv.id, turnId: 'turn-here', startedAt: f.time.now }]);
-    expect(await json(await f.request(`/api/conversations/${conv.id}/cancel`, 'POST', { turnId: 'turn-here' }))).toEqual({ cancelled: true });
+    expect(await json(await f.request('/api/timeline/cancel', 'POST', { turnId: 'turn-here' }))).toEqual({ cancelled: true });
   });
 
   it.each(['noop', 'tool', 'client', 'turn', 'confirm'] as const)('maps ui-action %s results to UiActionResponse', async (kind) => {
@@ -212,14 +210,14 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     if (kind === 'client') result = { kind, action: { kind: 'copy', id: 'copy', label: 'Copy', text: 'hello' } };
     if (kind === 'turn') result = { kind, turn: await f.services.runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Action' }] }) };
     if (kind === 'confirm') result = { kind, confirmation: { token: 'server-token', tool: 'forget', title: 'Forget memories', description: 'Forget “Hiking”', risk: 'dangerous', expiresAt: f.time.now + 10000 } };
-    vi.mocked(f.services.runtime.handleUiAction).mockResolvedValue(result);
+    vi.mocked(f.services.runtime.handleTimelineUiAction).mockResolvedValue(result);
     const body = { messageId: 'message-1', uiId: 'ui-1', actionId: 'action-1', values: { name: 'Richard' } };
-    const response = await json<Record<string, unknown>>(await f.request(`/api/conversations/${conv.id}/ui-action`, 'POST', body));
+    const response = await json<Record<string, unknown>>(await f.request('/api/timeline/ui-action', 'POST', body));
     expect(response.kind).toBe(kind);
     if (kind === 'tool') expect(response).toMatchObject({ isError: false, output: { reminder: 'snoozed' } });
     if (kind === 'turn') expect(response).toHaveProperty('assistantMessageId');
     if (kind === 'confirm' && result.kind === 'confirm') expect(response).toEqual(result);
-    expect(f.services.runtime.handleUiAction).toHaveBeenCalledWith({ conversationId: conv.id, ...body });
+    expect(f.services.runtime.handleTimelineUiAction).toHaveBeenCalledWith(body);
   });
 
   it('round-trips a UI confirmation token and preserves runtime replay errors', async () => {
@@ -227,22 +225,22 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     const body = { messageId: 'message-1', uiId: 'ui-1', actionId: 'memory.forget:memory-1', values: { scope: 'one' } };
     const confirmation = { token: 'single-use-token', tool: 'forget', title: 'Forget memories', description: 'Forget “Hiking”', risk: 'dangerous' as const, expiresAt: f.time.now + 10000 };
     let consumed = false;
-    vi.mocked(f.services.runtime.handleUiAction).mockImplementation(async (input) => {
+    vi.mocked(f.services.runtime.handleTimelineUiAction).mockImplementation(async (input) => {
       if (!input.confirmationToken) return { kind: 'confirm', confirmation };
       if (consumed || input.confirmationToken !== confirmation.token) throw new NeoError('conflict', 'UI confirmation token is invalid or already used');
       consumed = true;
       return { kind: 'tool', result: { output: { forgotten: ['Hiking'] }, summary: 'Forgot 1 memory' } };
     });
-    const path = `/api/conversations/${conv.id}/ui-action`;
+    const path = '/api/timeline/ui-action';
     expect(await json(await f.request(path, 'POST', body))).toEqual({ kind: 'confirm', confirmation });
     const approved = { ...body, confirmationToken: confirmation.token };
     expect(await json(await f.request(path, 'POST', approved))).toEqual({ kind: 'tool', output: { forgotten: ['Hiking'] }, summary: 'Forgot 1 memory', isError: false });
-    expect(f.services.runtime.handleUiAction).toHaveBeenLastCalledWith({ conversationId: conv.id, ...approved });
+    expect(f.services.runtime.handleTimelineUiAction).toHaveBeenLastCalledWith(approved);
     expect(await json(await f.request(path, 'POST', approved), 409)).toMatchObject({ code: 'conflict', message: expect.stringContaining('already used') });
   });
 
   it('lists confirmation nonces and answers by nonce, with unknown and reused 404s', async () => {
-    f.confirmations.set('cnf-server-1', { id: 'cnf-server-1', conversationId: 'conv', turnId: 'turn', messageId: 'message', toolCallId: 'provider-call-1', name: 'delete_task', title: 'Delete', input: {}, description: 'Delete task', risk: 'dangerous', requestedAt: f.time.now, expiresAt: f.time.now + 10000 });
+    f.confirmations.set('cnf-server-1', { id: 'cnf-server-1', conversationId: 'conv', episodeId: 'conv', turnId: 'turn', messageId: 'message', toolCallId: 'provider-call-1', name: 'delete_task', title: 'Delete', input: {}, description: 'Delete task', risk: 'dangerous', requestedAt: f.time.now, expiresAt: f.time.now + 10000 });
     expect(await json(await f.request('/api/confirmations'))).toMatchObject({ items: [{ id: 'cnf-server-1', toolCallId: 'provider-call-1' }] });
     expect((await f.request('/api/confirmations/provider-call-1', 'POST', { approve: true })).status).toBe(404);
     expect(await json(await f.request('/api/confirmations/cnf-server-1', 'POST', { approve: true, always: true }))).toEqual({ ok: true });
@@ -254,9 +252,9 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
   it('covers every memory route, source attribution, query coercion and export/import', async () => {
     const node = await json<MemoryNode>(await f.request('/api/memory', 'POST', { content: 'Richard likes hiking', kind: 'preference', source: { by: 'tool' }, tags: ['outdoors'] }), 201);
     expect(node.source).toEqual({ by: 'user' });
-    const found = await json<{ items: MemoryNode[]; total: number }>(await f.request('/api/memory?query=hiking&kinds=fact,preference&status=active,pending&tags=outdoors,fitness&pinned=0&limit=5&offset=0&sort=recent'));
+    const found = await json<{ items: MemoryNode[]; total: number }>(await f.request('/api/memory?query=hiking&kinds=fact,preference&status=active,archived&tags=outdoors,fitness&pinned=0&limit=5&offset=0&sort=recent'));
     expect(found.total).toBe(1);
-    expect(f.services.memory.search).toHaveBeenLastCalledWith({ query: 'hiking', kinds: ['fact', 'preference'], status: ['active', 'pending'], tags: ['outdoors', 'fitness'], pinned: false, limit: 5, offset: 0, sort: 'recent' });
+    expect(f.services.memory.search).toHaveBeenLastCalledWith({ query: 'hiking', kinds: ['fact', 'preference'], status: ['active', 'archived'], tags: ['outdoors', 'fitness'], pinned: false, limit: 5, offset: 0, sort: 'recent' });
     expect(await json(await f.request(`/api/memory/${node.id}`))).toMatchObject({ node: { id: node.id }, retention: 1 });
     expect(await json(await f.request(`/api/memory/${node.id}`, 'PATCH', { label: 'Outdoor interests', pinned: true }))).toMatchObject({ pinned: true });
     expect(await json(await f.request('/api/memory/stats'))).toMatchObject({ total: 1 });
@@ -270,7 +268,6 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     expect(f.services.memory.export).toHaveBeenCalledWith({ includeEmbeddings: true });
     const data = await exported.json();
     expect(await json(await f.request('/api/memory/import', 'POST', { data, mode: 'merge' }))).toEqual({ nodes: 1, edges: 0, skipped: 0 });
-    for (const action of ['approve', 'reject']) expect(await json(await f.request(`/api/memory/${action}`, 'POST', { ids: [node.id] }))).toEqual({ count: 1 });
     expect(await json(await f.request('/api/memory/find-for-forget', 'POST', { query: 'hiking', limit: 2 }))).toMatchObject({ items: [{ id: node.id }] });
     expect(await json(await f.request('/api/memory/links', 'POST', { from: node.id, to: 'mem-2', type: 'related', weight: .7 }))).toMatchObject({ id: 'edge_1', weight: .7 });
     expect(await json(await f.request('/api/memory/links/edge_1', 'DELETE'))).toEqual({ ok: true });
@@ -361,87 +358,89 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
   });
 
   it('provider CRUD redacts secrets, suffixes ids, syncs registry and models', async () => {
-    const first = await json<ProviderView>(await f.request('/api/providers', 'POST', { kind: 'mock', defaultModel: 'demo-model', apiKey: 'top-secret' }), 201);
-    expect(first).toMatchObject({ id: 'mock', hasApiKey: true, isLocal: true });
+    const first = await json<ProviderView>(await f.request('/api/providers', 'POST', { kind: 'ollama', defaultModel: 'fixture-model', apiKey: 'top-secret' }), 201);
+    expect(first).toMatchObject({ id: 'ollama', hasApiKey: true, isLocal: true });
     expect(first).not.toHaveProperty('apiKey'); expect(first).not.toHaveProperty('apiKeySecret');
-    expect(f.services.secrets.get('provider:mock')).toBe('top-secret');
-    expect(f.services.providerConfigs.get('mock')).toMatchObject({ apiKeySecret: 'provider:mock' });
-    expect(f.services.providerConfigs.get('mock')).not.toHaveProperty('apiKey');
-    expect(f.services.providers.upsert).toHaveBeenCalledWith(expect.objectContaining({ id: 'mock', apiKeySecret: 'provider:mock' }));
-    expect(f.services.settings.get().defaultModel).toEqual({ provider: 'mock', model: 'demo-model' });
-    expect(await json(await f.request('/api/providers/mock/models'))).toMatchObject({ items: [{ id: 'demo-model' }] });
-    expect(await json(await f.request('/api/providers/mock/test', 'POST'))).toMatchObject({ ok: true });
-    const second = await json<ProviderView>(await f.request('/api/providers', 'POST', { kind: 'mock' }), 201);
-    const third = await json<ProviderView>(await f.request('/api/providers', 'POST', { kind: 'mock' }), 201);
-    expect([second.id, third.id]).toEqual(['mock-2', 'mock-3']);
-    expect((await f.request('/api/providers', 'POST', { id: 'mock', kind: 'mock' })).status).toBe(409);
-    const updated = await json<ProviderView>(await f.request('/api/providers/mock', 'PATCH', { label: 'Private', apiKey: 'new-secret' }));
+    expect(f.services.secrets.get('provider:ollama')).toBe('top-secret');
+    expect(f.services.providerConfigs.get('ollama')).toMatchObject({ apiKeySecret: 'provider:ollama' });
+    expect(f.services.providerConfigs.get('ollama')).not.toHaveProperty('apiKey');
+    expect(f.services.providers.upsert).toHaveBeenCalledWith(expect.objectContaining({ id: 'ollama', apiKeySecret: 'provider:ollama' }));
+    expect(f.services.settings.get().defaultModel).toEqual({ provider: 'ollama', model: 'fixture-model' });
+    expect(await json(await f.request('/api/providers/ollama/models'))).toMatchObject({ items: [{ id: 'fixture-model' }] });
+    expect(await json(await f.request('/api/providers/ollama/test', 'POST'))).toMatchObject({ ok: true });
+    const second = await json<ProviderView>(await f.request('/api/providers', 'POST', { kind: 'ollama' }), 201);
+    const third = await json<ProviderView>(await f.request('/api/providers', 'POST', { kind: 'ollama' }), 201);
+    expect([second.id, third.id]).toEqual(['ollama-2', 'ollama-3']);
+    expect((await f.request('/api/providers', 'POST', { id: 'ollama', kind: 'ollama' })).status).toBe(409);
+    const updated = await json<ProviderView>(await f.request('/api/providers/ollama', 'PATCH', { label: 'Private', apiKey: 'new-secret' }));
     expect(updated).toMatchObject({ label: 'Private', hasApiKey: true });
-    expect(f.services.secrets.get('provider:mock')).toBe('new-secret');
+    expect(f.services.secrets.get('provider:ollama')).toBe('new-secret');
     const listed = await f.request('/api/providers');
     expect(await listed.text()).not.toMatch(/top-secret|new-secret|apiKeySecret|"apiKey"/);
-    expect(await json(await f.request('/api/providers/mock', 'PATCH', { apiKey: '' }))).toMatchObject({ hasApiKey: false });
-    expect(f.services.secrets.get('provider:mock')).toBeUndefined();
-    f.services.settings.update({ memoryModel: { provider: 'mock', model: 'memory-model' } });
-    expect((await f.request('/api/providers/mock', 'DELETE')).status).toBe(204);
-    expect(f.services.providers.remove).toHaveBeenCalledWith('mock');
+    expect(await json(await f.request('/api/providers/ollama', 'PATCH', { apiKey: '' }))).toMatchObject({ hasApiKey: false });
+    expect(f.services.secrets.get('provider:ollama')).toBeUndefined();
+    f.services.settings.update({ memoryModel: { provider: 'ollama', model: 'memory-model' } });
+    expect((await f.request('/api/providers/ollama', 'DELETE')).status).toBe(204);
+    expect(f.services.providers.remove).toHaveBeenCalledWith('ollama');
     expect(f.services.settings.get()).toMatchObject({ defaultModel: null, memoryModel: null });
-    expect((await f.request('/api/providers/mock', 'PATCH', {})).status).toBe(404);
-    expect((await f.request('/api/providers/mock', 'DELETE')).status).toBe(404);
+    expect((await f.request('/api/providers/ollama', 'PATCH', {})).status).toBe(404);
+    expect((await f.request('/api/providers/ollama', 'DELETE')).status).toBe(404);
   });
 
   it('keeps config-file providers immutable and draft tests isolated from all stores', async () => {
-    f.services.config.providers.push({ id: 'configured', kind: 'mock', enabled: true, apiKey: 'config-secret' });
+    f.services.config.providers.push({ id: 'configured', kind: 'ollama', enabled: true, apiKey: 'config-secret' });
     expect((await f.request('/api/providers/configured', 'PATCH', { label: 'Rename' })).status).toBe(409);
     expect((await f.request('/api/providers/configured', 'DELETE')).status).toBe(409);
-    expect((await f.request('/api/providers', 'POST', { kind: 'mock', id: 'configured' })).status).toBe(409);
+    expect((await f.request('/api/providers', 'POST', { kind: 'ollama', id: 'configured' })).status).toBe(409);
     expect(await (await f.request('/api/providers')).text()).not.toContain('config-secret');
     const configs = f.services.providerConfigs.list(); const secretNames = f.services.secrets.list();
     vi.mocked(f.services.providers.upsert).mockClear(); vi.mocked(f.services.providers.remove).mockClear();
-    expect(await json(await f.request('/api/providers/test', 'POST', { kind: 'mock', apiKey: 'draft-secret' }))).toMatchObject({ ok: true });
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ models: [{ name: 'fixture-model' }] }));
+    expect(await json(await f.request('/api/providers/test', 'POST', { kind: 'ollama', apiKey: 'draft-secret' }))).toMatchObject({ ok: true });
     expect(f.services.providerConfigs.list()).toEqual(configs); expect(f.services.secrets.list()).toEqual(secretNames);
     expect(f.services.providers.upsert).not.toHaveBeenCalled(); expect(f.services.providers.remove).not.toHaveBeenCalled();
+    fetch.mockRestore();
   });
 
   it('does not retain an empty provider API key', async () => {
-    expect(await json(await f.request('/api/providers', 'POST', { kind: 'mock', apiKey: '' }), 201)).toMatchObject({ hasApiKey: false });
+    expect(await json(await f.request('/api/providers', 'POST', { kind: 'ollama', apiKey: '' }), 201)).toMatchObject({ hasApiKey: false });
     expect(f.services.secrets.list()).toEqual([]);
-    expect(f.services.providerConfigs.get('mock')?.apiKeySecret).toBeUndefined();
+    expect(f.services.providerConfigs.get('ollama')?.apiKeySecret).toBeUndefined();
   });
 
   it.each([
     [{ kind: 'ollama' }, true],
     [{ kind: 'openai-compatible', baseUrl: 'http://192.168.1.4:1234/v1' }, true],
     [{ kind: 'openai' }, false],
-    [{ kind: 'mock', local: false }, false],
+    [{ kind: 'ollama', local: false }, false],
   ])('returns accurate locality for provider %j', async (config, expected) => {
     expect(await json(await f.request('/api/providers', 'POST', config), 201)).toMatchObject({ isLocal: expected });
   });
 
   it('redacts credential headers from provider views while retaining benign headers', async () => {
     const view = await json<ProviderView>(await f.request('/api/providers', 'POST', {
-      kind: 'mock', headers: { Authorization: 'Bearer header-secret', 'X-API-Key': 'key-secret', 'X-Region': 'test' },
+      kind: 'ollama', headers: { Authorization: 'Bearer header-secret', 'X-API-Key': 'key-secret', 'X-Region': 'test' },
     }), 201);
     expect(view.headers).toEqual({ Authorization: '••••', 'X-API-Key': '••••', 'X-Region': 'test' });
-    expect(f.services.providerConfigs.get('mock')?.headers?.Authorization).toBe('neo-secret:provider:mock:header:authorization');
+    expect(f.services.providerConfigs.get('ollama')?.headers?.Authorization).toBe('neo-secret:provider:ollama:header:authorization');
     expect(await (await f.request('/api/providers')).text()).not.toMatch(/header-secret|key-secret/);
   });
 
   it('rolls back provider config and secret when registry construction throws', async () => {
     vi.mocked(f.services.providers.upsert).mockImplementationOnce(() => { throw new NeoError('config_error', 'Broken adapter'); });
-    expect((await f.request('/api/providers', 'POST', { kind: 'mock', apiKey: 'must-not-persist' })).status).toBe(500);
+    expect((await f.request('/api/providers', 'POST', { kind: 'ollama', apiKey: 'must-not-persist' })).status).toBe(500);
     expect(f.services.providerConfigs.list()).toEqual([]); expect(f.services.secrets.list()).toEqual([]);
-    await f.request('/api/providers', 'POST', { kind: 'mock', apiKey: 'original' });
+    await f.request('/api/providers', 'POST', { kind: 'ollama', apiKey: 'original' });
     vi.mocked(f.services.providers.upsert).mockImplementationOnce(() => { throw new NeoError('config_error', 'Broken update'); });
-    expect((await f.request('/api/providers/mock', 'PATCH', { apiKey: 'replacement' })).status).toBe(500);
-    expect(f.services.secrets.get('provider:mock')).toBe('original');
+    expect((await f.request('/api/providers/ollama', 'PATCH', { apiKey: 'replacement' })).status).toBe(500);
+    expect(f.services.secrets.get('provider:ollama')).toBe('original');
   });
 
   it('deep settings patch immediately propagates memory and tool permissions, emits once', async () => {
     const current = await json<Record<string, unknown>>(await f.request('/api/settings'));
     expect(current).toHaveProperty('persona');
-    const patched = await json(await f.request('/api/settings', 'PATCH', { persona: { name: 'Nora' }, memory: { recall: false }, tools: { permissions: { read_test: 'deny' } }, onboarded: true }));
-    expect(patched).toMatchObject({ persona: { name: 'Nora', tone: 'warm' }, memory: { recall: false, mode: 'auto' }, onboarded: true });
+    const patched = await json(await f.request('/api/settings', 'PATCH', { persona: { avatar: '🌙' }, memory: { recall: false }, tools: { permissions: { read_test: 'deny' } }, onboarded: true }));
+    expect(patched).toMatchObject({ persona: { avatar: '🌙' }, memory: { recall: false }, onboarded: true });
     expect(f.services.memory.getPolicy().recall).toBe(false);
     expect(f.services.tools.permissionFor('read_test')).toBe('deny');
     expect(f.services.events.since(0).filter((e) => e.event.type === 'settings.updated')).toHaveLength(1);
@@ -463,36 +462,41 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
   });
 
   it.each([
-    ['POST', '/api/conversations', { incognito: 'yes' }], ['PATCH', '/api/conversations/id', { title: '' }],
-    ['POST', '/api/conversations/id/messages', {}], ['POST', '/api/conversations/id/cancel', { turnId: 1 }],
-    ['POST', '/api/conversations/id/ui-action', {}], ['POST', '/api/confirmations/id', { approve: 'yes' }],
+    ['POST', '/api/timeline/messages', { text: 'hello', offRecord: 'yes' }], ['POST', '/api/memory/forget-by-source', { messageIds: [] }],
+    ['POST', '/api/timeline/messages', {}], ['POST', '/api/timeline/cancel', { turnId: 1 }],
+    ['POST', '/api/timeline/ui-action', {}], ['POST', '/api/confirmations/id', { approve: 'yes' }],
     ['POST', '/api/memory', {}], ['PATCH', '/api/memory/id', { importance: 2 }],
-    ['POST', '/api/memory/import', { data: {} }], ['POST', '/api/memory/approve', { ids: [] }],
-    ['POST', '/api/memory/reject', { ids: [] }], ['POST', '/api/memory/forget', { ids: [] }],
+    ['POST', '/api/memory/import', { data: {} }],
+    ['POST', '/api/memory/forget', { ids: [] }],
     ['POST', '/api/memory/find-for-forget', { query: '' }], ['POST', '/api/memory/links', { from: 'a', to: 'b', type: 'bogus' }],
     ['POST', '/api/reminders', { title: 'Water', dueAt: 'soon' }], ['PATCH', '/api/reminders/id', { status: 'bogus' }],
     ['POST', '/api/reminders/id/snooze', { minutes: 0 }], ['POST', '/api/task-lists', { name: '' }],
     ['PATCH', '/api/task-lists/id', { color: 1 }], ['POST', '/api/tasks', { title: '' }],
     ['PATCH', '/api/tasks/id', { done: 'yes' }], ['POST', '/api/notes', { content: 1 }],
     ['PATCH', '/api/notes/id', { tags: [1] }], ['POST', '/api/notifications/read', { ids: 1 }],
-    ['POST', '/api/providers', { kind: 'bogus' }], ['POST', '/api/providers/test', { kind: 'mock', baseUrl: 'no' }],
-    ['PATCH', '/api/settings', { persona: { tone: 'bogus' } }], ['PUT', '/api/tools/read_test/permission', { permission: 'bogus' }],
+    ['POST', '/api/providers', { kind: 'bogus' }], ['POST', '/api/providers/test', { kind: 'ollama', baseUrl: 'no' }],
+    ['PATCH', '/api/settings', { persona: { avatar: 1 } }], ['PUT', '/api/tools/read_test/permission', { permission: 'bogus' }],
     ['PATCH', '/api/phone-access', { enabled: 'yes' }], ['PATCH', '/api/phone-access', { relayUrl: 1 }],
     ['POST', '/api/devices', { name: '' }], ['POST', '/api/push/subscribe', {}], ['POST', '/api/push/unsubscribe', { endpoint: 1 }],
   ])('validates %s %s with structured zod details', async (method, path, body) => {
-    if (path.endsWith('/messages')) path = `/api/conversations/${f.services.conversations.create().id}/messages`;
+    
     const response = await json<{ code: string; details: unknown }>(await f.request(path, method, body), 400);
     expect(response.code).toBe('bad_request'); expect(response.details).toHaveProperty('errors');
   });
 
   it.each([
-    '/api/conversations?archived=yes', '/api/conversations?limit=0', '/api/conversations?before=NaN',
+    '/api/timeline?limit=0',
     '/api/memory?kinds=bogus', '/api/memory?status=bogus', '/api/memory?pinned=yes', '/api/memory?offset=-1', '/api/memory?sort=bad',
     '/api/memory/graph?depth=5', '/api/memory/graph?includeArchived=yes', '/api/memory/journal?limit=wat', '/api/memory/export?embeddings=yes',
     '/api/reminders?status=bad', '/api/reminders?from=NaN', '/api/tasks?done=yes', '/api/tasks?limit=-1',
     '/api/notes?limit=NaN', '/api/notifications?unread=yes',
   ])('validates query %s', async (path) => {
     expect(await json(await f.request(path), 400)).toMatchObject({ code: 'bad_request', details: { errors: [] } });
+  });
+
+  it('rejects malformed timeline cursors and returns not_found for missing jump targets', async () => {
+    expect(await json(await f.request('/api/timeline?before=invalid'), 400)).toMatchObject({ code: 'bad_request', message: 'Invalid timeline cursor.' });
+    expect(await json(await f.request('/api/timeline?around=missing-message'), 404)).toMatchObject({ code: 'not_found', message: 'Timeline message not found.' });
   });
 
   it('returns JSON for malformed bodies, mapped errors and unknown routes', async () => {

@@ -13,12 +13,12 @@ import { DataSection } from './settings/DataSection.js';
 import { DevicesSection } from './settings/DevicesSection.js';
 import { MemorySection } from './settings/MemorySection.js';
 import { NotificationsSection } from './settings/NotificationsSection.js';
-import { PersonaSection } from './settings/PersonaSection.js';
+import { AvatarSection } from './settings/PersonaSection.js';
 import { ToolsSection } from './settings/ToolsSection.js';
 
 const ICONS: Record<SettingsSection, string> = {
   ai: 'cpu',
-  persona: 'smile',
+  avatar: 'smile',
   memory: 'brain',
   tools: 'wand',
   devices: 'smartphone',
@@ -31,8 +31,8 @@ function SectionContent({ section }: { section: SettingsSection }): ReactElement
   switch (section) {
     case 'ai':
       return <AiSection />;
-    case 'persona':
-      return <PersonaSection />;
+    case 'avatar':
+      return <AvatarSection />;
     case 'memory':
       return <MemorySection />;
     case 'tools':

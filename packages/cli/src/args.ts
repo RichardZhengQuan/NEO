@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 
 export type Command =
   | { cmd: 'serve'; host?: string; port?: number; dataDir?: string; mode?: string; config?: string; webDir?: string; logLevel?: string; showToken?: boolean }
-  | { cmd: 'chat'; server?: string; token?: string; conversation?: string; model?: string; incognito?: boolean; showReasoning?: boolean }
+  | { cmd: 'chat'; server?: string; token?: string; offRecord?: boolean; showReasoning?: boolean }
   | { cmd: 'init'; dataDir?: string }
   | { cmd: 'pair'; name?: string; platform?: string; dataDir?: string; server?: string; token?: string }
   | { cmd: 'token'; dataDir?: string }
@@ -91,9 +91,7 @@ function parseChat(args: string[]): Command | ParseArgsError {
       options: {
         server: { type: 'string' },
         token: { type: 'string' },
-        conversation: { type: 'string' },
-        model: { type: 'string' },
-        incognito: { type: 'boolean', default: false },
+        'off-record': { type: 'boolean', default: false },
         'show-reasoning': { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -105,9 +103,7 @@ function parseChat(args: string[]): Command | ParseArgsError {
       cmd: 'chat',
       server: values.server,
       token: values.token,
-      conversation: values.conversation,
-      model: values.model,
-      incognito: values.incognito,
+      offRecord: values['off-record'],
       showReasoning: values['show-reasoning'],
     };
   } catch (e) {

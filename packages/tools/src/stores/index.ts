@@ -3,7 +3,7 @@
  * Namespace: 'tools'
  */
 import type { Clock, ProductivityStores } from '@neo/protocol';
-import type { Migration, NeoDatabase } from '@neo/storage';
+import { fromJson, type Migration, type NeoDatabase } from '@neo/storage';
 import { createReminderStore } from './reminders.js';
 import { createTaskStore } from './tasks.js';
 import { createNoteStore } from './notes.js';
@@ -145,6 +145,38 @@ export const toolsMigrations: Migration[] = [
           VALUES (new.id, new.title, new.content, (SELECT group_concat(value, ' ') FROM json_each(new.tags)));
       END;
     `,
+  },
+  {
+    version: 6,
+    name: 'timeline_reminder_links',
+    up(db) {
+      db.exec('ALTER TABLE reminders ADD COLUMN message_id TEXT');
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get()) db.exec(`
+        UPDATE reminders SET message_id = COALESCE(
+          (SELECT id FROM messages WHERE conversation_id = reminders.conversation_id AND created_at <= reminders.created_at
+            ORDER BY created_at DESC, id DESC LIMIT 1),
+          (SELECT id FROM messages WHERE conversation_id = reminders.conversation_id ORDER BY created_at, id LIMIT 1)
+        ) WHERE conversation_id IS NOT NULL;
+        UPDATE notifications SET data = json_set(json_remove(data, '$.conversationId'), '$.messageId', (
+          SELECT id FROM messages WHERE conversation_id = json_extract(notifications.data, '$.conversationId')
+          ORDER BY created_at DESC, id DESC LIMIT 1
+        )) WHERE json_valid(data) AND json_extract(data, '$.conversationId') IS NOT NULL;
+      `);
+      const notifications = db.prepare(`
+        SELECT id, data FROM notifications WHERE json_valid(data) AND (
+          json_type(data, '$.messageId') = 'text' OR
+          json_extract(data, '$.url') LIKE 'neo://chat/%' OR
+          json_extract(data, '$.url') LIKE 'neo://conversations/%'
+        )
+      `).all() as { id: string; data: string }[];
+      const updateNotification = db.prepare('UPDATE notifications SET data = ? WHERE id = ?');
+      for (const notification of notifications) {
+        const data = fromJson<Record<string, unknown>>(notification.data, {});
+        if (typeof data.messageId === 'string' && data.messageId) data.url = `neo://timeline/${encodeURIComponent(data.messageId)}`;
+        else delete data.url;
+        updateNotification.run(JSON.stringify(data), notification.id);
+      }
+    },
   },
 ];
 

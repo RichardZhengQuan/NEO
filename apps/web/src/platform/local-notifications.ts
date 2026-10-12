@@ -59,7 +59,7 @@ export function planReminderNotifications(
       title: r.title,
       body: r.notes?.trim() || options.defaultBody || '',
       at: r.dueAt,
-      url: `neo://reminders/${r.id}`,
+      url: r.messageId ? `neo://timeline/${encodeURIComponent(r.messageId)}` : `neo://reminders/${r.id}`,
     };
   });
 }

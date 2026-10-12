@@ -10,6 +10,7 @@ export * from './ui.js';
 export * from './content.js';
 export * from './transcript.js';
 export * from './providers.js';
+export * from './ai.js';
 export * from './tools.js';
 export * from './memory.js';
 export * from './productivity.js';

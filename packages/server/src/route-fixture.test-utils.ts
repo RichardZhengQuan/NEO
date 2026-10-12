@@ -52,7 +52,7 @@ export function routeFixture(configInput: unknown = {}) {
   };
   const memory: MemoryService = {
     recall: vi.fn(async () => ({ items: [], tookMs: 0, seeds: 0, considered: 0 })),
-    observe: vi.fn(async () => ({ created: [], updated: [], superseded: [], pending: [], linked: 0 })),
+    observe: vi.fn(async () => ({ created: [], updated: [], superseded: [], linked: 0 })),
     remember: vi.fn(async (input) => {
       const node = MemoryNodeSchema.parse({
         id: newId('mem', clock()), content: input.content, label: input.label ?? input.content,
@@ -79,9 +79,14 @@ export function routeFixture(configInput: unknown = {}) {
       nodes.set(id, next);
       return next;
     }),
+    findBySource: vi.fn(async (messageIds: string[]) => [...nodes.values()].filter(node => !!node.source.messageId && messageIds.includes(node.source.messageId))),
+    forgetBySource: vi.fn(async (messageIds: string[]) => {
+      const matches = [...nodes.values()].filter(node => !!node.source.messageId && messageIds.includes(node.source.messageId));
+      for (const node of matches) nodes.delete(node.id);
+      return matches.length;
+    }),
     forget: vi.fn(async (ids: string[]) => ids.reduce((count, id) => count + Number(nodes.delete(id)), 0)),
     findForForget: vi.fn(async () => [...nodes.values()]),
-    approve: vi.fn(async (ids) => ids.length), reject: vi.fn(async (ids) => ids.length),
     link: vi.fn(async (from, to, type, weight) => ({
       id: 'edge_1', from, to, type, weight: weight ?? .5, createdAt: clock(), updatedAt: clock(),
       lastReinforcedAt: clock(), coactivations: 0,
@@ -91,7 +96,7 @@ export function routeFixture(configInput: unknown = {}) {
     consolidate: vi.fn(async () => report), journal: vi.fn(async () => [report]),
     stats: vi.fn(async () => ({
       total: nodes.size, byKind: { episode: 0, fact: nodes.size, entity: 0, preference: 0, skill: 0, goal: 0, summary: 0 },
-      byStatus: { active: nodes.size, pending: 0, archived: 0, superseded: 0 }, edges: 0, pending: 0,
+      byStatus: { active: nodes.size, archived: 0, superseded: 0 }, edges: 0,
       lastConsolidationAt: null, embeddingModel: 'fake',
     })),
     export: vi.fn(async () => ({ format: 'neo-memory' as const, version: 1 as const, exportedAt: clock(), nodes: [...nodes.values()], edges: [] })),
@@ -100,7 +105,7 @@ export function routeFixture(configInput: unknown = {}) {
   };
   const adapters = new Map<string, ProviderAdapter>();
   const adapter = (config: ProviderConfig): ProviderAdapter => ({
-    id: config.id, kind: config.kind, config, isLocal: config.local ?? config.kind === 'mock',
+    id: config.id, kind: config.kind, config, isLocal: config.local ?? (config.kind === 'mock' || config.kind === 'ollama'),
     async *chat() { yield { type: 'done', stopReason: 'end' }; },
     capabilities: () => DEFAULT_CAPABILITIES,
     listModels: vi.fn(async () => [{ id: config.defaultModel ?? 'model', provider: config.id, capabilities: DEFAULT_CAPABILITIES }]),
@@ -122,16 +127,16 @@ export function routeFixture(configInput: unknown = {}) {
     send: vi.fn(async (input): Promise<TurnHandle> => {
       const turnId = newId('turn', clock());
       const userMessage: Message = {
-        id: newId('msg', clock()), conversationId: input.conversationId, role: 'user',
+        id: newId('msg', clock()), conversationId: input.conversationId, episodeId: input.conversationId, role: 'user',
         parts: input.parts, createdAt: clock(), status: 'complete', turnId,
       };
       const assistant: Message = {
-        id: newId('msg', clock()), conversationId: input.conversationId, role: 'assistant',
+        id: newId('msg', clock()), conversationId: input.conversationId, episodeId: input.conversationId, role: 'assistant',
         parts: [{ type: 'text', text: 'Hello from scripted runtime' }], createdAt: clock(), status: 'complete', turnId,
       };
       conversations.appendMessage(userMessage);
       conversations.appendMessage(assistant);
-      const scope = { turnId, conversationId: input.conversationId };
+      const scope = { turnId, conversationId: input.conversationId, episodeId: input.conversationId };
       const scripted: AgentEvent[] = [
         { type: 'turn.started', ...scope, userMessage, assistantMessageId: assistant.id, model: { provider: 'fake', model: 'model' } },
         { type: 'text.delta', ...scope, messageId: assistant.id, text: 'Hello from scripted runtime' },
@@ -139,10 +144,39 @@ export function routeFixture(configInput: unknown = {}) {
         { type: 'turn.finished', ...scope, stopReason: 'end', usage: null },
       ];
       return {
-        turnId, conversationId: input.conversationId, userMessage, assistantMessageId: assistant.id,
+        turnId, conversationId: input.conversationId, episodeId: input.conversationId, userMessage, assistantMessageId: assistant.id,
         events: (async function* () { yield* scripted; })(), done: Promise.resolve(assistant),
       };
     }),
+    sendTimeline: vi.fn(async input => {
+      if (input.offRecord === true) await runtime.startOffRecord();
+      const offRecord = conversations.offRecordState().active;
+      if (!offRecord) conversations.purgeOffRecord(Number.MAX_SAFE_INTEGER);
+      const current = conversations.currentEpisode();
+      const episode = current?.offRecord === offRecord ? current : conversations.createEpisode({ offRecord });
+      return runtime.send({ conversationId: episode.id, parts: input.parts });
+    }),
+    cancelTimeline: vi.fn(turnId => !turnId || runtime.activeTurns().some(turn => turn.turnId === turnId) ? runtime.cancel(turnId ?? '') : false),
+    offRecordState: () => conversations.offRecordState(),
+    startOffRecord: vi.fn(async () => {
+      const state = conversations.offRecordState();
+      if (state.active) return state;
+      const episode = conversations.createEpisode({ offRecord: true });
+      const next = { active: true, episodeId: episode.id, startedAt: clock() };
+      conversations.setOffRecordState(next);
+      events.publish({ type: 'timeline.off_record', active: true });
+      return next;
+    }),
+    endOffRecord: vi.fn(async () => {
+      const active = conversations.offRecordState().active;
+      const deleted = conversations.purgeOffRecord(Number.MAX_SAFE_INTEGER);
+      if (active) events.publish({ type: 'timeline.off_record', active: false });
+      return { deleted };
+    }),
+    purgeOffRecord: vi.fn(async before => conversations.purgeOffRecord(before)),
+    waitForIdle: vi.fn(async () => {}),
+    async mutateTimeline<T>(mutation: () => Promise<T>): Promise<T> { return mutation(); },
+    handleTimelineUiAction: vi.fn(async input => runtime.handleUiAction({ ...input, conversationId: conversations.getMessage(input.messageId)?.conversationId ?? '' })),
     cancel: vi.fn(() => true), cancelConversation: vi.fn(() => true),
     confirm: vi.fn((id) => confirmations.delete(id)), pendingConfirmations: () => [...confirmations.values()],
     handleUiAction: vi.fn(async () => ({ kind: 'noop' as const })), subscribe: () => () => {}, activeTurns: vi.fn(() => []),

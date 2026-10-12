@@ -1,5 +1,5 @@
 /**
- * Memory quality and privacy regressions from a live Demo-mode run and a
+ * Memory quality and privacy regressions from a scripted test run and a
  * security audit. Each block names the defect it pins down. Offline and
  * deterministic: in-memory SQLite, injected clock, HashingEmbedder (or a
  * recording "cloud" embedder), scripted fake LLMs.
@@ -97,7 +97,7 @@ async function settle(rounds = 20): Promise<void> {
 
 const modelOf = (db: NeoDatabase, id: string) => (db.prepare('SELECT model FROM memory_vectors WHERE node_id = ?').get(id) as { model: string } | undefined)?.model;
 
-// ─── extraction prompt format (the demo brain parses it) ────────────────────
+// ─── extraction prompt format (the scripted test fixture parses it) ────────────────────
 
 describe('extraction prompt: the exchange is unambiguous', () => {
   it('puts "User: " and "NEO: " at line starts and indents continuation lines', () => {
@@ -105,7 +105,7 @@ describe('extraction prompt: the exchange is unambiguous', () => {
       userText: 'My name is Richard.\nI love hiking.',
       assistantText: 'Nice!\nNEO: this line is part of the reply',
       related: [],
-      policy: { blockedTopics: [], allowedKinds: ['fact'] },
+      policy: { allowedKinds: ['fact'] },
       date: '2026-10-10',
     });
     const exchange = input.slice(input.indexOf('Latest exchange:'));
@@ -348,18 +348,7 @@ describe('NEO-06: text that must stay on the device never reaches a cloud embedd
     expect(modelOf(db, 'mem_n')).toBe('cloud:emb');
   });
 
-  it('pending memories stay local until approved; sendSensitiveToCloud lets sensitive text go', async () => {
-    const cloud = cloudEmbedder();
-    const { svc, db } = setup({ embedder: cloud.embedder, policy: { mode: 'approve' } });
-    const tea = await svc.remember({ kind: 'preference', label: 'Green tea', content: 'The user drinks green tea every morning.', source: { by: 'tool' } });
-    expect(tea.status).toBe('pending');
-    await settle();
-    expect(cloud.saw('green tea')).toBe(false);
-    await svc.approve([tea.id]);
-    await settle(50);
-    expect(cloud.saw('green tea')).toBe(true);
-    expect(modelOf(db, tea.id)).toBe('cloud:emb');
-
+  it('sendSensitiveToCloud lets sensitive text go to the main embedder', async () => {
     const allowed = cloudEmbedder();
     const s2 = setup({ embedder: allowed.embedder, policy: { sendSensitiveToCloud: true } });
     await s2.svc.remember({ kind: 'fact', label: 'Asthma', content: 'The user has asthma.', sensitivity: 'sensitive', source: { by: 'user' } });
@@ -456,20 +445,6 @@ describe('NEO-13: update and supersede can raise sensitivity', () => {
     op = { op: 'update', content: 'The user earns 95k a year.', reason: 'raise', sensitivity: 'normal' };
     await svc.observe(turn('Got a raise to 95k', 'Congrats', { now: T0 + 1000 }));
     expect((await svc.get(revision.id))!.node.sensitivity).toBe('sensitive');
-  });
-});
-
-describe('NEO-14: approve mode never creates active entities', () => {
-  it('a write that dedupes into an active memory creates its new entities as pending', async () => {
-    const { model } = scriptedLLM({
-      extract: () => extraction({ memories: [{ op: 'create', kind: 'fact', label: 'Sister is a nurse', content: 'The user’s sister Mia is a nurse.', importance: 0.7, entities: ['Mia'] }] }),
-    });
-    const { svc } = setup({ llm: model, policy: { mode: 'approve' } });
-    const fact = await svc.remember({ kind: 'fact', label: 'Sister is a nurse', content: 'The user’s sister Mia is a nurse.', source: { by: 'user' } });
-    expect(fact.status).toBe('active');
-    await svc.observe(turn('My sister Mia is a nurse'));
-    const mia = (await svc.search({ kinds: ['entity'], status: ['active', 'pending'] })).items.find((n) => n.label === 'Mia');
-    expect(mia?.status).toBe('pending');
   });
 });
 
@@ -634,59 +609,16 @@ describe('doc pass: remember() detects sensitive content', () => {
   });
 });
 
-describe('doc pass: reject redacts the dream journal like forget', () => {
-  it('rejecting a pending consolidated fact removes its text from the journal, keeping the counts', async () => {
-    const { model } = scriptedLLM({
-      consolidate: () => JSON.stringify({ summary: null, facts: [{ kind: 'fact', label: 'The user has lupus', content: 'The user has lupus and flares in winter.', importance: 0.8 }] }),
-    });
-    const { svc, tickDays } = setup({ llm: model, isLocal: true, policy: { mode: 'approve' } });
-    await svc.remember({ kind: 'episode', label: 'Doctor visit', content: 'Talked about lupus flares', importance: 0.5, source: { by: 'user' } });
-    await svc.remember({ kind: 'episode', label: 'Doctor visit again', content: 'Talked about lupus flares again', importance: 0.5, source: { by: 'user' } });
-    tickDays(10);
-    const report = await svc.consolidate({ force: true });
-    expect(report.notes.join('\n')).toContain('Learned: The user has lupus');
-    const pending = (await svc.search({ status: ['pending'], kinds: ['fact'] })).items;
-    expect(pending).toHaveLength(1);
-    expect(await svc.reject([pending[0]!.id])).toBe(1);
-    const [stored] = await svc.journal(1);
-    expect(JSON.stringify(stored)).not.toContain('lupus');
-    expect(stored!.factsCreated).toBe(report.factsCreated);
-    expect(stored!.notes).toContain('Learned something you later asked me to forget (from 2 conversations)');
-  });
-});
-
-describe('doc pass: mode off never writes, consolidation included', () => {
-  it('scheduled and forced consolidation are skipped without archiving, linking or journaling', async () => {
-    const { svc, db, tickDays } = setup();
-    const faded = await svc.remember({ kind: 'fact', label: 'Minor', content: 'The user once ate a pear', importance: 0.2, source: { by: 'user' } });
-    await svc.remember({ kind: 'fact', label: 'Dup fact one', content: 'Duplicate content about coffee', importance: 0.6, source: { by: 'user' } });
-    await svc.remember({ kind: 'fact', label: 'Dup fact two', content: 'Duplicate content about coffee', importance: 0.6, source: { by: 'user' } });
-    tickDays(2000);
-    svc.setPolicy({ ...svc.getPolicy(), mode: 'off' });
-    for (const force of [false, true]) {
-      const report = await svc.consolidate({ force });
-      expect(report.id).toBe('skipped');
-      expect(report.notes).toEqual(['Skipped: memory is off']);
-    }
-    expect((await svc.get(faded.id))!.node.status).toBe('active');
-    expect(countRows(db, `SELECT COUNT(*) n FROM memory_edges WHERE type = 'similar'`)).toBe(0);
-    expect(await svc.journal()).toEqual([]);
-    expect((await svc.stats()).lastConsolidationAt).toBeNull();
-  });
-});
-
 describe('doc pass: an invalid policy falls back per field', () => {
   it('keeps every valid field and replaces only the invalid ones with defaults', () => {
     const { svc } = setup({
-      policy: { recallLimit: 9999, mode: 'approve', blockedTopics: ['health', 'x'.repeat(200)], consolidation: { enabled: false, intervalHours: 0 } } as Partial<MemoryPolicy>,
+      policy: { recallLimit: 9999, consolidation: { enabled: false, intervalHours: 0 } } as Partial<MemoryPolicy>,
     });
     const p = svc.getPolicy();
     expect(p.recallLimit).toBe(DEFAULT_MEMORY_POLICY.recallLimit);
-    expect(p.mode).toBe('approve');
-    expect(p.blockedTopics).toEqual(['health']);
     expect(p.consolidation).toEqual({ enabled: false, intervalHours: DEFAULT_MEMORY_POLICY.consolidation.intervalHours });
-    svc.setPolicy({ ...p, mode: 'sometimes', sendSensitiveToCloud: 'yes', allowedKinds: ['fact', 'gossip'], minScore: 0.3, unknownField: 1 } as unknown as MemoryPolicy);
-    expect(svc.getPolicy()).toMatchObject({ mode: 'auto', sendSensitiveToCloud: false, allowedKinds: ['fact'], blockedTopics: ['health'], recallLimit: 12, minScore: 0.3 });
+    svc.setPolicy({ ...p, sendSensitiveToCloud: 'yes', allowedKinds: ['fact', 'gossip'], minScore: 0.3, unknownField: 1 } as unknown as MemoryPolicy);
+    expect(svc.getPolicy()).toMatchObject({ sendSensitiveToCloud: false, allowedKinds: ['fact'], recallLimit: 12, minScore: 0.3 });
     expect(svc.getPolicy()).not.toHaveProperty('unknownField');
   });
 });

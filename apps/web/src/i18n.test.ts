@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { buildMessages, dictionaries } from '@neo/ui';
+import { AI_CAPABILITIES } from '@neo/protocol';
 import { appDictionaries } from './i18n.js';
 
 const sources = import.meta.glob(['./**/*.ts', './**/*.tsx', '!./**/*.test.ts', '!./**/*.test.tsx'], { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
@@ -10,7 +11,6 @@ const sources = import.meta.glob(['./**/*.ts', './**/*.tsx', '!./**/*.test.ts', 
 /** Keys built at runtime from a prefix + a known set of values. */
 const DYNAMIC: Record<string, readonly string[]> = {
   'ai.reasoning_': ['off', 'low', 'medium', 'high'],
-  'chat.group.': ['pinned', 'today', 'yesterday', 'week', 'older'],
   'chat.risk.': ['read', 'write', 'external', 'dangerous'],
   'chat.suggestion.': ['remind', 'remember', 'dashboard', 'tasks'],
   'dataSettings.mode_': ['local', 'server'],
@@ -20,25 +20,22 @@ const DYNAMIC: Record<string, readonly string[]> = {
   'journal.count_': ['factsCreated', 'episodesConsolidated', 'linksCreated', 'entitiesMerged', 'archived', 'edgesPruned'],
   'language.': ['auto', 'en', 'zh-CN', 'ja', 'ko', 'es', 'fr', 'de', 'pt', 'it', 'ru'],
   'memory.kind.': ['episode', 'fact', 'entity', 'preference', 'skill', 'goal', 'summary'],
-  'memory.status.': ['active', 'pending', 'archived', 'superseded'],
+  'memory.status.': ['active', 'archived', 'superseded'],
   'memoryList.sort_': ['recent', 'importance', 'strength', 'relevance'],
-  'memoryList.status_': ['current', 'active', 'pending', 'archived', 'superseded', 'all'],
-  'memoryMode.': ['auto.title', 'auto.text', 'approve.title', 'approve.text', 'off.title', 'off.text'],
-  'memoryScreen.tab_': ['net', 'list', 'pending', 'journal', 'stats', 'data'],
-  'nav.': ['chat', 'memory', 'reminders', 'tasks', 'notes', 'settings'],
+  'memoryList.status_': ['active', 'archived', 'superseded', 'all'],
+  'memoryScreen.tab_': ['net', 'list', 'journal', 'stats', 'data'],
+  'nav.': ['timeline', 'memory', 'reminders', 'tasks', 'notes', 'settings'],
   'notify.': ['browser.title', 'browser.text', 'browser.denied', 'electron.title', 'electron.text', 'electron.denied', 'capacitor.title', 'capacitor.text', 'capacitor.denied'],
   'notify.reason.': ['insecure-context', 'no-vapid', 'ios-install', 'unsupported'],
-  'persona.sample_': ['warm', 'professional', 'playful', 'concise'],
-  'persona.tone_': ['warm', 'professional', 'playful', 'concise'],
-  'provider.': ['anthropic', 'openai', 'gemini', 'ollama', 'openai-compatible', 'mock'].flatMap((k) => [`${k}.label`, `${k}.description`]),
+  'provider.': ['anthropic', 'openai', 'gemini', 'openrouter'].map((k) => `${k}.label`),
+  'provider.capability.': AI_CAPABILITIES,
+  'provider.capability_help.': AI_CAPABILITIES,
   'reminders.repeat_': ['none', 'daily', 'weekdays', 'weekly', 'monthly', 'yearly'],
-  'settings.': ['ai', 'persona', 'memory', 'tools', 'devices', 'notifications', 'appearance', 'data'],
+  'settings.': ['ai', 'avatar', 'memory', 'tools', 'devices', 'notifications', 'appearance', 'data'],
   'source.': ['user', 'assistant', 'extraction', 'consolidation', 'import', 'tool'],
   'status.': ['idle', 'connecting', 'open', 'reconnecting', 'closed'],
   'tasks.priority_': ['0', '1', '2', '3'],
   'toolsSettings.risk_': ['read', 'write', 'external', 'dangerous'],
-  'topic.': ['health', 'finances', 'politics', 'religion', 'relationships', 'work'],
-  'trait.': ['curious', 'warm', 'direct', 'witty', 'patient', 'concise', 'encouraging', 'honest', 'calm', 'playful'],
 };
 
 function usedKeys(): Set<string> {
@@ -65,6 +62,12 @@ describe('app dictionaries', () => {
     const zh = appDictionaries['zh-CN'];
     const missing = Object.keys(appDictionaries.en).filter((k) => !(k in zh) && !/_(one|other)$/.test(k));
     expect(missing).toEqual([]);
+  });
+
+  it('has no removed persona or trait settings keys', () => {
+    for (const dictionary of Object.values(appDictionaries)) {
+      expect(Object.keys(dictionary).filter((key) => /(?:^|[.])persona(?:[.]|$)|^personaSettings[.]|^trait[.]/.test(key))).toEqual([]);
+    }
   });
 
   it('Chinese is actually translated (no English left in zh-CN where en differs)', () => {

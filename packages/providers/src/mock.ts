@@ -1,18 +1,13 @@
 /**
- * Mock provider: an offline stand-in for an AI (Demo mode) and a scriptable test double.
- * `MockProvider` streams whatever the {@link MockScript} returns; the default script is
- * the demo brain in demo-brain.ts.
+ * Internal test double. `MockProvider` streams whatever the explicit script returns.
  */
 import { NeoError, estimateTokens } from '@neo/protocol';
 import type { ChatRequest, ChatStreamEvent, ModelCapabilities, ModelInfo, ProviderAdapter, ProviderConfig, ProviderTestResult } from '@neo/protocol';
-import { defaultMockScript } from './demo-brain.js';
 import type { MockReply, MockScript, ProviderOptions } from './index.js';
 import { abortableSleep, newCallId, throwIfAborted } from './shared.js';
 
-export { defaultMockScript } from './demo-brain.js';
-
 const DEFAULT_CHUNK_SIZE = 12;
-const DEMO_MODEL = 'neo-demo';
+const TEST_MODEL = 'neo-test';
 
 function* chunks(text: string, size: number): Generator<string> {
   const step = Math.max(1, Math.floor(size));
@@ -34,7 +29,8 @@ export class MockProvider implements ProviderAdapter {
     this.id = config.id;
     this.config = config;
     this.isLocal = config.local ?? true;
-    this.script = options.mockScript ?? defaultMockScript;
+    if (!options.mockScript) throw new NeoError('config_error', 'Mock providers require an explicit test script.');
+    this.script = options.mockScript;
   }
 
   capabilities(_model: string): ModelCapabilities {
@@ -73,10 +69,10 @@ export class MockProvider implements ProviderAdapter {
   }
 
   async listModels(_signal?: AbortSignal): Promise<ModelInfo[]> {
-    return [{ id: DEMO_MODEL, provider: this.id, label: 'NEO Demo (offline)', capabilities: this.capabilities(DEMO_MODEL) }];
+    return [{ id: TEST_MODEL, provider: this.id, label: 'NEO Test', capabilities: this.capabilities(TEST_MODEL) }];
   }
 
   async test(_signal?: AbortSignal): Promise<ProviderTestResult> {
-    return { ok: true, latencyMs: 0, models: [DEMO_MODEL] };
+    return { ok: true, latencyMs: 0, models: [TEST_MODEL] };
   }
 }

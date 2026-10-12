@@ -298,6 +298,36 @@ describe('Gemini streaming', () => {
 });
 
 describe('Gemini errors, keys, models, embeddings', () => {
+  it('does not expose malformed model-response text in errors or connection tests', async () => {
+    const { a } = make(() => new Response(KEY, { headers: { 'Content-Type': 'application/json' } }));
+    const error = await a.listModels().catch((err: unknown) => err);
+    expect(error).toMatchObject({ code: 'provider_error', message: 'Gemini returned invalid model data.' });
+    expect(error).not.toHaveProperty('cause');
+    expect(await a.test()).toMatchObject({ ok: false, error: 'Gemini returned invalid model data.' });
+  });
+
+  it.each([null, { models: null }, { models: KEY }])('rejects malformed model-list structures safely: %j', async (body) => {
+    const { a } = make(() => jsonResponse(body));
+    await expect(a.listModels()).rejects.toMatchObject({ code: 'provider_error', message: 'Gemini returned invalid model data.' });
+  });
+
+  it('ignores invalid entries and redacts echoed credentials in labels', async () => {
+    const { a } = make(() => jsonResponse({ models: [null, 42, KEY, { name: {} }, { name: 'models/gemini-3-pro', displayName: `Model ${KEY}`, supportedGenerationMethods: ['generateContent'] }] }));
+    const models = await a.listModels();
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({ id: 'gemini-3-pro', label: 'Model [redacted]' });
+    expect(JSON.stringify(models)).not.toContain(KEY);
+  });
+
+  it('rejects credential echoes in model ids and page tokens', async () => {
+    const { a } = make([
+      () => jsonResponse({ models: [{ name: `models/${KEY}`, supportedGenerationMethods: ['generateContent'] }] }),
+      () => jsonResponse({ models: [], nextPageToken: KEY }),
+    ]);
+    await expect(a.listModels()).rejects.toMatchObject({ code: 'provider_error', message: 'Gemini returned invalid model data.' });
+    await expect(a.listModels()).rejects.toMatchObject({ code: 'provider_error', message: 'Gemini returned invalid model data.' });
+  });
+
   const gErr = (status: number, message: string, extra: Record<string, unknown> = {}): FakeResponder => () =>
     jsonResponse({ error: { code: status, message, status: 'X', ...extra } }, status);
 
@@ -333,16 +363,37 @@ describe('Gemini errors, keys, models, embeddings', () => {
     expect(e.message).not.toContain(KEY);
   });
 
-  it('listModels follows pages and keeps generateContent models', async () => {
+  it('listModels follows pages and keeps text and embedding models with their own capabilities', async () => {
     const { a, f } = make([
       () => jsonResponse({ models: [{ name: 'models/gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', supportedGenerationMethods: ['generateContent'], inputTokenLimit: 1_048_576, outputTokenLimit: 65_536 }], nextPageToken: 'p2' }),
-      () => jsonResponse({ models: [{ name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] }, { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent', 'countTokens'] }] }),
+      () => jsonResponse({ models: [{ name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] }, { name: 'models/gemini-embedding-001', supportedGenerationMethods: ['batchEmbedContents'] }, { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent', 'countTokens'] }, { name: 'models/unsupported', supportedGenerationMethods: ['countTokens'] }] }),
     ]);
     const models = await a.listModels();
     expect(f.calls.map((c) => c.url)).toEqual([`${BASE}/models?pageSize=200`, `${BASE}/models?pageSize=200&pageToken=p2`]);
     expect(f.calls[0]!.headers.get('x-goog-api-key')).toBe(KEY);
-    expect(models.map((m) => m.id)).toEqual(['gemini-2.5-pro', 'gemini-2.5-flash']);
-    expect(models[0]!.capabilities).toMatchObject({ contextWindow: 1_048_576, maxOutputTokens: 65_536, reasoning: true, vision: true });
+    expect(models.map((m) => m.id)).toEqual(['gemini-2.5-pro', 'text-embedding-004', 'gemini-embedding-001', 'gemini-2.5-flash']);
+    expect(models[0]!.capabilities).toMatchObject({ text: true, contextWindow: 1_048_576, maxOutputTokens: 65_536, reasoning: true, vision: true, embeddings: false });
+    expect(models[1]!.capabilities).toMatchObject({ text: false, tools: false, vision: false, reasoning: false, embeddings: true });
+    expect(models[2]!.capabilities).toMatchObject({ text: false, embeddings: true });
+  });
+
+  it('uses listing methods to distinguish a dual-purpose model from embedding-only and future generation models', async () => {
+    const { a } = make(() => jsonResponse({ models: [
+      { name: 'models/dual-purpose', supportedGenerationMethods: ['generateContent', 'embedContent'] },
+      { name: 'models/vector-model', supportedGenerationMethods: ['embedContent'] },
+      { name: 'models/gemini-2.5-flash-preview-tts', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/imagen-4.0-generate-001', supportedGenerationMethods: ['predict'] },
+      { name: 'models/veo-3.0-generate-001', supportedGenerationMethods: ['predictLongRunning'] },
+    ] }));
+    const models = await a.listModels();
+    expect(models.map((m) => [m.id, m.capabilities.text, m.capabilities.embeddings, m.capabilities.textToSpeech, m.capabilities.image, m.capabilities.video])).toEqual([
+      ['dual-purpose', true, true, false, false, false],
+      ['vector-model', false, true, false, false, false],
+      ['gemini-2.5-flash-preview-tts', false, false, true, false, false],
+      ['imagen-4.0-generate-001', false, false, false, true, false],
+      ['veo-3.0-generate-001', false, false, false, false, true],
+    ]);
+    expect(a.capabilities('models/vector-model')).toMatchObject({ text: false, embeddings: true });
   });
 
   it('embed uses batchEmbedContents with the key header and returns one vector per text', async () => {

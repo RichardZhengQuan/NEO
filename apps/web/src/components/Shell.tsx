@@ -1,16 +1,14 @@
 /**
- * App frame. ≥ 768 px: a persistent sidebar (brand, new chat, navigation,
- * conversations, settings). Below: the same panel as a drawer plus a bottom
- * tab bar. Esc closes the drawer.
+ * App frame. ≥ 768 px: a persistent sidebar with app navigation. Below:
+ * the same panel as a drawer plus a bottom tab bar. Esc closes the drawer.
  */
 import { useEffect, useRef, type ReactElement, type ReactNode } from 'react';
-import { Button, Icon, IconButton, NeoAvatar, useT } from '@neo/ui';
+import { Icon, NeoAvatar, useT } from '@neo/ui';
 import { useIsDesktop } from '../hooks/useMediaQuery.js';
 import { navigate, type Route, type RouteName } from '../router.js';
 import { useData } from '../state/data.js';
 import { useSession } from '../state/session.js';
-import { focusComposer, resetDraft, setDrawer, useUi } from '../state/ui.js';
-import { ConversationList } from './ConversationList.js';
+import { setDrawer, useUi } from '../state/ui.js';
 import { StatusDot } from './StatusDot.js';
 
 interface NavDef {
@@ -20,24 +18,17 @@ interface NavDef {
 }
 
 const NAV: NavDef[] = [
-  { name: 'chat', icon: 'message', route: { name: 'chat' } },
+  { name: 'timeline', icon: 'message', route: { name: 'timeline' } },
   { name: 'memory', icon: 'brain', route: { name: 'memory', tab: 'net' } },
   { name: 'reminders', icon: 'bell', route: { name: 'reminders' } },
   { name: 'tasks', icon: 'list-checks', route: { name: 'tasks' } },
   { name: 'notes', icon: 'note', route: { name: 'notes' } },
+  { name: 'settings', icon: 'settings', route: { name: 'settings' } },
 ];
 
-export function startNewChat(incognito = false): void {
-  resetDraft(incognito);
-  setDrawer(false);
-  navigate({ name: 'chat' });
-  focusComposer();
-}
-
 function useBadges(): Partial<Record<NavDef['name'], number>> {
-  const pending = useData((s) => s.pendingMemories);
   const due = useData((s) => Object.values(s.reminders).filter((r) => r.status === 'fired').length);
-  return { memory: pending, reminders: due };
+  return { reminders: due };
 }
 
 function SidePanel({ route }: { route: Route }): ReactElement {
@@ -51,19 +42,13 @@ function SidePanel({ route }: { route: Route }): ReactElement {
   return (
     <div className="side">
       <div className="side__head">
-        <button type="button" className="side__brand" onClick={() => go({ name: 'settings', section: 'persona' })} title={t('nav.persona')}>
+        <button type="button" className="side__brand" onClick={() => go({ name: 'timeline' })} aria-label={t('nav.timeline')}>
           <NeoAvatar avatar={persona?.avatar ?? null} size={30} animated={false} />
           <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-            <span className="side__name">{persona?.name ?? 'NEO'}</span>
+            <span className="side__name">NEO</span>
           </span>
         </button>
         <StatusDot />
-      </div>
-      <div className="side__new">
-        <Button variant="soft" icon="message-plus" block onClick={() => startNewChat(false)} title={t('nav.new_chat_hint')}>
-          {t('nav.new_chat')}
-        </Button>
-        <IconButton icon="incognito" label={t('nav.new_incognito')} variant="secondary" onClick={() => startNewChat(true)} />
       </div>
       <nav className="side__nav" aria-label={t('nav.main')}>
         {NAV.map((item) => (
@@ -74,14 +59,6 @@ function SidePanel({ route }: { route: Route }): ReactElement {
           </button>
         ))}
       </nav>
-      <div className="side__section">{t('nav.recent')}</div>
-      <ConversationList activeId={route.name === 'chat' ? route.conversationId : undefined} />
-      <div className="side__foot">
-        <button type="button" className="nav-item" style={{ flex: 1 }} aria-current={route.name === 'settings' ? 'page' : undefined} onClick={() => go({ name: 'settings' })}>
-          <Icon name="settings" size={17} />
-          {t('nav.settings')}
-        </button>
-      </div>
     </div>
   );
 }

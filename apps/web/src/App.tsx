@@ -8,22 +8,22 @@ import { ConfirmProvider, I18nProvider, LinkProvider, NeoAvatar, RemoteImageProv
 import { appDictionaries } from './i18n.js';
 import { openLink, openPairLink } from './actions/links.js';
 import { bootstrap } from './actions/session.js';
-import { Shell, startNewChat } from './components/Shell.js';
+import { Shell } from './components/Shell.js';
 import { AppErrorBoundary, lazyScreen } from './components/ErrorBoundary.js';
 import { Toaster } from './components/Toaster.js';
 import { STORAGE_KEYS, readString } from './lib/storage.js';
 import { getPlatform } from './platform/index.js';
 import { navigate, useRoute, type Route } from './router.js';
-import { ChatScreen } from './screens/ChatScreen.js';
+import { TimelineScreen } from './screens/TimelineScreen.js';
 import { ConnectScreen, OfflineScreen } from './screens/ConnectScreen.js';
-import { loadConversationList, loadPendingConfirmations, refreshAll, startEventStream } from './state/connection.js';
-import { loadReminders, refreshPendingMemories } from './state/data.js';
+import { loadPendingConfirmations, refreshAll, startEventStream } from './state/connection.js';
+import { loadReminders } from './state/data.js';
 import { runReminderAction, type EventContext } from './state/events.js';
 import { onSessionEnd, useSession } from './state/session.js';
-import { focusComposer, setDrawer } from './state/ui.js';
+import { focusComposer, requestTimelineSearch, setDrawer } from './state/ui.js';
 import { originOf, usePreferences } from './state/preferences.js';
 
-// Secondary screens load on demand so the first paint (chat) stays light on phones.
+// Secondary screens load on demand so the first paint stays light on phones.
 const MemoryScreen = lazyScreen(() => import('./screens/MemoryScreen.js').then((m) => ({ default: m.MemoryScreen })));
 const NotesScreen = lazyScreen(() => import('./screens/NotesScreen.js').then((m) => ({ default: m.NotesScreen })));
 const OnboardingScreen = lazyScreen(() => import('./screens/OnboardingScreen.js').then((m) => ({ default: m.OnboardingScreen })));
@@ -78,31 +78,29 @@ function useSessionWiring(route: Route): void {
         }, ms),
       );
     };
-    const active = () => (routeRef.current.name === 'chat' ? routeRef.current.conversationId ?? null : null);
+    const active = () => routeRef.current.name === 'timeline';
     const syncReminders = () => debounce('sync-reminders', () => void platform.syncReminders(client), 800);
     const context = (): EventContext => ({
       client,
       t: tRef.current,
       locale: localeRef.current,
-      assistantName: () => useSession.getState().settings?.persona.name ?? 'NEO',
-      activeConversationId: active,
+      assistantName: () => 'NEO',
+      timelineActive: active,
       openLink,
       syncReminders,
       debounce,
     });
 
-    const stopEvents = startEventStream({ client, context, activeConversationId: active, onResync: syncReminders });
+    const stopEvents = startEventStream({ client, context, timelineActive: active, onResync: syncReminders });
     const stopPlatform = platform.init({
       openLink,
       onPairLink: openPairLink,
       onReminderAction: (id, action) => void runReminderAction(client, id, action, tRef.current),
-      onResume: () => debounce('resume', () => void refreshAll(client, active()).finally(syncReminders), 500),
+      onResume: () => debounce('resume', () => void refreshAll(client).finally(syncReminders), 500),
     });
 
-    void loadConversationList(client).catch(() => undefined);
     void loadPendingConfirmations(client).catch(() => undefined);
     void loadReminders(client).catch(() => undefined);
-    void refreshPendingMemories(client);
     syncReminders();
 
     const cleanup = () => {
@@ -132,12 +130,14 @@ function useShortcuts(): void {
       if (!mod || e.altKey) return;
       if (e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        startNewChat(e.shiftKey);
+        setDrawer(false);
+        navigate({ name: 'timeline' });
+        requestTimelineSearch();
       } else if (e.key === '/') {
         e.preventDefault();
         setDrawer(false);
         const route = window.location.hash;
-        if (!route.startsWith('#/chat') && route !== '' && route !== '#/') navigate({ name: 'chat' });
+        if (!route.startsWith('#/timeline') && route !== '' && route !== '#/') navigate({ name: 'timeline' });
         focusComposer();
       }
     };
@@ -158,10 +158,10 @@ function Screen({ route }: { route: Route }): ReactElement {
       return <NotesScreen noteId={route.noteId} />;
     case 'settings':
       return <SettingsScreen section={route.section} />;
-    case 'chat':
-      return <ChatScreen key={route.conversationId ?? 'new'} conversationId={route.conversationId} />;
+    case 'timeline':
+      return <TimelineScreen messageId={route.messageId} />;
     default:
-      return <ChatScreen key="new" />;
+      return <TimelineScreen />;
   }
 }
 
@@ -182,9 +182,9 @@ function ReadyApp(): ReactElement {
         if (server) q.set('server', server);
         openPairLink(`neo://pair?${q.toString()}`);
       }
-      navigate({ name: 'chat' }, { replace: true });
+      navigate({ name: 'timeline' }, { replace: true });
     } else if (route.name === 'connect') {
-      navigate({ name: 'chat' }, { replace: true });
+      navigate({ name: 'timeline' }, { replace: true });
     }
   }, [route]);
 

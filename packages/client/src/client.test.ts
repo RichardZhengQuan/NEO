@@ -9,7 +9,7 @@
  *   no reconnect after close() or 4401
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { NeoClient, NeoApiError, readEventStream } from './index.js';
+import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet } from './index.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fake fetch helpers
@@ -101,9 +101,9 @@ describe('buildQuery', () => {
 
   it('encodes booleans as true/false', async () => {
     const { client, requests } = makeClient([{ status: 200, body: { items: [], total: 0 } }]);
-    await client.conversations.list({ archived: false });
+    await client.notifications.list({ unread: false });
     const req = requests[0]!;
-    expect(req.url).toContain('archived=false');
+    expect(req.url).toContain('unread=false');
   });
 
   it('skips undefined values', async () => {
@@ -154,7 +154,7 @@ describe('NeoApiError mapping', () => {
       status: 404,
       body: { code: 'not_found', message: 'Conversation not found', retryable: false },
     }]);
-    const err = await client.conversations.get('bad-id').catch((e: unknown) => e);
+    const err = await client.timeline.list({ around: 'bad-id' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(NeoApiError);
     const apiErr = err as NeoApiError;
     expect(apiErr.code).toBe('not_found');
@@ -207,79 +207,100 @@ describe('NeoApiError mapping', () => {
 // Route groups
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('conversations routes', () => {
-  it('list: GET /api/conversations', async () => {
-    const { client, requests } = makeClient([{ status: 200, body: { items: [] } }]);
-    await client.conversations.list({ limit: 20, archived: true });
+describe('timeline routes', () => {
+  it('lists pages with opaque cursors and jump targets', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { items: [], episodes: [], nextCursor: null } }]);
+    await client.timeline.list({ limit: 20, before: 'opaque:cursor' });
+    await client.timeline.list({ limit: 20, around: 'message-1' });
     expect(requests[0]!.method).toBe('GET');
-    expect(requests[0]!.url).toContain('/api/conversations');
+    expect(requests[0]!.url).toContain('/api/timeline?');
+    expect(requests[0]!.url).toContain('before=opaque%3Acursor');
+    expect(requests[1]!.url).toContain('around=message-1');
+    expect(requests[1]!.url).not.toContain('before=');
     expect(requests[0]!.url).toContain('limit=20');
-    expect(requests[0]!.url).toContain('archived=true');
+    expect(client).not.toHaveProperty('conversations');
   });
 
-  it('get: GET /api/conversations/:id', async () => {
-    const { client, requests } = makeClient([{ status: 200, body: { conversation: {}, messages: [], hasMore: false } }]);
-    await client.conversations.get('conv-1', { limit: 50 });
-    expect(requests[0]!.url).toContain('/api/conversations/conv-1');
-    expect(requests[0]!.url).toContain('limit=50');
-  });
-
-  it('preserves optional sensitivity metadata on messages and tool results', async () => {
+  it('preserves sensitivity metadata and episode ids', async () => {
     const message = {
-      id: 'private_msg', conversationId: 'conv-1', role: 'assistant', status: 'complete', createdAt: 1, sensitive: true,
-      parts: [
-        { type: 'tool_call', id: 'recall_call', name: 'recall', input: {} },
-        { type: 'tool_result', toolCallId: 'recall_call', name: 'recall', output: { memories: [] }, sensitive: true },
-      ],
+      id: 'private_msg', conversationId: 'episode-1', episodeId: 'episode-1', role: 'assistant', status: 'complete', createdAt: 1, sensitive: true,
+      parts: [{ type: 'tool_result', toolCallId: 'recall_call', name: 'recall', output: { memories: [] }, sensitive: true }],
     };
-    const { client } = makeClient([{ status: 200, body: { conversation: { id: 'conv-1' }, messages: [message], hasMore: false } }]);
-    const result = await client.conversations.get('conv-1');
-    expect(result.messages[0]).toEqual(message);
+    const { client } = makeClient([{ status: 200, body: { items: [message], episodes: [], nextCursor: null } }]);
+    expect((await client.timeline.list()).items[0]).toEqual(message);
   });
 
-  it('create: POST /api/conversations', async () => {
-    const { client, requests } = makeClient([{ status: 201, body: { id: 'c1', title: 'New' } }]);
-    await client.conversations.create({ title: 'New' });
+  it('sends without a conversation id and carries off-record mode', async () => {
+    const response = { episodeId: 'episode-1', turnId: 't1', assistantMessageId: 'm1', userMessage: {} };
+    const { client, requests } = makeClient([{ status: 202, body: response }]);
+    expect(await client.timeline.send({ text: 'hello', offRecord: true })).toEqual(response);
     expect(requests[0]!.method).toBe('POST');
-    expect(requests[0]!.url).toContain('/api/conversations');
-    expect((requests[0]!.body as { title: string }).title).toBe('New');
+    expect(requests[0]!.url).toContain('/api/timeline/messages');
+    expect(requests[0]!.body).toEqual({ text: 'hello', offRecord: true });
   });
 
-  it('update: PATCH /api/conversations/:id', async () => {
-    const { client, requests } = makeClient([{ status: 200, body: { id: 'c1' } }]);
-    await client.conversations.update('c1', { pinned: true });
-    expect(requests[0]!.method).toBe('PATCH');
-    expect(requests[0]!.url).toContain('/api/conversations/c1');
-    expect((requests[0]!.body as { pinned: boolean }).pinned).toBe(true);
+  it('cancels and executes UI actions in the timeline', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { cancelled: true } }, { status: 200, body: { kind: 'noop' } }]);
+    await client.timeline.cancel('turn-1');
+    await client.timeline.uiAction({ messageId: 'm1', uiId: 'u1', actionId: 'a1' });
+    expect(requests[0]!.url).toContain('/api/timeline/cancel');
+    expect(requests[0]!.body).toEqual({ turnId: 'turn-1' });
+    expect(requests[1]!.url).toContain('/api/timeline/ui-action');
   });
 
-  it('delete: DELETE /api/conversations/:id returns void on 204', async () => {
-    const { client, requests } = makeClient([{ status: 204, body: null }]);
-    const result = await client.conversations.delete('c1');
-    expect(requests[0]!.method).toBe('DELETE');
-    expect(result).toBeUndefined();
+  it('reads and starts the authoritative off-record state', async () => {
+    const inactive = { active: false, episodeId: null, startedAt: null };
+    const active = { active: true, episodeId: 'private-ep', startedAt: 42 };
+    const { client, requests } = makeClient([{ status: 200, body: inactive }, { status: 200, body: active }]);
+    expect(await client.timeline.offRecord()).toEqual(inactive);
+    expect(await client.timeline.startOffRecord()).toEqual(active);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toContain('/api/timeline/off-record');
+    expect(requests[1]!.method).toBe('POST');
+    expect(requests[1]!.url).toContain('/api/timeline/off-record/start');
+    expect(requests[1]!.body).toEqual({});
   });
 
-  it('send: POST /api/conversations/:id/messages → 202', async () => {
-    const { client, requests } = makeClient([{ status: 202, body: { turnId: 't1', assistantMessageId: 'm1', userMessage: {} } }]);
-    await client.conversations.send('c1', { text: 'hello' });
-    expect(requests[0]!.method).toBe('POST');
-    expect(requests[0]!.url).toContain('/api/conversations/c1/messages');
-    expect((requests[0]!.body as { text: string }).text).toBe('hello');
+  it('returns typed search text and highlight ranges without changing literal brackets', async () => {
+    const snippet: TimelineSearchSnippet = {
+      text: 'I prefer window seats, with literal [brackets].',
+      highlights: [[9, 15], [16, 21]],
+    };
+    const response: ListResponse<TimelineSearchHit> = {
+      items: [{ messageId: 'msg-1', episodeId: 'ep-1', createdAt: 42, snippet }],
+    };
+    const { client, requests } = makeClient([{ status: 200, body: response }]);
+    const result: ListResponse<TimelineSearchHit> = await client.timeline.search('window seats', 12);
+    expect(result).toEqual(response);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toContain('/api/timeline/search?q=window+seats&limit=12');
   });
 
-  it('cancel: POST /api/conversations/:id/cancel', async () => {
-    const { client, requests } = makeClient([{ status: 200, body: { cancelled: true } }]);
-    await client.conversations.cancel('c1', 'turn-1');
-    expect(requests[0]!.method).toBe('POST');
-    expect(requests[0]!.url).toContain('/api/conversations/c1/cancel');
-    expect((requests[0]!.body as { turnId: string }).turnId).toBe('turn-1');
+  it('searches, deletes messages and ranges, ends off-record, and forgets sources', async () => {
+    const { client, requests } = makeClient([]);
+    await client.timeline.search('blue sky', 12);
+    await client.timeline.deleteMessage('msg/1');
+    await client.timeline.deleteRange({ from: '2026-10-01T00:00:00Z', to: '2026-10-02T00:00:00Z' });
+    await client.timeline.endOffRecord();
+    await client.memory.forgetBySource(['msg_1', 'msg_2']);
+    expect(requests[0]!.url).toContain('/api/timeline/search?q=blue+sky&limit=12');
+    expect(requests[1]!.url).toContain('/api/timeline/messages/msg%2F1');
+    expect(requests[1]!.method).toBe('DELETE');
+    expect(requests[2]!.url).toContain('/api/timeline?from=2026-10-01T00%3A00%3A00Z');
+    expect(requests[2]!.method).toBe('DELETE');
+    expect(requests[3]!.url).toContain('/api/timeline/off-record/end');
+    expect(requests[4]!.url).toContain('/api/memory/forget-by-source');
+    expect(requests[4]!.body).toEqual({ messageIds: ['msg_1', 'msg_2'] });
   });
 
-  it('uiAction: POST /api/conversations/:id/ui-action', async () => {
-    const { client, requests } = makeClient([{ status: 200, body: { kind: 'noop' } }]);
-    await client.conversations.uiAction('c1', { messageId: 'm1', uiId: 'u1', actionId: 'a1' });
-    expect(requests[0]!.url).toContain('/api/conversations/c1/ui-action');
+  it('streams timeline events with episode ids', async () => {
+    const event = { type: 'text.delta', episodeId: 'ep', conversationId: 'ep', turnId: 't', messageId: 'm', text: 'hello' };
+    const { client, requests } = makeClient([{ status: 200, body: `event: text.delta\ndata: ${JSON.stringify(event)}\n\n` }]);
+    const events = [];
+    for await (const item of client.timeline.stream({ text: 'hello' })) events.push(item);
+    expect(events).toEqual([event]);
+    expect(requests[0]!.url).toContain('/api/timeline/messages');
+    expect(requests[0]!.headers.accept).toBe('text/event-stream');
   });
 });
 
@@ -327,18 +348,6 @@ describe('memory routes', () => {
     expect(requests[0]!.method).toBe('POST');
     expect(requests[0]!.url).toContain('/api/memory/forget');
     expect((requests[0]!.body as { ids: string[] }).ids).toEqual(['m1', 'm2']);
-  });
-
-  it('approve: POST /api/memory/approve', async () => {
-    const { client, requests } = makeClient([{ status: 200, body: { count: 1 } }]);
-    await client.memory.approve(['m1']);
-    expect(requests[0]!.url).toContain('/api/memory/approve');
-  });
-
-  it('reject: POST /api/memory/reject', async () => {
-    const { client, requests } = makeClient([{ status: 200, body: { count: 1 } }]);
-    await client.memory.reject(['m1']);
-    expect(requests[0]!.url).toContain('/api/memory/reject');
   });
 
   it('link: POST /api/memory/links', async () => {
@@ -488,6 +497,50 @@ describe('notifications routes', () => {
     await client.notifications.markRead(['n1', 'n2', 'n3']);
     expect(requests[0]!.method).toBe('POST');
     expect(requests[0]!.url).toContain('/api/notifications/read');
+  });
+});
+
+describe('OpenRouter authentication routes', () => {
+  it('starts OAuth through the authenticated server', async () => {
+    const response = { url: 'https://openrouter.ai/auth?state=test-state', state: 'test-state', expiresAt: 123_000 };
+    const { client, requests } = makeClient([{ status: 200, body: response }]);
+    expect(await client.auth.openrouterStart()).toEqual(response);
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/auth/openrouter/start');
+    expect(requests[0]!.headers['authorization']).toBe('Bearer test-token');
+  });
+
+  it('cancels the matching server-side pending authorization', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { cancelled: true } }]);
+    expect(await client.auth.openrouterCancel('test-state')).toEqual({ cancelled: true });
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/auth/openrouter/cancel');
+    expect(requests[0]!.body).toEqual({ state: 'test-state' });
+  });
+});
+
+describe('ChatGPT authentication routes', () => {
+  it('starts sign-in or reauthorizes a saved provider without credentials in the request', async () => {
+    const response = { url: 'https://auth.openai.com/api/accounts/authorize?state=test-state', state: 'test-state', expiresAt: 123_000 };
+    const { client, requests } = makeClient([{ status: 200, body: response }, { status: 200, body: response }]);
+    expect(await client.auth.chatgptStart()).toEqual(response);
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/auth/chatgpt/start');
+    expect(requests[0]!.headers['authorization']).toBe('Bearer test-token');
+    expect(requests[0]!.body).toEqual({});
+    await client.auth.chatgptStart('chatgpt');
+    expect(requests[1]!.body).toEqual({ providerId: 'chatgpt' });
+  });
+
+  it('cancels an attempt and reads safe status using its opaque state', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { cancelled: true } }, { status: 200, body: { status: 'waiting' } }]);
+    expect(await client.auth.chatgptCancel('test-state')).toEqual({ cancelled: true });
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/auth/chatgpt/cancel');
+    expect(requests[0]!.body).toEqual({ state: 'test-state' });
+    expect(await client.auth.chatgptStatus('test state')).toEqual({ status: 'waiting' });
+    expect(requests[1]!.method).toBe('GET');
+    expect(requests[1]!.url).toBe('http://localhost:7777/api/auth/chatgpt/status?state=test+state');
   });
 });
 
@@ -691,7 +744,7 @@ async function collectEvents(response: Response, signal?: AbortSignal): Promise<
 
 describe('readEventStream SSE parsing', () => {
   it('parses a simple SSE stream', async () => {
-    const event = { type: 'text.delta', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'hello' };
+    const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'hello' };
     const response = makeStreamResponse(
       sseChunks([`data: ${JSON.stringify(event)}\n\n`])
     );
@@ -701,7 +754,7 @@ describe('readEventStream SSE parsing', () => {
   });
 
   it('handles CRLF line endings', async () => {
-    const event = { type: 'text.delta', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'world' };
+    const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'world' };
     const response = makeStreamResponse(
       sseChunks([`data: ${JSON.stringify(event)}\r\n\r\n`])
     );
@@ -711,7 +764,7 @@ describe('readEventStream SSE parsing', () => {
   });
 
   it('handles chunks split at line boundaries', async () => {
-    const event = { type: 'text.delta', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'split' };
+    const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'split' };
     const full = `data: ${JSON.stringify(event)}\n\n`;
     // Split at various points.
     const mid = Math.floor(full.length / 2);
@@ -726,7 +779,7 @@ describe('readEventStream SSE parsing', () => {
   });
 
   it('handles chunks split within the data field value', async () => {
-    const event = { type: 'turn.finished', conversationId: 'c1', turnId: 't1', stopReason: 'end_turn', usage: null };
+    const event = { type: 'turn.finished', episodeId: 'c1', conversationId: 'c1', turnId: 't1', stopReason: 'end_turn', usage: null };
     const full = `data: ${JSON.stringify(event)}\n\n`;
     // Split at multiple points.
     const chunks = [
@@ -740,7 +793,7 @@ describe('readEventStream SSE parsing', () => {
   });
 
   it('ignores comment lines', async () => {
-    const event = { type: 'text.delta', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'hi' };
+    const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'hi' };
     const response = makeStreamResponse(
       sseChunks([`: keepalive\ndata: ${JSON.stringify(event)}\n\n`])
     );
@@ -749,8 +802,8 @@ describe('readEventStream SSE parsing', () => {
   });
 
   it('handles multiple events in one chunk', async () => {
-    const e1 = { type: 'text.delta', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'a' };
-    const e2 = { type: 'text.delta', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'b' };
+    const e1 = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'a' };
+    const e2 = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'b' };
     const response = makeStreamResponse(
       sseChunks([`data: ${JSON.stringify(e1)}\n\ndata: ${JSON.stringify(e2)}\n\n`])
     );
@@ -761,7 +814,7 @@ describe('readEventStream SSE parsing', () => {
   });
 
   it('ignores malformed JSON data', async () => {
-    const valid = { type: 'text.delta', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'ok' };
+    const valid = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'ok' };
     const response = makeStreamResponse(
       sseChunks([`data: not-json\n\ndata: ${JSON.stringify(valid)}\n\n`])
     );
@@ -770,7 +823,7 @@ describe('readEventStream SSE parsing', () => {
   });
 
   it('respects abort signal', async () => {
-    const event = { type: 'text.delta', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'x' };
+    const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'x' };
     const ac = new AbortController();
     ac.abort(); // Pre-aborted.
 
@@ -920,6 +973,19 @@ describe('connect() WebSocket', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toEqual(envelope);
     expect(conn.lastSeq).toBe(1);
+    conn.close();
+  });
+
+  it('delivers authoritative off-record changes from another client', () => {
+    const events: unknown[] = [];
+    const client = makeWsClient();
+    const conn = client.connect({ onEvent: (env) => events.push(env) });
+    const ws = instances[0]!;
+    ws.simulateOpen();
+    ws.simulateMessage({ type: 'ready', serverVersion: '0.1.0', seq: 0 });
+    const envelope = { seq: 1, at: 42, event: { type: 'timeline.off_record', active: true } };
+    ws.simulateMessage({ type: 'event', envelope });
+    expect(events).toEqual([envelope]);
     conn.close();
   });
 

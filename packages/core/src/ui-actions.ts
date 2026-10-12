@@ -78,7 +78,7 @@ function findForm(block: UIBlock): FormBlock | null {
 
 /**
  * The action `actionId` declared by `block`: a form submission, a live-widget
- * control (task toggle, reminder snooze/done, memory approve/reject/forget) or an
+ * control (task toggle, reminder snooze/done, memory forget) or an
  * action listed in the block tree. Null when the block declares no such action.
  */
 export function resolveStoredAction(block: UIBlock, actionId: string, values?: Record<string, unknown>): ResolvedUiAction | null {

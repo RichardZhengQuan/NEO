@@ -1,5 +1,5 @@
 export * from './session.js';
-export * from './conversations.js';
+export * from './timeline.js';
 export * from './data.js';
 export * from './notifications.js';
 export * from './events.js';

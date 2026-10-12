@@ -5,12 +5,12 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { PROVIDER_PRESETS, type ProviderKind, type NeoConfig } from '@neo/protocol';
+import { NeoError, PROVIDER_PRESETS, type ProviderKind, type NeoConfig } from '@neo/protocol';
 
 export type PromptFn = (question: string, options?: { secret?: boolean; choices?: string[] }) => Promise<string>;
 
 export interface InitAnswers {
-  providerKind: ProviderKind;
+  providerKind: Exclude<ProviderKind, 'mock'> | null;
   apiKey: string;
   baseUrl: string;
   defaultModel: string;
@@ -62,7 +62,7 @@ export function readConfigFile(filePath: string): Partial<NeoConfig> | null {
  */
 export async function runInitWizard(prompt: PromptFn): Promise<InitAnswers> {
   // 1. Provider preset
-  const presetKeys = Object.keys(PROVIDER_PRESETS) as ProviderKind[];
+  const presetKeys = Object.keys(PROVIDER_PRESETS) as Exclude<ProviderKind, 'mock' | 'chatgpt'>[];
   const presetList = presetKeys
     .map((k, i) => {
       const p = PROVIDER_PRESETS[k];
@@ -71,31 +71,35 @@ export async function runInitWizard(prompt: PromptFn): Promise<InitAnswers> {
     .join('\n');
 
   const choiceStr = await prompt(
-    `\nChoose your AI provider:\n${presetList}\n\nEnter number`,
-    { choices: presetKeys.map((_, i) => String(i + 1)) },
+    `\nChoose your AI provider:\n${presetList}\n  0. Skip for now\n\nEnter number [0]`,
+    { choices: ['0', ...presetKeys.map((_, i) => String(i + 1))] },
   );
-  const idx = parseInt(choiceStr.trim(), 10) - 1;
-  const providerKind: ProviderKind = presetKeys[idx] ?? 'mock';
-  const preset = PROVIDER_PRESETS[providerKind];
+  const choice = choiceStr.trim() || '0';
+  const idx = Number(choice) - 1;
+  const providerKind = choice === '0' ? null : presetKeys[idx];
+  if (!/^\d+$/.test(choice) || providerKind === undefined) {
+    throw new NeoError('bad_request', 'Choose a provider number or 0 to skip for now.');
+  }
+  const preset = providerKind === null ? null : PROVIDER_PRESETS[providerKind];
 
   // 2. API key (hidden for keyed providers)
   let apiKey = '';
-  if (preset.needsKey) {
+  if (preset?.needsKey) {
     const keyUrl = preset.keyUrl ? ` (get one at ${preset.keyUrl})` : '';
     apiKey = await prompt(`\n${preset.label} API key${keyUrl}`, { secret: true });
   }
 
   // 3. Base URL (for openai-compatible / ollama)
-  let baseUrl = preset.baseUrl ?? '';
+  let baseUrl = preset?.baseUrl ?? '';
   if (providerKind === 'openai-compatible' || providerKind === 'ollama') {
-    const defaultUrl = preset.baseUrl ?? '';
+    const defaultUrl = preset?.baseUrl ?? '';
     const entered = await prompt(`\nBase URL [${defaultUrl}]`);
     baseUrl = entered.trim() || defaultUrl;
   }
 
   // 4. Default model
-  const suggestedDefault = preset.defaultModel ?? preset.suggestedModels[0] ?? '';
-  const modelInput = await prompt(`\nDefault model [${suggestedDefault}]`);
+  const suggestedDefault = preset?.defaultModel ?? preset?.suggestedModels[0] ?? '';
+  const modelInput = preset ? await prompt(`\nDefault model [${suggestedDefault}]`) : '';
   const defaultModel = modelInput.trim() || suggestedDefault;
 
   // 5. Mode
@@ -143,10 +147,10 @@ export function writeInitConfig(dataDir: string, answers: InitAnswers, configPat
     ...existing,
     mode: answers.mode,
     dataDir: resolvedDir,
-    providers: [providerConfig],
+    providers: answers.providerKind === null ? [] : [providerConfig],
     settings: {
       ...((existing as Record<string, unknown>)['settings'] as Record<string, unknown> | undefined ?? {}),
-      defaultModel: { provider: answers.providerKind, model: answers.defaultModel },
+      defaultModel: answers.providerKind === null ? null : { provider: answers.providerKind, model: answers.defaultModel },
     },
   };
 

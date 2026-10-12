@@ -30,7 +30,7 @@ export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId:
       }),
     [version, archived, kinds.join(','), focusId],
   );
-  const matches = useLoader(async () => (q ? (await requireClient().memory.search({ query: q, limit: 30, status: ['active', 'pending', ...(archived ? (['archived'] as const) : [])] })).items.map((n) => n.id) : []), [q, version, archived]);
+  const matches = useLoader(async () => (q ? (await requireClient().memory.search({ query: q, limit: 30, status: ['active', ...(archived ? (['archived'] as const) : [])] })).items.map((n) => n.id) : []), [q, version, archived]);
 
   const highlight = useMemo(() => matches.data ?? [], [matches.data]);
   const toggleKind = (k: MemoryKind) => setKinds((prev) => (prev.includes(k) ? (prev.length === 1 ? prev : prev.filter((x) => x !== k)) : [...prev, k]));

@@ -23,7 +23,7 @@ async function liveProviderFixture() {
   const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ data: [{ id: 'fixture-model' }] }));
   vi.stubGlobal('fetch', fetch);
   const services = await createServices(NeoConfigSchema.parse({
-    providers: [{ id: 'configured', kind: 'mock', headers: { 'x-api-key': 'protected-fixture-credential' } }],
+    providers: [{ id: 'configured', kind: 'openai-compatible', headers: { 'x-api-key': 'protected-fixture-credential' } }],
     plugins: { enabled: false }, log: { level: 'silent' },
   }), { inMemory: true, logger: silentLogger });
   resources.push(services);
@@ -113,7 +113,7 @@ describe('provider credential header security', () => {
       'X-Session-Token': 'session-secret', 'X-Custom-Secret': 'custom-credential',
       'X-Region': 'test-region',
     };
-    const created = await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'mock', headers });
+    const created = await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'openai-compatible', headers });
     expect(created.status).toBe(201);
     const view = await created.json() as ProviderView;
     expect(view.headers).toEqual(Object.fromEntries(Object.keys(headers).map((name) => [name, name === 'X-Region' ? 'test-region' : '••••'])));
@@ -131,7 +131,7 @@ describe('provider credential header security', () => {
   });
 
   it('redacts credential headers loaded directly from the config file', async () => {
-    fixture = routeFixture({ providers: [{ id: 'configured', kind: 'mock', headers: { 'x-goog-api-key': 'config-google-secret', 'X-Private-Auth': 'config-auth-secret', 'X-Region': 'test' } }] });
+    fixture = routeFixture({ providers: [{ id: 'configured', kind: 'openai-compatible', headers: { 'x-goog-api-key': 'config-google-secret', 'X-Private-Auth': 'config-auth-secret', 'X-Region': 'test' } }] });
     const response = await fixture.request('/api/providers');
     expect(response.status).toBe(200);
     const body = await response.json() as { items: ProviderView[] };
@@ -141,7 +141,7 @@ describe('provider credential header security', () => {
 
   it('rolls back encrypted headers and the adapter on failed provider changes', async () => {
     fixture = routeFixture();
-    expect((await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'mock', headers: { 'x-goog-api-key': 'original-secret' } })).status).toBe(201);
+    expect((await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'openai-compatible', headers: { 'x-goog-api-key': 'original-secret' } })).status).toBe(201);
     vi.mocked(fixture.services.providers.upsert).mockImplementationOnce(() => { throw new NeoError('config_error', 'Adapter rejected'); });
     const result = await fixture.request('/api/providers/custom', 'PATCH', { headers: { 'x-goog-api-key': 'replacement-secret' } });
     expect(result.status).toBe(500);
@@ -153,7 +153,7 @@ describe('provider credential header security', () => {
 
   it('restores a replaced live adapter when persisting its encrypted config fails', async () => {
     fixture = routeFixture();
-    expect((await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'mock', headers: { 'x-api-key': 'original-key' } })).status).toBe(201);
+    expect((await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'openai-compatible', headers: { 'x-api-key': 'original-key' } })).status).toBe(201);
     vi.spyOn(fixture.services.providerConfigs, 'upsert').mockImplementationOnce(() => { throw new NeoError('config_error', 'Persistence rejected'); });
     const response = await fixture.request('/api/providers/custom', 'PATCH', { headers: { 'x-api-key': 'replacement-key' } });
     expect(response.status).toBe(500);
@@ -167,7 +167,7 @@ describe('provider credential header security', () => {
     fixture.services.secrets.set('provider:other', 'stolen-api-key');
     // Try to create a provider whose apiKeySecret points at the other provider's secret.
     const response = await fixture.request('/api/providers', 'POST', {
-      id: 'attack', kind: 'mock', apiKeySecret: 'provider:other',
+      id: 'attack', kind: 'openai-compatible', apiKeySecret: 'provider:other',
     }, OWNER_TOKEN);
     // The request is accepted (no crash), but the cross-provider reference was stripped.
     expect(response.status).toBe(201);
@@ -180,7 +180,7 @@ describe('provider credential header security', () => {
 
   it('strips apiKeySecret from PATCH body so credentials cannot be redirected', async () => {
     fixture = routeFixture();
-    await fixture.request('/api/providers', 'POST', { id: 'victim', kind: 'mock' });
+    await fixture.request('/api/providers', 'POST', { id: 'victim', kind: 'openai-compatible' });
     fixture.services.secrets.set('provider:attacker', 'attacker-api-key');
     const response = await fixture.request('/api/providers/victim', 'PATCH', {
       apiKeySecret: 'provider:attacker',
@@ -198,7 +198,7 @@ describe('provider credential header security', () => {
     // apiKeySecret and then calling PATCH (which calls save()) to trigger the check.
     fixture = routeFixture();
     // First create the provider legitimately.
-    await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'mock' });
+    await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'openai-compatible' });
     // Manually corrupt the stored config to simulate a direct DB write or a future route bug.
     const existing = fixture.services.providerConfigs.get('custom')!;
     fixture.services.providerConfigs.upsert({ ...existing, apiKeySecret: 'provider:other-provider' });
@@ -213,7 +213,7 @@ describe('provider credential header security', () => {
     fixture = routeFixture();
     fixture.services.secrets.set('provider:other:header:x-api-key', 'other-provider-secret');
     const attack = 'neo-secret:provider:other:header:x-api-key';
-    const response = await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'mock', headers: { 'x-api-key': attack } }, OWNER_TOKEN);
+    const response = await fixture.request('/api/providers', 'POST', { id: 'custom', kind: 'openai-compatible', headers: { 'x-api-key': attack } }, OWNER_TOKEN);
     expect(response.status).toBe(201);
     expect(fixture.services.providers.get('custom')?.config.headers?.['x-api-key']).toBe(attack);
     expect(fixture.services.secrets.get('provider:custom:header:x-api-key')).toBe(attack);
@@ -222,7 +222,7 @@ describe('provider credential header security', () => {
   it('rejects ambiguous duplicate credential headers with 400 and leaves stores unchanged', async () => {
     fixture = routeFixture();
     const response = await fixture.request('/api/providers', 'POST', {
-      id: 'custom', kind: 'mock', headers: { Authorization: 'first-credential', authorization: 'second-credential' },
+      id: 'custom', kind: 'openai-compatible', headers: { Authorization: 'first-credential', authorization: 'second-credential' },
     });
     expect(response.status).toBe(400);
     expect(fixture.services.secrets.list()).toEqual([]);
@@ -230,7 +230,7 @@ describe('provider credential header security', () => {
     expect(fixture.services.providers.get('custom')).toBeUndefined();
   });
 
-  it('resolves encrypted persisted credential headers into offline adapters after restart', async () => {
+  it('resolves encrypted persisted credential headers into live adapters after restart', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'neo-provider-restart-'));
     directories.push(dataDir);
     const config = NeoConfigSchema.parse({ dataDir, providers: [], log: { level: 'silent' }, plugins: { enabled: false } });
@@ -239,7 +239,7 @@ describe('provider credential header security', () => {
     const headers = { 'x-goog-api-key': 'persisted-google-credential', 'X-Region': 'test' };
     const response = await createApp(first).app.request('/api/providers', {
       method: 'POST', headers: { Authorization: `Bearer ${first.ownerToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: 'persisted', kind: 'mock', headers }),
+      body: JSON.stringify({ id: 'persisted', kind: 'openai-compatible', headers }),
     });
     expect(response.status).toBe(201);
     await first.close();

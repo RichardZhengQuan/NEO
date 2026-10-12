@@ -17,8 +17,12 @@ function temp(): string {
   return directory;
 }
 async function services(raw: unknown = {}, inMemory = true, mockScript?: import('@neo/providers').MockScript) {
-  const result = await createServices(NeoConfigSchema.parse({ dataDir: join(temp(), 'data'), log: { level: 'silent' }, ...raw as object }), {
-    inMemory, clock, logger: silentLogger, ...(mockScript ? { mockScript } : {}),
+  const config = NeoConfigSchema.parse({ dataDir: join(temp(), 'data'), log: { level: 'silent' }, ...raw as object });
+  const mockProviders = config.providers.filter(provider => provider.kind === 'mock');
+  config.providers = config.providers.filter(provider => provider.kind !== 'mock');
+  const result = await createServices(config, {
+    inMemory, clock, logger: silentLogger,
+    ...(mockProviders.length || mockScript ? { mockProviders, mockScript: mockScript ?? (() => ({ text: 'Test reply' })) } : {}),
   });
   resources.push(result);
   return result;
@@ -113,12 +117,12 @@ describe('server composition', () => {
       expect(new Headers(init?.headers).get('x-api-key')).toBe('replacement-header-key');
     }
     const swap = vi.spyOn(live.s.memory as import('@neo/protocol').MemoryService & { setEmbedder: (embedder: import('@neo/protocol').Embedder) => void }, 'setEmbedder');
-    expect((await live.request('/api/providers', 'POST', { id: 'unrelated', kind: 'mock' })).status).toBe(201);
+    expect((await live.request('/api/providers', 'POST', { id: 'unrelated', kind: 'openai-compatible' })).status).toBe(201);
     expect((await live.request('/api/providers/unrelated', 'PATCH', { label: 'renamed' })).status).toBe(200);
     expect(swap).not.toHaveBeenCalled();
   });
 
-  it('falls back immediately after deleting the embedding provider and recovers when that provider is recreated', async () => {
+  it('clears embeddings after deleting the provider and recovers when the recreated provider is assigned', async () => {
     const live = await liveEmbeddingFixture();
     expect((await live.addProvider()).status).toBe(201);
     expect((await live.request('/api/settings', 'PATCH', { embedding: { provider: 'remote', model: 'text-embedding-fixture' } })).status).toBe(200);
@@ -128,7 +132,9 @@ describe('server composition', () => {
     await live.s.memory.remember({ content: 'After provider deletion' });
     expect(live.fetch).not.toHaveBeenCalled();
     expect((await live.s.memory.stats()).embeddingModel).toBe('hash2-512');
+    expect(live.s.settings.get().ai.capabilities.embedding).toBeNull();
     expect((await live.addProvider()).status).toBe(201);
+    expect((await live.request('/api/settings', 'PATCH', { ai: { capabilities: { embedding: { provider: 'remote', model: 'text-embedding-fixture' } } } })).status).toBe(200);
     await live.s.memory.remember({ content: 'After provider recreation' });
     expect(live.fetch).toHaveBeenCalled();
     expect((await live.s.memory.stats()).embeddingModel).toBe('remote:text-embedding-fixture');
@@ -136,9 +142,9 @@ describe('server composition', () => {
 
   // WP-providers regression: isLocalUrl(undefined) is false, so the stock
   // MockProvider's `?? true` fallback never marks its offline endpoint local.
-  it('stock offline mock is treated as local for sensitive-memory policy', async () => {
-    const s = await services();
-    expect(s.providers.get('demo')?.isLocal).toBe(true);
+  it('explicit internal mock is treated as local for sensitive-memory policy', async () => {
+    const s = await services({ providers: [{ id: 'test', kind: 'mock', enabled: true }] }, true, () => ({ text: 'Test reply' }));
+    expect(s.providers.get('test')?.isLocal).toBe(true);
   });
 
   it('keeps the entire in-memory instance off disk and creates an owner and ephemeral push keys', async () => {
@@ -156,18 +162,18 @@ describe('server composition', () => {
   it('detects host defaults, merges initial settings, and never re-applies them on restart', async () => {
     vi.stubEnv('LC_ALL', 'zh_CN.UTF-8');
     const dataDir = join(temp(), 'private');
-    const s = await services({ dataDir, settings: { persona: { name: 'Nova' }, memory: { recallLimit: 5 } } }, false);
+    const s = await services({ dataDir, settings: { persona: { avatar: '🌟' }, memory: { recallLimit: 5 } } }, false);
     expect(s.settings.get().timezone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
     expect(s.settings.get().locale).toBe('zh-CN');
-    expect(s.settings.get().persona).toMatchObject({ name: 'Nova', tone: 'warm' });
+    expect(s.settings.get().persona).toEqual({ avatar: '🌟' });
     expect(s.settings.get().memory.recallLimit).toBe(5);
     expect(statSync(dataDir).mode & 0o777).toBe(0o700);
     expect(statSync(join(dataDir, 'token')).mode & 0o777).toBe(0o600);
     expect(statSync(join(dataDir, 'key')).mode & 0o777).toBe(0o600);
-    s.settings.update({ persona: { name: 'Persisted' }, timezone: 'Europe/Berlin', locale: 'de-DE' });
+    s.settings.update({ persona: { avatar: '🌙' }, timezone: 'Europe/Berlin', locale: 'de-DE' });
     await s.close();
-    const again = await services({ dataDir, settings: { persona: { name: 'Overwrite' } } }, false);
-    expect(again.settings.get()).toMatchObject({ timezone: 'Europe/Berlin', locale: 'de-DE', onboarded: false, persona: { name: 'Persisted' } });
+    const again = await services({ dataDir, settings: { persona: { avatar: '🪐' } } }, false);
+    expect(again.settings.get()).toMatchObject({ timezone: 'Europe/Berlin', locale: 'de-DE', onboarded: false, persona: { avatar: '🌙' } });
     expect(again.ownerToken).toBe(s.ownerToken);
   });
 
@@ -189,8 +195,8 @@ describe('server composition', () => {
       expect(envelope.at).toBe(clock());
       events.push(envelope.event);
     });
-    s.settings.update({ memory: { mode: 'approve' }, tools: { permissions: { calculate: 'deny', delete_task: 'auto' } } });
-    expect(s.memory.getPolicy().mode).toBe('approve');
+    s.settings.update({ memory: { recall: false }, tools: { permissions: { calculate: 'deny', delete_task: 'auto' } } });
+    expect(s.memory.getPolicy().recall).toBe(false);
     expect(s.tools.permissionFor('calculate')).toBe('deny');
     expect(s.tools.permissionFor('delete_task')).toBe('auto');
     await s.memory.remember({ content: 'Richard enjoys hiking', source: { by: 'user' } });
@@ -264,7 +270,7 @@ describe('server composition', () => {
 
   it('falls back to the offline embedder when the configured embedding provider cannot embed', async () => {
     // The offline mock has no embeddings endpoint; a missing provider behaves the same way.
-    for (const provider of ['demo', 'deleted-provider']) {
+    for (const provider of ['test', 'deleted-provider']) {
       const s = await services({ settings: { embedding: { provider, model: 'test-embedding' } } });
       expect((await s.memory.stats()).embeddingModel).toBe('hash2-512');
       const node = await s.memory.remember({ content: 'Embedded hiking preference', source: { by: 'user' } });
@@ -280,13 +286,13 @@ describe('server composition', () => {
     };
     const s = await services({ providers: [
       { id: 'disabled', kind: 'mock', enabled: false, defaultModel: 'disabled-model' },
-      { id: 'demo', kind: 'mock', enabled: true, defaultModel: 'fallback-model' },
+      { id: 'test', kind: 'mock', enabled: true, defaultModel: 'fallback-model' },
     ] }, true, script);
     await s.memory.observe(exchange('My name is Richard and I love hiking'));
     expect(requests).toEqual(['fallback-model']);
-    s.settings.update({ defaultModel: { provider: 'demo', model: 'default-model' } });
+    s.settings.update({ defaultModel: { provider: 'test', model: 'default-model' } });
     await s.memory.observe(exchange('I love hiking in the mountains'));
-    s.settings.update({ memoryModel: { provider: 'demo', model: 'memory-model' } });
+    s.settings.update({ memoryModel: { provider: 'test', model: 'memory-model' } });
     await s.memory.observe(exchange('I love hiking with friends'));
     expect(requests).toEqual(['fallback-model', 'default-model', 'memory-model']);
     s.settings.update({ memoryModel: { provider: 'missing', model: 'missing-model' } });

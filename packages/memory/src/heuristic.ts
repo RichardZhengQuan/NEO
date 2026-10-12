@@ -5,6 +5,7 @@
  */
 import type { RememberInput } from '@neo/protocol';
 import { MEMORY_CONSTANTS } from './constants.js';
+import { ASSISTANT_STYLE_TAG, assistantStyleTags } from './assistant-style.js';
 import { cleanLabel } from './text.js';
 
 type Candidate = RememberInput & { kind: NonNullable<RememberInput['kind']>; label: string };
@@ -135,14 +136,39 @@ export function heuristicExtract(userText: string): RememberInput[] {
   const out: Candidate[] = [];
   const add = (c: Candidate) => {
     const label = cleanLabel(c.label).slice(0, 300);
-    if (label && !out.some((o) => o.label === label)) out.push({ ...c, label, content: c.content.replace(/["“”「」]/g, '').slice(0, 1000) });
+    if (label && !out.some((o) => o.label === label)) out.push({ ...c, label, tags: c.kind === 'preference' ? assistantStyleTags(`${label} ${c.content}`, c.tags) : (c.tags ?? []), content: c.content.replace(/["“”「」]/g, '').slice(0, 1000) });
   };
+
+  // Assistant behaviour is a preference, including names used in conversation.
+  for (const sentence of sentences(text)) {
+    const value = sentence.replace(/^(?:please\s+|from now on[, ]+|请\s*)/iu, '').replace(/[.!。！]+$/u, '').trim();
+    const style = (aspect: string, label: string, content: string) => add({
+      kind: 'preference', label, content, importance: 0.8,
+      tags: [ASSISTANT_STYLE_TAG, `${ASSISTANT_STYLE_TAG}:${aspect}`],
+    });
+    const userName = new RegExp(`^[Cc]all me\\s+(${NAME})$`, 'u').exec(value)
+      ?? /^(?:叫我|称呼我|稱呼我)\s*([\p{L}\p{M}'’ -]{1,40})$/u.exec(value);
+    if (userName?.[1]) style('user-name', "User's preferred name", `The user wants to be called ${userName[1].trim()}.`);
+    const assistantName = new RegExp(`^(?:[Cc]all yourself|[Yy]our name is|[Yy]our name should be)\\s+(${NAME})$`, 'u').exec(value)
+      ?? /^(?:你叫|称呼你为|稱呼你為)\s*([\p{L}\p{M}'’ -]{1,40})$/u.exec(value);
+    if (assistantName?.[1]) style('assistant-name', "Assistant's name", `The user calls me ${assistantName[1].trim()}.`);
+    const language = /^(?:reply|respond|answer|speak|write) in ([\p{L} -]{2,40})$/iu.exec(value)
+      ?? /^(?:用|使用)\s*(.{1,12}?)(?:回答|回复|回覆|交流)$/u.exec(value);
+    if (language?.[1]) style('language', 'Reply language', `The user wants NEO to reply in ${language[1].trim()}.`);
+    const length = /^(?:keep (?:your )?(?:answers|replies|responses) (short|brief|concise|long|detailed|succinct)|(?:give|use) (short|brief|concise|long|detailed|succinct) (?:answers|replies|responses))$/iu.exec(value)
+      ?? /^(?:保持)?(?:回答|回复)(?:要|保持)?(简短|簡短|详细|詳細)(?:一点|一點)?$/u.exec(value);
+    const lengthValue = length?.[1] ?? length?.[2];
+    if (lengthValue) style('length', 'Reply length', `The user prefers ${lengthValue} answers.`);
+    const tone = /^be (?:more |less )?(playful|serious|formal|casual|warm|direct|gentle|friendly|humorous|professional|respectful)$/iu.exec(value)
+      ?? /^(?:更|保持)?(活泼|活潑|严肃|嚴肅|幽默|正式)(?:一点|一點)?$/u.exec(value);
+    if (tone?.[1]) style('tone', 'Assistant tone', `The user wants NEO to ${value}.`);
+  }
 
   // ── English ──
 
-  // "my name is Richard" / "call me Ishmael" (capitalized), or a single lower-case word after "my name is".
+  // "my name is Richard" (capitalized), or a single lower-case word after "my name is".
   {
-    const m = new RegExp(`\\b(?:[Mm]y name is|[Ii](?:'m| am) called|[Cc]all me)\\s+(${NAME})`, 'u').exec(text)
+    const m = new RegExp(`\\b(?:[Mm]y name is|[Ii](?:'m| am) called)\\s+(${NAME})`, 'u').exec(text)
       ?? /\bmy name is\s+([\p{Ll}][\p{L}'-]{1,30})\b/iu.exec(text);
     const name = m?.[1] ? m[1].trim() : '';
     if (name && !/^(?:not|just|actually|also)$/i.test(name)) {

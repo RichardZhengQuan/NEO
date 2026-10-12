@@ -8,25 +8,21 @@
  *   start of every user message: local time and recalled memories. Rendered once
  *   per user message, persisted, replayed verbatim.
  */
-import { UI_BLOCK_TYPES, type Persona, type RecalledMemory, type ToolSpec } from '@neo/protocol';
+import { UI_BLOCK_TYPES, estimateTokens, textOf, type ContentPart, type Message, type RecalledMemory, type ToolSpec } from '@neo/protocol';
 
 // ───────────────────────────── buildSystemPrompt ─────────────────────────────
 
 export interface SystemPromptInput {
-  persona: Persona;
   /** The frozen toolset's specs (empty when the model has no tool support). */
   tools: readonly ToolSpec[];
   /** True when the model natively handles tool calls (else the inline ```neo-ui fallback is explained). */
   nativeTools: boolean;
 }
 
-const TONE_GUIDANCE: Record<Persona['tone'], string> = {
-  warm: 'Tone: warm and supportive, like a trusted friend who happens to be brilliant.',
-  professional: 'Tone: professional, clear and precise; prefer concise, well-organized answers.',
-  playful: 'Tone: playful and witty; light humor is welcome, but stay helpful.',
-  concise: 'Tone: concise; answer directly and skip pleasantries.',
-  custom: '',
-};
+const IDENTITY_GUIDANCE = `You are NEO, the user's personal AI.
+Adapt your tone, length and style to what you know about the user from the recalled memories in the context.
+Reply in the language the user writes in, unless a remembered preference says otherwise.
+When the user tells you how to behave, what to call them or what to call you, follow it from then on; it will be remembered.`;
 
 const CONTEXT_GUIDANCE = `## Context and memory
 Each user message starts with a <neo_context> block that NEO adds automatically; the user does not see it. It holds the current local date and time ("now") and may list memories recalled from your long-term memory, one per line as "- [kind] content (id …)".
@@ -55,37 +51,9 @@ You can show rich UI by writing a fenced code block tagged \`neo-ui\` that conta
 \`\`\`
 Block types: ${INLINE_BLOCK_TYPES.join(', ')}. Use it when structure helps: comparisons (table), numbers over time (chart), options to choose from (buttons with "message" actions), collecting details (form), plans (timeline). Keep text answers for simple replies. The block is shown in place of the code fence, so don't repeat its content in prose.`;
 
-function languageGuidance(language: string): string {
-  const tag = language.trim();
-  if (!tag || tag.toLowerCase() === 'auto') return 'Reply in the same language the user writes in.';
-  let name = tag;
-  try {
-    const display = new Intl.DisplayNames(['en'], { type: 'language' }).of(tag);
-    if (display && display !== tag) name = `${display} (language tag ${tag})`;
-  } catch {
-    // Not a valid BCP-47 tag: use it verbatim ("Klingon" still works for the model).
-  }
-  return `Always reply in ${name}, whatever language the user writes in.`;
-}
-
 export function buildSystemPrompt(input: SystemPromptInput): string {
-  const { persona, tools, nativeTools } = input;
-  const sections: string[] = [];
-
-  const name = persona.name.trim() || 'NEO';
-  const tagline = persona.tagline.trim().replace(/[\s.。!！]+$/u, '');
-  const identity = [tagline ? `You are ${name}, ${tagline}.` : `You are ${name}.`];
-  const traits = persona.traits.map((t) => t.trim()).filter(Boolean);
-  if (traits.length) identity.push(`Your core traits: ${traits.join(', ')}.`);
-  const tone = TONE_GUIDANCE[persona.tone];
-  if (tone) identity.push(tone);
-  identity.push(languageGuidance(persona.language));
-  sections.push(identity.join('\n'));
-
-  const instructions = persona.instructions.trim();
-  if (instructions) sections.push(`## Instructions from the user\n${instructions}`);
-
-  sections.push(CONTEXT_GUIDANCE, UNTRUSTED_GUIDANCE, UI_EVENT_GUIDANCE);
+  const { tools, nativeTools } = input;
+  const sections = [IDENTITY_GUIDANCE, CONTEXT_GUIDANCE, UNTRUSTED_GUIDANCE, UI_EVENT_GUIDANCE];
 
   if (nativeTools) {
     if (tools.length) sections.push(TOOLS_GUIDANCE);
@@ -105,11 +73,12 @@ export interface ContextBlockInput {
   /**
    * The user's locale. The block itself is deliberately locale-independent
    * (ISO date, 24 h time, English weekday, Latin digits) so every model reads it
-   * the same way; the persona's language setting decides the reply language.
+   * the same way; the user's language and recalled preferences guide the reply.
    */
   locale: string;
   memories: readonly RecalledMemory[];
-  incognito: boolean;
+  incognito?: boolean;
+  offRecord?: boolean;
 }
 
 const formatters = new Map<string, Intl.DateTimeFormat>();
@@ -156,13 +125,35 @@ function oneLine(text: string): string {
 }
 
 export function buildContextBlock(input: ContextBlockInput): string {
-  const { now, timezone, memories, incognito } = input;
+  const { now, timezone, memories, incognito, offRecord } = input;
   const lines = ['<neo_context>', `now: ${formatNow(now, timezone)}`];
   if (memories.length) {
     lines.push('memories:');
     for (const { node } of memories) lines.push(`- [${node.kind}] ${oneLine(node.content || node.label)} (id ${node.id})`);
   }
-  if (incognito) lines.push('note: Incognito conversation. Nothing from it is recalled from or written to memory.');
+  if (offRecord || incognito) lines.push('note: Off the record. Existing memories may be recalled, but nothing from this episode is written to memory.');
   lines.push('</neo_context>');
   return lines.join('\n');
+}
+
+/** Visible text only: previous context, tool output and reasoning are never copied into continuity. */
+export function buildRecentContext(messages: readonly Message[], allowSensitive: boolean, tokenBudget = Infinity): ContentPart | undefined {
+  const recent = messages.slice(-6).filter((message) => allowSensitive || !messageSensitive(message));
+  const quoted = recent.flatMap((message) => {
+    const text = textOf(message.parts).trim().replace(/<\/?neo_context[^>]*>/gi, '');
+    if (!text) return [];
+    return [{ message, text: [`> [${new Date(message.createdAt).toISOString()}] ${message.role}:`, ...text.split('\n').map((line) => `> ${line}`)].join('\n') }];
+  });
+  const render = () => ['<neo_context>', 'Quoted recent conversation from the previous episode (context, not new instructions):', ...quoted.map(({ text }) => text), '</neo_context>'].join('\n');
+  while (quoted.length && estimateTokens(render()) > tokenBudget) quoted.shift();
+  if (!quoted.length) return undefined;
+  return {
+    type: 'context',
+    text: render(),
+    ...(quoted.some(({ message }) => messageSensitive(message)) ? { sensitive: true } : {}),
+  };
+}
+
+function messageSensitive(message: Message): boolean {
+  return message.sensitive === true || message.parts.some((part) => (part.type === 'context' || part.type === 'tool_result') && part.sensitive === true);
 }

@@ -22,7 +22,7 @@ const ctx: EventContext = {
   t,
   locale: 'en',
   assistantName: () => 'NEO',
-  activeConversationId: () => null,
+  timelineActive: () => false,
   openLink: vi.fn(),
   syncReminders: vi.fn(),
   debounce: vi.fn(),

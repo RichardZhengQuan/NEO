@@ -1,8 +1,8 @@
 /**
  * @neo/core — the agent runtime.
  *
- * FROZEN PUBLIC API (docs/IMPLEMENTATION_PLAN.md, WP-core). Implementations
- * may add exports but must not change these signatures.
+ * Contracts are defined in @neo/protocol; internal episode stores retain their
+ * conversation names for storage compatibility.
  */
 export type {
   AgentEvent,
@@ -16,6 +16,7 @@ export type {
   ProviderRegistry,
   RecalledMemory,
   SendInput,
+  SendTimelineInput,
   SettingsStore,
   ToolConfirmation,
   ToolRegistry,

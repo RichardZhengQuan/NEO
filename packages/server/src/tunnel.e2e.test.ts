@@ -12,6 +12,7 @@ import type { EventConnection } from '../../client/src/index.js';
 import { startServer } from './server.js';
 import type { NeoServer } from './index.js';
 import * as lan from './tunnel/lan.js';
+import { scriptedProviderOptions } from './testing/mock-options.js';
 
 vi.mock('node:os', () => ({
   networkInterfaces: () => ({
@@ -71,12 +72,12 @@ async function startTestServer(lanEnabled = true): Promise<NeoServer> {
     dataDir: '/unwritten-tunnel-e2e',
     server: { host: '127.0.0.1', port: 0, authToken: TOKEN, trustProxy: true },
     tunnel: { host: '127.0.0.1', port: 0, lan: lanEnabled },
-    settings: { agent: { autoTitle: false }, memory: { consolidation: { enabled: false } } },
+    settings: { memory: { consolidation: { enabled: false } } },
   }), {
-    inMemory: true, logger: silentLogger,
-    mockScript: request => request.metadata?.['purpose'] === 'memory-extract'
+    ...scriptedProviderOptions(request => request.metadata?.['purpose'] === 'memory-extract'
       ? { text: JSON.stringify({ episode: null, memories: [], links: [] }) }
-      : { text: 'Reply through the encrypted tunnel.', chunkSize: 5 },
+      : { text: 'Reply through the encrypted tunnel.', chunkSize: 5 }),
+    inMemory: true, logger: silentLogger,
   });
 }
 
@@ -96,12 +97,11 @@ describe('LAN encrypted tunnel end to end', () => {
     expect(transport.via).toBe('lan');
     const inbox = events(phone);
     await until(() => inbox.status() === 'open', 'Phone event socket authenticates');
-    const conversation = await phone.conversations.create();
-    const sent = await phone.conversations.send(conversation.id, { text: 'Hello over LAN' });
+    const sent = await phone.timeline.send({ text: 'Hello over LAN' });
     await until(() => inbox.envelopes.some(({ event }) => event.type === 'turn.finished' && event.turnId === sent.turnId), 'Chat completes over tunneled events');
     expect(inbox.envelopes.some(({ event }) => event.type === 'text.delta' && event.turnId === sent.turnId)).toBe(true);
     const streamed: AgentEvent[] = [];
-    for await (const event of phone.conversations.stream(conversation.id, { text: 'Stream over LAN' }, AbortSignal.timeout(4000))) streamed.push(event);
+    for await (const event of phone.timeline.stream({ text: 'Stream over LAN' }, AbortSignal.timeout(4000))) streamed.push(event);
     expect(streamed.at(-1)?.type).toBe('turn.finished');
     expect(streamed.filter(event => event.type === 'text.delta').map(event => event.text).join('')).toBe('Reply through the encrypted tunnel.');
   });
@@ -196,9 +196,8 @@ describe('relay encrypted tunnel end to end', () => {
     const phone = new NeoClient({ baseUrl: transport.baseUrl, fetch: transport.fetch, WebSocket: transport.WebSocket, token: claimed.token });
     const inbox = events(phone);
     await until(() => inbox.status() === 'open', 'Relay phone event socket authenticates');
-    const conversation = await phone.conversations.create();
     const marker = 'private-relay-chat-marker-7f2924d2';
-    const sent = await phone.conversations.send(conversation.id, { text: marker });
+    const sent = await phone.timeline.send({ text: marker });
     await until(() => inbox.envelopes.some(({ event }) => event.type === 'turn.finished' && event.turnId === sent.turnId), 'Relay chat completes over tunneled events');
     expect(inbox.envelopes.filter(({ event }) => event.type === 'text.delta' && event.turnId === sent.turnId)
       .map(({ event }) => event.type === 'text.delta' ? event.text : '').join('')).toBe('Reply through the encrypted tunnel.');

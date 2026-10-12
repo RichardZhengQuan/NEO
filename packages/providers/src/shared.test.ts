@@ -149,7 +149,7 @@ describe('helpers', () => {
 });
 
 describe('createProvider / registry', () => {
-  const disabled: ProviderConfig = { id: 'off', kind: 'mock', enabled: false, label: 'Old demo' };
+  const disabled: ProviderConfig = { id: 'off', kind: 'mock', enabled: false, label: 'Disabled test provider' };
 
   it('adapter.config is the very config passed in (no secrets copied in)', () => {
     const config: ProviderConfig = { id: 'o', kind: 'openai', apiKeySecret: 'provider:o', enabled: true };
@@ -159,22 +159,22 @@ describe('createProvider / registry', () => {
   });
 
   it('keeps disabled providers as they are, and resolve() refuses them', () => {
-    const registry = createProviderRegistry([disabled, { id: 'demo', kind: 'mock', enabled: true }]);
+    const registry = createProviderRegistry([disabled, { id: 'test-mock', kind: 'mock', enabled: true }], { mockScript: () => ({ text: 'Test reply' }) });
     expect(registry.get('off')?.config).toBe(disabled);
     expect(registry.get('off')?.config.enabled).toBe(false);
-    expect(registry.list().map((a) => a.id)).toEqual(['off', 'demo']);
-    expect(() => registry.resolve({ provider: 'off', model: 'neo-demo' })).toThrow(expect.objectContaining({ code: 'config_error' }));
+    expect(registry.list().map((a) => a.id)).toEqual(['off', 'test-mock']);
+    expect(() => registry.resolve({ provider: 'off', model: 'neo-test' })).toThrow(expect.objectContaining({ code: 'config_error' }));
     expect(() => registry.resolve({ provider: 'nope', model: 'x' })).toThrow(expect.objectContaining({ code: 'not_found' }));
-    expect(registry.resolve({ provider: 'demo', model: 'neo-demo' }).model).toBe('neo-demo');
+    expect(registry.resolve({ provider: 'test-mock', model: 'neo-test' }).model).toBe('neo-test');
   });
 
   it('re-enabling via upsert makes resolve() work; a failing upsert leaves the registry unchanged', () => {
-    const registry = createProviderRegistry([disabled]);
+    const registry = createProviderRegistry([disabled], { mockScript: () => ({ text: 'Test reply' }) });
     const before = registry.get('off');
     expect(() => registry.upsert({ ...disabled, kind: 'nope' as never })).toThrow(NeoError);
     expect(registry.get('off')).toBe(before);
     registry.upsert({ ...disabled, enabled: true });
-    expect(registry.resolve({ provider: 'off', model: 'neo-demo' }).adapter.config.enabled).toBe(true);
+    expect(registry.resolve({ provider: 'off', model: 'neo-test' }).adapter.config.enabled).toBe(true);
   });
 
   it('isLocal follows config.local, the kind and the base URL', () => {
@@ -182,6 +182,6 @@ describe('createProvider / registry', () => {
     expect(createProvider({ id: 'b', kind: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1', enabled: true }).isLocal).toBe(false);
     expect(createProvider({ id: 'c', kind: 'openai-compatible', baseUrl: 'http://192.168.1.20:8000/v1', enabled: true }).isLocal).toBe(true);
     expect(createProvider({ id: 'd', kind: 'gemini', enabled: true, local: true }).isLocal).toBe(true);
-    expect(createProvider({ id: 'e', kind: 'mock', enabled: true }).isLocal).toBe(true);
+    expect(createProvider({ id: 'e', kind: 'mock', enabled: true }, { mockScript: () => ({ text: 'Test reply' }) }).isLocal).toBe(true);
   });
 });

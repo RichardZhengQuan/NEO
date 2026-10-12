@@ -3,7 +3,8 @@
  */
 import { NeoClient } from '@neo/client';
 import { bold, cyan, dim, green, red, yellow } from '../ansi.js';
-import { resolveDataDir, readToken, readConfigFile, expandHome } from '../config-file.js';
+import { resolveDataDir, readToken } from '../config-file.js';
+import type { NeoConfig } from '@neo/protocol';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loadConfig } from '@neo/server';
@@ -72,15 +73,16 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
   const cfgPath = path.join(dataDir, 'config.json');
   let configStatus: 'ok' | 'warn' | 'fail' = 'warn';
   let configMsg = 'no config.json found (run `neo init`)';
-  if (fs.existsSync(cfgPath)) {
-    try {
-      loadConfig({ path: cfgPath });
+  let configuredProviders: NeoConfig['providers'] = [];
+  try {
+    configuredProviders = loadConfig({ path: cfgPath, overrides: { dataDir } }).providers;
+    if (fs.existsSync(cfgPath)) {
       configStatus = 'ok';
       configMsg = cfgPath;
-    } catch (e) {
-      configStatus = 'fail';
-      configMsg = `invalid config: ${String(e)}`;
     }
+  } catch (e) {
+    configStatus = 'fail';
+    configMsg = `invalid config: ${String(e)}`;
   }
   checks.push({ name: 'Config', status: configStatus, message: configMsg });
 
@@ -104,10 +106,11 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
     try {
       const client = new NeoClient({ baseUrl: serverUrl, token, timeoutMs: 10_000 });
       const res = await client.providers.list();
-      if (res.items.length === 0) {
-        checks.push({ name: 'Providers', status: 'warn', message: 'No providers configured (run `neo init`)' });
+      const providers = res.items.filter(p => p.enabled && p.kind !== 'mock');
+      if (providers.length === 0) {
+        checks.push({ name: 'Providers', status: 'warn', message: 'no AI provider configured (connect an AI in Settings → AI or run `neo init`)' });
       } else {
-        for (const p of res.items.slice(0, 3)) {
+        for (const p of providers.slice(0, 3)) {
           try {
             const result = await client.providers.test(p.id);
             checks.push({
@@ -123,6 +126,8 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
     } catch {
       // skip provider checks if listing fails
     }
+  } else if (!configuredProviders.some(p => p.enabled && p.kind !== 'mock')) {
+    checks.push({ name: 'Providers', status: 'warn', message: 'no AI provider configured (connect an AI in Settings → AI or run `neo init`)' });
   }
 
   // Print results

@@ -40,7 +40,7 @@ function toReminder(r: Row): Reminder {
     status: r.status as Reminder['status'],
     firedCount: toNum(r.fired_count),
     lastFiredAt: toNumOrNull(r.last_fired_at),
-    conversationId: (r.conversation_id as string | null) ?? null,
+    messageId: (r.message_id as string | null) ?? null,
     createdAt: toNum(r.created_at),
     updatedAt: toNum(r.updated_at),
   };
@@ -112,16 +112,16 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
         status: 'scheduled',
         firedCount: 0,
         lastFiredAt: null,
-        conversationId: data.conversationId ?? null,
+        messageId: data.messageId ?? null,
         createdAt: now,
         updatedAt: now,
       };
       db.prepare(
-        `INSERT INTO reminders (id, title, notes, due_at, anchor_at, timezone, recurrence, status, fired_count, last_fired_at, conversation_id, created_at, updated_at)
+        `INSERT INTO reminders (id, title, notes, due_at, anchor_at, timezone, recurrence, status, fired_count, last_fired_at, message_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         reminder.id, reminder.title, reminder.notes, reminder.dueAt, reminder.dueAt, reminder.timezone,
-        toJson(reminder.recurrence), reminder.status, 0, null, reminder.conversationId, now, now,
+        toJson(reminder.recurrence), reminder.status, 0, null, reminder.messageId, now, now,
       );
       emit({ type: 'upsert', reminder });
       return reminder;

@@ -37,6 +37,7 @@ import {
   parseRetryAfter,
   parseToolInput,
   redact,
+  readModelData,
   resolveApiKey,
   systemWithJsonInstruction,
   testByListingModels,
@@ -49,6 +50,11 @@ type OpenAIKind = 'openai' | 'openai-compatible' | 'ollama';
 const REASONING_MODEL_RE = /^(o\d|gpt-5)/;
 const VISION_MODEL_RE = /llava|vision|-vl\b|gemma3|llama3\.2-vision|qwen2\.5vl|gpt-4o|gpt-5/i;
 const EMBEDDING_MODEL_RE = /embed/i;
+const TRANSCRIPTION_MODEL_RE = /^(?:whisper(?:-|$)|gpt-[\w.-]*transcribe(?:-|$))/;
+const SPEECH_MODEL_RE = /^(?:tts(?:-|$)|gpt-[\w.-]*tts(?:-|$))/;
+const IMAGE_MODEL_RE = /^(?:dall-e(?:-|$)|gpt-image(?:-|$))/;
+const VIDEO_MODEL_RE = /^sora(?:-|$)/;
+const NON_CHAT_MODEL_RE = /(?:^|[-.])(?:audio|realtime|moderation)(?:[-.]|$)|^(?:davinci|babbage)-002$/;
 
 /** Context-window hints for common models (first match wins); default 32k. */
 const CONTEXT_TABLE: [RegExp, number][] = [
@@ -76,6 +82,10 @@ function guessContextWindow(model: string): number {
   const name = model.toLowerCase();
   for (const [re, size] of CONTEXT_TABLE) if (re.test(name)) return size;
   return 32_000;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 type ContentPiece = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
@@ -150,6 +160,7 @@ export class OpenAIAdapter implements ProviderAdapter {
   private readonly baseUrl: string;
   /** Ollama server root (native /api endpoints). */
   private readonly ollamaRoot: string;
+  private readonly listedCapabilities = new Map<string, ModelCapabilities>();
 
   constructor(config: ProviderConfig, options: ProviderOptions = {}) {
     if (config.kind !== 'openai' && config.kind !== 'openai-compatible' && config.kind !== 'ollama') {
@@ -169,12 +180,25 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   capabilities(model: string): ModelCapabilities {
+    const listed = this.listedCapabilities.get(model);
+    if (listed) return listed;
+    const name = baseModelName(model);
     const reasoning = isReasoningModel(model);
     const embeddings = EMBEDDING_MODEL_RE.test(model);
+    const speechToText = TRANSCRIPTION_MODEL_RE.test(name);
+    const textToSpeech = SPEECH_MODEL_RE.test(name);
+    const image = IMAGE_MODEL_RE.test(name);
+    const video = VIDEO_MODEL_RE.test(name);
+    const text = !embeddings && !speechToText && !textToSpeech && !image && !video && !NON_CHAT_MODEL_RE.test(name);
     return {
-      tools: !embeddings,
-      vision: VISION_MODEL_RE.test(model),
-      reasoning,
+      text,
+      speechToText,
+      textToSpeech,
+      image,
+      video,
+      tools: text,
+      vision: text && VISION_MODEL_RE.test(model),
+      reasoning: text && reasoning,
       embeddings,
       contextWindow: guessContextWindow(model),
       maxOutputTokens: reasoning ? 100_000 : 16_384,
@@ -291,17 +315,54 @@ export class OpenAIAdapter implements ProviderAdapter {
   async listModels(signal?: AbortSignal): Promise<ModelInfo[]> {
     if (this.kind === 'ollama') {
       const resp = await this.request(`${this.ollamaRoot}/api/tags`, { headers: this.headers({}) }, signal, false);
-      const json = (await resp.json()) as { models?: { name?: string; model?: string }[] };
-      return (json.models ?? [])
-        .map((m) => m.name ?? m.model ?? '')
+      const json = await readModelData(resp, 'Ollama', 'models', signal);
+      return (json['models'] as unknown[])
+        .filter(isPlainObject)
+        .map((m) => typeof m['name'] === 'string' ? m['name'] : typeof m['model'] === 'string' ? m['model'] : '')
         .filter(Boolean)
-        .map((id) => ({ id, provider: this.id, label: id, capabilities: this.capabilities(id) }));
+        .map((id) => {
+          if (this.clean(id) !== id) throw new NeoError('provider_error', 'Ollama returned invalid model data.');
+          return { id, provider: this.id, label: id, capabilities: this.capabilities(id) };
+        });
     }
     const resp = await this.request(`${this.baseUrl}/models`, { headers: this.headers({}) }, signal, false);
-    const json = (await resp.json()) as { data?: { id?: string; display_name?: string; name?: string }[] };
-    return (json.data ?? [])
-      .filter((m): m is { id: string; display_name?: string; name?: string } => typeof m.id === 'string' && m.id !== '')
-      .map((m) => ({ id: m.id, provider: this.id, label: m.display_name ?? m.name ?? m.id, capabilities: this.capabilities(m.id) }));
+    const label = this.clean(this.label());
+    const json = await readModelData(resp, label, 'data', signal);
+    this.listedCapabilities.clear();
+    return (json['data'] as unknown[])
+      .filter(isPlainObject)
+      .filter((m) => typeof m['id'] === 'string' && m['id'] !== '')
+      .map((m) => {
+        const id = m['id'] as string;
+        if (this.clean(id) !== id) throw new NeoError('provider_error', `${label} returned invalid model data.`);
+        const capabilities = this.modelCapabilities(m, id);
+        this.listedCapabilities.set(id, capabilities);
+        return { id, provider: this.id, label: this.clean(typeof m['display_name'] === 'string' ? m['display_name'] : typeof m['name'] === 'string' ? m['name'] : id), capabilities };
+      });
+  }
+
+  private modelCapabilities(model: Record<string, unknown>, id: string): ModelCapabilities {
+    const caps = this.capabilities(id);
+    const architecture = isPlainObject(model['architecture']) ? model['architecture'] : {};
+    const inputs = Array.isArray(architecture['input_modalities']) ? architecture['input_modalities'] : undefined;
+    const outputs = Array.isArray(architecture['output_modalities']) ? architecture['output_modalities'] : undefined;
+    const parameters = Array.isArray(model['supported_parameters']) ? model['supported_parameters'] : undefined;
+    const topProvider = isPlainObject(model['top_provider']) ? model['top_provider'] : {};
+    const text = outputs ? outputs.includes('text') && (!inputs || inputs.includes('text')) : caps.text;
+    return {
+      ...caps,
+      text,
+      tools: !!text && (parameters ? parameters.includes('tools') : caps.tools),
+      vision: !!text && (inputs ? inputs.includes('image') : caps.vision),
+      reasoning: !!text && (parameters ? parameters.includes('reasoning') || parameters.includes('reasoning_effort') : caps.reasoning),
+      embeddings: outputs ? outputs.includes('embedding') || outputs.includes('embeddings') : caps.embeddings,
+      speechToText: inputs && outputs ? inputs.includes('audio') && outputs.includes('text') : caps.speechToText,
+      textToSpeech: inputs && outputs ? inputs.includes('text') && outputs.includes('audio') : caps.textToSpeech,
+      image: outputs ? outputs.includes('image') : caps.image,
+      video: outputs ? outputs.includes('video') : caps.video,
+      contextWindow: positiveNumber(model['context_length']) ?? caps.contextWindow,
+      maxOutputTokens: positiveNumber(topProvider['max_completion_tokens']) ?? caps.maxOutputTokens,
+    };
   }
 
   async embed(request: EmbedRequest): Promise<number[][]> {

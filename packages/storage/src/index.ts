@@ -3,7 +3,7 @@ import { migrate, openDatabase, type NeoDatabase } from './db.js';
 import { storageMigrations } from './migrations.js';
 
 export * from './db.js';
-export { storageMigrations } from './migrations.js';
+export { retireLegacyDemoProvider, storageMigrations } from './migrations.js';
 export { createConversationStore } from './conversations.js';
 export { createSettingsStore } from './settings.js';
 export { createSecretStore, loadOrCreateKey } from './secrets.js';

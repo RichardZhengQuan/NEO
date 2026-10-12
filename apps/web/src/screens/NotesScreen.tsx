@@ -161,7 +161,7 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
       <div className="page-body">
         <div className="page-inner" style={{ maxWidth: '46rem', display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
           <input
-            className="title-btn"
+            className="note-title"
             style={{ fontSize: '1.5rem', fontWeight: 700, cursor: 'text', marginLeft: 0, padding: '0.25rem 0' }}
             value={title}
             placeholder={t('notes.title_placeholder')}
@@ -288,13 +288,13 @@ export function NotesScreen({ noteId }: { noteId?: string }): ReactElement {
         ) : (
           <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {visible.map((n) => (
-              <li key={n.id} className="conv-item" aria-current={n.id === noteId ? 'page' : undefined}>
-                <button type="button" className="conv-item__link" onClick={() => navigate({ name: 'notes', noteId: n.id })}>
-                  <span className="conv-item__title">
+              <li key={n.id} className="note-item" aria-current={n.id === noteId ? 'page' : undefined}>
+                <button type="button" className="note-item__link" onClick={() => navigate({ name: 'notes', noteId: n.id })}>
+                  <span className="note-item__title">
                     {n.pinned && <Icon name="pin" size={12} style={{ color: 'var(--neo-tone-warning-text)' }} />}
                     <span>{titleOf(n, t('notes.untitled'))}</span>
                   </span>
-                  <span className="conv-item__preview">
+                  <span className="note-item__preview">
                     {formatRelative(n.updatedAt, locale)}
                     {n.content ? ` · ${n.content.replace(/[#*_`>\-[\]]/g, '').replace(/\s+/g, ' ').slice(0, 90)}` : ''}
                   </span>

@@ -9,7 +9,7 @@ import { createWsHandler } from './ws.js';
 const TOKEN = 'transport-owner-token';
 const config = NeoConfigSchema.parse({
   server: { host: '127.0.0.1', port: 0, authToken: TOKEN },
-  settings: { agent: { autoTitle: false }, memory: { consolidation: { enabled: false } } },
+  settings: { memory: { consolidation: { enabled: false } } },
 });
 
 class Inbox {
@@ -57,15 +57,15 @@ function scriptedRuntime(server: NeoServer, release: Promise<void> = Promise.res
   const runtime: AgentRuntimeApi = {
     async send(input) {
       const turnId = newId('turn', server.services.clock());
-      const userMessage: Message = { id: newId('msg'), conversationId: input.conversationId, role: 'user', parts: input.parts, createdAt: server.services.clock(), status: 'complete', turnId };
-      const assistant: Message = { id: newId('msg'), conversationId: input.conversationId, role: 'assistant', parts: [], createdAt: server.services.clock(), status: 'streaming', turnId };
+      const userMessage: Message = { id: newId('msg'), conversationId: input.conversationId, episodeId: input.conversationId, role: 'user', parts: input.parts, createdAt: server.services.clock(), status: 'complete', turnId };
+      const assistant: Message = { id: newId('msg'), conversationId: input.conversationId, episodeId: input.conversationId, role: 'assistant', parts: [], createdAt: server.services.clock(), status: 'streaming', turnId };
       server.services.conversations.appendMessage(userMessage);
       server.services.conversations.appendMessage(assistant);
-      const scope = { conversationId: input.conversationId, turnId };
+      const scope = { conversationId: input.conversationId, episodeId: input.conversationId, turnId };
       // Completion is owned by the runtime, independently of its SSE consumer.
       const done = release.then(() => server.services.conversations.updateMessage(assistant.id, { parts: [{ type: 'text', text: 'A scripted reply' }], status: 'complete' }));
       async function* events(): AsyncIterable<AgentEvent> {
-        yield { type: 'turn.started', ...scope, userMessage, assistantMessageId: assistant.id, model: { provider: 'demo', model: 'neo-demo' } };
+        yield { type: 'turn.started', ...scope, userMessage, assistantMessageId: assistant.id, model: { provider: 'test', model: 'neo-test' } };
         yield { type: 'text.delta', ...scope, messageId: assistant.id, text: 'A scripted reply' };
         yield { type: 'message.completed', ...scope, message: await done };
         yield { type: 'turn.finished', ...scope, usage: null, stopReason: 'end' };
@@ -73,6 +73,18 @@ function scriptedRuntime(server: NeoServer, release: Promise<void> = Promise.res
       handle = { ...scope, userMessage, assistantMessageId: assistant.id, done, events: events() };
       return handle;
     },
+    async sendTimeline(input) {
+      const episode = server.services.conversations.currentEpisode() ?? server.services.conversations.createEpisode({ offRecord: input.offRecord });
+      return runtime.send({ conversationId: episode.id, parts: input.parts });
+    },
+    cancelTimeline: cancel,
+    startOffRecord: async () => ({ active: true, episodeId: null, startedAt: server.services.clock() }),
+    offRecordState: () => server.services.conversations.offRecordState(),
+    endOffRecord: async () => ({ deleted: 0 }),
+    purgeOffRecord: async () => 0,
+    waitForIdle: async () => {},
+    async mutateTimeline<T>(mutation: () => Promise<T>): Promise<T> { return mutation(); },
+    handleTimelineUiAction: async () => ({ kind: 'noop' }),
     cancel,
     cancelConversation: cancel,
     confirm: () => false,
@@ -122,8 +134,8 @@ describe('HTTP/WebSocket transport on port 0', () => {
     owner.socket.send(JSON.stringify({ type: 'ping', id: 'subscription-applied' }));
     expect(await owner.next()).toEqual({ type: 'pong', id: 'subscription-applied' });
 
-    eventHub.publish({ type: 'conversation.deleted', conversationId: 'conv-hidden' });
-    const visible = eventHub.publish({ type: 'text.delta', conversationId: 'conv-visible', turnId: 'turn-test', messageId: 'msg-test', text: 'hello' });
+    eventHub.publish({ type: 'conversation.deleted', conversationId: 'conv-hidden', episodeId: 'conv-hidden' });
+    const visible = eventHub.publish({ type: 'text.delta', conversationId: 'conv-visible', episodeId: 'conv-visible', turnId: 'turn-test', messageId: 'msg-test', text: 'hello' });
     const global = eventHub.publish({ type: 'task.deleted', taskId: 'global-task' });
     expect(await owner.next()).toEqual({ type: 'event', envelope: visible });
     expect(await owner.next()).toEqual({ type: 'event', envelope: global });
@@ -131,6 +143,28 @@ describe('HTTP/WebSocket transport on port 0', () => {
     expect((await device.next()).type).toBe('event');
     expect((await device.next()).type).toBe('event');
     expect(owner.messages.filter((message) => message.type === 'event')).toHaveLength(2);
+  });
+
+  it('broadcasts private mode changes to a second device regardless of episode subscription', async () => {
+    server = await startServer(config, { inMemory: true, logger: silentLogger });
+    const { token } = server.services.devices.create({ name: 'second phone', platform: 'ios' });
+    const device = await connect(server);
+    device.socket.send(JSON.stringify({ type: 'auth', token }));
+    expect((await device.next()).type).toBe('ready');
+    device.socket.send(JSON.stringify({ type: 'subscribe', conversations: [] }));
+    device.socket.send(JSON.stringify({ type: 'ping', id: 'privacy-subscription' }));
+    expect((await device.next()).type).toBe('pong');
+    const change = async (action: string) => {
+      const response = await fetch(`${server!.url}/api/timeline/off-record/${action}`, {
+        method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    expect(await change('start')).toMatchObject({ active: true, episodeId: expect.any(String) });
+    expect(await device.next()).toMatchObject({ type: 'event', envelope: { event: { type: 'timeline.off_record', active: true } } });
+    await change('end');
+    expect(await device.next()).toMatchObject({ type: 'event', envelope: { event: { type: 'timeline.off_record', active: false } } });
   });
 
   it.each([
@@ -153,7 +187,7 @@ describe('HTTP/WebSocket transport on port 0', () => {
     await inbox.next();
     inbox.socket.send(JSON.stringify({ type: 'subscribe', conversations: 12 }));
     expect(await inbox.next()).toMatchObject({ type: 'error', error: { code: 'bad_request', details: { errors: [] } } });
-    const envelope = server.services.events.publish({ type: 'conversation.deleted', conversationId: 'still-all' });
+    const envelope = server.services.events.publish({ type: 'conversation.deleted', conversationId: 'still-all', episodeId: 'still-all' });
     expect(await inbox.next()).toEqual({ type: 'event', envelope });
   });
 
@@ -161,7 +195,7 @@ describe('HTTP/WebSocket transport on port 0', () => {
     server = await startServer(config, { inMemory: true, logger: silentLogger });
     const conversation = server.services.conversations.create();
     scriptedRuntime(server);
-    const response = await fetch(`${server.url}/api/conversations/${conversation.id}/messages`, {
+    const response = await fetch(`${server.url}/api/timeline/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${TOKEN}`, Accept: 'text/event-stream', 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: 'test SSE' }),
@@ -185,7 +219,7 @@ describe('HTTP/WebSocket transport on port 0', () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => { release = resolve; });
     const script = scriptedRuntime(server, pending);
-    const response = await fetch(`${server.url}/api/conversations/${conversation.id}/messages`, {
+    const response = await fetch(`${server.url}/api/timeline/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${TOKEN}`, Accept: 'text/event-stream', 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: 'test disconnect' }),

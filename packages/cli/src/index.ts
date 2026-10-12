@@ -61,9 +61,7 @@ async function main(): Promise<void> {
       await runChat({
         server: parsed.server,
         token: parsed.token,
-        conversation: parsed.conversation,
-        model: parsed.model,
-        incognito: parsed.incognito,
+        offRecord: parsed.offRecord,
         showReasoning: parsed.showReasoning,
       });
       return;
@@ -154,9 +152,7 @@ function printCommandHelp(topic: string): void {
       `  ${bold('Options:')}\n` +
       `    --server <url>         Server URL (default: http://127.0.0.1:7777)\n` +
       `    --token <token>        Auth token\n` +
-      `    --conversation <id>    Resume a conversation\n` +
-      `    --model <p/m>          Model as provider/model\n` +
-      `    --incognito            Incognito mode (no memory)\n` +
+      `    --off-record           Ephemeral timeline messages (recall allowed, no memory writes)\n` +
       `    --show-reasoning       Show model reasoning\n`,
     init:
       `  ${bold('neo init')} — interactive setup wizard\n\n` +

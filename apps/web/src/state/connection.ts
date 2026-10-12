@@ -3,56 +3,85 @@
  * a gap in the event sequence.
  */
 import type { NeoClient } from '@neo/client';
-import { emptyEntry, mergeFetched, setAllConfirmations, upsertConversations, useConversations } from './conversations.js';
+import { httpStatus } from '../lib/errors.js';
+import { applyOffRecordState, emptyEntry, isTimelineStreamEvent, mergeFetched, setAllConfirmations, setTimeline, useTimeline } from './timeline.js';
 import { refreshLoadedData } from './data.js';
 import { EventSequencer, handleServerEvent, type EventContext } from './events.js';
 import { currentSessionEpoch, isCurrentSession, onSessionEnd, setSettings, useSession } from './session.js';
 
-/** Reload a conversation's newest messages into the cache. */
-export async function loadConversation(client: NeoClient, id: string): Promise<void> {
+const timelineLoads = new WeakMap<NeoClient, number>();
+const pendingTimelineLoads = new WeakMap<NeoClient, Promise<void>>();
+const privacyLoads = new WeakMap<NeoClient, Promise<void>>();
+
+export function loadOffRecord(client: NeoClient): Promise<void> {
+  const existing = privacyLoads.get(client);
+  if (existing) return existing;
   const epoch = currentSessionEpoch();
-  const data = await client.conversations.get(id, { limit: 100 });
-  if (!isCurrentSession(epoch, client)) return;
-  useConversations.setState((s) => ({
-    conversations: { ...s.conversations, [id]: data.conversation },
-    entries: { ...s.entries, [id]: mergeFetched(s.entries[id] ?? emptyEntry(), data) },
-  }));
+  const revision = useTimeline.getState().privacyRevision;
+  const loading = client.timeline.offRecord().then((state) => {
+    if (isCurrentSession(epoch, client) && useTimeline.getState().privacyRevision === revision) applyOffRecordState(state);
+  }).finally(() => {
+    if (privacyLoads.get(client) === loading) privacyLoads.delete(client);
+  });
+  privacyLoads.set(client, loading);
+  return loading;
 }
 
-export async function loadConversationList(client: NeoClient): Promise<void> {
+
+/** Reload the newest page or jump to a message/date; newest request wins. */
+export function loadTimeline(client: NeoClient, around?: string): Promise<void> {
+  const loading = fetchTimeline(client, around);
+  pendingTimelineLoads.set(client, loading);
+  const clear = () => { if (pendingTimelineLoads.get(client) === loading) pendingTimelineLoads.delete(client); };
+  void loading.then(clear, clear);
+  return loading;
+}
+
+async function fetchTimeline(client: NeoClient, around?: string): Promise<void> {
   const epoch = currentSessionEpoch();
-  const { items } = await client.conversations.list({ limit: 200 });
-  if (!isCurrentSession(epoch, client)) return;
-  upsertConversations(items, { listLoaded: true });
+  const generation = (timelineLoads.get(client) ?? 0) + 1;
+  timelineLoads.set(client, generation);
+  const snapshotIds = new Set(useTimeline.getState().messages.map((message) => message.id));
+  const current = () => isCurrentSession(epoch, client) && timelineLoads.get(client) === generation;
+  let page;
+  try {
+    page = await client.timeline.list({ limit: 100, ...(around ? { around } : {}) });
+  } catch (error) {
+    if (!current()) return;
+    if (httpStatus(error) === 404) {
+      setTimeline((entry) => ({ ...entry, ...emptyEntry(), offRecord: entry.offRecord,
+        privacyScope: entry.privacyScope, offRecordLoaded: entry.offRecordLoaded, startingOffRecord: entry.startingOffRecord,
+        endingOffRecord: entry.endingOffRecord, privacyRevision: entry.privacyRevision,
+        deletedEpisodes: entry.deletedEpisodes, deletedMessageIds: entry.deletedMessageIds,
+        loaded: true, viewAround: around }));
+    }
+    throw error;
+  }
+  if (!current()) return;
+  setTimeline((entry) => {
+    const target = { ...entry, viewAround: around, ...(around && entry.viewAround !== around ? { messages: [] } : {}) };
+    return { ...mergeFetched(target, page, snapshotIds), viewAround: around };
+  });
 }
 
 export async function loadPendingConfirmations(client: NeoClient): Promise<void> {
   const epoch = currentSessionEpoch();
   const { items } = await client.confirmations.list();
-  if (!isCurrentSession(epoch, client)) return;
-  setAllConfirmations(items);
+  if (isCurrentSession(epoch, client)) setAllConfirmations(items);
 }
 
-/**
- * Bring everything back in sync: the conversation list, the conversation on
- * screen and any with a running turn (others reload when opened), pending
- * confirmations, settings and loaded productivity data.
- */
-export async function refreshAll(client: NeoClient, activeConversationId: string | null): Promise<void> {
+/** Resync the current timeline window, approvals, settings and loaded data. */
+export async function refreshAll(client: NeoClient): Promise<void> {
   const epoch = currentSessionEpoch();
   if (!isCurrentSession(epoch, client)) return;
-  const { entries } = useConversations.getState();
-  const reload = Object.entries(entries)
-    .filter(([id, e]) => e.loaded && (id === activeConversationId || e.turn !== null))
-    .map(([id]) => id);
-  // Everything else is marked stale so it refetches on open.
-  useConversations.setState((s) => ({
-    entries: Object.fromEntries(Object.entries(s.entries).map(([id, e]) => [id, reload.includes(id) ? e : { ...e, loaded: false }])),
-  }));
   await Promise.allSettled([
-    loadConversationList(client),
-    ...reload.map((id) => loadConversation(client, id)),
+    (async () => {
+      // A reconnect must not replace a jump whose page is still loading.
+      while (pendingTimelineLoads.has(client)) await pendingTimelineLoads.get(client)?.catch(() => undefined);
+      if (isCurrentSession(epoch, client)) await loadTimeline(client, useTimeline.getState().viewAround);
+    })(),
     loadPendingConfirmations(client),
+    loadOffRecord(client),
     client.settings.get().then((settings) => { if (isCurrentSession(epoch, client)) setSettings(settings); }),
     refreshLoadedData(client),
   ]);
@@ -61,13 +90,13 @@ export async function refreshAll(client: NeoClient, activeConversationId: string
 export interface EventStreamOptions {
   client: NeoClient;
   context: () => EventContext;
-  activeConversationId: () => string | null;
+  timelineActive: () => boolean;
   /** Called after a reconnect / gap refetch (e.g. to re-plan local notifications). */
   onResync?: () => void;
 }
 
 /** Open the WebSocket and route events. Returns a function that closes it. */
-export function startEventStream({ client, context, activeConversationId, onResync }: EventStreamOptions): () => void {
+export function startEventStream({ client, context, onResync }: EventStreamOptions): () => void {
   const epoch = currentSessionEpoch();
   const sequencer = new EventSequencer();
   let closed = false;
@@ -80,7 +109,7 @@ export function startEventStream({ client, context, activeConversationId, onResy
     timer = setTimeout(() => {
       timer = null;
       if (closed || !isCurrentSession(epoch, client)) return;
-      void refreshAll(client, activeConversationId()).finally(() => { if (!closed && isCurrentSession(epoch, client)) onResync?.(); });
+      void refreshAll(client).finally(() => { if (!closed && isCurrentSession(epoch, client)) onResync?.(); });
     }, 300);
   };
 
@@ -89,7 +118,8 @@ export function startEventStream({ client, context, activeConversationId, onResy
     onEvent(envelope) {
       if (closed || !isCurrentSession(epoch, client)) return;
       if (sequencer.observe(envelope.seq)) resync();
-      handleServerEvent(envelope.event, context());
+      if (!isTimelineStreamEvent(client, envelope.event)) handleServerEvent(envelope.event, context());
+      if (envelope.event.type === 'timeline.off_record' && !envelope.event.active) resync();
     },
     onStatus(status) {
       if (closed || !isCurrentSession(epoch, client)) return;
@@ -98,6 +128,7 @@ export function startEventStream({ client, context, activeConversationId, onResy
         sequencer.reset(conn.lastSeq);
         // Anything that happened while we were away was missed.
         if (openedBefore) resync();
+        else void loadOffRecord(client).catch(() => undefined);
         openedBefore = true;
       }
     },

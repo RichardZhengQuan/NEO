@@ -1,28 +1,30 @@
 /**
- * First-run setup: Welcome → Choose your AI → Memory → Make it yours →
- * Notifications → Done. Each step saves as you go, so leaving halfway keeps
- * what was chosen; the current step survives a reload.
+ * First-run setup: Choose an avatar → Choose your AI → Notifications → Done.
+ * Each step saves as you go, so leaving halfway keeps what was chosen; the current step survives a reload.
  */
-import { useEffect, useRef, useState, type FormEvent, type ReactElement, type ReactNode } from 'react';
-import type { MemoryPolicy, Persona } from '@neo/protocol';
+import { createContext, useContext, useEffect, useRef, useState, type FormEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
+import { createPortal, flushSync } from 'react-dom';
 import {
   AvatarPicker,
   Badge,
   Button,
+  DEFAULT_AVATAR,
   Icon,
   NeoAvatar,
-  SegmentedControl,
-  Select,
+  NeoFigure,
+  parseAvatar,
+  serializeAvatar,
   Spinner,
-  Switch,
-  TextArea,
-  TextField,
   useT,
-  type AvatarState,
 } from '@neo/ui';
-import { ChipInput } from '../components/ChipInput.js';
-import { MemoryNetArt } from '../components/MemoryNetArt.js';
-import { useModelLabel } from '../components/ModelPicker.js';
+import { PrintBackdrop } from '../components/cyber/PrintBackdrop.js';
+import { PrintWordmark } from '../components/cyber/PrintWordmark.js';
+import { StackedTabs } from '../components/cyber/PrintGraphics.js';
+import { TerminalLine } from '../components/cyber/TerminalLine.js';
+import { Hud } from '../components/cyber/Hud.js';
+import { useReducedMotion } from '../components/cyber/useReducedMotion.js';
+import { useSceneTransition } from '../components/cyber/useSceneTransition.js';
+import { useModelLabel } from '../components/ModelLabel.js';
 import { ProviderSetup } from '../components/ProviderSetup.js';
 import { PairPhoneDialog } from '../components/PairPhoneDialog.js';
 import { errorMessage } from '../lib/errors.js';
@@ -32,22 +34,31 @@ import { navigate } from '../router.js';
 import { pushToast } from '../state/notifications.js';
 import { loadProviders, requireClient, updateSettings, useSession } from '../state/session.js';
 
-const STEPS = ['welcome', 'ai', 'memory', 'persona', 'notifications', 'done'] as const;
+const STEPS = ['avatar', 'ai', 'notifications', 'done'] as const;
 type Step = (typeof STEPS)[number];
+const TransitionBusy = createContext(false);
 
-export const TRAIT_SUGGESTIONS = ['curious', 'warm', 'direct', 'witty', 'patient', 'concise', 'encouraging', 'honest', 'calm', 'playful'];
-export const BLOCKED_SUGGESTIONS = ['health', 'finances', 'politics', 'religion', 'relationships', 'work'];
-export const LANGUAGES = ['auto', 'en', 'zh-CN', 'ja', 'ko', 'es', 'fr', 'de', 'pt', 'it', 'ru'];
+/** Single composition switch for the avatar and done posters. */
+export let POSTER_CARD_SIDE: 'left' | 'right' = 'right';
+export function setPosterCardSide(side: typeof POSTER_CARD_SIDE): void {
+  POSTER_CARD_SIDE = side;
+}
 
 function StepFrame(props: { title: ReactNode; lead?: ReactNode; children: ReactNode; footer: ReactNode; onSubmit?: () => void }): ReactElement {
+  const persona = useSession((s) => s.settings?.persona);
   const heading = useRef<HTMLHeadingElement>(null);
-  useEffect(() => heading.current?.focus(), []);
+  const moving = useContext(TransitionBusy);
+  useEffect(() => { if (!moving) heading.current?.focus({ preventScroll: true }); }, [moving]);
   const body = (
     <>
-      <div className="onboarding__body neo-animate-in">
-        <h1 ref={heading} tabIndex={-1} className="onboarding__title" style={{ outline: 'none' }}>
-          {props.title}
-        </h1>
+      <div className="onboarding__body">
+        <div className="cyber-step-heading">
+          <StackedTabs className="print-heading-tabs" />
+          <NeoAvatar avatar={persona?.avatar} size={44} animated={false} className="cyber-step-portrait" />
+          <h1 ref={heading} tabIndex={-1} className="onboarding__title">
+            {props.title}
+          </h1>
+        </div>
         {props.lead && <p className="onboarding__lead">{props.lead}</p>}
         {props.children}
       </div>
@@ -59,7 +70,7 @@ function StepFrame(props: { title: ReactNode; lead?: ReactNode; children: ReactN
     <form
       onSubmit={(e: FormEvent) => {
         e.preventDefault();
-        props.onSubmit!();
+        if (!moving) props.onSubmit!();
       }}
       style={{ display: 'contents' }}
     >
@@ -68,18 +79,19 @@ function StepFrame(props: { title: ReactNode; lead?: ReactNode; children: ReactN
   );
 }
 
-function Footer(props: { onBack?: () => void; next: ReactNode; nextIcon?: string; onNext?: () => void; disabled?: boolean; loading?: boolean; extra?: ReactNode }): ReactElement {
+function Footer(props: { onBack?: () => void; next: ReactNode; onNext?: () => void; disabled?: boolean; loading?: boolean; extra?: ReactNode }): ReactElement {
   const t = useT();
+  const moving = useContext(TransitionBusy);
   return (
     <>
       {props.onBack && (
-        <Button variant="ghost" icon="arrow-left" onClick={props.onBack} disabled={props.loading}>
+        <Button variant="ghost" icon="arrow-left" onClick={props.onBack} disabled={props.loading || moving}>
           {t('common.back')}
         </Button>
       )}
       <span style={{ flex: 1 }} />
       {props.extra}
-      <Button type={props.onNext ? 'button' : 'submit'} variant="primary" size="lg" iconRight={props.nextIcon ?? 'arrow-right'} onClick={props.onNext} disabled={props.disabled} loading={props.loading}>
+      <Button type={props.onNext ? 'button' : 'submit'} variant="primary" size="lg" onClick={props.onNext} disabled={props.disabled || moving} loading={props.loading}>
         {props.next}
       </Button>
     </>
@@ -88,52 +100,67 @@ function Footer(props: { onBack?: () => void; next: ReactNode; nextIcon?: string
 
 // ── steps ────────────────────────────────────────────────────────────────
 
-function WelcomeStep({ next, skip }: { next: () => void; skip: () => void }): ReactElement {
+function AvatarStep({ next, finish, avatar, onAvatarChange, figureFrameRef, orbitAreaRef, cardRef, orbitHost, reducedMotion }: { next: () => void; finish: () => Promise<void>; avatar: string; onAvatarChange: (avatar: string) => void; figureFrameRef: RefObject<HTMLDivElement | null>; orbitAreaRef: RefObject<HTMLDivElement | null>; cardRef: RefObject<HTMLDivElement | null>; orbitHost: HTMLDivElement | null; reducedMotion: boolean }): ReactElement {
   const t = useT();
-  const persona = useSession((s) => s.settings?.persona);
-  const [state, setState] = useState<AvatarState>('speaking');
-  useEffect(() => {
-    const id = setTimeout(() => setState('idle'), 2400);
-    return () => clearTimeout(id);
-  }, []);
-  const pillars = [
-    { icon: 'cpu', title: t('onboarding.welcome.p1_title'), text: t('onboarding.welcome.p1_text') },
-    { icon: 'brain', title: t('onboarding.welcome.p2_title'), text: t('onboarding.welcome.p2_text') },
-    { icon: 'server', title: t('onboarding.welcome.p3_title'), text: t('onboarding.welcome.p3_text') },
-  ];
-  return (
-    <StepFrame
-      title={
-        <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '1.25rem' }}>
-          <NeoAvatar avatar={persona?.avatar ?? null} size={104} state={state} shape="squircle" title={persona?.name ?? 'NEO'} />
-          {t('onboarding.welcome.title', { name: persona?.name ?? 'NEO' })}
-        </span>
+  const savedPersona = useSession((s) => s.settings!.persona);
+  const [initialAvatar] = useState(() => serializeAvatar(parseAvatar(savedPersona.avatar) ?? DEFAULT_AVATAR));
+  const [saving, setSaving] = useState(false);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const savingRef = useRef(false);
+  const moving = useContext(TransitionBusy);
+  useEffect(() => { if (!moving) heading.current?.focus({ preventScroll: true }); }, [moving]);
+  const save = async (skip = false) => {
+    if (savingRef.current || moving) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      if (!skip || avatar !== initialAvatar) {
+        await updateSettings({ persona: { avatar } });
       }
-      lead={t('onboarding.welcome.lead')}
-      footer={<Footer onNext={next} next={t('onboarding.welcome.start')} extra={<Button variant="ghost" onClick={skip}>{t('onboarding.skip_all')}</Button>} />}
-    >
-      <div className="pillars">
-        {pillars.map((p) => (
-          <div key={p.icon} className="option-card" style={{ cursor: 'default' }}>
-            <span className="option-card__icon" style={{ background: 'var(--neo-accent-muted)', color: 'var(--neo-accent-text)' }}>
-              <Icon name={p.icon} size={18} />
-            </span>
-            <span>
-              <span className="option-card__title">{p.title}</span>
-              <span className="option-card__text">{p.text}</span>
-            </span>
-          </div>
-        ))}
-      </div>
-    </StepFrame>
+      if (skip) await finish();
+      else next();
+    } catch (err) {
+      pushToast({ tone: 'error', title: errorMessage(err, t) });
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    void save();
+  };
+  return (
+    <>
+      {orbitHost && createPortal(
+        <form className="cyber-avatar-form" onSubmit={submit} style={{ display: 'contents' }}>
+          <fieldset className="cyber-orbit" disabled={saving || moving}>
+            <AvatarPicker layout="orbit" value={avatar} onChange={onAvatarChange} orbitFrameRef={figureFrameRef} orbitAreaRef={orbitAreaRef} orbitClearanceRef={cardRef} reducedMotion={reducedMotion}>
+              {({ characters }) => <div className="cyber-orbit-characters">{characters}</div>}
+            </AvatarPicker>
+          </fieldset>
+        </form>, orbitHost,
+      )}
+      <form onSubmit={submit} style={{ display: 'contents' }}>
+        <h1 ref={heading} tabIndex={-1} className="onboarding__title cyber-avatar-title">
+          {t('onboarding.avatar.title')}
+        </h1>
+        <p className="onboarding__lead">{t('onboarding.avatar.lead')}</p>
+        <div className="cyber-avatar-actions">
+          <Button type="submit" variant="primary" size="sm" className="cyber-avatar-continue" loading={saving} disabled={moving}>{t('common.continue')}</Button>
+          <button type="button" className="cyber-avatar-skip" onClick={() => void save(true)} disabled={saving || moving}>{t('onboarding.skip_all')}</button>
+        </div>
+      </form>
+    </>
   );
 }
 
 function AiStep({ next, back }: { next: () => void; back: () => void }): ReactElement {
   const t = useT();
   const providers = useSession((s) => s.providers);
-  const defaultModel = useSession((s) => s.settings?.defaultModel ?? null);
+  const defaultModel = useSession((s) => s.settings?.ai.capabilities.text ?? null);
   const current = useModelLabel(defaultModel);
+  const connected = !!defaultModel && !!providers?.items.some((p) => p.id === defaultModel.provider && p.enabled && !p.needsReauthorization && p.kind !== 'mock');
   useEffect(() => {
     void loadProviders().catch(() => undefined);
   }, []);
@@ -141,9 +168,9 @@ function AiStep({ next, back }: { next: () => void; back: () => void }): ReactEl
     <StepFrame
       title={t('onboarding.ai.title')}
       lead={t('onboarding.ai.lead')}
-      footer={<Footer onBack={back} onNext={next} next={defaultModel ? t('common.continue') : t('onboarding.ai.later')} />}
+      footer={<Footer onBack={back} onNext={next} next={connected ? t('common.continue') : t('onboarding.skip_for_now')} />}
     >
-      {defaultModel && (
+      {connected && (
         <div className="neo-callout" data-tone="success" style={{ marginBottom: '1rem' }}>
           <span className="neo-callout__icon">
             <Icon name="check-circle" size={17} />
@@ -155,125 +182,11 @@ function AiStep({ next, back }: { next: () => void; back: () => void }): ReactEl
         <ProviderSetup
           existing={providers.items}
           offerExisting
-          onDone={async ({ provider, model }) => {
-            await updateSettings({ defaultModel: { provider: provider.id, model } });
-            next();
-          }}
+          onDone={() => next()}
         />
       ) : (
         <Spinner size={20} />
       )}
-    </StepFrame>
-  );
-}
-
-const MODE_ICON: Record<MemoryPolicy['mode'], string> = { auto: 'sparkles', approve: 'check-square', off: 'eye-off' };
-
-function MemoryStep({ next, back }: { next: () => void; back: () => void }): ReactElement {
-  const t = useT();
-  const policy = useSession((s) => s.settings!.memory);
-  const [mode, setMode] = useState(policy.mode);
-  const [blocked, setBlocked] = useState(policy.blockedTopics);
-  const [cloud, setCloud] = useState(policy.sendSensitiveToCloud);
-  const [saving, setSaving] = useState(false);
-  const save = async () => {
-    setSaving(true);
-    try {
-      await updateSettings({ memory: { mode, blockedTopics: blocked, sendSensitiveToCloud: cloud } });
-      next();
-    } catch (err) {
-      pushToast({ tone: 'error', title: errorMessage(err, t) });
-    } finally {
-      setSaving(false);
-    }
-  };
-  return (
-    <StepFrame title={t('onboarding.memory.title')} lead={t('onboarding.memory.lead')} onSubmit={() => void save()} footer={<Footer onBack={back} next={t('common.continue')} loading={saving} />}>
-      <figure style={{ margin: '0 0 1.25rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
-        <MemoryNetArt label={t('onboarding.memory.art')} />
-        <figcaption className="neo-help" style={{ textAlign: 'center', maxWidth: '30rem' }}>
-          {t('onboarding.memory.art_caption')}
-        </figcaption>
-      </figure>
-      <div role="radiogroup" aria-label={t('onboarding.memory.mode')} style={{ display: 'grid', gap: '0.5rem' }}>
-        {(['auto', 'approve', 'off'] as const).map((m) => (
-          <button key={m} type="button" role="radio" aria-checked={mode === m} className="option-card" onClick={() => setMode(m)}>
-            <span className="option-card__icon">
-              <Icon name={MODE_ICON[m]} size={18} />
-            </span>
-            <span style={{ flex: 1 }}>
-              <span className="option-card__title">
-                {t(`memoryMode.${m}.title`)} {m === 'auto' && <Badge tone="accent">{t('onboarding.recommended')}</Badge>}
-              </span>
-              <span className="option-card__text">{t(`memoryMode.${m}.text`)}</span>
-            </span>
-            {mode === m && <Icon name="check" size={16} className="option-check" />}
-          </button>
-        ))}
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1.5rem' }}>
-        <ChipInput label={t('memoryPolicy.blocked')} values={blocked} onChange={setBlocked} placeholder={t('memoryPolicy.blocked_placeholder')} suggestions={BLOCKED_SUGGESTIONS.map((k) => t(`topic.${k}`))} help={t('memoryPolicy.blocked_help')} max={50} maxLength={100} />
-        <Switch checked={cloud} onChange={setCloud} label={t('memoryPolicy.sensitive_cloud')} description={t('memoryPolicy.sensitive_cloud_help')} />
-      </div>
-    </StepFrame>
-  );
-}
-
-export function PersonaFields({ persona, onChange, compactAvatar }: { persona: Persona; onChange: (p: Persona) => void; compactAvatar?: boolean }): ReactElement {
-  const t = useT();
-  const set = <K extends keyof Persona>(key: K, value: Persona[K]) => onChange({ ...persona, [key]: value });
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.125rem' }}>
-      <AvatarPicker compact={compactAvatar} value={persona.avatar} onChange={(encoded) => set('avatar', encoded)} />
-      <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(14rem, 1fr))' }}>
-        <TextField label={t('persona.name')} value={persona.name} onChange={(v) => set('name', v)} maxLength={60} required placeholder="NEO" />
-        <TextField label={t('persona.tagline')} value={persona.tagline} onChange={(v) => set('tagline', v)} maxLength={200} placeholder={t('persona.tagline_placeholder')} />
-      </div>
-      <div className="neo-field">
-        <span className="neo-label">{t('persona.tone')}</span>
-        <SegmentedControl
-          label={t('persona.tone')}
-          value={persona.tone === 'custom' ? 'warm' : persona.tone}
-          onChange={(v) => set('tone', v)}
-          options={(['warm', 'professional', 'playful', 'concise'] as const).map((v) => ({ value: v, label: t(`persona.tone_${v}`) }))}
-        />
-      </div>
-      <ChipInput label={t('persona.traits')} values={persona.traits} onChange={(v) => set('traits', v)} suggestions={TRAIT_SUGGESTIONS.map((k) => t(`trait.${k}`))} max={12} placeholder={t('persona.traits_placeholder')} />
-      <TextArea label={t('persona.instructions')} value={persona.instructions} onChange={(v) => set('instructions', v)} rows={3} maxLength={8000} placeholder={t('persona.instructions_placeholder')} help={t('persona.instructions_help')} />
-      <Select label={t('persona.language')} value={LANGUAGES.includes(persona.language) ? persona.language : 'auto'} onChange={(v) => set('language', v)} options={LANGUAGES.map((l) => ({ value: l, label: t(`language.${l}`) }))} help={t('persona.language_help')} />
-    </div>
-  );
-}
-
-function PersonaStep({ next, back }: { next: () => void; back: () => void }): ReactElement {
-  const t = useT();
-  const saved = useSession((s) => s.settings!.persona);
-  const [persona, setPersona] = useState<Persona>(saved);
-  const [saving, setSaving] = useState(false);
-  const save = async () => {
-    if (!persona.name.trim()) return;
-    setSaving(true);
-    try {
-      await updateSettings({ persona: { ...persona, name: persona.name.trim(), traits: persona.traits } });
-      next();
-    } catch (err) {
-      pushToast({ tone: 'error', title: errorMessage(err, t) });
-    } finally {
-      setSaving(false);
-    }
-  };
-  return (
-    <StepFrame title={t('onboarding.persona.title')} lead={t('onboarding.persona.lead')} onSubmit={() => void save()} footer={<Footer onBack={back} next={t('common.continue')} loading={saving} disabled={!persona.name.trim()} />}>
-      <div className="neo-card" style={{ display: 'flex', alignItems: 'center', gap: '0.875rem', marginBottom: '1.25rem' }} aria-live="polite">
-        <NeoAvatar avatar={persona.avatar} size={52} shape="squircle" state="speaking" />
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 650 }}>{persona.name || 'NEO'}</div>
-          <div className="neo-help" style={{ fontSize: '0.875rem' }}>
-            {t(`persona.sample_${persona.tone === 'custom' ? 'warm' : persona.tone}`, { name: persona.name || 'NEO' })}
-          </div>
-        </div>
-      </div>
-      <PersonaFields persona={persona} onChange={setPersona} compactAvatar />
     </StepFrame>
   );
 }
@@ -337,22 +250,22 @@ function NotificationsStep({ next, back }: { next: () => void; back: () => void 
 function DoneStep({ back, finish }: { back: () => void; finish: () => Promise<void> }): ReactElement {
   const t = useT();
   const settings = useSession((s) => s.settings!);
-  const model = useModelLabel(settings.defaultModel);
+  const providers = useSession((s) => s.providers);
+  const fallback = providers?.items.find((p) => p.enabled && !p.needsReauthorization && p.kind !== 'mock' && p.defaultModel?.trim());
+  const modelRef = settings.ai.capabilities.text ?? (fallback ? { provider: fallback.id, model: fallback.defaultModel! } : null);
+  const model = useModelLabel(modelRef);
+  const connected = !!modelRef && !!providers?.items.some((p) => p.id === modelRef.provider && p.enabled && !p.needsReauthorization && p.kind !== 'mock');
   const [busy, setBusy] = useState(false);
   const [pairing, setPairing] = useState(false);
+  useEffect(() => {
+    void loadProviders().catch(() => undefined);
+  }, []);
   const rows = [
-    { icon: 'cpu', label: t('onboarding.done.ai'), value: model || t('onboarding.done.no_ai') },
-    { icon: 'brain', label: t('onboarding.done.memory'), value: t(`memoryMode.${settings.memory.mode}.title`) },
-    { icon: 'smile', label: t('onboarding.done.persona'), value: `${settings.persona.name} · ${t(`persona.tone_${settings.persona.tone === 'custom' ? 'warm' : settings.persona.tone}`)}` },
+    { icon: 'cpu', label: t('onboarding.done.ai'), value: connected ? model : t('onboarding.done.no_ai') },
   ];
   return (
     <StepFrame
-      title={
-        <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '1.25rem' }}>
-          <NeoAvatar avatar={settings.persona.avatar} size={104} state="speaking" shape="squircle" />
-          {t('onboarding.done.title', { name: settings.persona.name })}
-        </span>
-      }
+      title={t('onboarding.done.title')}
       lead={t('onboarding.done.lead')}
       footer={
         <Footer
@@ -362,7 +275,6 @@ function DoneStep({ back, finish }: { back: () => void; finish: () => Promise<vo
             void finish().finally(() => setBusy(false));
           }}
           next={t('onboarding.done.start')}
-          nextIcon="message"
           loading={busy}
         />
       }
@@ -391,48 +303,104 @@ function DoneStep({ back, finish }: { back: () => void; finish: () => Promise<vo
 
 export function OnboardingScreen(): ReactElement {
   const t = useT();
-  const onboarded = useSession((s) => s.settings?.onboarded ?? false);
+  const persona = useSession((s) => s.settings!.persona);
+  const [draftAvatar, setDraftAvatar] = useState(() => serializeAvatar(parseAvatar(persona.avatar) ?? DEFAULT_AVATAR));
+  const [figureBurst, setFigureBurst] = useState(0);
+  const reducedMotion = useReducedMotion();
+  const root = useRef<HTMLDivElement>(null);
+  const figureFrameRef = useRef<HTMLDivElement>(null);
+  const orbitAreaRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [orbitHost, setOrbitHost] = useState<HTMLDivElement | null>(null);
+  const transition = useSceneTransition(root, reducedMotion);
+  const finishing = useRef(false);
   const [step, setStepState] = useState<Step>(() => {
-    const saved = readString(STORAGE_KEYS.onboardingStep, 'session') as Step | null;
-    return saved && STEPS.includes(saved) ? saved : 'welcome';
+    const saved = readString(STORAGE_KEYS.onboardingStep, 'session');
+    if (saved === 'welcome') return 'ai';
+    if (saved === 'persona' || saved === 'memory') return 'notifications';
+    return STEPS.find((s) => s === saved) ?? 'avatar';
   });
+  const stepRef = useRef(step);
+  const [previousIndex, setPreviousIndex] = useState(STEPS.indexOf(step));
   const index = STEPS.indexOf(step);
+  const poster = step === 'avatar' || step === 'done';
+  const avatar = step === 'avatar' ? draftAvatar : persona.avatar;
   const setStep = (s: Step) => {
-    setStepState(s);
-    writeString(STORAGE_KEYS.onboardingStep, s, 'session');
-    window.scrollTo?.({ top: 0 });
+    if (s === stepRef.current || finishing.current) return;
+    transition.run({
+      key: s,
+      direction: STEPS.indexOf(s) > STEPS.indexOf(stepRef.current) ? 'forward' : 'back',
+      commit: () => {
+        setPreviousIndex(STEPS.indexOf(stepRef.current));
+        if (s === 'avatar') setDraftAvatar(serializeAvatar(parseAvatar(useSession.getState().settings!.persona.avatar) ?? DEFAULT_AVATAR));
+        stepRef.current = s;
+        setStepState(s);
+        writeString(STORAGE_KEYS.onboardingStep, s, 'session');
+        window.scrollTo?.({ top: 0 });
+      },
+    });
   };
   const next = () => setStep(STEPS[Math.min(index + 1, STEPS.length - 1)]!);
   const back = () => setStep(STEPS[Math.max(index - 1, 0)]!);
 
   const finish = async () => {
+    if (finishing.current || transition.isLocked()) return;
+    finishing.current = true;
     try {
-      if (!onboarded) await updateSettings({ onboarded: true });
-      writeString(STORAGE_KEYS.onboardingStep, null, 'session');
-      navigate({ name: 'chat' }, { replace: true });
+      // The explicit route keeps the scene mounted during the optimistic settings save.
+      flushSync(() => navigate({ name: 'onboarding' }, { replace: true }));
+      if (!useSession.getState().settings?.onboarded) await updateSettings({ onboarded: true });
+      await new Promise<void>((resolve) => transition.run({
+        key: 'finish', direction: 'forward', exit: true, commit: () => {},
+        settled: () => {
+          writeString(STORAGE_KEYS.onboardingStep, null, 'session');
+          navigate({ name: 'timeline' }, { replace: true });
+          resolve();
+        },
+      }));
     } catch (err) {
       pushToast({ tone: 'error', title: errorMessage(err, t) });
+    } finally {
+      finishing.current = false;
     }
   };
 
   return (
-    <div className="onboarding">
-      <div className="onboarding__top">
-        <div className="onboarding__progress" role="progressbar" aria-valuemin={1} aria-valuemax={STEPS.length} aria-valuenow={index + 1} aria-label={t('onboarding.progress', { n: index + 1, total: STEPS.length })}>
-          {STEPS.map((s, i) => (
-            <span key={s} data-done={i <= index} />
-          ))}
+    <TransitionBusy.Provider value={transition.busy}>
+      <div ref={root} className={`onboarding cyber-onboarding cyber-onboarding--${poster ? 'poster' : 'content'}${transition.mode ? ` cyber-transition--${transition.mode}` : ''}${transition.exit && transition.mode === 'crossfade' ? ' cyber-transition--finish' : ''}`} data-step={step} data-card-side={POSTER_CARD_SIDE} data-window-anchor={poster && POSTER_CARD_SIDE === 'left' ? 'bottom-left' : 'bottom-right'} data-motion={reducedMotion ? 'off' : 'on'} data-direction={transition.direction} data-transition={transition.busy} aria-busy={transition.busy}>
+        <Hud />
+        <div ref={orbitAreaRef} className="cyber-stage" aria-hidden="true">
+          <PrintBackdrop badges={step !== 'avatar'} persistent />
+          <PrintWordmark />
+          <div
+            className="cyber-figure-hit"
+            onMouseEnter={() => setFigureBurst((value) => value + 1)}
+            onPointerDown={() => setFigureBurst((value) => value + 1)}
+          />
+          <div ref={figureFrameRef} className="cyber-figure-frame">
+            <NeoFigure avatar={avatar} variant="glitch" glitchTrigger={transition.burst + figureBurst} className="cyber-figure" />
+          </div>
         </div>
-        <span className="neo-help" style={{ fontVariantNumeric: 'tabular-nums' }}>
-          {index + 1}/{STEPS.length}
-        </span>
+        <div ref={setOrbitHost} className="cyber-orbit-host" />
+        <div ref={cardRef} data-window-anchor={poster && POSTER_CARD_SIDE === 'left' ? 'bottom-left' : 'bottom-right'} className={`cyber-card${!poster ? ' cyber-card--translucent' : ''}${step === 'avatar' ? ' cyber-avatar-card' : ''}`}>
+          <div hidden={step === 'avatar'}><StackedTabs className="print-card-tabs" /></div>
+          <div className={step === 'avatar' ? 'onboarding__top cyber-avatar-progress' : 'onboarding__top'}>
+            {step !== 'avatar' && <span className="cyber-step-label">{t('onboarding.cyber.step', { n: String(index + 1).padStart(2, '0'), total: String(STEPS.length).padStart(2, '0') })}</span>}
+            {step === 'avatar' && <span className="cyber-step-count">{String(index + 1).padStart(2, '0')}/{String(STEPS.length).padStart(2, '0')}</span>}
+            <div className="onboarding__progress" role="progressbar" aria-valuemin={1} aria-valuemax={STEPS.length} aria-valuenow={index + 1} aria-label={t('onboarding.progress', { n: index + 1, total: STEPS.length })}>
+              {STEPS.map((s, i) => <span key={s} data-done={i <= index} data-changing={transition.busy && (i <= index) !== (i <= previousIndex)} />)}
+            </div>
+            {step !== 'avatar' && <span className="neo-help cyber-step-count">{index + 1}/{STEPS.length}</span>}
+          </div>
+          <div hidden={step === 'avatar'}><TerminalLine text={t(`onboarding.terminal.${step}`)} animateOnMount={false} /></div>
+          <div className={`cyber-card-content${transition.started ? ' cyber-card-content--incoming' : ''}`} inert={transition.busy}>
+            {step === 'avatar' && <AvatarStep next={next} finish={finish} avatar={draftAvatar} onAvatarChange={setDraftAvatar} figureFrameRef={figureFrameRef} orbitAreaRef={orbitAreaRef} cardRef={cardRef} orbitHost={orbitHost} reducedMotion={reducedMotion} />}
+            {step === 'ai' && <AiStep next={next} back={back} />}
+            {step === 'notifications' && <NotificationsStep next={next} back={back} />}
+            {step === 'done' && <DoneStep back={back} finish={finish} />}
+          </div>
+        </div>
       </div>
-      {step === 'welcome' && <WelcomeStep next={next} skip={() => void finish()} />}
-      {step === 'ai' && <AiStep next={next} back={back} />}
-      {step === 'memory' && <MemoryStep next={next} back={back} />}
-      {step === 'persona' && <PersonaStep next={next} back={back} />}
-      {step === 'notifications' && <NotificationsStep next={next} back={back} />}
-      {step === 'done' && <DoneStep back={back} finish={finish} />}
-    </div>
+    </TransitionBusy.Provider>
   );
 }

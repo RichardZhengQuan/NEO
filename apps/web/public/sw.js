@@ -198,15 +198,31 @@ self.addEventListener('push', (event) => {
 
 // ───────────────────────────── clicks ─────────────────────────────
 
-const ROUTES = new Set(['chat', 'memory', 'reminders', 'tasks', 'notes', 'settings']);
+const ROUTES = new Set(['memory', 'reminders', 'tasks', 'notes', 'settings']);
+const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
-/** neo://reminders/rem_1 → "#/reminders/rem_1" (unknown links open chat). */
+/** Notification targets share the app's timeline and secondary routes. */
 function hashFor(data) {
+  if (typeof data.messageId === 'string' && SAFE_ID.test(data.messageId)) return `#/timeline?messageId=${encodeURIComponent(data.messageId)}`;
   const url = typeof data.url === 'string' ? data.url : '';
-  const m = /^neo:\/\/([^/?#]+)(\/[^?#]*)?/i.exec(url);
-  if (m && ROUTES.has(m[1].toLowerCase())) return `#/${m[1].toLowerCase()}${m[2] || ''}`;
+  const m = /^neo:\/\/([^/?#]+)(\/[^?#]*)?(\?[^#]*)?/i.exec(url);
+  if (m) {
+    const route = m[1].toLowerCase();
+    if (route === 'timeline' || route === 'chat') {
+      let segments = [];
+      try {
+        segments = (m[2] || '').split('/').filter(Boolean).map(decodeURIComponent);
+      } catch {
+        return '#/';
+      }
+      const query = new URLSearchParams((m[3] || '').slice(1));
+      const id = query.get('messageId') || (route === 'timeline' ? segments[0] : segments[1] === 'message' || segments[1] === 'messages' ? segments[2] : segments[1]);
+      return typeof id === 'string' && SAFE_ID.test(id) ? `#/timeline?messageId=${encodeURIComponent(id)}` : '#/';
+    }
+    if (ROUTES.has(route)) return `#/${route}${m[2] || ''}${m[3] || ''}`;
+  }
   if (typeof data.reminderId === 'string') return `#/reminders/${data.reminderId}`;
-  return '#/chat';
+  return '#/';
 }
 
 async function windowClients() {

@@ -15,13 +15,15 @@ import { createAuthMiddleware, getClientIp, IpFailureLimiter, ownerOnly } from '
 import { registerHealth } from './routes/health.js';
 import { PairingService } from './pairing.js';
 import { registerPairing, registerPairingClaim } from './routes/pairing.js';
-import { registerConversations } from './routes/conversations.js';
+import { registerTimeline } from './routes/conversations.js';
 import { registerMemory } from './routes/memory.js';
 import { registerReminders } from './routes/reminders.js';
 import { registerTasks } from './routes/tasks.js';
 import { registerNotes } from './routes/notes.js';
 import { registerNotifications } from './routes/notifications.js';
 import { registerProviders } from './routes/providers.js';
+import { openRouterRoutes } from './routes/openrouter.js';
+import { registerChatGPT } from './routes/chatgpt.js';
 import { registerSettings } from './routes/settings.js';
 import { registerPhoneAccess } from './routes/phone-access.js';
 import { registerTools } from './routes/tools.js';
@@ -100,6 +102,8 @@ export function createApp(services: NeoServices): NeoApp {
     })(c, next);
   });
 
+  const openRouter = openRouterRoutes(services);
+  openRouter.registerPublic(app);
   registerHealth(app, services);
   registerPairingClaim(app, services, pairing);
   app.get('/api/ws', upgradeWebSocket(c => createWsHandler(devices, services.events, services.logger, {
@@ -111,7 +115,9 @@ export function createApp(services: NeoServices): NeoApp {
     onError: () => { throw new NeoError('bad_request', 'Request body is too large'); },
   }));
 
-  registerConversations(app, services);
+  openRouter.registerPrivate(app);
+  registerChatGPT(app, services);
+  registerTimeline(app, services);
   registerMemory(app, services);
   registerReminders(app, services);
   registerTasks(app, services);

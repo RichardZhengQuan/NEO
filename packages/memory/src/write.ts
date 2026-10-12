@@ -1,5 +1,5 @@
 /**
- * Write path: observe(), remember(), approve(), reject(), forget(), link(),
+ * Write path: observe(), remember(), forget(), link(),
  * unlink(), and reinforcement after recall.
  *
  * Every write runs in ONE transaction through {@link runWrite}. Embeddings are
@@ -23,6 +23,7 @@ import type {
 } from '@neo/protocol';
 import { describeUiEvent, EdgeTypeSchema, NeoError, newId, RememberInputSchema } from '@neo/protocol';
 import { MEMORY_CONSTANTS } from './constants.js';
+import { ASSISTANT_STYLE_TAG, assistantStyleAspect, assistantStyleConflict, assistantStyleTags } from './assistant-style.js';
 import type { MemoryContext } from './context.js';
 import {
   addEdge,
@@ -35,6 +36,7 @@ import {
   insertEdge,
   insertNode,
   rowToEdge,
+  rowToNode,
   updateNode,
   type EdgeRow,
   type NodeRow,
@@ -43,12 +45,11 @@ import { nodeEmbedText } from './embedder.js';
 import { buildExtractionInput, llmExtract, type ExtractionResult, type MemoryOp } from './extract.js';
 import { heuristicEpisode, heuristicExtract } from './heuristic.js';
 import { redactJournal } from './journal.js';
-import { cleanLabel, containsTerm, deriveLabel, hasCJK, hasCredentials, looksSensitive, mentionsBlockedTopic, normalizeText } from './text.js';
+import { cleanLabel, containsTerm, deriveLabel, hasCJK, hasCredentials, looksSensitive, normalizeText } from './text.js';
 import { clamp01, dot, effectiveEdgeWeight, initialStability, normalized, reinforcedFields } from './utils.js';
 import { tagVector, vectorModel } from './vectors.js';
 
 const C = MEMORY_CONSTANTS;
-type WritableStatus = 'active' | 'pending';
 
 // ─────────────────────────────── write sessions ────────────────────────────────
 
@@ -87,7 +88,6 @@ export async function embedTexts(ctx: MemoryContext, texts: string[], local: boo
 export class WriteSession {
   readonly staged = new Map<string, Float32Array>();
   readonly created = new Set<string>();
-  readonly pending = new Set<string>();
   readonly updated = new Set<string>();
   readonly deleted = new Set<string>();
   /** Vectors of entity names, computed before the transaction, by normalized name. */
@@ -131,7 +131,7 @@ export class WriteSession {
   }
 
   /**
-   * After a status or sensitivity change: a node whose vector is not where it now
+   * After a sensitivity change: a node whose vector is not where it now
    * belongs (local while it must stay on the device, main otherwise) is queued
    * for re-embedding. Text that must stay local is never sent anywhere by this.
    */
@@ -146,7 +146,7 @@ export class WriteSession {
   }
 
   markNew(node: MemoryNode): void {
-    (node.status === 'pending' ? this.pending : this.created).add(node.id);
+    this.created.add(node.id);
   }
 }
 
@@ -158,10 +158,9 @@ export function runWrite<T>(ctx: MemoryContext, now: number, fn: (s: WriteSessio
   for (const [id, vec] of s.staged) if (!s.deleted.has(id)) ctx.vectors.remember(vectorModel(vec) ?? s.model, id, vec);
   for (const id of s.deleted) ctx.vectors.drop(id);
   if (s.missingVectors) void ctx.vectors.reembedStale(ctx.embedder);
-  const fresh = new Set([...s.created, ...s.pending, ...s.deleted]);
+  const fresh = new Set([...s.created, ...s.deleted]);
   const updated = [...s.updated].filter((id) => !fresh.has(id));
   if (s.created.size) ctx.emit({ type: 'created', nodeIds: [...s.created].filter((id) => !s.deleted.has(id)) });
-  if (s.pending.size) ctx.emit({ type: 'pending', nodeIds: [...s.pending].filter((id) => !s.deleted.has(id)) });
   if (updated.length) ctx.emit({ type: 'updated', nodeIds: updated });
   if (s.deleted.size) ctx.emit({ type: 'deleted', nodeIds: [...s.deleted] });
   return result;
@@ -177,7 +176,6 @@ export interface CreateSpec {
   confidence: number;
   sensitivity: Sensitivity;
   pinned: boolean;
-  status: WritableStatus;
   source: MemorySource;
   entities: string[];
   /** For an entity: its own type; otherwise: the type of entities created for `entities`. */
@@ -199,7 +197,7 @@ function entityContent(name: string): string {
 
 /**
  * Collect entity names that need a vector (no entity of that name yet) into the session map.
- * `local` says which names must stay on the device (they belong to a sensitive or pending write).
+ * `local` says which names must stay on the device (they belong to a sensitive write).
  */
 export async function prepareEntityVectors(
   ctx: MemoryContext,
@@ -224,12 +222,12 @@ function stricter(a: Sensitivity, b: Sensitivity | undefined): Sensitivity {
   return a === 'sensitive' || b === 'sensitive' ? 'sensitive' : 'normal';
 }
 
-/** An active/pending node of the same kind with similarity ≥ dedupeSimilarity (exact text when no vector). */
+/** An active node of the same kind with similarity ≥ dedupeSimilarity (exact text when no vector). */
 function findDuplicate(s: WriteSession, spec: CreateSpec): MemoryNode | null {
   const { db } = s.ctx;
   if (spec.vector) {
     const model = vectorModel(spec.vector) ?? s.model;
-    const ids = db.prepare(`SELECT id FROM memory_nodes WHERE kind = ? AND status IN ('active', 'pending')`).all(spec.kind) as { id: string }[];
+    const ids = db.prepare(`SELECT id FROM memory_nodes WHERE kind = ? AND status = 'active'`).all(spec.kind) as { id: string }[];
     let best: { id: string; sim: number } | null = null;
     for (const { id } of ids) {
       const v = s.vectorOf(id, model);
@@ -240,7 +238,7 @@ function findDuplicate(s: WriteSession, spec: CreateSpec): MemoryNode | null {
     if (best) return getNode(db, best.id);
   }
   const rows = db
-    .prepare(`SELECT * FROM memory_nodes WHERE kind = ? AND norm_label = ? AND status IN ('active', 'pending')`)
+    .prepare(`SELECT * FROM memory_nodes WHERE kind = ? AND norm_label = ? AND status = 'active'`)
     .all(spec.kind, normalizeText(spec.label)) as unknown as NodeRow[];
   const content = normalizeText(spec.content);
   const same = rows.find((r) => normalizeText(r.content) === content);
@@ -265,32 +263,17 @@ function applySupersession(s: WriteSession, oldId: string): MemoryNode | null {
   return updated;
 }
 
-/** Make a pending node active; a pending revision now supersedes its predecessor. */
-function activate(s: WriteSession, node: MemoryNode, extra: Partial<MemoryNode> = {}): { node: MemoryNode; superseded: MemoryNode | null } {
-  const { supersedes, ...rest } = node.metadata ?? {};
-  const fields: Partial<MemoryNode> = { ...extra, status: 'active' };
-  if (typeof supersedes === 'string') fields.metadata = Object.keys(rest).length ? rest : undefined;
-  const updated = updateNode(s.ctx.db, node.id, fields, s.now)!;
-  s.updated.add(updated.id);
-  // Approved: its text may now use the main embedder (unless it is sensitive and must stay local).
-  s.syncVectorPlace(updated);
-  const superseded = typeof supersedes === 'string' ? applySupersession(s, supersedes) : null;
-  return { node: updated, superseded };
-}
-
 /** Merge a create into an existing node: reinforce, raise importance/confidence, maybe replace content. */
 function mergeInto(s: WriteSession, target: MemoryNode, spec: CreateSpec): MemoryNode {
   const fields: Partial<MemoryNode> = reinforcedFields(target, s.now);
   let touch = false;
-  // In approve mode a merge must not silently edit an active memory: it only reinforces it.
-  const canEdit = !(target.status !== 'pending' && spec.status === 'pending');
   if (spec.importance > target.importance) {
     fields.importance = spec.importance;
     touch = true;
   }
   if (spec.confidence > target.confidence) fields.confidence = spec.confidence;
   let contentChanged = false;
-  if (canEdit && shouldReplaceContent(target, spec.content)) {
+  if (shouldReplaceContent(target, spec.content)) {
     fields.content = spec.content;
     contentChanged = touch = true;
   }
@@ -298,24 +281,18 @@ function mergeInto(s: WriteSession, target: MemoryNode, spec: CreateSpec): Memor
     fields.sensitivity = 'sensitive';
     touch = true;
   }
-  if (canEdit) {
-    if (spec.pinned && !target.pinned) fields.pinned = touch = true;
-    const tags = [...new Set([...target.tags, ...spec.tags])].slice(0, 20);
-    if (tags.length !== target.tags.length) {
-      fields.tags = tags;
-      touch = true;
-    }
-    if (spec.kind === 'entity' && spec.entityType && !target.entityType) fields.entityType = spec.entityType;
-    if (spec.validUntil !== undefined && spec.validUntil !== target.validUntil) fields.validUntil = spec.validUntil;
+  if (spec.pinned && !target.pinned) fields.pinned = touch = true;
+  const tags = [...new Set([...target.tags, ...spec.tags])].slice(0, 20);
+  if (tags.length !== target.tags.length) {
+    fields.tags = tags;
+    touch = true;
   }
-  let merged: MemoryNode;
-  if (spec.status === 'active' && target.status !== 'active') {
-    // Stated again by an active write: a pending memory is now confirmed, an archived one restored.
-    merged = activate(s, target, fields).node;
-  } else {
-    merged = updateNode(s.ctx.db, target.id, fields, s.now, { touch })!;
-    s.updated.add(merged.id);
-  }
+  if (spec.kind === 'entity' && spec.entityType && !target.entityType) fields.entityType = spec.entityType;
+  if (spec.validUntil !== undefined && spec.validUntil !== target.validUntil) fields.validUntil = spec.validUntil;
+  // Stated again: an archived memory is restored.
+  if (target.status !== 'active') fields.status = 'active';
+  const merged = updateNode(s.ctx.db, target.id, fields, s.now, { touch })!;
+  s.updated.add(merged.id);
   if (!contentChanged) s.syncVectorPlace(merged);
   if (contentChanged) {
     // The incoming vector was computed where the *write* belongs. When the merged memory belongs
@@ -334,19 +311,16 @@ function mergeInto(s: WriteSession, target: MemoryNode, spec: CreateSpec): Memor
   return merged;
 }
 
-/** Find or create the entity called `name`. New entities inherit the writer's status (pending in approve mode). */
+/** Find or create the entity called `name`. */
 function upsertEntity(
   s: WriteSession,
   name: string,
-  opts: { status: WritableStatus; sensitive: boolean; entityType?: string; source: MemorySource },
+  opts: { sensitive: boolean; entityType?: string; source: MemorySource },
 ): MemoryNode | null {
   const label = name.trim().slice(0, 120);
   if (!normalizeText(label)) return null;
   const existing = findEntityByName(s.ctx.db, label);
-  if (existing) {
-    if (existing.status === 'pending' && opts.status === 'active') return activate(s, existing).node;
-    return existing;
-  }
+  if (existing) return existing;
   const node: MemoryNode = {
     id: newId('mem', s.now),
     kind: 'entity',
@@ -362,7 +336,7 @@ function upsertEntity(
     lastAccessedAt: null,
     createdAt: s.now,
     updatedAt: s.now,
-    status: opts.status,
+    status: 'active',
     pinned: false,
     // An entity that only exists because of a sensitive memory is itself sensitive.
     sensitivity: opts.sensitive ? 'sensitive' : 'normal',
@@ -370,7 +344,7 @@ function upsertEntity(
   };
   insertNode(s.ctx.db, node);
   // Use the precomputed vector only when it lives where this entity belongs (local while it is
-  // pending or sensitive); otherwise it is re-embedded in the right place later.
+  // sensitive); otherwise it is re-embedded in the right place later.
   const pre = s.entityVectors.get(normalizeText(label)) ?? null;
   const want = s.ctx.keepLocal(node) ? s.ctx.localEmbedder.id : s.ctx.embedder.id;
   s.writeVector(node.id, pre && (vectorModel(pre) ?? s.model) === want ? pre : null);
@@ -380,20 +354,17 @@ function upsertEntity(
 
 /**
  * about-edges to the spec's entities (+ episode mentions), and derived_from to the episode.
- * New entities take the status of the incoming write, never that of the node it merged into:
- * in approve mode a write that dedupes into an active memory still creates only pending entities.
  */
 function linkProvenance(
   s: WriteSession,
   node: MemoryNode,
-  spec: Pick<CreateSpec, 'entities' | 'entityType' | 'kind' | 'sensitivity' | 'source' | 'status'>,
+  spec: Pick<CreateSpec, 'entities' | 'entityType' | 'kind' | 'sensitivity' | 'source'>,
   episodeId?: string,
   derivedWeight = 0.5,
 ): void {
   for (const name of spec.entities) {
     if (node.kind === 'entity' && normalizeText(name) === normalizeText(node.label)) continue;
     const entity = upsertEntity(s, name, {
-      status: spec.status === 'pending' || node.status === 'pending' ? 'pending' : 'active',
       sensitive: spec.sensitivity === 'sensitive' || node.sensitivity === 'sensitive',
       entityType: spec.kind === 'entity' ? undefined : spec.entityType,
       source: spec.source,
@@ -407,11 +378,31 @@ function linkProvenance(
 
 /**
  * The create path shared by observe, remember and consolidation: entity
- * upsert by name/alias, dedupe against same-kind active/pending nodes
+ * upsert by name/alias, dedupe against same-kind active nodes
  * (merge + reinforce), else insert with entities and provenance edges.
  */
-export function createOrMerge(s: WriteSession, spec: CreateSpec, opts: { episodeId?: string; derivedWeight?: number } = {}): { node: MemoryNode; merged: boolean } {
+export function createOrMerge(s: WriteSession, spec: CreateSpec, opts: { episodeId?: string; derivedWeight?: number } = {}): { node: MemoryNode; merged: boolean; superseded?: MemoryNode[] } {
   const { db } = s.ctx;
+  if (spec.kind === 'preference') spec = { ...spec, tags: assistantStyleTags(`${spec.label} ${spec.content}`, spec.tags) };
+  // A revised style preference uses the usual supersede history, also offline.
+  const aspect = spec.kind === 'preference' && spec.tags.includes(ASSISTANT_STYLE_TAG) ? assistantStyleAspect(`${spec.label} ${spec.content}`) : null;
+  const previous = aspect ? (db.prepare(`SELECT * FROM memory_nodes WHERE kind = 'preference' AND status = 'active' AND EXISTS (SELECT 1 FROM json_each(memory_nodes.tags) WHERE lower(value) = ?) ORDER BY updated_at DESC, id DESC`).all(ASSISTANT_STYLE_TAG) as unknown as NodeRow[])
+    .map(rowToNode)
+    .filter((node) => node.tags.includes(ASSISTANT_STYLE_TAG) && assistantStyleConflict(node, spec)) : [];
+  if (previous.length) {
+    const node = createRevision(s, previous[0]!, {
+      kind: 'preference', label: spec.label, content: spec.content, tags: spec.tags, source: spec.source,
+      reason: 'The user changed this assistant-style preference', vector: spec.vector, episodeId: opts.episodeId,
+      sensitivity: previous.some((old) => old.sensitivity === 'sensitive') ? 'sensitive' : spec.sensitivity,
+    });
+    const superseded: MemoryNode[] = [];
+    for (const old of previous) {
+      if (old.id !== previous[0]!.id) addEdge(db, node.id, old.id, 'supersedes', 1, s.now);
+      const revised = applySupersession(s, old.id);
+      if (revised) superseded.push(revised);
+    }
+    return { node, merged: false, superseded };
+  }
   let target: MemoryNode | null = null;
   if (spec.kind === 'entity') {
     const named = findEntityByName(db, spec.label);
@@ -438,7 +429,7 @@ export function createOrMerge(s: WriteSession, spec: CreateSpec, opts: { episode
     lastAccessedAt: null,
     createdAt: s.now,
     updatedAt: s.now,
-    status: spec.status,
+    status: 'active',
     pinned: spec.pinned,
     sensitivity: spec.sensitivity,
     source: spec.source,
@@ -455,8 +446,7 @@ export function createOrMerge(s: WriteSession, spec: CreateSpec, opts: { episode
 
 /**
  * A new version of `old` with an edge `new —supersedes→ old` and old's
- * about-edges copied. Pending revisions remember what they supersede so
- * approval applies it and rejection leaves the old belief untouched.
+ * about-edges copied.
  */
 function createRevision(
   s: WriteSession,
@@ -465,7 +455,7 @@ function createRevision(
     kind: MemoryKind;
     label: string;
     content: string;
-    status: WritableStatus;
+    tags?: string[];
     source: MemorySource;
     reason?: string;
     vector: Float32Array | null;
@@ -475,7 +465,6 @@ function createRevision(
   },
 ): MemoryNode {
   const metadata: Record<string, unknown> = {};
-  if (r.status === 'pending') metadata['supersedes'] = old.id;
   if (r.reason) metadata['reason'] = r.reason.slice(0, 500);
   const node: MemoryNode = {
     id: newId('mem', s.now),
@@ -484,7 +473,7 @@ function createRevision(
     content: r.content,
     entityType: r.kind === 'entity' ? old.entityType : undefined,
     aliases: r.kind === 'entity' && old.kind === 'entity' ? old.aliases : [],
-    tags: old.tags,
+    tags: r.kind === 'preference' ? assistantStyleTags(`${r.label} ${r.content}`, [...new Set([...old.tags, ...(r.tags ?? [])])]) : old.tags,
     importance: old.importance,
     confidence: C.extractionConfidence,
     stability: initialStability(r.kind, old.importance),
@@ -492,14 +481,16 @@ function createRevision(
     lastAccessedAt: null,
     createdAt: s.now,
     updatedAt: s.now,
-    status: r.status,
+    status: 'active',
     pinned: old.pinned,
     sensitivity: stricter(old.sensitivity, r.sensitivity),
     source: r.source,
     metadata: Object.keys(metadata).length ? metadata : undefined,
   };
   insertNode(s.ctx.db, node);
-  const model = s.writeVector(node.id, r.vector);
+  const want = s.ctx.keepLocal(node) ? s.ctx.localEmbedder.id : s.ctx.embedder.id;
+  const fits = r.vector && (vectorModel(r.vector) ?? s.model) === want;
+  const model = s.writeVector(node.id, fits ? r.vector : null);
   if (model) node.embeddingModel = model;
   s.markNew(node);
   addEdge(s.ctx.db, node.id, old.id, 'supersedes', 1, s.now);
@@ -547,6 +538,7 @@ function heuristicPlan(userText: string): ExtractionResult {
     };
     if (m.entities?.length) op.entities = m.entities;
     if (m.entityType) op.entityType = m.entityType;
+    if (m.tags?.length) op.tags = m.tags;
     return op;
   });
   const label = heuristicEpisode(userText, extracted);
@@ -591,7 +583,7 @@ function rememberedThisTurn(ctx: MemoryContext, assistant: Message): MemoryNode[
   for (const id of memoryIds(toolOutputs(assistant, 'remember').map((o) => o['id']))) {
     if (out.has(id)) continue;
     const node = getNode(ctx.db, id);
-    if (node && (node.status === 'active' || node.status === 'pending')) out.set(id, node);
+    if (node?.status === 'active') out.set(id, node);
   }
   return [...out.values()];
 }
@@ -673,7 +665,7 @@ function asRelated(node: MemoryNode): RecalledMemory {
   return { node, score: 1, activation: 1, similarity: 1, retention: 1, via: [], reason: 'written by the remember tool in this turn' };
 }
 
-const nothing = (skipped: string): MemoryWriteResult => ({ created: [], updated: [], superseded: [], pending: [], linked: 0, skipped });
+const nothing = (skipped: string): MemoryWriteResult => ({ created: [], updated: [], superseded: [], linked: 0, skipped });
 
 export interface ObserveDeps {
   /** Related memories for the extraction prompt (recall without reinforcement). */
@@ -683,7 +675,6 @@ export interface ObserveDeps {
 /** Extract, filter and apply what is worth remembering from one exchange. */
 export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: ObserveDeps): Promise<MemoryWriteResult> {
   const policy = ctx.policy();
-  if (policy.mode === 'off') return nothing('memory is off');
   const now = turn.now ?? ctx.clock();
   const userText = messageText(turn.userMessage, true).slice(0, C.maxTurnTextChars);
   const assistantText = messageText(turn.assistantMessage, false).slice(0, C.maxTurnTextChars);
@@ -728,11 +719,16 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
   // ── 2. filters (always, also on model output) ──
   const allowed = new Set<MemoryKind>(policy.allowedKinds);
   const refused = (...texts: (string | undefined)[]) =>
-    texts.some((t) => !!t && (mentionsBlockedTopic(t, policy.blockedTopics) || hasCredentials(t)));
+    texts.some((t) => !!t && hasCredentials(t));
   const ops = plan.memories
     .map((op): MemoryOp => {
       // Labels are titles: no quotes, no punctuation at the ends ("Prefers window seats”." → "Prefers window seats").
-      if (op.op === 'create' || op.op === 'supersede') return { ...op, label: cleanLabel(op.label) || deriveLabel(op.content) };
+      if (op.op === 'create') return {
+        ...op,
+        label: cleanLabel(op.label) || deriveLabel(op.content),
+        tags: op.kind === 'preference' ? assistantStyleTags(`${op.label} ${op.content}`, op.tags) : op.tags,
+      };
+      if (op.op === 'supersede') return { ...op, label: cleanLabel(op.label) || deriveLabel(op.content) };
       if (op.op === 'update' && op.label !== undefined) return { ...op, label: cleanLabel(op.label) || op.label };
       return op;
     })
@@ -758,20 +754,19 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
       }
     });
   let episode: { label: string; content: string; importance: number } | null = null;
-  if (plan.episode && policy.storeEpisodes && allowed.has('episode') && !mentionsBlockedTopic(userText, policy.blockedTopics)) {
+  if (plan.episode && policy.storeEpisodes && allowed.has('episode')) {
     const content = plan.episode.summary ?? rawEpisodeContent(userText);
     const label = cleanLabel(plan.episode.label ?? '') || deriveLabel(plan.episode.summary ?? userText);
     if (!refused(label, content)) episode = { label: label.slice(0, 80), content: content.slice(0, 600), importance: plan.episode.importance ?? 0.3 };
   }
   if (!episode && !ops.length && !plan.links.length) {
-    return nothing(mentionsBlockedTopic(userText, policy.blockedTopics) ? 'blocked topic' : 'nothing worth remembering');
+    return nothing('nothing worth remembering');
   }
 
   // ── 3. embeddings (async, before the transaction) ──
-  // Every text is embedded where its memory's privacy allows: pending and sensitive memories
+  // Every text is embedded where its memory's privacy allows: sensitive memories
   // stay on the device (ctx.keepLocal) unless the main embedder is local anyway.
   const { db } = ctx;
-  let status: WritableStatus = policy.mode === 'approve' ? 'pending' : 'active';
   const sens = (sensitive: boolean): Sensitivity => (sensitive ? 'sensitive' : 'normal');
   // An episode is as sensitive as the turn it records: one that touched a sensitive memory, whose
   // user text (or the episode's own text) looks sensitive, or that produced or revised sensitive
@@ -784,23 +779,23 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
     ops.some((op) => (op.op === 'update' || op.op === 'supersede') && getNode(db, op.id)?.sensitivity === 'sensitive');
   const texts: string[] = [];
   const local: boolean[] = [];
-  const at = (text: string, node: { sensitivity: Sensitivity; status: string }) => {
+  const at = (text: string, node: { sensitivity: Sensitivity }) => {
     local.push(ctx.keepLocal(node));
     return texts.push(text) - 1;
   };
-  const episodeIdx = episode ? at(nodeEmbedText('episode', episode.label, episode.content, []), { sensitivity: sens(episodeSensitive), status }) : -1;
+  const episodeIdx = episode ? at(nodeEmbedText('episode', episode.label, episode.content, []), { sensitivity: sens(episodeSensitive) }) : -1;
   const opIdx = ops.map((op) => {
-    if (op.op === 'create') return at(nodeEmbedText(op.kind, op.label, op.content, []), { sensitivity: op.sensitivity ?? 'normal', status });
+    if (op.op === 'create') return at(nodeEmbedText(op.kind, op.label, op.content, []), { sensitivity: op.sensitivity ?? 'normal' });
     if (op.op === 'update') {
       const existing = getNode(db, op.id);
       if (!existing) return -1;
-      const after = { sensitivity: stricter(existing.sensitivity, op.sensitivity), status: status === 'pending' && existing.status === 'active' ? 'pending' : existing.status };
+      const after = { sensitivity: stricter(existing.sensitivity, op.sensitivity) };
       return at(nodeEmbedText(existing.kind, op.label ?? existing.label, op.content, existing.aliases), after);
     }
     if (op.op === 'supersede') {
       const old = getNode(db, op.id);
       const kind = op.kind ?? old?.kind ?? 'fact';
-      const after = { sensitivity: stricter(old?.sensitivity ?? 'normal', op.sensitivity), status };
+      const after = { sensitivity: stricter(old?.sensitivity ?? 'normal', op.sensitivity) };
       return at(nodeEmbedText(kind, op.label, op.content, kind === 'entity' ? (old?.aliases ?? []) : []), after);
     }
     return -1;
@@ -809,7 +804,7 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
   const vec = (i: number) => (i >= 0 ? (vectors[i] ?? null) : null);
   const entityVectors = new Map<string, Float32Array | null>();
   const localNames = new Set(
-    ops.flatMap((op) => (op.op === 'create' && ctx.keepLocal({ sensitivity: op.sensitivity ?? 'normal', status }) ? (op.entities ?? []) : [])).map(normalizeText),
+    ops.flatMap((op) => (op.op === 'create' && ctx.keepLocal({ sensitivity: op.sensitivity ?? 'normal' }) ? (op.entities ?? []) : [])).map(normalizeText),
   );
   await prepareEntityVectors(
     ctx,
@@ -819,25 +814,14 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
   );
 
   // ── 4. apply in one transaction ──
-  // Recheck policy after the async embedding gap: the user may have turned memory off or switched
-  // to approve-first mode while we were waiting for vectors.
-  {
-    const latestPolicy = ctx.policy();
-    // Critical: if memory was disabled while we were embedding, drop everything.
-    if (latestPolicy.mode === 'off') return nothing('memory was disabled after extraction');
-    // If the mode tightened to approve-first, route everything to pending so nothing lands silently.
-    if (latestPolicy.mode === 'approve') status = 'pending';
-    // Any other policy change (allowed kinds, blocked topics, privacy) invalidates the filters above:
-    // dropping this observation is safer than writing under rules the user just replaced.
-    const { mode: _m1, ...latestRules } = latestPolicy;
-    const { mode: _m2, ...capturedRules } = policy;
-    if (JSON.stringify(latestRules) !== JSON.stringify(capturedRules)) return nothing('memory settings changed during extraction');
-  }
+  // Recheck policy after the async embedding gap: allowed kinds and privacy may have changed.
+  // Drop this observation rather than write under settings the user just replaced.
+  if (JSON.stringify(ctx.policy()) !== JSON.stringify(policy)) return nothing('memory settings changed during extraction');
 
   const source: MemorySource = { by: 'extraction', conversationId: turn.conversationId, messageId: turn.userMessage.id };
   return runWrite(ctx, now, (s) => {
     for (const [k, v] of entityVectors) s.entityVectors.set(k, v);
-    const result: MemoryWriteResult = { created: [], updated: [], superseded: [], pending: [], linked: 0 };
+    const result: MemoryWriteResult = { created: [], updated: [], superseded: [], linked: 0 };
     const listed = new Map<string, MemoryNode[]>();
     const list = (target: MemoryNode[], node: MemoryNode) => {
       const where = listed.get(node.id);
@@ -866,7 +850,7 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
         lastAccessedAt: null,
         createdAt: now,
         updatedAt: now,
-        status,
+        status: 'active',
         pinned: false,
         sensitivity: sens(episodeSensitive),
         source,
@@ -876,7 +860,7 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
       s.markNew(node);
       episodeId = node.id;
       episodeNode = node;
-      list(status === 'pending' ? result.pending : result.created, node);
+      list(result.created, node);
       touched.push(node);
       const prev = db
         .prepare(
@@ -900,7 +884,6 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
             confidence: C.extractionConfidence,
             sensitivity: op.sensitivity ?? 'normal',
             pinned: false,
-            status,
             source,
             entities: op.entities ?? [],
             entityType: op.entityType,
@@ -914,6 +897,12 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
             // (its entities, the episode it came from, and its sensitivity: sensitivity only goes
             // up), never a second copy.
             let current = getNode(db, same.id) ?? same;
+            const tags = [...new Set([...current.tags, ...spec.tags])].slice(0, 20);
+            if (tags.length !== current.tags.length) {
+              current = updateNode(db, current.id, { tags }, now)!;
+              s.updated.add(current.id);
+              list(result.updated, current);
+            }
             if (spec.sensitivity === 'sensitive' && current.sensitivity !== 'sensitive') {
               current = updateNode(db, current.id, { sensitivity: 'sensitive' }, now)!;
               // Its vector moves on the device when the main embedder is remote.
@@ -925,34 +914,19 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
             touched.push(current);
             break;
           }
-          const { node, merged } = createOrMerge(s, spec, { episodeId });
-          list(merged ? result.updated : node.status === 'pending' ? result.pending : result.created, node);
+          const { node, merged, superseded } = createOrMerge(s, spec, { episodeId });
+          if (superseded) result.superseded.push(...superseded);
+          list(merged ? result.updated : result.created, node);
           touched.push(node);
           break;
         }
         case 'update': {
           const existing = getNode(db, op.id);
-          if (!existing || (existing.status !== 'active' && existing.status !== 'pending')) break;
-          if (status === 'pending' && existing.status === 'active') {
-            // Approve mode: the edit becomes a pending revision the user can accept or reject.
-            const revision = createRevision(s, existing, {
-              kind: existing.kind,
-              label: op.label ?? existing.label,
-              content: op.content,
-              status,
-              source,
-              reason: op.reason,
-              vector: vec(opIdx[i]!),
-              episodeId,
-              sensitivity: op.sensitivity,
-            });
-            list(result.pending, revision);
-            touched.push(revision);
-            break;
-          }
+          if (existing?.status !== 'active') break;
           const updated = updateNode(db, existing.id, {
             label: op.label ?? existing.label,
             content: op.content,
+            tags: existing.kind === 'preference' ? assistantStyleTags(`${op.label ?? existing.label} ${op.content}`, existing.tags) : existing.tags,
             confidence: Math.min(1, existing.confidence + 0.05),
             // An update may make a memory sensitive (a diagnosis), never less sensitive.
             sensitivity: stricter(existing.sensitivity, op.sensitivity),
@@ -971,19 +945,16 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
             kind: op.kind ?? old.kind,
             label: op.label,
             content: op.content,
-            status,
             source,
             reason: op.reason,
             vector: vec(opIdx[i]!),
             episodeId,
             sensitivity: op.sensitivity,
           });
-          list(status === 'pending' ? result.pending : result.created, revision);
+          list(result.created, revision);
           touched.push(revision);
-          if (status === 'active') {
-            const superseded = applySupersession(s, old.id);
-            if (superseded) result.superseded.push(superseded);
-          }
+          const superseded = applySupersession(s, old.id);
+          if (superseded) result.superseded.push(superseded);
           break;
         }
         case 'reinforce': {
@@ -998,7 +969,7 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
     if (episodeNode && episodeNode.sensitivity !== 'sensitive' && touched.some((n) => n.id !== episodeNode.id && n.sensitivity === 'sensitive')) {
       const raised = updateNode(db, episodeNode.id, { sensitivity: 'sensitive' }, now)!;
       s.syncVectorPlace(raised);
-      list(status === 'pending' ? result.pending : result.created, raised);
+      list(result.created, raised);
       touched[touched.findIndex((n) => n.id === raised.id)] = raised;
     }
 
@@ -1027,19 +998,20 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
 // ─────────────────────────────── remember ────────────────────────────────
 
 /** Explicit "remember this" (memory UI or the remember tool). */
-export async function remember(ctx: MemoryContext, input: RememberInput): Promise<MemoryNode> {
+export async function remember(ctx: MemoryContext, input: RememberInput, signal?: AbortSignal): Promise<MemoryNode> {
+  if (signal?.aborted) throw new NeoError('cancelled', 'The operation was cancelled.');
   const parsed = RememberInputSchema.safeParse(input);
   if (!parsed.success) throw new NeoError('bad_request', `Invalid memory: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ')}`);
   const data = parsed.data;
   const policy = ctx.policy();
-  if (policy.mode === 'off') throw new NeoError('forbidden', 'Memory is turned off.');
 
   const content = data.content.trim();
   if (!content) throw new NeoError('bad_request', 'Invalid memory: content is empty');
   const label = (data.label?.trim() || deriveLabel(content)).slice(0, 300);
   const kind = data.kind ?? 'fact';
   const entities = (data.entities ?? []).map((e) => e.trim()).filter(Boolean);
-  const tags = (data.tags ?? []).map((t) => t.trim()).filter(Boolean);
+  const rawTags = (data.tags ?? []).map((t) => t.trim()).filter(Boolean);
+  const tags = kind === 'preference' ? assistantStyleTags(`${label} ${content}`, rawTags) : rawTags;
   const all = [label, content, ...entities, ...tags];
   if (all.some(hasCredentials)) {
     throw new NeoError('bad_request', 'That looks like a password, key or card number. NEO never stores secrets in memory.');
@@ -1048,10 +1020,8 @@ export async function remember(ctx: MemoryContext, input: RememberInput): Promis
   const byUser = source.by === 'user';
   // The user's own edits in the memory UI are theirs to make; the model is held to the policy.
   if (!byUser) {
-    if (all.some((t) => mentionsBlockedTopic(t, policy.blockedTopics))) throw new NeoError('forbidden', 'That topic is blocked in your memory settings.');
     if (!policy.allowedKinds.includes(kind)) throw new NeoError('forbidden', `Memories of kind "${kind}" are turned off in your memory settings.`);
   }
-  const status: WritableStatus = byUser || policy.mode !== 'approve' ? 'active' : 'pending';
   // Sensitive-looking content (health, finances, …) is sensitive unless said otherwise. Only the
   // user's own explicit "normal" (memory UI) keeps it normal: the model can raise, never lower it.
   const userSaysNormal = byUser && data.sensitivity === 'normal';
@@ -1059,10 +1029,11 @@ export async function remember(ctx: MemoryContext, input: RememberInput): Promis
     data.sensitivity === 'sensitive' || (!userSaysNormal && [label, content, ...tags].some(looksSensitive)) ? 'sensitive' : 'normal';
   const now = ctx.clock();
 
-  const onDevice = ctx.keepLocal({ sensitivity, status });
+  const onDevice = ctx.keepLocal({ sensitivity });
   const [vector] = await embedTexts(ctx, [nodeEmbedText(kind, label, content, [])], onDevice);
   const entityVectors = new Map<string, Float32Array | null>();
   await prepareEntityVectors(ctx, entities, entityVectors, onDevice);
+  if (signal?.aborted) throw new NeoError('cancelled', 'The operation was cancelled.');
 
   return runWrite(ctx, now, (s) => {
     for (const [k, v] of entityVectors) s.entityVectors.set(k, v);
@@ -1074,7 +1045,6 @@ export async function remember(ctx: MemoryContext, input: RememberInput): Promis
       confidence: C.userConfidence,
       sensitivity,
       pinned: data.pinned ?? false,
-      status,
       source,
       entities,
       entityType: data.entityType,
@@ -1082,88 +1052,6 @@ export async function remember(ctx: MemoryContext, input: RememberInput): Promis
       validUntil: data.validUntil ?? undefined,
       vector: vector ?? null,
     }).node;
-  });
-}
-
-// ─────────────────────────────── approve / reject ────────────────────────────────
-
-/** Pending entities linked (either direction) to `nodeId`. */
-function pendingEntityNeighbors(s: WriteSession, nodeId: string): string[] {
-  const rows = s.ctx.db
-    .prepare(
-      `SELECT n.id FROM memory_edges e
-       JOIN memory_nodes n ON n.id = CASE WHEN e.src = ? THEN e.dst ELSE e.src END
-       WHERE (e.src = ? OR e.dst = ?) AND n.kind = 'entity' AND n.status = 'pending'`,
-    )
-    .all(nodeId, nodeId, nodeId) as { id: string }[];
-  return rows.map((r) => r.id);
-}
-
-/**
- * A pending entity follows the memories that mention it: active once every
- * linked memory is active, deleted when nothing links to it any more.
- */
-function settleEntity(s: WriteSession, entityId: string, deleteOrphan: boolean): void {
-  const entity = getNode(s.ctx.db, entityId);
-  if (!entity || entity.kind !== 'entity' || entity.status !== 'pending') return;
-  const others = s.ctx.db
-    .prepare(
-      `SELECT n.status FROM memory_edges e
-       JOIN memory_nodes n ON n.id = CASE WHEN e.src = ? THEN e.dst ELSE e.src END
-       WHERE e.src = ? OR e.dst = ?`,
-    )
-    .all(entityId, entityId, entityId) as { status: string }[];
-  if (!others.length) {
-    if (deleteOrphan) for (const id of deleteNodes(s.ctx.db, [entityId])) s.deleted.add(id);
-    return;
-  }
-  if (others.every((o) => o.status === 'active')) activate(s, entity);
-}
-
-/** Approve pending nodes inside an open write session. Returns how many were approved. */
-export function approveNodes(s: WriteSession, ids: Iterable<string>): number {
-  let count = 0;
-  const entities = new Set<string>();
-  for (const id of new Set(ids)) {
-    const node = getNode(s.ctx.db, id);
-    if (!node || node.status !== 'pending') continue;
-    activate(s, node);
-    count++;
-    for (const e of pendingEntityNeighbors(s, id)) entities.add(e);
-  }
-  for (const e of entities) settleEntity(s, e, false);
-  return count;
-}
-
-export function approve(ctx: MemoryContext, ids: string[]): number {
-  return runWrite(ctx, ctx.clock(), (s) => approveNodes(s, ids));
-}
-
-export function reject(ctx: MemoryContext, ids: string[]): number {
-  return runWrite(ctx, ctx.clock(), (s) => {
-    const targets: string[] = [];
-    const entities = new Set<string>();
-    const labels = new Map<string, string>();
-    for (const id of new Set(ids)) {
-      const node = getNode(ctx.db, id);
-      if (!node || node.status !== 'pending') continue;
-      targets.push(id);
-      labels.set(id, node.label);
-      for (const e of pendingEntityNeighbors(s, id)) {
-        entities.add(e);
-        if (!labels.has(e)) labels.set(e, getNode(ctx.db, e)?.label ?? '');
-      }
-    }
-    const deleted = deleteNodes(ctx.db, targets);
-    for (const id of deleted) {
-      s.deleted.add(id);
-      entities.delete(id);
-    }
-    for (const e of entities) settleEntity(s, e, true);
-    // Like forget: the text of rejected memories (and of the orphaned entities deleted with them)
-    // must not outlive them in the consolidation journal.
-    redactJournal(ctx.db, [...s.deleted].map((id) => ({ id, label: labels.get(id) ?? '' })));
-    return deleted.length;
   });
 }
 

@@ -4,6 +4,7 @@ import {
   NeoSettingsSchema,
   applySettingsPatch,
   deepMerge,
+  migrateSettings,
   type NeoSettings,
   type NeoSettingsPatch,
   type SettingsStore,
@@ -23,7 +24,7 @@ export function createSettingsStore(db: NeoDatabase, defaults: NeoSettings = DEF
   const read = (): NeoSettings => {
     const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(KEY) as { value: string } | undefined;
     const stored = fromJson<Record<string, unknown>>(row?.value, {});
-    const parsed = NeoSettingsSchema.safeParse(deepMerge(defaults, stored));
+    const parsed = NeoSettingsSchema.safeParse(deepMerge(defaults, migrateSettings(stored)));
     return parsed.success ? parsed.data : defaults;
   };
 

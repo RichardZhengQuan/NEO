@@ -6,6 +6,14 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import swSource from '../public/sw.js?raw';
+import manifestSource from '../public/manifest.webmanifest?raw';
+
+it('installs and opens the PWA at the timeline without a new-chat shortcut', () => {
+  const manifest: { start_url: string; shortcuts: { name: string; url: string; description: string }[] } = JSON.parse(manifestSource);
+  expect(manifest.start_url).toBe('./#/');
+  expect(manifest.shortcuts[0]).toEqual({ name: 'NEO', url: './#/', description: 'Open your timeline' });
+  expect(manifest.shortcuts.some((shortcut) => /New chat|new conversation|#\/chat/i.test(`${shortcut.name} ${shortcut.description} ${shortcut.url}`))).toBe(false);
+});
 
 const ORIGIN = 'https://neo.example';
 const SCOPE = `${ORIGIN}/neo/`;
@@ -137,7 +145,7 @@ describe('service worker caching (allow-list only)', () => {
   });
 
   it('never intercepts API requests, at the root or behind a prefix', async () => {
-    for (const path of ['/api/health', '/api', '/neo/api/conversations', '/neo/api', '/neo/v2/api/memory/export', '/neo/API/settings']) {
+    for (const path of ['/api/health', '/api', '/neo/api/timeline', '/neo/api', '/neo/v2/api/memory/export', '/neo/API/settings']) {
       expect(await sw.fetchEvent(request(path)), path).toBeNull();
     }
     expect(sw.fetch).not.toHaveBeenCalled();
@@ -234,7 +242,7 @@ describe('service worker push + clicks', () => {
 
   it('routes a Snooze click to an open window, or opens the reminder', async () => {
     const sw = loadWorker();
-    const client = { url: `${SCOPE}#/chat`, focused: true, visibilityState: 'visible', postMessage: vi.fn(), focus: vi.fn(async () => undefined) };
+    const client = { url: `${SCOPE}#/`, focused: true, visibilityState: 'visible', postMessage: vi.fn(), focus: vi.fn(async () => undefined) };
     sw.clients.matchAll.mockResolvedValueOnce([client]);
     const close = vi.fn();
     let run = sw.dispatch('notificationclick', { action: 'snooze', notification: { data: { reminderId: 'rem_1' }, close } });
@@ -245,5 +253,28 @@ describe('service worker push + clicks', () => {
     run = sw.dispatch('notificationclick', { action: '', notification: { data: { url: 'neo://reminders/rem_2' }, close } });
     await Promise.all(run.pending);
     expect(sw.clients.openWindow).toHaveBeenCalledWith(`${SCOPE}#/reminders/rem_2`);
+  });
+
+  it.each([
+    [{ url: 'neo://timeline/msg_1', reminderId: 'rem_1' }, '#/timeline?messageId=msg_1'],
+    [{ url: 'neo://timeline?messageId=msg_1' }, '#/timeline?messageId=msg_1'],
+    [{ messageId: 'msg_1', reminderId: 'rem_1' }, '#/timeline?messageId=msg_1'],
+    [{ url: 'neo://chat/conv_1?messageId=msg_1' }, '#/timeline?messageId=msg_1'],
+    [{ url: 'neo://chat/conv_1' }, '#/'],
+    [{ url: 'neo://elsewhere' }, '#/'],
+  ])('opens notification target %j at %s', async (data, hash) => {
+    const sw = loadWorker();
+    const { pending } = sw.dispatch('notificationclick', { action: '', notification: { data, close: vi.fn() } });
+    await Promise.all(pending);
+    expect(sw.clients.openWindow).toHaveBeenCalledWith(`${SCOPE}${hash}`);
+  });
+
+  it('sends a timeline jump to the focused open window', async () => {
+    const sw = loadWorker();
+    const client = { url: `${SCOPE}#/memory`, focused: true, visibilityState: 'visible', postMessage: vi.fn(), focus: vi.fn(async () => undefined) };
+    sw.clients.matchAll.mockResolvedValueOnce([client]);
+    const { pending } = sw.dispatch('notificationclick', { action: '', notification: { data: { url: 'neo://timeline/msg_1' }, close: vi.fn() } });
+    await Promise.all(pending);
+    expect(client.postMessage).toHaveBeenCalledWith({ type: 'neo:navigate', url: '#/timeline?messageId=msg_1' });
   });
 });

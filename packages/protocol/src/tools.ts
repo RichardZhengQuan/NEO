@@ -24,6 +24,8 @@ export interface ToolContext {
   toolCallId: string;
   conversationId?: string | undefined;
   messageId?: string | undefined;
+  /** Off-record calls may recall without reinforcement and cannot write memories. */
+  offRecord?: boolean | undefined;
   signal: AbortSignal;
   now(): number;
   /** IANA zone of the user, e.g. "Asia/Shanghai". */
@@ -60,7 +62,7 @@ export interface ToolDefinition<I = any> {
   defaultPermission: PermissionLevel;
   /** Output contains third-party content; the runtime wraps it as untrusted data. */
   untrustedOutput?: boolean;
-  /** Only runnable from UI actions (origin 'ui'); never offered to the model (e.g. approve_memory). */
+  /** Only runnable from UI actions (origin 'ui'); never offered to the model. */
   uiOnly?: boolean;
   /** One line describing a concrete call, for confirmation prompts ("Delete note 'Groceries'"). */
   describeCall?(input: I): string;

@@ -337,7 +337,7 @@ export function browserBootstrapDeps(): BootstrapDeps {
     consumePairLink: consumePairingLink,
     health: async (url) => (await checkHealth(url)) !== null,
     clearPairHash: () => {
-      window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#/chat`);
+      window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#/`);
     },
   };
 }

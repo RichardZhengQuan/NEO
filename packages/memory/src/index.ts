@@ -21,6 +21,7 @@ import type { MemoryServiceOptions } from './constants.js';
 
 // Export constants and shared types (also used by sub-modules via ./constants.js)
 export { MEMORY_CONSTANTS, BASE_STABILITY_DAYS } from './constants.js';
+export { ASSISTANT_STYLE_TAG, assistantStyleAspect, assistantStyleTags } from './assistant-style.js';
 export type { MemoryLLM, MemoryServiceOptions } from './constants.js';
 
 /** Create the service and run memory migrations on `db`. */
