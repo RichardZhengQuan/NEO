@@ -12,6 +12,9 @@ describe('parseRoute', () => {
     ['', { name: 'timeline' }],
     ['#/', { name: 'timeline' }],
     ['#/timeline', { name: 'timeline' }],
+    ['#/plan-tomorrow', { name: 'plan-tomorrow' }],
+    ['#/plan-tomorrow?date=2026-10-13', { name: 'plan-tomorrow', date: '2026-10-13' }],
+    ['#/plan-tomorrow?date=2026-02-30', { name: 'plan-tomorrow' }],
     ['#/timeline/msg_1', { name: 'timeline', messageId: 'msg_1' }],
     ['#/timeline?messageId=msg_2', { name: 'timeline', messageId: 'msg_2' }],
     ['#/chat', { name: 'timeline' }],
@@ -55,6 +58,8 @@ describe('parseRoute', () => {
 describe('routeToHash', () => {
   it.each<Route>([
     { name: 'timeline' },
+    { name: 'plan-tomorrow' },
+    { name: 'plan-tomorrow', date: '2026-10-13' },
     { name: 'timeline', messageId: 'msg_1' },
     { name: 'memory', tab: 'net' },
     { name: 'memory', tab: 'stats' },
@@ -80,6 +85,7 @@ describe('neoUrlToRoute', () => {
     ['neo://timeline/msg_1', { name: 'timeline', messageId: 'msg_1' }],
     ['neo://reminders/rem_abc', { name: 'reminders', reminderId: 'rem_abc' }],
     ['neo://reminders', { name: 'reminders' }],
+    ['neo://plan-tomorrow?date=2026-10-13', { name: 'plan-tomorrow', date: '2026-10-13' }],
     ['neo://memory/mem_5', { name: 'memory', tab: 'net', nodeId: 'mem_5' }],
     ['neo://tasks/task_1', { name: 'tasks', taskId: 'task_1' }],
     ['neo://notes/note_1', { name: 'notes', noteId: 'note_1' }],

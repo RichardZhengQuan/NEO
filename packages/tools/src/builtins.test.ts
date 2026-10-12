@@ -108,7 +108,7 @@ describe('catalogue', () => {
   it('has every documented tool with the documented risk, permission and flags', () => {
     const { registry } = setup({}, { provider: 'searxng', baseUrl: 'http://127.0.0.1:8888' });
     const expected: Record<string, [string, string]> = {
-      get_datetime: ['read', 'auto'], calculate: ['read', 'auto'],
+      get_datetime: ['read', 'auto'], calculate: ['read', 'auto'], plan_tomorrow: ['read', 'auto'],
       create_reminder: ['write', 'auto'], list_reminders: ['read', 'auto'], update_reminder: ['write', 'auto'],
       snooze_reminder: ['write', 'auto'], complete_reminder: ['write', 'auto'], cancel_reminder: ['write', 'auto'],
       create_task: ['write', 'auto'], list_tasks: ['read', 'auto'], update_task: ['write', 'auto'], delete_task: ['dangerous', 'confirm'],

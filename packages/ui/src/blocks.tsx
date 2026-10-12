@@ -74,6 +74,7 @@ import { useConfirm } from './confirm.js';
 import { useLinkClick } from './links.js';
 import { formatDate, formatDateTime, formatRelative } from './format.js';
 import { RemoteImagePlaceholder, SafeImage, useRemoteImages } from './remote-image.js';
+import { RetainedStateScope, useRetainedState } from './retained-state.js';
 
 export interface UIActionContext {
   uiId?: string;
@@ -95,6 +96,8 @@ export interface BlockRendererProps {
   onAction?: OnUIAction;
   live?: LiveData;
   depth?: number;
+  /** Stable structural identity supplied by container renderers for blocks without ids. */
+  stateKey?: string;
 }
 
 const MAX_DEPTH = 8;
@@ -336,7 +339,7 @@ const TABLE_PAGE = 50;
 function TableRenderer({ block }: { block: TableBlock }): ReactElement {
   const locale = useLocale();
   const t = useT();
-  const [all, setAll] = useState(false);
+  const [all, setAll] = useRetainedState('table:all', false);
   const rows = all ? block.rows : block.rows.slice(0, TABLE_PAGE);
   const numeric = (f?: string) => f === 'number' || f === 'currency' || f === 'percent';
   return (
@@ -580,9 +583,9 @@ function FormFieldControl({ field, id, value, error, onChange }: { field: FormFi
 function FormRenderer({ block, uiId, onAction }: BlockRendererProps & { block: FormBlock }): ReactElement {
   const t = useT();
   const formId = useId();
-  const [values, setValues] = useState<Record<string, FieldValue>>(() => Object.fromEntries(block.fields.map((f) => [f.name, initialValue(f)])));
-  const [errors, setErrors] = useState<Record<string, string | null>>({});
-  const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [values, setValues] = useRetainedState<Record<string, FieldValue>>('form:values', () => Object.fromEntries(block.fields.map((f) => [f.name, initialValue(f)])));
+  const [errors, setErrors] = useRetainedState<Record<string, string | null>>('form:errors', {});
+  const [state, setState] = useRetainedState<'idle' | 'sending' | 'sent' | 'error'>('form:status', 'idle');
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -594,7 +597,7 @@ function FormRenderer({ block, uiId, onAction }: BlockRendererProps & { block: F
       if (err) invalid = true;
     }
     setErrors(next);
-    if (invalid || !onAction) return;
+    if (invalid || !onAction || state === 'sending') return;
     setState('sending');
     try {
       await onAction({ id: FORM_SUBMIT_ACTION_ID, kind: 'event', label: block.submitLabel ?? t('common.submit') }, { uiId, values });
@@ -785,7 +788,7 @@ function GridRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps
   return (
     <div className="neo-grid" data-cols={cols} style={{ ['--neo-cols' as string]: cols }}>
       {block.children.map((child, i) => (
-        <BlockRenderer key={child.id ?? i} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
       ))}
     </div>
   );
@@ -795,7 +798,7 @@ function StackRenderer({ block, uiId, onAction, live, depth }: BlockRendererProp
   return (
     <div className="neo-stack" data-direction={block.direction ?? 'vertical'} data-gap={block.gap ?? 'md'}>
       {block.children.map((child, i) => (
-        <BlockRenderer key={child.id ?? i} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
       ))}
     </div>
   );
@@ -803,7 +806,7 @@ function StackRenderer({ block, uiId, onAction, live, depth }: BlockRendererProp
 
 function TabsRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: TabsBlock }): ReactElement {
   const prefix = useId();
-  const [active, setActive] = useState(block.tabs[0]?.id ?? '');
+  const [active, setActive] = useRetainedState('tabs:active', block.tabs[0]?.id ?? '');
   const current = block.tabs.find((tab) => tab.id === active) ?? block.tabs[0];
   return (
     <div>
@@ -816,7 +819,9 @@ function TabsRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps
       />
       {current && (
         <div className="neo-tabpanel" role="tabpanel" id={`${prefix}-panel-${current.id}`} aria-labelledby={`${prefix}-tab-${current.id}`}>
-          <BlockList blocks={current.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+          <RetainedStateScope key={current.id} scope={`tab:${current.id}`}>
+            <BlockList blocks={current.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+          </RetainedStateScope>
         </div>
       )}
     </div>
@@ -825,7 +830,7 @@ function TabsRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps
 
 function AccordionRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: AccordionBlock }): ReactElement {
   const prefix = useId();
-  const [open, setOpen] = useState<Record<string, boolean>>(() => Object.fromEntries(block.items.map((item) => [item.id, item.open ?? false])));
+  const [open, setOpen] = useRetainedState<Record<string, boolean>>('accordion:open', () => Object.fromEntries(block.items.map((item) => [item.id, item.open ?? false])));
   return (
     <div className="neo-accordion">
       {block.items.map((item) => {
@@ -847,7 +852,9 @@ function AccordionRenderer({ block, uiId, onAction, live, depth }: BlockRenderer
             </button>
             {isOpen && (
               <div id={panelId} className="neo-accordion__panel">
-                <BlockList blocks={item.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+                <RetainedStateScope scope={`item:${item.id}`}>
+                  <BlockList blocks={item.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+                </RetainedStateScope>
               </div>
             )}
           </div>
@@ -1247,13 +1254,25 @@ function renderBlock(props: BlockRendererProps): ReactElement {
   }
 }
 
+function blockStateKey(block: UIBlock, index: number): string {
+  return block?.id ? `id:${block.id}` : `index:${index}`;
+}
+
 /** Render one block. Top-level blocks (depth 0) are validated against the schema first. */
 export function BlockRenderer(props: BlockRendererProps): ReactElement | null {
   const { block, depth = 0 } = props;
+  const instance = useId();
+  const scope = props.stateKey ?? (block?.id ? `id:${block.id}` : props.uiId ? `ui:${props.uiId}` : `instance:${instance}`);
   const valid = useMemo(() => (depth > 0 ? true : UIBlockSchema.safeParse(block).success), [block, depth]);
   if (depth > MAX_DEPTH) return null;
   if (!valid || !block || typeof block !== 'object') return <FallbackRenderer block={block} />;
-  return <BlockBoundary block={block}>{renderBlock({ ...props, depth })}</BlockBoundary>;
+  return (
+    <RetainedStateScope scope={scope}>
+      <RetainedStateScope scope={block.type}>
+        <BlockBoundary block={block}>{renderBlock({ ...props, depth })}</BlockBoundary>
+      </RetainedStateScope>
+    </RetainedStateScope>
+  );
 }
 
 export function BlockList({
@@ -1272,7 +1291,7 @@ export function BlockList({
   return (
     <div className={`neo-blocks${depth === 0 ? ' neo-blocks--root' : ''}`}>
       {blocks.map((block, i) => (
-        <BlockRenderer key={block?.id ?? i} block={block} uiId={uiId} onAction={onAction} live={live} depth={depth} />
+        <BlockRenderer key={block?.id ?? i} stateKey={blockStateKey(block, i)} block={block} uiId={uiId} onAction={onAction} live={live} depth={depth} />
       ))}
     </div>
   );

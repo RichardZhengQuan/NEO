@@ -9,7 +9,7 @@
  *   no reconnect after close() or 4401
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet, type ToolUseEvent } from './index.js';
+import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet, type ToolUseEvent, type Task } from './index.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fake fetch helpers
@@ -473,6 +473,32 @@ describe('tasks routes', () => {
     expect(requests[0]!.url).toContain('/api/tasks');
     expect(requests[0]!.url).toContain('done=false');
     expect(requests[0]!.url).toContain('query=groceries');
+  });
+
+  it('get: returns the typed task using an encoded ID and a single read-only request', async () => {
+    const task: Task = {
+      id: 'task/with?reserved#characters', listId: 'list_inbox', title: 'Prepare proposal', notes: null,
+      done: true, doneAt: 100, dueAt: 200, priority: 3, tags: ['work'], order: 0, parentId: null,
+      createdAt: 50, updatedAt: 100,
+    };
+    const { client, requests } = makeClient([{ status: 200, body: task }]);
+    const result: Task = await client.tasks.get(task.id);
+    expect(result).toEqual(task);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/tasks/task%2Fwith%3Freserved%23characters');
+    expect(requests[0]!.body).toBeUndefined();
+    expect(requests[0]!.headers['authorization']).toBe('Bearer test-token');
+  });
+
+  it('get: preserves the missing-task error without attempting a mutation', async () => {
+    const { client, requests } = makeClient([{ status: 404, body: { code: 'not_found', message: 'Task not found', retryable: false } }]);
+    await expect(client.tasks.get('missing')).rejects.toMatchObject({
+      name: 'NeoApiError', code: 'not_found', httpStatus: 404, retryable: false,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.body).toBeUndefined();
   });
 
   it('create: POST /api/tasks', async () => {

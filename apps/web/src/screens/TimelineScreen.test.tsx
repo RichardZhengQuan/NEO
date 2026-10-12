@@ -32,13 +32,14 @@ afterEach(cleanup);
 
 describe('timeline without AI', () => {
   it.each([
-    ['en', 'Connect an AI to start chatting', 'Open AI settings'],
-    ['zh-CN', '连接 AI 后即可开始聊天', '打开 AI 设置'],
-  ])('shows empty-chat and composer guidance in %s and opens Settings → AI', (locale, prompt, action) => {
+    ['en', 'Connect an AI to start chatting', 'Open AI settings', 'Type “Plan tomorrow” or keep a draft…'],
+    ['zh-CN', '连接 AI 后即可开始聊天', '打开 AI 设置', '输入“规划明天”，或保留草稿…'],
+  ])('shows empty-chat and composer guidance in %s and opens Settings → AI', (locale, prompt, action, localPlaceholder) => {
     renderTimeline(locale);
 
     expect(screen.getByRole('heading', { name: prompt })).toBeTruthy();
-    expect((screen.getByRole('textbox', { name: prompt }) as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByRole('textbox', { name: localPlaceholder }) as HTMLTextAreaElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: locale === 'en' ? 'Send' : '发送' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole('list', { name: /Things to try/ })).toBeNull();
     const buttons = screen.getAllByRole('button', { name: action });
     expect(buttons).toHaveLength(2);
@@ -62,13 +63,14 @@ describe('timeline without AI', () => {
     expect(screen.queryByText('A custom tagline')).toBeNull();
   });
 
-  it('keeps an existing transcript visible while the composer asks to connect AI', () => {
-    useTimeline.setState({ ...emptyEntry(), loaded: true, messages: [{ id: 'msg_1', episodeId: 'ep_1', conversationId: 'ep_1', role: 'user', parts: [{ type: 'text', text: 'My saved message' }], createdAt: 0, status: 'complete' }] });
+  it('keeps an existing transcript and local drafts available while AI is disconnected', () => {
+    useTimeline.setState({ ...emptyEntry(), loaded: true, offRecordLoaded: true, messages: [{ id: 'msg_1', episodeId: 'ep_1', conversationId: 'ep_1', role: 'user', parts: [{ type: 'text', text: 'My saved message' }], createdAt: 0, status: 'complete' }] });
     renderTimeline();
 
     expect(screen.getByText('My saved message')).toBeTruthy();
-    expect(screen.getByText('Connect an AI to start chatting')).toBeTruthy();
-    expect((screen.getByRole('textbox', { name: 'Connect an AI to start chatting' }) as HTMLTextAreaElement).disabled).toBe(true);
+    expect(screen.getByText('Plan tomorrow uses your saved tasks and reminders. Connect an AI for other requests.')).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: 'Type “Plan tomorrow” or keep a draft…' }) as HTMLTextAreaElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Open AI settings' }));
     expect(navigate).toHaveBeenCalledWith({ name: 'settings', section: 'ai' });
     expect(useTimeline.getState().messages).toHaveLength(1);

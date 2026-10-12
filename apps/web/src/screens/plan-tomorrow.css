@@ -1,0 +1,91 @@
+/* A contextual task scene inside the existing NEO frame. */
+.plan-inner { max-width: 68rem; padding-bottom: 1.75rem; }
+.plan-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.6rem; }
+.plan-heading h2 { margin: 0; font-size: clamp(1.3rem, 2.4vw, 1.8rem); font-weight: 650; letter-spacing: -0.025em; line-height: 1.2; }
+.plan-heading p, .plan-source { color: var(--neo-text-muted); font-size: 0.8rem; margin: 0.4rem 0 0; }
+.plan-source { margin-bottom: 1.5rem; }
+.plan-limited { display: flex; align-items: flex-start; gap: 0.4rem; margin: -0.6rem 0 1rem; color: var(--neo-tone-warning-text); font-size: 0.8rem; line-height: 1.45; }
+.plan-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(14rem, 18rem); gap: 1.5rem; align-items: start; grid-template-areas: 'work context'; }
+.plan-work { grid-area: work; min-width: 0; }
+.plan-context { grid-area: context; min-width: 0; padding: 1rem; border: 1px solid var(--neo-border); border-radius: var(--neo-radius-lg); background: var(--neo-surface); }
+.plan-section-heading { display: flex; align-items: center; gap: 0.5rem; color: var(--neo-text); }
+.plan-section-heading h2 { margin: 0; font-size: 0.975rem; font-weight: 650; }
+.plan-section-hint, .plan-context__hint { font-size: 0.8rem; color: var(--neo-text-muted); margin: 0.35rem 0 1rem; line-height: 1.5; }
+.plan-context__hint { font-size: 0.75rem; margin-bottom: 0.75rem; }
+.plan-context__empty { color: var(--neo-text-muted); margin: 0; font-size: 0.8rem; line-height: 1.5; }
+.plan-anchors { list-style: none; margin: 0; padding: 0; }
+.plan-anchors li { display: grid; grid-template-columns: 4.75rem minmax(0, 1fr); gap: 0.65rem; align-items: baseline; padding: 0.7rem 0; border-top: 1px solid var(--neo-border); font-size: 0.8rem; line-height: 1.4; }
+.plan-anchors time { font-variant-numeric: tabular-nums; color: var(--neo-text-muted); }
+.plan-anchors span { overflow-wrap: anywhere; }
+.plan-context__more > summary { font-size: 0.8rem; padding-top: 0.5rem; color: var(--neo-text-muted); cursor: pointer; }
+.plan-task-list, .plan-change-list { list-style: none; display: grid; gap: 0.75rem; margin: 0; padding: 0; }
+.plan-task { min-width: 0; padding: 1rem; border: 1px solid var(--neo-border); border-radius: var(--neo-radius-lg); background: var(--neo-surface); }
+.plan-task[data-selected='true'] { border-color: color-mix(in srgb, var(--neo-accent) 40%, var(--neo-border)); }
+.plan-task[data-invalid='true'] { border-color: color-mix(in srgb, var(--neo-tone-warning-text) 50%, var(--neo-border)); }
+.plan-task__heading { display: flex; align-items: flex-start; gap: 0.75rem; }
+.plan-task__title { flex: 1; min-width: 0; margin: 0; font-size: 0.925rem; line-height: 1.45; font-weight: 600; overflow-wrap: anywhere; }
+.plan-check { display: inline-flex; align-items: center; gap: 0.5rem; min-height: 2.25rem; color: var(--neo-text); cursor: pointer; font-size: 0.8rem; }
+.plan-task__include { min-height: 1.5rem; flex-shrink: 0; }
+.plan-task__include > span { color: var(--neo-text-muted); font-size: 0.75rem; }
+.plan-task__priority { display: inline-flex; align-items: center; gap: 0.2rem; flex-shrink: 0; font-size: 0.7rem; line-height: 1.5rem; }
+.plan-task__current { display: flex; align-items: center; gap: 0.35rem; margin: 0.55rem 0 0; color: var(--neo-text-muted); font-size: 0.75rem; line-height: 1.45; flex-wrap: wrap; }
+.plan-task__controls { display: grid; grid-template-columns: minmax(8rem, 10rem) minmax(0, 1fr); align-items: end; gap: 1rem; margin-top: 0.9rem; }
+.plan-task__controls .neo-field { margin: 0; }
+.plan-task__controls .neo-label { font-size: 0.75rem; }
+.plan-task__reminder { min-height: 2.5rem; }
+.plan-task__invalid { display: flex; align-items: flex-start; gap: 0.4rem; margin: 0.7rem 0 0; color: var(--neo-tone-warning-text); font-size: 0.8rem; line-height: 1.45; }
+.plan-task__invalid svg { flex-shrink: 0; margin-top: 0.1rem; }
+.plan-alternatives { margin-top: 1.1rem; }
+.plan-alternatives > summary { display: flex; align-items: center; gap: 0.5rem; padding: 0.8rem 0; cursor: pointer; color: var(--neo-text-muted); font-size: 0.825rem; }
+.plan-alternatives > summary::after { content: '+'; margin-left: auto; font-size: 1rem; }
+.plan-alternatives[open] > summary::after { content: '−'; }
+.plan-alternatives > summary::-webkit-details-marker { display: none; }
+.plan-alternatives > summary:focus-visible, .plan-context__more > summary:focus-visible { outline: 2px solid var(--neo-accent); outline-offset: 3px; border-radius: var(--neo-radius-sm); }
+.plan-refresh, .plan-load-error { display: flex; align-items: center; gap: 0.7rem; padding: 0.85rem 1rem; border: 1px solid var(--neo-border); border-radius: var(--neo-radius); color: var(--neo-tone-warning-text); font-size: 0.8rem; line-height: 1.45; margin-top: 1rem; }
+.plan-refresh > span, .plan-load-error > span { flex: 1; }
+.plan-load-error { margin: 0 0 1rem; }
+.plan-load-error > svg { flex-shrink: 0; }
+.plan-skeleton { display: grid; gap: 0.75rem; }
+.plan-change { padding: 1rem; border: 1px solid var(--neo-border); border-radius: var(--neo-radius-lg); background: var(--neo-surface); min-width: 0; }
+.plan-change__heading { display: flex; align-items: flex-start; gap: 0.6rem; }
+.plan-change__heading > svg { margin-top: 0.2rem; flex-shrink: 0; color: var(--neo-text-muted); }
+.plan-change__heading > div { flex: 1; min-width: 0; }
+.plan-change__heading h3 { font-size: 0.9rem; line-height: 1.45; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.plan-change__heading p { font-size: 0.75rem; color: var(--neo-text-muted); margin: 0.2rem 0 0; }
+.plan-change__recovery { margin-top: 0.75rem; }
+.plan-change__values { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 0.7rem; margin: 1rem 0 0; padding-top: 0.8rem; border-top: 1px solid var(--neo-border); }
+.plan-change__values dt { font-size: 0.7rem; color: var(--neo-text-muted); margin-bottom: 0.3rem; }
+.plan-change__values dd { margin: 0; font-size: 0.8rem; line-height: 1.45; overflow-wrap: anywhere; }
+.plan-change__values > svg { color: var(--neo-text-muted); }
+.plan-no-changes { font-size: 0.875rem; color: var(--neo-text-muted); padding: 1rem 0; }
+.plan-footer { position: sticky; bottom: 0; z-index: 2; background: color-mix(in srgb, var(--neo-bg) 94%, transparent); backdrop-filter: blur(12px); border-top: 1px solid var(--neo-border); padding: 0.85rem 1.5rem max(0.85rem, env(safe-area-inset-bottom, 0px)); }
+.plan-footer__inner { display: flex; align-items: center; justify-content: space-between; gap: 1rem; max-width: 65rem; margin: 0 auto; }
+.plan-footer__inner > p { margin: 0; color: var(--neo-text-muted); font-size: 0.8rem; line-height: 1.4; }
+.plan-footer__actions { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+@media (max-width: 767px) {
+  .plan-layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'context' 'work'; gap: 1.25rem; }
+  .plan-heading { align-items: flex-start; }
+  .plan-heading .neo-badge { max-width: 9rem; white-space: normal; }
+  .plan-source { margin-bottom: 1rem; }
+  .plan-context { padding: 0.85rem 1rem; }
+  .plan-task { padding: 0.85rem; }
+  .plan-task__heading { gap: 0.55rem; flex-wrap: wrap; }
+  .plan-task__title { flex-basis: calc(100% - 5rem); }
+  .plan-task__priority { margin-left: auto; }
+  .plan-task__controls { grid-template-columns: minmax(7rem, 1fr) minmax(0, 1.3fr); gap: 0.65rem; }
+  .plan-task__reminder { font-size: 0.75rem; gap: 0.4rem; }
+  .plan-task__reminder > svg { display: none; }
+  .plan-refresh, .plan-load-error { align-items: flex-start; flex-wrap: wrap; }
+  .plan-refresh > span, .plan-load-error > span { flex-basis: calc(100% - 2rem); }
+  .plan-refresh .neo-btn, .plan-load-error .neo-btn { margin-left: auto; }
+  .plan-change__heading { flex-wrap: wrap; }
+  .plan-change__heading > .neo-badge { margin-left: auto; }
+  .plan-footer { padding: 0.8rem 1rem max(0.8rem, env(safe-area-inset-bottom, 0px)); }
+  .plan-footer__inner { align-items: stretch; flex-direction: column; gap: 0.65rem; }
+  .plan-footer__actions { width: 100%; }
+  .plan-footer__actions > .neo-btn { flex: 1; min-width: 0; }
+}
+@media (max-width: 359px) {
+  .plan-task__controls { grid-template-columns: minmax(0, 1fr); gap: 0.3rem; }
+  .plan-change__values { gap: 0.4rem; }
+}

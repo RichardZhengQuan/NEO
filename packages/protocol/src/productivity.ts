@@ -37,6 +37,8 @@ export const ReminderSchema = z.object({
   firedCount: z.number().int().nonnegative(),
   lastFiredAt: z.number().nullable(),
   messageId: z.string().nullable(),
+  /** Opaque caller key for retrying the same creation without making a duplicate. */
+  creationKey: z.string().min(1).max(256).optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
@@ -49,6 +51,7 @@ export const ReminderInputSchema = z.object({
   timezone: z.string().optional(),
   recurrence: RecurrenceSchema.nullable().optional(),
   messageId: z.string().nullable().optional(),
+  creationKey: z.string().trim().min(1).max(256).optional(),
 });
 export type ReminderInput = z.input<typeof ReminderInputSchema>;
 

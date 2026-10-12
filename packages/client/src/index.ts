@@ -266,6 +266,8 @@ export class NeoClient {
       this._impl.tasks.deleteList(id),
     list: (q?: { listId?: string; done?: boolean; query?: string; limit?: number }): Promise<ListResponse<Task>> =>
       this._impl.tasks.list(q),
+    get: (id: string): Promise<Task> =>
+      this._impl.tasks.get(id),
     create: (body: TaskInput): Promise<Task> =>
       this._impl.tasks.create(body),
     update: (id: string, body: TaskPatch): Promise<Task> =>

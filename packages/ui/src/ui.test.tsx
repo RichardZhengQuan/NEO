@@ -733,7 +733,7 @@ describe('Composer', () => {
     fireEvent.keyDown(ta, { key: 'Enter', shiftKey: true });
     expect(onSend).not.toHaveBeenCalled();
     fireEvent.keyDown(ta, { key: 'Enter' });
-    expect(onSend).toHaveBeenCalledWith('Hello', []);
+    expect(onSend).toHaveBeenCalledWith('Hello', [], expect.any(Function));
     expect(onDraftChange).toHaveBeenLastCalledWith('');
   });
 
@@ -766,7 +766,7 @@ describe('Composer', () => {
     fireEvent.keyDown(ta, { key: 'Enter' });
     expect(onSend).not.toHaveBeenCalled();
     fireEvent.keyDown(ta, { key: 'Enter', metaKey: true });
-    expect(onSend).toHaveBeenCalledWith('a', []);
+    expect(onSend).toHaveBeenCalledWith('a', [], expect.any(Function));
   });
 
   it('exposes focus and setText through handleRef', async () => {

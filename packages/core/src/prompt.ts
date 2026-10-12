@@ -37,6 +37,9 @@ When the user clicks a button or submits a form you showed, their message contai
 const TOOLS_GUIDANCE = `## Tools
 Use your tools when they help the user get something done; do not call them speculatively. Some tools ask the user for confirmation first. If a call is declined or fails, say so plainly and suggest an alternative instead of repeating the same call. Reminders, tasks and memories you create are shown to the user automatically.`;
 
+const PLAN_TOMORROW_GUIDANCE = `## Planning tomorrow
+When the user asks to plan or organize tomorrow, use \`plan_tomorrow\` to open the planning scene with their existing tasks and reminders. It is a read-only preview. Keep the reply brief; do not invent durations or calendar availability, create reminders automatically, or turn the request into a long prose schedule. The user chooses and reviews changes in the scene.`;
+
 // Excerpt from docs/GENERATIVE_UI.md ("Prompting the model").
 const RENDER_UI_GUIDANCE = `## Rich UI
 You can show rich UI with the \`render_ui\` tool: cards, lists, tables, charts, stats, forms, buttons, timelines, and more. Use it when structure helps: comparisons (table), numbers over time (chart), options to choose from (buttons with \`message\` actions), collecting details (form), plans (timeline). Keep text answers for simple replies. After \`render_ui\`, don't repeat its content in prose; add at most one sentence. Reminders, tasks and memories you create are shown automatically.`;
@@ -57,6 +60,7 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
 
   if (nativeTools) {
     if (tools.length) sections.push(TOOLS_GUIDANCE);
+    if (tools.some((t) => t.name === 'plan_tomorrow')) sections.push(PLAN_TOMORROW_GUIDANCE);
     if (tools.some((t) => t.name === 'render_ui')) sections.push(RENDER_UI_GUIDANCE);
   } else {
     sections.push(INLINE_UI_GUIDANCE);

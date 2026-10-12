@@ -97,6 +97,26 @@ Model tool-call approvals use a separate server-generated `ToolConfirmation.id` 
 - Streaming: blocks appear when their part arrives (tool results). Text streams token by token with a caret.
 - Never throw. An invalid block (it can't happen after server validation, but old data might) renders a small "Can't display this content" fallback with the text rendering inside `<details>`.
 
+### Unfinished chat input
+
+Within the current app session, leaving the timeline or switching generated tabs and accordion sections preserves composer text and image attachments, form edits, field selections, and the current generated view. A pending form submission remains pending after returning, so navigation does not enable a duplicate submission. Failed chat sends restore their draft unless newer input has replaced it.
+
+The app owns an in-memory `RetainedStateProvider` store; generated controls are scoped by message, UI part, and nested block identity. Standalone `@neo/ui` controls retain their normal local-state behavior unless wrapped in this provider. No draft is written to browser storage or synchronized to another device, and reloading or restarting the app clears it. Disconnecting or changing the connected session clears all drafts. Recorded and off-record composer drafts are separate; ending an off-record exchange or deleting a message removes its retained input and invalidates pending writes to that input.
+
+### Plan tomorrow
+
+Planning is a contextual scene, opened by an explicit “Plan tomorrow” chat request, the planning action on Tasks or Reminders when relevant saved items exist, or the read-only `plan_tomorrow` tool's card. The explicit local chat command works without a configured AI provider; other requests stay unsendable while their drafts remain editable. It has no permanent navigation item. Chat offers **Resume plan** only after a plan exists in the current session.
+
+The scene uses the next calendar date in the configured timezone and reads existing tasks and reminders. It initially selects up to three unfinished tasks due tomorrow, earlier, or without a due date; later tasks remain available as unselected alternatives. Saved reminders show only their next scheduled due time. These are context, not calendar availability or projected recurrence instances. Target times are editable due times, not invented task durations. Adding a reminder is optional and starts unchecked.
+
+**Review plan** shows the exact before/after due times and requested new reminders. **Apply changes** writes through the existing tasks and reminders APIs. Successful writes have individual receipts; a partial save keeps those receipts and retries only the remaining operations. Changed, completed, deleted, unverifiable, or past-due selections require another review. Unknown reminder outcomes remain unresolved until verified; retries cannot blindly create a second reminder.
+
+Each reviewed reminder creation uses an opaque UUID `creationKey` through the existing API. The reminder store persists that key with its original payload fingerprint: a repeated matching request returns the existing reminder, and a different payload with the same key fails with `409`. Deleting a keyed reminder retains its consumed key, so delayed replay cannot recreate it; a new intentional creation uses a fresh key. This metadata is separate from user-visible notes. Clients still reconcile an unknown response by reading saved reminders, so a server that does not support the key cannot cause a blind duplicate retry.
+
+Switching scenes retains choices, target times, optional reminders, disclosure selections, review stage, pending saves, and their results. Composer drafts and generated form edits use the same existing session retention boundary. Reloading, restarting, disconnecting, or changing server sessions clears these in-memory drafts. Private and recorded plans are separate; ending private mode removes its plan and prevents late responses from restoring it. Saved tasks and reminders remain governed by the existing productivity APIs.
+
+The tool and prompt are available to new assistant episodes. Existing episodes retain their frozen toolset and prompt; the explicit local chat intent and Tasks/Reminders actions can open the scene immediately.
+
 ## Prompting the model (core system prompt excerpt)
 
 > You can show rich UI with the `render_ui` tool: cards, lists, tables, charts, stats, forms, buttons, timelines, and more. Use it when structure helps: comparisons (table), numbers over time (chart), options to choose from (buttons with `message` actions), collecting details (form), plans (timeline). Keep text answers for simple replies. After `render_ui`, don't repeat its content in prose; add at most one sentence. Reminders, tasks and memories you create are shown automatically.
