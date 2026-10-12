@@ -16,17 +16,20 @@ const reminder = (body: ReminderInput, id: string): Reminder => ({ ...body, id, 
 function fixture(ids = ['a', 'b']) {
   const tasks = Object.fromEntries(ids.map((id) => [id, task(id)]));
   const reminders: Reminder[] = [];
-  const listTasks = vi.fn(async () => ({ items: Object.values(tasks) }));
+  const listTasks = vi.fn(async (query?: Parameters<NeoClient['tasks']['list']>[0]) => ({ items: Object.values(tasks).filter((task) => query?.done === undefined || task.done === query.done).slice(0, query?.limit ?? 500) }));
+  const getTask = vi.fn(async (id: string) => { if (!tasks[id]) throw Object.assign(new Error('Task not found'), { httpStatus: 404 }); return tasks[id]!; });
   const updateTask = vi.fn(async (id: string, patch: TaskPatch) => {
     const updated = { ...tasks[id]!, ...patch, updatedAt: tasks[id]!.updatedAt + 1 } as Task;
     tasks[id] = updated;
     return updated;
   });
-  const listReminders = vi.fn(async () => ({ items: [...reminders] }));
+  const listReminders = vi.fn(async (query?: Parameters<NeoClient['reminders']['list']>[0]) => ({ items: reminders.filter((reminder) =>
+    (!query?.status || query.status.includes(reminder.status)) && (query?.from === undefined || reminder.dueAt >= query.from) && (query?.to === undefined || reminder.dueAt <= query.to),
+  ).slice(0, query?.limit ?? 500) }));
   const createReminder = vi.fn(async (body: ReminderInput) => { const created = reminder(body, `r${reminders.length + 1}`); reminders.push(created); return created; });
-  const client = { tasks: { list: listTasks, update: updateTask }, reminders: { list: listReminders, create: createReminder } } as unknown as NeoClient;
+  const client = { tasks: { list: listTasks, get: getTask, update: updateTask }, reminders: { list: listReminders, create: createReminder } } as unknown as NeoClient;
   useSession.setState({ client, sessionEpoch: 10, settings: { ...DEFAULT_SETTINGS, timezone: 'UTC' } });
-  return { tasks, reminders, client, listTasks, updateTask, listReminders, createReminder };
+  return { tasks, reminders, client, listTasks, getTask, updateTask, listReminders, createReminder };
 }
 
 async function ready() {
@@ -49,6 +52,77 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); resetPlanTomorrow(); });
 
 describe('Plan tomorrow review and real receipts', () => {
+  it('loads active tasks and tomorrow reminders beyond hundreds of completed historical items', async () => {
+    const f = fixture(Array.from({ length: 501 }, (_, index) => `task${index}`));
+    for (const id of Object.keys(f.tasks).slice(0, 500)) f.tasks[id] = { ...f.tasks[id]!, done: true };
+    for (let index = 0; index < 500; index++) f.reminders.push({ ...reminder({ title: `Historical ${index}`, dueAt: NOW - 1000 }, `old${index}`), status: 'completed' });
+    f.reminders.push(reminder({ title: 'Tomorrow anchor', dueAt: Date.parse('2026-10-13T08:00Z') }, 'tomorrow'));
+    const plan = await ready();
+    expect(f.listTasks).toHaveBeenCalledWith({ done: false, limit: 500 });
+    expect(f.listReminders).toHaveBeenCalledWith({ status: ['scheduled'], from: Date.parse('2026-10-13T00:00Z'), to: Date.parse('2026-10-14T00:00Z') - 1, limit: 500 });
+    expect(currentPlan(plan.key).suggestedIds).toEqual(['task500']);
+    expect(currentPlan(plan.key).reminderIds).toEqual(['tomorrow']);
+    expect(currentPlan(plan.key).limited).toBe(false);
+  });
+
+  it('merges scoped scene reads without dropping cached completed tasks or claiming full-route caches loaded', async () => {
+    const f = fixture(['a']);
+    const completed = { ...task('cached-done'), done: true };
+    const unrelatedReminder = reminder({ title: 'Another day', dueAt: Date.parse('2026-10-20T09:00Z') }, 'later');
+    useData.setState({ tasks: { [completed.id]: completed }, reminders: { [unrelatedReminder.id]: unrelatedReminder }, tasksLoaded: false, remindersLoaded: false });
+    const plan = await ready();
+    expect(useData.getState().tasks).toMatchObject({ a: f.tasks.a, 'cached-done': completed });
+    expect(useData.getState().reminders.later).toEqual(unrelatedReminder);
+    expect(useData.getState()).toMatchObject({ tasksLoaded: false, remindersLoaded: false });
+    expect(currentPlan(plan.key).baselines).not.toHaveProperty('cached-done');
+  });
+
+  it('drops a canceled reminder from the scene anchor IDs while retaining unrelated cached reminders', async () => {
+    const f = fixture(['a']);
+    f.reminders.push(reminder({ title: 'Old anchor', dueAt: Date.parse('2026-10-13T09:00Z') }, 'anchor'));
+    const plan = await ready();
+    expect(currentPlan(plan.key).reminderIds).toEqual(['anchor']);
+    f.reminders[0] = { ...f.reminders[0]!, status: 'cancelled' };
+    await loadPlanTomorrow(plan.key, true);
+    expect(currentPlan(plan.key).reminderIds).toEqual([]);
+    expect(useData.getState().reminders).toHaveProperty('anchor');
+  });
+
+  it('verifies a selected task beyond the capped active list and blocks a failed authoritative lookup', async () => {
+    const f = fixture(['selected']);
+    const plan = await ready();
+    reviewPlanTomorrow(plan.key);
+    f.listTasks.mockResolvedValue({ items: Array.from({ length: 500 }, (_, index) => task(`other${index}`)) });
+    f.getTask.mockRejectedValueOnce(new Error('Task lookup unavailable'));
+    await applyPlanTomorrow(plan.key);
+    expect(f.getTask).toHaveBeenCalledWith('selected');
+    expect(currentPlan(plan.key).operations[0]?.reason).toBe('source-unavailable');
+    expect(f.updateTask).not.toHaveBeenCalled();
+    await loadPlanTomorrow(plan.key, true);
+    expect(currentPlan(plan.key).taskReadErrors).toEqual({});
+    expect(currentPlan(plan.key).baselines.selected?.id).toBe('selected');
+    reviewPlanTomorrow(plan.key);
+    await applyPlanTomorrow(plan.key);
+    expect(f.updateTask).toHaveBeenCalledWith('selected', { dueAt: Date.parse('2026-10-13T09:00Z') });
+  });
+
+  it.each(['done', 'deleted'] as const)('authoritatively detects a retained %s task outside the active list while keeping other cached records', async (reason) => {
+    const f = fixture(['a']);
+    const plan = await ready();
+    reviewPlanTomorrow(plan.key);
+    const unrelated = { ...task('cached-completed'), done: true };
+    useData.setState((data) => ({ tasks: { ...data.tasks, [unrelated.id]: unrelated } }));
+    if (reason === 'done') f.tasks.a = { ...f.tasks.a!, done: true, updatedAt: 2 };
+    else delete f.tasks.a;
+    f.listTasks.mockResolvedValue({ items: Array.from({ length: 500 }, (_, index) => task(`other${index}`)) });
+    await applyPlanTomorrow(plan.key);
+    expect(currentPlan(plan.key).operations[0]?.reason).toBe(reason);
+    expect(useData.getState().tasks['cached-completed']).toEqual(unrelated);
+    expect(f.updateTask).not.toHaveBeenCalled();
+    if (reason === 'deleted') expect(useData.getState().tasks.a).toBeUndefined();
+    else expect(useData.getState().tasks.a?.done).toBe(true);
+  });
+
   it('restarts a deferred source read after a privacy roundtrip and ignores its old response', async () => {
     const f = fixture(['a']);
     const plan = await ready();
@@ -259,6 +333,22 @@ describe('Plan tomorrow review and real receipts', () => {
     expect(f.createReminder).toHaveBeenCalledOnce();
   });
 
+  it('reconciles an accepted reminder that was completed after its response was lost without treating it as a scheduled anchor', async () => {
+    const f = fixture(['a']);
+    const plan = await ready();
+    setPlanChoice(plan.key, 'a', { addReminder: true });
+    reviewPlanTomorrow(plan.key);
+    f.createReminder.mockRejectedValueOnce(new Error('Response lost'));
+    await applyPlanTomorrow(plan.key);
+    const receipt = currentPlan(plan.key).operations.find((receipt) => receipt.kind === 'reminder')!;
+    f.reminders.push({ ...reminder({ title: receipt.title, dueAt: receipt.after, timezone: 'UTC', creationKey: receipt.creationKey }, 'accepted-completed'), status: 'completed' });
+    await loadPlanTomorrow(plan.key, true);
+    expect(currentPlan(plan.key).operations.find((receipt) => receipt.kind === 'reminder')).toMatchObject({ status: 'saved', uncertain: false, reminderId: 'accepted-completed' });
+    expect(currentPlan(plan.key).reminderIds).toEqual([]);
+    expect(useData.getState().reminders['accepted-completed']?.status).toBe('completed');
+    expect(f.createReminder).toHaveBeenCalledOnce();
+  });
+
   it('deduplicates simultaneous Apply controls', async () => {
     const f = fixture(['a']);
     const plan = await ready();
@@ -307,9 +397,10 @@ describe('Plan tomorrow review and real receipts', () => {
     const plan = await ready();
     reviewPlanTomorrow(plan.key);
     const pending = deferred<Task>();
-    f.updateTask.mockImplementationOnce(() => pending.promise);
+    const started = deferred<true>();
+    f.updateTask.mockImplementationOnce(() => { started.resolve(true); return pending.promise; });
     const applying = applyPlanTomorrow(plan.key);
-    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    await started.promise;
     expect(f.updateTask).toHaveBeenCalledOnce();
     resetPlanTomorrow();
     useSession.setState({ sessionEpoch: 11 });
@@ -324,9 +415,10 @@ describe('Plan tomorrow review and real receipts', () => {
     const plan = await ready();
     reviewPlanTomorrow(plan.key);
     const pending = deferred<Task>();
-    f.updateTask.mockImplementationOnce(() => pending.promise);
+    const started = deferred<true>();
+    f.updateTask.mockImplementationOnce(() => { started.resolve(true); return pending.promise; });
     const applying = applyPlanTomorrow(plan.key);
-    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    await started.promise;
     useTimeline.setState({ offRecord: true });
     useTimeline.setState({ offRecord: false });
     expect(currentPlan(plan.key).token).not.toBe(plan.token);

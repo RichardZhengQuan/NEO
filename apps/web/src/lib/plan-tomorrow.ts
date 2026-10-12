@@ -17,6 +17,7 @@ export interface PlanTomorrow {
   baselines: Record<string, Task>; acceptedTasks: Record<string, Task>; reminderIds: string[];
   suggestedIds: string[]; choices: Record<string, PlanChoice>; operations: PlanReceipt[];
   disclosures: { alternatives: boolean; reminders: boolean };
+  taskReadErrors?: Record<string, 'deleted' | 'source-unavailable'>;
 }
 
 export function assertPlanTimeZone(timezone: string): string {
@@ -35,6 +36,28 @@ export function validPlanDate(date: string): boolean {
 export function tomorrowDate(now: number, timezone: string): string {
   const wall = wallTimeOf(now, assertPlanTimeZone(timezone));
   return new Date(Date.UTC(wall.year, wall.month - 1, wall.day + 1)).toISOString().slice(0, 10);
+}
+
+/** A calendar day's actual bounds, including 23/25-hour days and midnight clock changes. */
+export function planDayRange(date: string, timezone: string): { start: number; end: number } {
+  if (!validPlanDate(date)) throw new Error('Invalid plan date');
+  assertPlanTimeZone(timezone);
+  const [year, month, day] = date.split('-').map(Number) as [number, number, number];
+  const following = new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+  const startOfDate = (value: string): number => {
+    const [y, m, d] = value.split('-').map(Number) as [number, number, number];
+    const noon = instantOf(y, m, d, 12, 0, timezone);
+    if (toDateInputValue(noon, timezone) !== value) throw new Error('This calendar date does not exist in the selected timezone');
+    let low = noon - 36 * 60 * 60_000;
+    let high = noon;
+    while (high - low > 1) {
+      const middle = Math.floor((low + high) / 2);
+      if (toDateInputValue(middle, timezone) < value) low = middle;
+      else high = middle;
+    }
+    return high;
+  };
+  return { start: startOfDate(date), end: startOfDate(following) };
 }
 
 /** Reject missing DST wall times rather than silently approve a different clock time. */
@@ -81,6 +104,7 @@ export function invalidPlanChoices(plan: PlanTomorrow, tasks: Record<string, Tas
     const target = planInstant(plan.date, choice.time, plan.timezone);
     const uncertain = plan.operations.find((receipt) => receipt.taskId === id && receipt.uncertain);
     if (uncertain) invalid[id] = uncertain.kind === 'reminder' ? 'reminder-unknown' : 'session';
+    else if (plan.taskReadErrors?.[id]) invalid[id] = plan.taskReadErrors[id]!;
     else if (!current) invalid[id] = plan.limited ? 'source-unavailable' : 'deleted';
     else if (current.done) invalid[id] = 'done';
     else if (baseline && !samePlanTask(baseline, current)) invalid[id] = 'changed';

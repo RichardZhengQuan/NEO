@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { Task } from '@neo/protocol';
-import { initialPlanChoices, planInstant, rankPlanTasks, tomorrowDate } from './plan-tomorrow.js';
+import { initialPlanChoices, planDayRange, planInstant, rankPlanTasks, tomorrowDate } from './plan-tomorrow.js';
 
 const task = (id: string, dueAt: number | null, priority = 0): Task => ({ id, dueAt, priority, title: id, listId: 'inbox', notes: null, done: false, doneAt: null, tags: [], order: 0, parentId: null, createdAt: 1, updatedAt: 1 });
 
 describe('Plan tomorrow dates and recommendations', () => {
+  it.each([
+    ['2026-03-08', '2026-03-08T05:00Z', '2026-03-09T04:00Z', 23],
+    ['2026-11-01', '2026-11-01T04:00Z', '2026-11-02T05:00Z', 25],
+  ] as const)('queries the actual calendar range for %s across DST', (date, start, end, hours) => {
+    const range = planDayRange(date, 'America/New_York');
+    expect(range).toEqual({ start: Date.parse(start), end: Date.parse(end) });
+    expect((range.end - range.start) / 3_600_000).toBe(hours);
+  });
   it('uses the user timezone calendar date rather than 24 elapsed hours', () => {
     expect(tomorrowDate(Date.parse('2026-10-12T17:30:00Z'), 'Asia/Singapore')).toBe('2026-10-14');
     const spring = Date.parse('2026-03-07T17:00:00Z');

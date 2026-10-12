@@ -125,7 +125,7 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
       openPlanTomorrow({ timezone, intent: text });
       return;
     }
-    if (noProvider) return;
+    if (noProvider) { restoreDraft?.(); return; }
     const active = requireClient();
     const epoch = currentSessionEpoch();
     setSending(true);
@@ -157,15 +157,17 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
       <div className="timeline-composer">
         <RetainedStateScope key={entry.offRecord ? 'off-record' : 'recorded'} scope={entry.offRecord ? 'composer:off-record' : 'composer:recorded'}>
           <Composer handleRef={setComposer} onSend={(text, images, restoreDraft) => void send(text, images, restoreDraft)} onCancel={() => void cancelTurn(requireClient(), t)}
-            busy={busy || sending} disabled={noProvider || privacyBusy || !entry.offRecordLoaded} onDraftChange={setComposerText} enterToSend={!coarse}
-            placeholder={noProvider ? t('chat.connect_ai') : t('chat.placeholder')} autoFocus={!coarse && !noProvider} />
+            busy={busy || sending} disabled={privacyBusy || !entry.offRecordLoaded}
+            sendDisabled={noProvider ? (text, images) => images.length > 0 || !isPlanTomorrowIntent(text) : false}
+            onDraftChange={setComposerText} enterToSend={!coarse}
+            placeholder={noProvider ? t('plan.local_placeholder') : t('chat.placeholder')} autoFocus={!coarse && !noProvider} />
         </RetainedStateScope>
         <button type="button" className={`neo-btn neo-btn--sm neo-btn--${entry.offRecord ? 'secondary' : 'ghost'} timeline-off-record`} aria-pressed={entry.offRecord}
           title={t('timeline.off_record')} aria-busy={privacyBusy || undefined} disabled={!client || sending || privacyBusy || !entry.offRecordLoaded} onClick={() => void setOffRecord(requireClient(), !entry.offRecord, t).catch(() => undefined)}>
           {privacyBusy ? <Spinner size={14} /> : <Icon name="eye-off" size={14} />}{t('timeline.off_record')}
         </button>
       </div>
-      {noProvider && <div className="timeline-connect"><p className="neo-help">{t('chat.connect_ai')}</p><Button size="sm" variant="secondary" icon="settings" onClick={openAiSettings}>{t('chat.open_ai_settings')}</Button></div>}
+      {noProvider && <div className="timeline-connect"><p className="neo-help">{t('plan.local_hint')}</p><Button size="sm" variant="secondary" icon="settings" onClick={openAiSettings}>{t('chat.open_ai_settings')}</Button></div>}
     </div>
   );
   return (

@@ -105,7 +105,7 @@ The app owns an in-memory `RetainedStateProvider` store; generated controls are 
 
 ### Plan tomorrow
 
-Planning is a contextual scene, opened by an explicit “Plan tomorrow” chat request, the planning action on Tasks or Reminders when relevant saved items exist, or the read-only `plan_tomorrow` tool's card. It has no permanent navigation item. Chat offers **Resume plan** only after a plan exists in the current session.
+Planning is a contextual scene, opened by an explicit “Plan tomorrow” chat request, the planning action on Tasks or Reminders when relevant saved items exist, or the read-only `plan_tomorrow` tool's card. The explicit local chat command works without a configured AI provider; other requests stay unsendable while their drafts remain editable. It has no permanent navigation item. Chat offers **Resume plan** only after a plan exists in the current session.
 
 The scene uses the next calendar date in the configured timezone and reads existing tasks and reminders. It initially selects up to three unfinished tasks due tomorrow, earlier, or without a due date; later tasks remain available as unselected alternatives. Saved reminders show only their next scheduled due time. These are context, not calendar availability or projected recurrence instances. Target times are editable due times, not invented task durations. Adding a reminder is optional and starts unchecked.
 

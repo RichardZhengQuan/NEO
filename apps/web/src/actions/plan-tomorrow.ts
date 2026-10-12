@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { NeoClient } from '@neo/client';
 import type { Reminder, Task } from '@neo/protocol';
-import { buildPlanReceipts, initialPlanChoices, invalidPlanChoices, matchingPlanReminder, samePlanTask, type PlanChoice, type PlanInvalidReason, type PlanReceipt, type PlanTomorrow } from '../lib/plan-tomorrow.js';
+import { buildPlanReceipts, initialPlanChoices, invalidPlanChoices, matchingPlanReminder, planDayRange, samePlanTask, type PlanChoice, type PlanInvalidReason, type PlanReceipt, type PlanTomorrow } from '../lib/plan-tomorrow.js';
 import { deviceTimeZone } from '../lib/time.js';
 import { httpStatus } from '../lib/errors.js';
 import { navigate } from '../router.js';
-import { upsertReminder, upsertTask, useData } from '../state/data.js';
+import { removeTask, upsertReminder, upsertTask, useData } from '../state/data.js';
 import { loadOffRecord } from '../state/connection.js';
 import { ensurePlanTomorrow, planForSession, setPlanChoice, setPlanDisclosure, updatePlanTomorrow, usePlanTomorrowState } from '../state/plan-tomorrow.js';
 import { isCurrentSession, requireClient, useSession } from '../state/session.js';
@@ -23,12 +23,29 @@ function current(plan: PlanTomorrow, client: NeoClient, writes = false): boolean
     (!writes || (privacy.offRecordLoaded && !privacy.startingOffRecord && !privacy.endingOffRecord));
 }
 
-async function sources(client: NeoClient, plan: PlanTomorrow): Promise<{ tasks: Record<string, Task>; reminders: Reminder[]; limited: boolean } | null> {
-  const [tasks, reminders] = await Promise.all([client.tasks.list({ limit: MAX_SOURCE_ITEMS }), client.reminders.list({ limit: MAX_SOURCE_ITEMS })]);
+async function sources(client: NeoClient, plan: PlanTomorrow, recover = false): Promise<{ tasks: Record<string, Task>; reminders: Reminder[]; recoveryReminders: Reminder[]; limited: boolean; taskReadErrors: Record<string, 'deleted' | 'source-unavailable'> } | null> {
+  const range = planDayRange(plan.date, plan.timezone);
+  const retainedIds = [...new Set([...Object.entries(plan.choices).filter(([, choice]) => choice.include).map(([id]) => id), ...plan.operations.map((receipt) => receipt.taskId)])];
+  const recovery = recover ? plan.operations.filter((receipt) => receipt.kind === 'reminder' && receipt.uncertain) : [];
+  const [tasks, reminders, retained, recovered] = await Promise.all([
+    client.tasks.list({ done: false, limit: MAX_SOURCE_ITEMS }),
+    client.reminders.list({ status: ['scheduled'], from: range.start, to: range.end - 1, limit: MAX_SOURCE_ITEMS }),
+    Promise.allSettled(retainedIds.map((id) => client.tasks.get(id))),
+    Promise.allSettled(recovery.map((receipt) => client.reminders.list({ from: receipt.after, to: receipt.after, limit: MAX_SOURCE_ITEMS }))),
+  ]);
   if (!current(plan, client)) return null;
   const taskMap = Object.fromEntries(tasks.items.map((task) => [task.id, task]));
-  useData.setState({ tasks: taskMap, tasksLoaded: true, reminders: Object.fromEntries(reminders.items.map((reminder) => [reminder.id, reminder])), remindersLoaded: true });
-  return { tasks: taskMap, reminders: reminders.items, limited: tasks.items.length >= MAX_SOURCE_ITEMS || reminders.items.length >= MAX_SOURCE_ITEMS };
+  const taskReadErrors: Record<string, 'deleted' | 'source-unavailable'> = {};
+  const recoveryReminders = recovered.flatMap((result) => result.status === 'fulfilled' ? result.value.items : []);
+  for (const [index, result] of retained.entries()) {
+    const id = retainedIds[index]!;
+    if (result.status === 'fulfilled') taskMap[id] = result.value;
+    else taskReadErrors[id] = httpStatus(result.reason) === 404 ? 'deleted' : 'source-unavailable';
+  }
+  // These scoped reads are not full route caches. Keep unrelated records and loaded flags intact.
+  useData.setState((data) => ({ tasks: { ...data.tasks, ...taskMap }, reminders: { ...data.reminders, ...Object.fromEntries([...reminders.items, ...recoveryReminders].map((reminder) => [reminder.id, reminder])) } }));
+  for (const [id, reason] of Object.entries(taskReadErrors)) if (reason === 'deleted') removeTask(id);
+  return { tasks: taskMap, reminders: reminders.items, recoveryReminders, limited: tasks.items.length >= MAX_SOURCE_ITEMS || reminders.items.length >= MAX_SOURCE_ITEMS, taskReadErrors };
 }
 
 export function openPlanTomorrow(input: { date?: string; timezone: string; intent?: string }): PlanTomorrow {
@@ -48,7 +65,7 @@ export function loadPlanTomorrow(key: string, rebase = false): Promise<void> {
   let loading!: Promise<void>;
   loading = (async () => {
     try {
-      const fetched = await sources(client, plan);
+      const fetched = await sources(client, plan, rebase);
       if (!fetched) return;
       updatePlanTomorrow(key, plan.token, (draft) => {
         const initial = initialPlanChoices(Object.values(fetched.tasks), plan.date, plan.timezone);
@@ -57,14 +74,14 @@ export function loadPlanTomorrow(key: string, rebase = false): Promise<void> {
         const operations = rebase ? draft.operations.map((receipt) => {
           if (!receipt.uncertain) return receipt;
           if (receipt.kind === 'reminder') {
-            const existing = matchingPlanReminder(fetched.reminders, receipt, plan.timezone);
+            const existing = matchingPlanReminder([...fetched.reminders, ...fetched.recoveryReminders], receipt, plan.timezone);
             return existing ? { ...receipt, status: 'saved' as const, reminderId: existing.id, uncertain: false, reason: undefined, error: undefined } : receipt;
           }
           const task = fetched.tasks[receipt.taskId];
           return task && task.dueAt === receipt.after && task.title === receipt.title ? { ...receipt, status: 'saved' as const, uncertain: false, reason: undefined, error: undefined } : receipt;
         }) : draft.operations;
         const unresolved = operations.some((receipt) => receipt.uncertain);
-        return { ...draft, status: 'ready', loadError: null, limited: fetched.limited, baselines,
+        return { ...draft, status: 'ready', loadError: null, limited: fetched.limited, baselines, taskReadErrors: fetched.taskReadErrors,
           reminderIds: fetched.reminders.filter((reminder) => reminder.status === 'scheduled').map((reminder) => reminder.id),
           suggestedIds: first || rebase ? initial.suggestedIds : draft.suggestedIds,
           choices: first ? initial.choices : rebase ? { ...initial.choices, ...draft.choices } : draft.choices,
@@ -93,10 +110,14 @@ export function editPlanTomorrow(key: string): void {
 }
 
 function receiptUpdate(plan: PlanTomorrow, id: string, patch: Partial<PlanReceipt>): void {
-  updatePlanTomorrow(plan.key, plan.token, (draft) => ({ ...draft, operations: draft.operations.map((receipt) => receipt.id === id ? { ...receipt, ...patch } : receipt) }));
+  updatePlanTomorrow(plan.key, plan.token, (draft) => ({ ...draft,
+    ...(patch.reminderId && !draft.reminderIds.includes(patch.reminderId) ? { reminderIds: [...draft.reminderIds, patch.reminderId] } : {}),
+    operations: draft.operations.map((receipt) => receipt.id === id ? { ...receipt, ...patch } : receipt),
+  }));
 }
 
 function operationInvalid(plan: PlanTomorrow, receipt: PlanReceipt, tasks: Record<string, Task>): PlanInvalidReason | undefined {
+  if (plan.taskReadErrors?.[receipt.taskId]) return plan.taskReadErrors[receipt.taskId];
   const expected = usePlanTomorrowState.getState().drafts[plan.key]?.acceptedTasks[receipt.taskId] ?? plan.acceptedTasks[receipt.taskId] ?? plan.baselines[receipt.taskId];
   const task = tasks[receipt.taskId];
   if (!task) return plan.limited ? 'source-unavailable' : 'deleted';
@@ -122,7 +143,7 @@ async function runApply(plan: PlanTomorrow, client: NeoClient): Promise<void> {
   try {
     const fetched = await sources(client, plan);
     if (!fetched || !current(plan, client, true)) return;
-    updatePlanTomorrow(plan.key, plan.token, (draft) => ({ ...draft, limited: fetched.limited }));
+    updatePlanTomorrow(plan.key, plan.token, (draft) => ({ ...draft, limited: fetched.limited, taskReadErrors: fetched.taskReadErrors, reminderIds: fetched.reminders.map((reminder) => reminder.id) }));
     for (const original of plan.operations) {
       if (!current(plan, client, true)) return;
       const draft = usePlanTomorrowState.getState().drafts[plan.key]!;
@@ -227,7 +248,11 @@ export function usePlanTomorrow(date?: string) {
         if (!privacyLoaded) await loadOffRecord(client);
         if (disposed || !isCurrentSession(epoch, client)) return;
         const selected = ensurePlanTomorrow({ date: date ?? planForSession(undefined, timezone)?.date, timezone });
-        if (selected.status === 'idle') await loadPlanTomorrow(selected.key);
+        const cache = useData.getState();
+        const missingTask = Object.entries(selected.choices).some(([id, choice]) => choice.include && !cache.tasks[id]);
+        const missingReminder = selected.reminderIds.some((id) => !cache.reminders[id]);
+        // Other routes replace their capped caches. Refresh on scene entry without rebasing unfinished work.
+        if (selected.status === 'idle' || (selected.status === 'ready' && selected.stage !== 'saving' && (missingTask || missingReminder))) await loadPlanTomorrow(selected.key);
       } catch (error) {
         if (!disposed && isCurrentSession(epoch, client)) setInitializationError(errorText(error));
       }
@@ -238,7 +263,7 @@ export function usePlanTomorrow(date?: string) {
   return {
     plan, loading: !initializationError && (!privacyLoaded || !plan || plan.status === 'idle' || plan.status === 'loading'), loadError: initializationError ?? plan?.loadError ?? null,
     tasks: plan ? Object.keys(plan.choices).flatMap((id) => { const task = plan.acceptedTasks[id] ?? plan.baselines[id]; return task ? [task] : []; }) : [],
-    reminders: Object.values(sourceReminders).filter((reminder) => reminder.status === 'scheduled'),
+    reminders: plan ? plan.reminderIds.flatMap((id) => sourceReminders[id]?.status === 'scheduled' ? [sourceReminders[id]!] : []) : [],
     suggestedIds: plan?.suggestedIds ?? [], invalid,
     setChoice: (id: string, patch: Partial<PlanChoice>) => { if (key) setPlanChoice(key, id, patch); },
     setDisclosure: (name: 'alternatives' | 'reminders', open: boolean) => { if (key) setPlanDisclosure(key, name, open); },

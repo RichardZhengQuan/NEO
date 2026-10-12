@@ -37,6 +37,7 @@ function fakeClient(): NeoClient {
   return {
     tasks: {
       list: vi.fn(async () => ({ items: serverTasks })),
+      get: vi.fn(async (id: string) => { const task = serverTasks.find((task) => task.id === id); if (!task) throw Object.assign(new Error('Task not found'), { httpStatus: 404 }); return task; }),
       lists: vi.fn(async () => ({ items: [{ id: INBOX_LIST_ID, name: 'Inbox', color: null, icon: 'inbox', order: 0, createdAt: NOW }] })),
       update: vi.fn(),
     },
@@ -134,6 +135,34 @@ describe('on-demand Plan tomorrow entry', () => {
 
     expect(targetTime().value).toBe('10:45');
     expect((screen.getByRole('checkbox', { name: 'Add reminder for Prepare proposal' }) as HTMLInputElement).checked).toBe(true);
+    noWrites();
+  });
+
+  it('refreshes missing scene source records after another route replaces the capped caches without rebasing the plan', async () => {
+    serverReminders = [{ id: 'anchor', title: 'Tomorrow check-in', notes: null, dueAt: Date.parse('2026-10-13T02:00Z'), timezone: 'Asia/Singapore', recurrence: null,
+      status: 'scheduled', firedCount: 0, lastFiredAt: null, messageId: null, createdAt: NOW, updatedAt: NOW }];
+    window.history.replaceState({}, '', `#/plan-tomorrow?date=${TOMORROW}`);
+    const view = show();
+    await screen.findByText('Tomorrow check-in');
+    fireEvent.change(targetTime(), { target: { value: '10:45' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Add reminder for Prepare proposal' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review plan' }));
+    const retained = planForSession(TOMORROW, 'Asia/Singapore')!;
+    const operations = retained.operations;
+    const taskReads = vi.mocked(client.tasks.list).mock.calls.length;
+    const reminderReads = vi.mocked(client.reminders.list).mock.calls.length;
+    view.unmount();
+    act(() => useData.setState({ tasks: { unrelated: task({ id: 'unrelated', done: true }) }, reminders: {}, tasksLoaded: true, remindersLoaded: true }));
+    show();
+    await screen.findByText('Tomorrow check-in');
+    await waitFor(() => expect(planForSession(TOMORROW, 'Asia/Singapore')?.status).toBe('ready'));
+    const reopened = planForSession(TOMORROW, 'Asia/Singapore')!;
+    expect(reopened.choices.task_proposal).toEqual({ include: true, time: '10:45', addReminder: true });
+    expect(reopened.stage).toBe('review');
+    expect(reopened.operations).toEqual(operations);
+    expect(useData.getState().tasks.unrelated?.done).toBe(true);
+    expect(client.tasks.list).toHaveBeenCalledTimes(taskReads + 1);
+    expect(client.reminders.list).toHaveBeenCalledTimes(reminderReads + 1);
     noWrites();
   });
 

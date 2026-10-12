@@ -74,7 +74,7 @@ describe('Plan tomorrow working scene', () => {
     scene.plan.suggestedIds = [];
     scene.plan.choices = Object.fromEntries(scene.tasks.map((item) => [item.id, { include: false, time: '10:00', addReminder: false }]));
     render(view());
-    expect(screen.getByText('No open tasks are due by tomorrow. Choose another task below if needed.')).toBeTruthy();
+    expect(screen.getByText('None of these tasks are due by tomorrow. Choose another task below if needed.')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Review plan' }) as HTMLButtonElement).disabled).toBe(true);
     expect(actions.apply).not.toHaveBeenCalled();
   });

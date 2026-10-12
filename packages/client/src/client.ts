@@ -260,6 +260,8 @@ export class NeoClientImpl {
     list: (q?: { listId?: string; done?: boolean; query?: string; limit?: number }) =>
       this.req<ListResponse<Task>>('GET', '/tasks', { query: q as Record<string, unknown> }),
 
+    get: (id: string) => this.req<Task>('GET', `/tasks/${encodeURIComponent(id)}`),
+
     create: (body: TaskInput) => this.req<Task>('POST', '/tasks', { body }),
 
     update: (id: string, body: TaskPatch) =>

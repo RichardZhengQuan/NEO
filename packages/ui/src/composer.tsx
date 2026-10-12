@@ -35,6 +35,8 @@ export interface ComposerProps {
   /** A turn is running: the send button becomes Stop. */
   busy?: boolean;
   disabled?: boolean;
+  /** Keep editing available while sending is gated; a predicate receives the actual retained draft. */
+  sendDisabled?: boolean | ((text: string, images: readonly ImagePart[]) => boolean);
   placeholder?: string;
   autoFocus?: boolean;
   /** Extra controls under the input (model picker, incognito toggle…). */
@@ -85,6 +87,7 @@ export function Composer({
   onCancel,
   busy = false,
   disabled = false,
+  sendDisabled = false,
   placeholder,
   autoFocus = false,
   toolbar,
@@ -140,11 +143,13 @@ export function Composer({
     if (autoFocus) textareaRef.current?.focus();
   }, [autoFocus]);
 
-  const canSend = !busy && !disabled && (text.trim().length > 0 || images.length > 0);
+  const sendingDisabled = typeof sendDisabled === 'function' ? sendDisabled(text, images.map((image) => image.part)) : sendDisabled;
+  const canSend = !busy && !disabled && !sendingDisabled && (text.trim().length > 0 || images.length > 0);
 
   const send = () => {
     if (!canSend) return;
     const submitted = draftRef.current;
+    if (typeof sendDisabled === 'function' && sendDisabled(submitted.text, submitted.images.map((image) => image.part))) return;
     if (!submitted.text.trim() && submitted.images.length === 0) return;
     const clearedRevision = submitted.revision + 1;
     const clearedGeneration = submitted.generation + 1;
