@@ -218,7 +218,9 @@ describe('memory net 3D scene without WebGL', () => {
     draw();
     const ticks = [...view.labels.querySelectorAll<HTMLElement>('.neo-net3d__tick')];
     const now = ticks.find((label) => label.textContent === 'Now')!;
-    const self = ticks.find((label) => label.textContent === 'My memory')!;
+    // The self node's stored label is a placeholder; the spine shows the translated "You".
+    expect(ticks.some((label) => label.textContent === 'My memory')).toBe(false);
+    const self = ticks.find((label) => label.textContent === 'You')!;
     expect(now.style.display).toBe('block');
     expect(self.style.display).toBe('block');
     const position = (label: HTMLElement) => label.style.transform.match(/translate\(([-\d.]+)px, ([-\d.]+)px\)/)!.slice(1).map(Number);
