@@ -130,8 +130,8 @@ describe('server relay connector', () => {
     connect(relay.url);
     await vi.waitFor(() => expect(relay.registrations).toHaveLength(1));
     const ws = relay.peers[0]!;
-    // Each accepted Open generates a Noise ephemeral key synchronously, so this burst can hold the event
-    // loop past any polling deadline; await the relay's first reply instead of racing a vi.waitFor timeout.
+    // The connector handles this whole burst in one synchronous run, so await the relay's first reply
+    // instead of racing a vi.waitFor deadline against however long that run takes on a loaded machine.
     const replied = new Promise<void>(resolve => relay.receive(() => resolve()));
     for (let connection = 1; connection <= 257; connection++) {
       ws.send(encodeRelayFrame({ op: RelayOp.Open, connection, payload: utf8('127.0.0.1') }));

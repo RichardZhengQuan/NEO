@@ -195,6 +195,31 @@ describe('Noise NK', () => {
     expect(() => new NkResponder({ staticKey: invalid, prologue: new Uint8Array() })).toThrow(NoiseError);
   });
 
+  it('rechecks a static pair changed in place after a responder accepted it', () => {
+    const staticKey = generateKeyPair();
+    const prologue = tunnelPrologue('server');
+    new NkResponder({ staticKey, prologue });
+    staticKey.publicKey[0] = staticKey.publicKey[0]! ^ 1;
+    expect(() => new NkResponder({ staticKey, prologue })).toThrow(NoiseError);
+    staticKey.publicKey[0] = staticKey.publicKey[0]! ^ 1;
+    staticKey.privateKey[0] = staticKey.privateKey[0]! ^ 64;
+    expect(() => new NkResponder({ staticKey, prologue })).toThrow(NoiseError);
+  });
+
+  it('refuses a mismatched injected responder ephemeral when writing message 2', () => {
+    const staticKey = generateKeyPair();
+    const prologue = tunnelPrologue('server');
+    const ephemeral = generateKeyPair();
+    ephemeral.publicKey[0] = ephemeral.publicKey[0]! ^ 1;
+    const initiator = new NkInitiator({ remoteStaticKey: staticKey.publicKey, prologue });
+    const responder = new NkResponder({ staticKey, prologue, ephemeral });
+    responder.readMessage1(initiator.writeMessage1());
+    expect(() => responder.writeMessage2()).toThrow(NoiseError);
+    expect(() => responder.writeMessage2()).toThrow(NoiseError);
+    expect(() => new NkResponder({ staticKey, prologue, ephemeral: { ...ephemeral, privateKey: new Uint8Array(31) } }))
+      .toThrow(NoiseError);
+  });
+
   it('refuses either nonce before the integer counter could lose precision', () => {
     const { phone, server } = session();
     const sending = phone as unknown as { sending: { nonce: number } };

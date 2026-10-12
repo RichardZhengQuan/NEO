@@ -168,8 +168,11 @@ terminates servers that miss a ping, and closes slow phone connections when
 destination queues exceed their cap. Limits apply per IP, per server and
 globally. Logs contain events and counts, never payloads, and truncate server
 ids to eight characters. The NEO connector also caps concurrent relay sessions
-at 256. Disabling phone access closes both listeners/connectors and their
-live sessions.
+at 256. A relay or LAN session does no X25519 work until the phone's first
+handshake message arrives (the static key is checked once, not per session),
+so Opens or connections that never handshake cost no curve operations before
+their handshake timeout. Disabling phone access closes both
+listeners/connectors and their live sessions.
 
 The data-directory file `tunnel-identity.json` stores the static X25519 and
 Ed25519 signing keys, written atomically with mode 0600. Corrupt identities are
