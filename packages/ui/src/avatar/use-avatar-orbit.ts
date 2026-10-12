@@ -102,7 +102,7 @@ export function useAvatarOrbit(props: {
         }
         node.style.transform = `translate3d(${x.toFixed(2)}px, ${(originY + y).toFixed(2)}px, 0) translate(-50%, -50%) scale(${front ? 1 : showHovered ? .9 : .8})`;
         node.style.opacity = front || showHovered ? '1' : '.6';
-        node.style.zIndex = showFocused ? '4' : front ? '3' : '1';
+        node.style.zIndex = lifted ? '4' : front ? '3' : '1';
         node.dataset.orbitAngle = String(theta);
         node.dataset.orbitDepth = depth;
         node.dataset.orbitLifted = String(lifted);
