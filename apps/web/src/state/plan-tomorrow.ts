@@ -59,10 +59,12 @@ export function setPlanDisclosure(key: string, name: 'alternatives' | 'reminders
 
 useTimeline.subscribe((entry, previous) => {
   const ended = entry.offRecordLoaded && !entry.offRecord && (previous.offRecord || previous.startingOffRecord || previous.endingOffRecord);
-  if (ended || entry.offRecord !== previous.offRecord || entry.startingOffRecord || entry.endingOffRecord) {
+  const modeChanged = entry.offRecord !== previous.offRecord;
+  if (ended || modeChanged || entry.startingOffRecord || entry.endingOffRecord) {
     usePlanTomorrowState.setState((state) => ({
       drafts: Object.fromEntries(Object.entries(state.drafts).filter(([, plan]) => !(ended && plan.private)).map(([key, plan]) => [key,
-        plan.stage === 'saving' ? { ...plan, token: {}, stage: 'partial', operations: plan.operations.map((receipt) => receipt.status === 'saving' ? { ...receipt, status: 'error', reason: 'session', uncertain: true } : receipt) } : plan,
+        plan.stage === 'saving' ? { ...plan, token: {}, stage: 'partial', operations: plan.operations.map((receipt) => receipt.status === 'saving' ? { ...receipt, status: 'error', reason: 'session', uncertain: true } : receipt) } :
+          modeChanged && plan.status === 'loading' ? { ...plan, token: {}, status: 'idle', loadError: null } : plan,
       ])),
       latestKey: ended && state.latestKey && state.drafts[state.latestKey]?.private ? null : state.latestKey,
     }));

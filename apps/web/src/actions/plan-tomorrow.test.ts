@@ -49,6 +49,54 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); resetPlanTomorrow(); });
 
 describe('Plan tomorrow review and real receipts', () => {
+  it('restarts a deferred source read after a privacy roundtrip and ignores its old response', async () => {
+    const f = fixture(['a']);
+    const plan = await ready();
+    setPlanChoice(plan.key, 'a', { time: '15:45', addReminder: true });
+    setPlanDisclosure(plan.key, 'alternatives', true);
+    reviewPlanTomorrow(plan.key);
+    const pending = deferred<{ items: Task[] }>();
+    f.listTasks.mockImplementationOnce(() => pending.promise);
+    const oldLoad = loadPlanTomorrow(plan.key);
+    const oldToken = currentPlan(plan.key).token;
+    expect(currentPlan(plan.key).status).toBe('loading');
+    useTimeline.setState({ offRecord: true });
+    expect(currentPlan(plan.key).status).toBe('idle');
+    expect(currentPlan(plan.key).token).not.toBe(oldToken);
+    useTimeline.setState({ offRecord: false });
+    f.tasks.a = { ...f.tasks.a!, title: 'Newest server title', updatedAt: 2 };
+    await loadPlanTomorrow(plan.key);
+    expect(currentPlan(plan.key).status).toBe('ready');
+    pending.resolve({ items: [{ ...task('a'), title: 'Stale response title' }] });
+    await oldLoad;
+    expect(useData.getState().tasks.a?.title).toBe('Newest server title');
+    expect(currentPlan(plan.key).status).toBe('ready');
+    expect(currentPlan(plan.key).choices.a).toEqual({ include: true, time: '15:45', addReminder: true });
+    expect(currentPlan(plan.key).stage).toBe('review');
+    expect(currentPlan(plan.key).disclosures.alternatives).toBe(true);
+    expect(currentPlan(plan.key).operations).toHaveLength(2);
+    expect(f.updateTask).not.toHaveBeenCalled();
+    expect(f.createReminder).not.toHaveBeenCalled();
+  });
+
+  it('keeps a deferred source load valid when a privacy transition fails without changing mode', async () => {
+    const f = fixture(['a']);
+    const plan = ensurePlanTomorrow({ timezone: 'UTC', now: NOW });
+    const pending = deferred<{ items: Task[] }>();
+    f.listTasks.mockImplementationOnce(() => pending.promise);
+    const loading = loadPlanTomorrow(plan.key);
+    const originalToken = currentPlan(plan.key).token;
+    useTimeline.setState({ startingOffRecord: true });
+    useTimeline.setState({ startingOffRecord: false });
+    expect(currentPlan(plan.key).status).toBe('loading');
+    expect(currentPlan(plan.key).token).toBe(originalToken);
+    pending.resolve({ items: Object.values(f.tasks) });
+    await loading;
+    expect(currentPlan(plan.key).status).toBe('ready');
+    expect(currentPlan(plan.key).choices.a?.include).toBe(true);
+    expect(f.listTasks).toHaveBeenCalledOnce();
+  });
+
   it('does not count an unchanged due time as a saved change or call the write APIs', async () => {
     const f = fixture(['a']);
     f.tasks.a = { ...f.tasks.a!, dueAt: Date.parse('2026-10-13T09:00Z') };

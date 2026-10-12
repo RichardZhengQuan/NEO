@@ -82,6 +82,54 @@ describe('reminder creation keys', () => {
     expect(h.reminders.list()).toHaveLength(1);
   });
 
+  it('keeps a deleted creation key consumed across store reconstruction while a fresh key can intentionally create again', () => {
+    const h = setup();
+    const changed = vi.fn();
+    h.reminders.onChange(changed);
+    const original = h.reminders.create(input());
+    h.setNow(Date.parse('2026-10-12T09:00:00Z'));
+    expect(h.reminders.delete(original.id)).toBe(true);
+    expect(h.reminders.delete(original.id)).toBe(false);
+    expectConflict(() => h.reminders.create(input()));
+    expectConflict(() => h.reminders.create({ ...input(), title: 'Changed deleted reminder' }));
+    const reopened = createProductivityStores(h.db, { clock: () => Date.parse('2026-10-14T08:00:00Z') }).reminders;
+    expectConflict(() => reopened.create(input()));
+    expect(reopened.list()).toEqual([]);
+    expect(h.db.prepare('SELECT * FROM reminder_creation_tombstones').all()).toEqual([
+      { creation_key: input().creationKey, deleted_at: Date.parse('2026-10-12T09:00:00Z') },
+    ]);
+    expect(changed.mock.calls.map(([event]) => event.type)).toEqual(['upsert', 'delete']);
+    const replacement = reopened.create({ ...input(), creationKey: '7f54c0c3-5b1e-4e77-bc2a-148cacb13f5c' });
+    expect(replacement.id).not.toBe(original.id);
+    expect(reopened.list()).toEqual([replacement]);
+  });
+
+  it('rolls deletion back if its consumed-key record cannot be saved', () => {
+    const h = setup();
+    const original = h.reminders.create(input());
+    const changed = vi.fn();
+    h.reminders.onChange(changed);
+    h.db.exec(`CREATE TRIGGER reject_reminder_tombstone BEFORE INSERT ON reminder_creation_tombstones
+      BEGIN SELECT RAISE(ABORT, 'Tombstone unavailable'); END`);
+    expect(() => h.reminders.delete(original.id)).toThrow('Tombstone unavailable');
+    expect(h.reminders.get(original.id)).toEqual(original);
+    expect(h.reminders.create(input())).toEqual(original);
+    expect(h.db.prepare('SELECT * FROM reminder_creation_tombstones').all()).toEqual([]);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it('allows unkeyed clients to create again after deletion without consuming a key', () => {
+    const h = setup();
+    const { creationKey: _key, ...unkeyed } = input();
+    const original = h.reminders.create(unkeyed);
+    expect(h.reminders.delete(original.id)).toBe(true);
+    const replacement = h.reminders.create(unkeyed);
+    expect(replacement.id).not.toBe(original.id);
+    expect(replacement).not.toHaveProperty('creationKey');
+    expect(h.reminders.list()).toEqual([replacement]);
+    expect(h.db.prepare('SELECT * FROM reminder_creation_tombstones').all()).toEqual([]);
+  });
+
   it('retains legacy unkeyed creation behavior and rejects unusable keys', () => {
     const h = setup();
     const { creationKey: _key, ...unkeyed } = input();
@@ -91,6 +139,24 @@ describe('reminder creation keys', () => {
     expect(one).not.toHaveProperty('creationKey');
     expect(h.reminders.list()).toHaveLength(2);
     for (const key of ['', '   ', 'x'.repeat(257)]) expect(() => h.reminders.create({ ...input(), creationKey: key })).toThrow(/creationKey/);
+  });
+
+  it('upgrades an already applied creation-key migration and retains an existing keyed reminder', () => {
+    const db = openDatabase(':memory:');
+    databases.push(db);
+    migrate(db, 'tools', toolsMigrations.filter((migration) => migration.version <= 7));
+    const request = input();
+    db.prepare(`INSERT INTO reminders
+      (id,title,notes,due_at,anchor_at,timezone,creation_key,creation_fingerprint,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run('keyed-v7', request.title, null, request.dueAt, request.dueAt, 'UTC', request.creationKey!, 'existing-v7-fingerprint', 1, 1);
+    expect(migrate(db, 'tools', toolsMigrations).applied).toEqual([8]);
+    expect(migrate(db, 'tools', toolsMigrations).applied).toEqual([]);
+    const reminders = createProductivityStores(db, { clock: () => 200 }).reminders;
+    expect(reminders.get('keyed-v7')).toMatchObject({ id: 'keyed-v7', creationKey: request.creationKey, title: request.title });
+    expect(reminders.delete('keyed-v7')).toBe(true);
+    expectConflict(() => reminders.create(request));
+    expect(reminders.list()).toEqual([]);
+    expect(db.prepare('SELECT * FROM reminder_creation_tombstones').all()).toEqual([{ creation_key: request.creationKey, deleted_at: 200 }]);
   });
 
   it('migrates existing reminders without inventing keys and applies the migration only once', () => {

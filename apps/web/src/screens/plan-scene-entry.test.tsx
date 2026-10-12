@@ -8,7 +8,7 @@ import { Shell } from '../components/Shell.js';
 import { appDictionaries } from '../i18n.js';
 import { navigate, useRoute } from '../router.js';
 import { useData } from '../state/data.js';
-import { planForSession } from '../state/plan-tomorrow.js';
+import { ensurePlanTomorrow, planForSession } from '../state/plan-tomorrow.js';
 import { startSession, useSession } from '../state/session.js';
 import { emptyEntry, useTimeline } from '../state/timeline.js';
 import { PlanTomorrowScreen } from './PlanTomorrowScreen.js';
@@ -134,6 +134,28 @@ describe('on-demand Plan tomorrow entry', () => {
 
     expect(targetTime().value).toBe('10:45');
     expect((screen.getByRole('checkbox', { name: 'Add reminder for Prepare proposal' }) as HTMLInputElement).checked).toBe(true);
+    noWrites();
+  });
+
+  it('offers the retained recorded plan after the latest private plan ends', async () => {
+    show();
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('button', { name: 'Tasks' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Plan tomorrow' }));
+    await screen.findByLabelText(/Target time for Prepare proposal/);
+    fireEvent.change(targetTime(), { target: { value: '15:45' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Back to NEO' }));
+    await screen.findByRole('textbox', { name: 'Message NEO…' });
+    act(() => {
+      useTimeline.setState({ offRecord: true });
+      ensurePlanTomorrow({ date: TOMORROW, timezone: 'Asia/Singapore' });
+      useTimeline.setState({ offRecord: false });
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume plan' }));
+
+    await screen.findByLabelText(/Target time for Prepare proposal/);
+    expect(targetTime().value).toBe('15:45');
+    expect(planForSession(TOMORROW, 'Asia/Singapore')?.private).toBe(false);
     noWrites();
   });
 

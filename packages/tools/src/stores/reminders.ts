@@ -117,6 +117,9 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       const fingerprint = data.creationKey ? createHash('sha256').update(JSON.stringify({ ...normalized, recurrence })).digest('hex') : null;
       const result = db.transaction(() => {
         if (data.creationKey) {
+          if (db.prepare('SELECT 1 FROM reminder_creation_tombstones WHERE creation_key = ?').get(data.creationKey)) {
+            throw new NeoError('conflict', 'This reminder creation key belongs to a deleted reminder. Use a new key to create another reminder.');
+          }
           const existing = db.prepare('SELECT * FROM reminders WHERE creation_key = ?').get(data.creationKey) as Row | undefined;
           if (existing) {
             if (existing.creation_fingerprint !== fingerprint) throw new NeoError('conflict', 'This reminder creation key was already used with different values.');
@@ -166,9 +169,17 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
     },
 
     delete(id: string): boolean {
-      if (changes(db.prepare('DELETE FROM reminders WHERE id = ?').run(id)) === 0) return false;
-      emit({ type: 'delete', id });
-      return true;
+      const deleted = db.transaction(() => {
+        const existing = row(id);
+        if (!existing || changes(db.prepare('DELETE FROM reminders WHERE id = ?').run(id)) === 0) return false;
+        // Keep a consumed key after its live row is gone, so a delayed retry cannot undo deletion.
+        if (typeof existing.creation_key === 'string') {
+          db.prepare('INSERT OR IGNORE INTO reminder_creation_tombstones (creation_key, deleted_at) VALUES (?, ?)').run(existing.creation_key, clock());
+        }
+        return true;
+      });
+      if (deleted) emit({ type: 'delete', id });
+      return deleted;
     },
 
     snooze(id: string, minutes: number): Reminder {

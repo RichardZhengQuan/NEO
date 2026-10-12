@@ -32,7 +32,7 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   const draftStore = useChatDrafts((s) => s.store);
   const timezone = useSession((s) => s.settings?.timezone ?? 'UTC');
   const planState = usePlanTomorrowState();
-  const retainedPlan = planState.latestKey ? planForSession(undefined, timezone) : null;
+  const retainedPlan = Object.keys(planState.drafts).length ? planForSession(undefined, timezone) : null;
   useEffect(() => {
     if (!client) return;
     const epoch = currentSessionEpoch();

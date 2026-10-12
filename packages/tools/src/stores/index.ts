@@ -187,6 +187,16 @@ export const toolsMigrations: Migration[] = [
       CREATE UNIQUE INDEX idx_reminders_creation_key ON reminders(creation_key) WHERE creation_key IS NOT NULL;
     `,
   },
+  {
+    version: 8,
+    name: 'deleted_reminder_creation_keys',
+    up: `
+      CREATE TABLE reminder_creation_tombstones (
+        creation_key TEXT PRIMARY KEY,
+        deleted_at INTEGER NOT NULL
+      );
+    `,
+  },
 ];
 
 export function createProductivityStores(

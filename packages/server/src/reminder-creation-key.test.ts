@@ -30,6 +30,24 @@ describe('HTTP reminder creation replay', () => {
     expect(await json(await fixture.request('/api/reminders'), 200)).toMatchObject({ items: [first] });
   });
 
+  it('rejects delayed replay after deletion and allows a fresh key to intentionally create another reminder', async () => {
+    const changed = vi.fn();
+    fixture.services.stores.reminders.onChange(changed);
+    const body = { title: 'Prepare proposal', dueAt: fixture.time.now + 60_000, notes: null,
+      creationKey: 'fdd8d6cb-021a-4fa6-9c8f-8c56704086cc' };
+    const first = await json<Reminder>(await fixture.request('/api/reminders', 'POST', body), 201);
+    expect((await fixture.request(`/api/reminders/${first.id}`, 'DELETE')).status).toBe(204);
+    expect(await json(await fixture.request('/api/reminders', 'POST', body), 409)).toMatchObject({ code: 'conflict' });
+    expect(await json(await fixture.request('/api/reminders'), 200)).toMatchObject({ items: [] });
+    expect(changed.mock.calls.map(([event]) => event.type)).toEqual(['upsert', 'delete']);
+    const replacement = await json<Reminder>(await fixture.request('/api/reminders', 'POST', {
+      ...body, creationKey: '7f54c0c3-5b1e-4e77-bc2a-148cacb13f5c',
+    }), 201);
+    expect(replacement.id).not.toBe(first.id);
+    expect(await json(await fixture.request('/api/reminders'), 200)).toMatchObject({ items: [replacement] });
+    expect(changed).toHaveBeenCalledTimes(3);
+  });
+
   it('keeps unkeyed clients compatible and rejects an empty or oversized creation key', async () => {
     const body = { title: 'Legacy reminder', dueAt: fixture.time.now + 60_000 };
     const one = await json<Reminder>(await fixture.request('/api/reminders', 'POST', body), 201);
