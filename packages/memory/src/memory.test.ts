@@ -819,7 +819,13 @@ describe('MEMORY_CONSTANTS', () => {
 // ─── performance ─────────────────────────────────────────────────────────────
 
 describe('performance', () => {
-  it('recall on 1000 nodes completes in < 2000ms', async () => {
+  // Recall is a linear scan over the cached vectors, so docs/MEMORY.md's 200 ms for 10k nodes means
+  // 20 ms here on an idle machine. Parallel suites and other jobs slow every sample several-fold and
+  // can stall one for seconds, so by default only a gross regression fails; NEO_PERF_STRICT=1 holds
+  // the tight bound (CONTRIBUTING.md). The median of several runs ignores one-off pauses.
+  const recallBudgetMs = process.env['NEO_PERF_STRICT'] === '1' ? 20 : 2000;
+
+  it(`recall stays fast at 1000 nodes (median < ${recallBudgetMs} ms)`, async () => {
     const { svc } = makeTestService();
     const inputs: RememberInput[] = [];
     for (let i = 0; i < 1000; i++) {
@@ -832,11 +838,17 @@ describe('performance', () => {
     }
     await Promise.all(inputs.map(inp => svc.remember(inp)));
 
-    const start = Date.now();
-    await svc.recall({ text: 'memory topics', limit: 20, reinforce: false });
-    const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(2000);
-  }, 10000);
+    await svc.recall({ text: 'warm-up', reinforce: false });
+    const samples: number[] = [];
+    for (let k = 0; k < 7; k++) {
+      const start = performance.now();
+      const r = await svc.recall({ text: 'memory topics', limit: 20, reinforce: false });
+      samples.push(performance.now() - start);
+      expect(r.items.length).toBeGreaterThan(0);
+    }
+    const median = [...samples].sort((a, b) => a - b)[samples.length >> 1]!;
+    expect(median, `recall samples (ms): ${samples.map((t) => t.toFixed(1)).join(', ')}`).toBeLessThan(recallBudgetMs);
+  }, 60_000);
 });
 
 // ─── Hebbian co-activation ───────────────────────────────────────────────────
