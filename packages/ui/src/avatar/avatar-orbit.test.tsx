@@ -483,6 +483,31 @@ describe('avatar orbits', () => {
     expect(frames.size).toBe(1);
   });
 
+  it('rings the portrait fallback when the figure frame swaps to it, and the torso again after', async () => {
+    vi.stubGlobal('innerWidth', 1000);
+    vi.stubGlobal('innerHeight', 742);
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute('data-testid') === 'figure-frame') return rect(55, 40, 529, 678);
+      if (this.classList.contains('neo-avfig__portrait')) return rect(144, 203, 352, 352);
+      return rect(0, 0, 1000, 742);
+    });
+    render(<Harness />);
+    const path = document.querySelector('[data-orbit-path="portrait-front"] path')!;
+    const torso = path.getAttribute('d');
+    expect(torso).toMatch(/^M 595 365\.44 A 275\.5 105\.8/);
+
+    const fallback = document.createElement('span');
+    fallback.className = 'neo-avfig__portrait';
+    await act(async () => { screen.getByTestId('figure-frame').append(fallback); });
+    advance(16);
+    // Centred on the portrait's lower edge (203 + 352), clear of its face.
+    expect(path.getAttribute('d')).toMatch(/^M 595 555 A 275\.5 105\.8/);
+
+    await act(async () => { fallback.remove(); });
+    advance(16);
+    expect(path.getAttribute('d')).toBe(torso);
+  });
+
   it('keeps phone targets below the face and within a 320 by 384 upper stage for a whole revolution', () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
       const figure = this.getAttribute('data-testid') === 'figure-frame';

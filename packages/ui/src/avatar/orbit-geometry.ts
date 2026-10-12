@@ -26,6 +26,8 @@ function usable(rect: OrbitRect | null | undefined): rect is OrbitRect {
  */
 export function avatarOrbitGeometry(props: {
   frame?: OrbitRect | null;
+  /** The square portrait NeoFigure shows inside the frame while the figure cannot load. */
+  fallback?: OrbitRect | null;
   area?: OrbitRect | null;
   viewport?: OrbitRect | null;
   clearance?: OrbitRect | null;
@@ -69,6 +71,28 @@ export function avatarOrbitGeometry(props: {
   };
 
   const portraitRy = width * .2;
+  const fallback = usable(props.fallback) ? props.fallback : null;
+  if (fallback) {
+    // The torso ring would cross a square portrait's face. Centre the ring on the
+    // portrait's lower edge instead, and dip it far enough that every front
+    // target clears the portrait where the ring passes its sides.
+    const bottom = fallback.top - bounds.top + fallback.height;
+    const gap = radius + 8;
+    const reach = Math.abs(fallback.left - bounds.left + fallback.width / 2 - x) + fallback.width / 2 + gap;
+    const floor = bounds.height - radius - 12;
+    // The widest band the ring can occupy, so the card limit holds for the final one.
+    const rx = Math.min(width * .825, availableRadius(bottom, Math.max(1, floor - bottom), radius));
+    const depth = rx > reach ? Math.sqrt(1 - (reach / rx) ** 2) : 0;
+    let ry = Math.min(portraitRy, floor - bottom);
+    let y = Math.max(bottom, bottom + gap - ry * depth);
+    if (y + ry > floor) {
+      ry = (floor - bottom - gap) / (1 - depth);
+      y = floor - ry;
+    }
+    if (rx > 0 && ry > 0) {
+      return { bounds, portrait: { x, y, rx, ry }, portraitRadius: radius, focusedPortraitMinY: bottom + gap };
+    }
+  }
   const portraitY = top + height * .48;
   const portraitRx = Math.min(width * .825, availableRadius(portraitY, portraitRy, radius));
   if (portraitRx <= 0) return null;

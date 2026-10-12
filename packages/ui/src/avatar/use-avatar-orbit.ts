@@ -113,6 +113,7 @@ export function useAvatarOrbit(props: {
       const geometry = avatarOrbitGeometry({
         area: area.getBoundingClientRect(),
         frame: frame?.getBoundingClientRect(),
+        fallback: frame?.querySelector('.neo-avfig__portrait')?.getBoundingClientRect(),
         clearance: clearance?.getBoundingClientRect(),
         viewport: { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight },
       });
@@ -273,6 +274,9 @@ export function useAvatarOrbit(props: {
     const layoutObserver = typeof MutationObserver === 'function' ? new MutationObserver(scheduleMeasure) : undefined;
     layoutObserver?.observe(layoutRoot, { attributes: true, attributeFilter: ['class', 'data-step', 'data-card-side', 'data-transition', 'data-layout'] });
     frame?.addEventListener('load', scheduleMeasure, true);
+    // The figure can swap to its portrait fallback (and back) inside an unchanged frame.
+    const artObserver = frame && typeof MutationObserver === 'function' ? new MutationObserver(scheduleMeasure) : undefined;
+    if (frame) artObserver?.observe(frame, { childList: true, subtree: true });
     window.addEventListener('resize', measure);
     measure();
     if (!reduced && !document.hidden) frameId = requestAnimationFrame(tick);
@@ -284,6 +288,7 @@ export function useAvatarOrbit(props: {
       clearTimeout(touchTimer);
       observer?.disconnect();
       layoutObserver?.disconnect();
+      artObserver?.disconnect();
       frame?.removeEventListener('load', scheduleMeasure, true);
       settleTargets.forEach((element) => {
         element.removeEventListener('animationend', settleGeometry);
