@@ -1,9 +1,21 @@
 /** The WebGL scene is created only after the view's dynamic Three import. */
 import type * as Three from 'three';
-import type { MemoryKind } from '@neo/protocol';
+import type { MemoryKind, ToolUseEvent } from '@neo/protocol';
 import type { TranslateFn } from './i18n.js';
 import { memoryKindColor } from './memory-graph.js';
-import { stepMemoryInTime, type MemoryNet3DLayout } from './memory-net-3d-layout.js';
+import { stepMemoryInTime, toolUseFocusId, type MemoryNet3DLayout, type Net3DToolMarker } from './memory-net-3d-layout.js';
+import { iconPaths } from './icons.js';
+
+export const defaultToolUseLabels: Record<ToolUseEvent['category'], string> = {
+  note: 'Note', reminder: 'Reminder', task: 'Task', search: 'Search', memory: 'Memory', other: 'Tool use',
+};
+const toolUseIcons: Record<ToolUseEvent['category'], string> = {
+  note: 'book', reminder: 'bell', task: 'check-square', search: 'search', memory: 'bookmark', other: 'more-horizontal',
+};
+// Deliberately muted, separate from the saturated memory-kind palette.
+const toolUseColors: Record<ToolUseEvent['category'], string> = {
+  note: '#a8977e', reminder: '#9d94ab', task: '#8f9d89', search: '#859aa3', memory: '#aa8d8d', other: '#99958d',
+};
 
 interface Appearance {
   selectedId: string | null;
@@ -32,7 +44,10 @@ interface SceneOptions {
   t: TranslateFn;
   onSelect(id: string | null): void;
   onFocus(id: string | null): void;
-  onHover(hover: { id: string; x: number; y: number } | null): void;
+  onHover(hover: { id: string; x: number; y: number; toolUses?: ToolUseEvent[] } | null): void;
+  toolUseLabels?: Record<ToolUseEvent['category'], string>;
+  onToolUseSelect?(event: ToolUseEvent): void;
+  onToolUseGroupSelect?(marker: Net3DToolMarker, x: number, y: number): void;
   onFailure(): void;
 }
 
@@ -91,14 +106,17 @@ export function createMemoryNetScene(T: SceneThree, options: SceneOptions): Memo
   const projected = new T.Vector3();
   const raycaster = new T.Raycaster();
   const pointer = new T.Vector2();
-  const date = (at: number, month = false) => new Intl.DateTimeFormat(locale, {
-    timeZone: 'UTC', year: 'numeric', month: 'short', ...(month ? {} : { day: 'numeric' }),
-  }).format(at);
+  const dateFormatter = new Intl.DateTimeFormat(locale, { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' });
+  const monthFormatter = new Intl.DateTimeFormat(locale, { timeZone: 'UTC', year: 'numeric', month: 'short' });
+  const date = (at: number, month = false) => (month ? monthFormatter : dateFormatter).format(at);
+  const toolAnnouncements = new Map(layout.toolMarkers.flatMap((marker) => marker.events.map((event) => [event.id, `${(options.toolUseLabels ?? defaultToolUseLabels)[event.category]}: ${event.title}, ${date(event.at)}`] as const)));
   const overlay: { el: HTMLSpanElement; position: Three.Vector3; id: string | null; priority: number; tick: boolean; width: number; left: boolean }[] = [];
+  const markerOverlay: { el: HTMLButtonElement; count: HTMLSpanElement; tick: HTMLSpanElement; marker: Net3DToolMarker; activeMarker: Net3DToolMarker; position: Three.Vector3; membership: string }[] = [];
   const addLabel = (text: string, x: number, y: number, z: number, id: string | null, priority: number, tick = false, left = false) => {
     const el = document.createElement('span');
     el.className = tick ? 'neo-net3d__tick' : 'neo-net3d__label';
     el.textContent = text;
+    el.setAttribute('aria-hidden', 'true');
     labels.append(el);
     overlay.push({ el, position: new T.Vector3(x, y, z), id, priority, tick, width: 0, left });
   };
@@ -135,6 +153,43 @@ export function createMemoryNetScene(T: SceneThree, options: SceneOptions): Memo
   };
 
   try {
+    for (const marker of layout.toolMarkers) {
+      const event = marker.events[0]!;
+      const el = document.createElement('button');
+      el.type = 'button';
+      // The host's Up/Down traversal reaches each event, including grouped ones.
+      el.tabIndex = -1;
+      el.className = 'neo-net3d__tool-marker';
+      el.dataset.markerId = marker.id;
+      el.dataset.count = String(marker.events.length);
+      Object.assign(el.style, {
+        position: 'absolute', top: '0', left: '0', display: 'none', alignItems: 'center', justifyContent: 'center', gap: '4px',
+        height: '28px', minWidth: '28px', padding: '3px 5px', pointerEvents: 'auto', cursor: 'pointer',
+        border: '1px solid var(--neo-border)', borderRadius: '5px', background: 'var(--neo-surface)', color: 'var(--neo-text-muted)',
+        font: 'inherit', fontSize: '11px', lineHeight: '1', boxSizing: 'border-box', zIndex: '2',
+      });
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      for (const [name, value] of Object.entries({ viewBox: '0 0 24 24', width: '15', height: '15', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', 'data-icon': toolUseIcons[event.category] })) svg.setAttribute(name, value);
+      for (const d of iconPaths(toolUseIcons[event.category]) ?? iconPaths('note')!) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', d);
+        svg.append(path);
+      }
+      el.append(svg);
+      const dot = document.createElement('span');
+      dot.setAttribute('aria-hidden', 'true');
+      Object.assign(dot.style, { width: '4px', height: '4px', borderRadius: '50%', background: toolUseColors[event.category], flexShrink: '0' });
+      el.append(dot);
+      const count = document.createElement('span');
+      count.setAttribute('aria-hidden', 'true');
+      el.append(count);
+      const tick = document.createElement('span');
+      tick.className = 'neo-net3d__tool-tick';
+      tick.setAttribute('aria-hidden', 'true');
+      Object.assign(tick.style, { position: 'absolute', left: '0', top: '0', width: '12px', height: '1px', background: 'var(--neo-text-subtle)', opacity: '.6', pointerEvents: 'none' });
+      labels.append(tick, el);
+      markerOverlay.push({ el, count, tick, marker, activeMarker: marker, position: new T.Vector3(marker.x, marker.y, marker.z), membership: '' });
+    }
     for (const node of layout.nodes) {
       const material = bindOpacity(bindColor(new T.MeshLambertMaterial({ transparent: true, wireframe: node.node.status === 'archived', depthWrite: false }), `--neo-kind-${node.node.kind}`, memoryKindColor[node.node.kind as MemoryKind]), 0.12 + Math.max(0, Math.min(1, node.node.retention)) * 0.88, [node.id]);
       const sphere = new T.Mesh(sphereGeometry, material);
@@ -185,7 +240,8 @@ export function createMemoryNetScene(T: SceneThree, options: SceneOptions): Memo
     };
     const markInteraction = () => { lastInteraction = performance.now(); target = null; schedule(); };
     const clampY = (y: number) => Math.max(layout.timeScale.minY, Math.min(layout.timeScale.maxY, y));
-    const fitHeight = () => Math.max(80, (layout.timeScale.maxY - layout.timeScale.minY) * Math.cos(Math.PI / 12) + 2 * layout.horizontalRadius * Math.sin(Math.PI / 12) + 58, (layout.horizontalRadius * 2 + 65) * height / width);
+    // HTML glyphs have a fixed screen size even when years of history fit at once.
+    const fitHeight = () => Math.max(80, (layout.timeScale.maxY - layout.timeScale.minY) * Math.cos(Math.PI / 12) + 2 * layout.horizontalRadius * Math.sin(Math.PI / 12) + 58, (layout.horizontalRadius * 2 + 65) * height / width) * height / Math.max(1, height - 48);
     const updateCamera = () => {
       const distance = Math.max(1000, (layout.timeScale.maxY - layout.timeScale.minY) * Math.sin(Math.PI / 12) + layout.horizontalRadius * 2 + 100);
       camera.left = -viewHeight * width / height / 2;
@@ -200,6 +256,48 @@ export function createMemoryNetScene(T: SceneThree, options: SceneOptions): Memo
     };
     const drawLabels = () => {
       const boxes: { x: number; y: number; w: number; h: number }[] = [];
+      const visibleMarkers: { binding: typeof markerOverlay[number]; anchorX: number; anchorY: number }[] = [];
+      for (const binding of markerOverlay) {
+        const { el, tick, marker, position } = binding;
+        el.style.display = 'none';
+        tick.style.display = 'none';
+        binding.activeMarker = { ...marker, events: marker.events.slice() };
+        projected.copy(position).project(camera);
+        const anchorX = (projected.x + 1) * width / 2;
+        const anchorY = (1 - projected.y) * height / 2;
+        if (projected.z < -1 || projected.z > 1 || anchorY < 14 || anchorY > height - 14) continue;
+        const previous = visibleMarkers[visibleMarkers.length - 1];
+        if (previous && Math.abs(previous.anchorY - anchorY) < 32) previous.binding.activeMarker.events.push(...marker.events);
+        else visibleMarkers.push({ binding, anchorX, anchorY });
+      }
+      for (const { binding, anchorX, anchorY } of visibleMarkers) {
+        const { el, tick, count, activeMarker: marker } = binding;
+        const markerWidth = marker.events.length > 1 ? 37 + String(marker.events.length).length * 6 : 28;
+        const x = anchorX - markerWidth - 14;
+        const y = anchorY - 14;
+        const show = x >= 0 && x + markerWidth <= width;
+        el.style.display = show ? 'flex' : 'none';
+        tick.style.display = show ? 'block' : 'none';
+        if (!show) continue;
+        const membership = marker.events.map((event) => event.id).join('\0');
+        if (binding.membership !== membership) {
+          binding.membership = membership;
+          count.textContent = marker.events.length > 1 ? String(marker.events.length) : '';
+          count.style.display = marker.events.length > 1 ? 'inline' : 'none';
+          el.dataset.count = String(marker.events.length);
+          el.setAttribute('aria-label', marker.events.map((event) => toolAnnouncements.get(event.id)).join('; '));
+          if (marker.events.length > 1) el.setAttribute('aria-haspopup', 'dialog');
+          else el.removeAttribute('aria-haspopup');
+        }
+        el.style.width = `${markerWidth}px`;
+        el.style.transform = `translate(${x}px, ${y}px)`;
+        tick.style.transform = `translate(${anchorX - 14}px, ${anchorY}px)`;
+        const active = marker.events.some((event) => toolUseFocusId(event.id) === appearance.focusedId) || hoveredId === marker.id;
+        el.dataset.active = String(active);
+        el.style.outline = active ? '2px solid var(--neo-accent)' : '';
+        el.style.outlineOffset = active ? '2px' : '';
+        boxes.push({ x, y, w: markerWidth, h: 28 });
+      }
       const priority = (label: typeof overlay[number]) => label.id === null ? label.priority : label.id === appearance.selectedId ? 100 : label.id === hoveredId ? 90 : label.id === appearance.focusedId ? 85 : appearance.highlightIds.has(label.id) ? 80 : label.priority;
       for (const label of [...overlay].sort((a, b) => priority(b) - priority(a))) {
         const emphasized = label.id !== null && (label.id === appearance.selectedId || label.id === hoveredId || label.id === appearance.focusedId || appearance.highlightIds.has(label.id));
@@ -276,6 +374,11 @@ export function createMemoryNetScene(T: SceneThree, options: SceneOptions): Memo
       const node = layout.nodes.find((n) => n.id === id);
       if (node) goTo({ yaw: Math.atan2(node.x, node.z), y: clampY(node.y), height: Math.min(viewHeight, Math.max(80, layout.horizontalRadius * 2.5 * height / width)) });
       else if (id === layout.spine?.id) goTo({ yaw, y: (layout.timeScale.minY + layout.timeScale.maxY) / 2, height: viewHeight });
+      else {
+        const marker = layout.toolMarkers.find((item) => item.events.some((event) => toolUseFocusId(event.id) === id));
+        const event = marker?.events.find((item) => toolUseFocusId(item.id) === id);
+        if (event) goTo({ yaw, y: clampY(layout.timeScale.yAt(event.at)), height: Math.min(viewHeight, Math.max(80, layout.horizontalRadius * 2.5 * height / width)) });
+      }
     };
     const zoom = (factor: number) => {
       markInteraction();
@@ -305,6 +408,35 @@ export function createMemoryNetScene(T: SceneThree, options: SceneOptions): Memo
       el.addEventListener(event, handler, settings);
       disposers.push(() => el.removeEventListener(event, handler, settings));
     };
+    for (const binding of markerOverlay) {
+      const { el } = binding;
+      const hover = () => {
+        const marker = binding.activeMarker;
+        markInteraction();
+        hoveredId = marker.id;
+        const markerRect = el.getBoundingClientRect();
+        const hostRect = host.getBoundingClientRect();
+        options.onHover({ id: marker.id, x: markerRect.right - hostRect.left + 8, y: markerRect.top - hostRect.top, toolUses: marker.events });
+      };
+      listen(el, 'pointerenter', hover);
+      listen(el, 'focus', hover);
+      listen(el, 'pointerleave', () => { hoveredId = null; options.onHover(null); schedule(); });
+      listen(el, 'click', (event) => {
+        const marker = binding.activeMarker;
+        event.stopPropagation();
+        markInteraction();
+        host.focus({ preventScroll: true });
+        const first = marker.events[0]!;
+        appearance.focusedId = toolUseFocusId(first.id);
+        options.onFocus(appearance.focusedId);
+        if (marker.events.length === 1) options.onToolUseSelect?.(first);
+        else {
+          const rect = el.getBoundingClientRect();
+          const hostRect = host.getBoundingClientRect();
+          options.onToolUseGroupSelect?.(marker, rect.right - hostRect.left + 8, rect.top - hostRect.top);
+        }
+      });
+    }
     listen(canvas, 'pointerdown', (event) => {
       markInteraction();
       host.focus({ preventScroll: true });
@@ -433,7 +565,11 @@ export function createMemoryNetScene(T: SceneThree, options: SceneOptions): Memo
           yawVelocity = 0;
         } else if (key === '+' || key === '=') zoom(1.25);
         else if (key === '-' || key === '−') zoom(0.8);
-        else if (key === 'Enter') { if (appearance.focusedId) options.onSelect(appearance.focusedId); }
+        else if (key === 'Enter') {
+          const event = layout.toolMarkers.flatMap((marker) => marker.events).find((item) => toolUseFocusId(item.id) === appearance.focusedId);
+          if (event) options.onToolUseSelect?.(event);
+          else if (appearance.focusedId) options.onSelect(appearance.focusedId);
+        }
         else if (key === 'Escape') { appearance.focusedId = null; options.onFocus(null); options.onSelect(null); }
         else if (key === '0') fit();
         else return false;

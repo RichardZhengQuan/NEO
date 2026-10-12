@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import type { MemoryEdge, MemoryGraph, MemoryKind } from '@neo/protocol';
+import type { MemoryEdge, MemoryGraph, MemoryKind, ToolUseEvent } from '@neo/protocol';
 import {
   buildMemoryNet3DLayout,
   createMemoryTimeScale,
   generateMemoryTimeTicks,
   memoryTimeOrder,
   stepMemoryInTime,
+  toolUseFocusId,
 } from './memory-net-3d-layout.js';
 
 const DAY = 86_400_000;
@@ -235,5 +236,54 @@ describe('keyboard time stepping', () => {
     expect(stepMemoryInTime(order, 'same-a', 'older')).toBe('same-a');
     expect(stepMemoryInTime(order, 'missing', 'older')).toBe('latest');
     expect(stepMemoryInTime([], null, 'newer')).toBeNull();
+  });
+});
+
+describe('tool-use spine markers', () => {
+  const event = (id: string, at: number, category: ToolUseEvent['category'] = 'note'): ToolUseEvent => ({
+    id, at, category, title: `Wrote note “${id}”`, tool: 'create_note', messageId: `message-${id}`,
+  });
+
+  it('anchors markers at their event time on the existing graph spine without moving memories', () => {
+    const graph: MemoryGraph = { nodes: [node('first'), node('last', start + 30 * DAY)], edges: [] };
+    const base = buildMemoryNet3DLayout(graph, { now: start + 40 * DAY });
+    const events = [event('early', start + DAY), event('later', start + 20 * DAY)];
+    const layout = buildMemoryNet3DLayout(graph, { now: start + 40 * DAY, toolUses: events });
+    expect(layout.nodes).toEqual(base.nodes);
+    expect(layout.timeScale.days).toEqual(base.timeScale.days);
+    expect(layout.toolMarkers).toHaveLength(2);
+    for (const marker of layout.toolMarkers) {
+      expect(marker.x).toBe(0);
+      expect(marker.z).toBe(0);
+      expect(marker.y).toBe(base.timeScale.yAt(marker.events[0]!.at));
+    }
+  });
+
+  it('groups close events deterministically across categories while retaining every target', () => {
+    const events = [event('second', start + 1000, 'reminder'), event('first', start), event('third', start + DAY, 'search')];
+    const graph: MemoryGraph = { nodes: [node('first-memory'), node('last-memory', start + DAY)], edges: [] };
+    const layout = buildMemoryNet3DLayout(graph, { toolUses: events });
+    expect(layout.toolMarkers.map((marker) => marker.events.map((item) => item.id))).toEqual([['first', 'second'], ['third']]);
+    expect(layout.toolMarkers[0]!.at).toBe(start);
+    expect(layout.toolMarkers[0]!.y).toBe(layout.timeScale.yAt(start));
+    expect(buildMemoryNet3DLayout(graph, { toolUses: events.slice().reverse() }).toolMarkers).toEqual(layout.toolMarkers);
+  });
+
+  it('steps through each tool event and memory by time even when events share a marker', () => {
+    const layout = buildMemoryNet3DLayout({ nodes: [node('oldest'), node('middle', start + DAY), node('newest', start + 2 * DAY)], edges: [] }, {
+      toolUses: [event('a', start + 1000), event('b', start + 2000), event('c', start + DAY + 1000)],
+    });
+    expect(layout.timeOrder).toEqual(['oldest', toolUseFocusId('a'), toolUseFocusId('b'), 'middle', toolUseFocusId('c'), 'newest']);
+    expect(stepMemoryInTime(layout.timeOrder, toolUseFocusId('a'), 'newer')).toBe(toolUseFocusId('b'));
+    expect(stepMemoryInTime(layout.timeOrder, 'middle', 'older')).toBe(toolUseFocusId('b'));
+  });
+
+  it('supports a marker-only net and ignores invalid timestamps', () => {
+    const layout = buildMemoryNet3DLayout({ nodes: [], edges: [] }, { toolUses: [event('oldest', start), event('latest', start + DAY), event('bad', NaN)] });
+    expect(layout.timeScale.oldestAt).toBe(start);
+    expect(layout.timeScale.newestAt).toBe(start + DAY);
+    expect(layout.toolMarkers).toHaveLength(2);
+    expect(layout.toolMarkers.every((marker) => Number.isFinite(marker.y))).toBe(true);
+    expect(layout.timeOrder).not.toContain(toolUseFocusId('bad'));
   });
 });

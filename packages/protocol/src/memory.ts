@@ -19,6 +19,33 @@ export const MemoryKindSchema = z.enum([
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 export const MEMORY_KINDS = MemoryKindSchema.options;
 
+/** A completed outside-aid action, derived from an assistant timeline message. */
+export const ToolUseEventSchema = z.object({
+  id: z.string().min(1),
+  at: z.number().finite(),
+  tool: z.string().min(1),
+  category: z.enum(['note', 'reminder', 'task', 'search', 'memory', 'other']),
+  /** Safe, short display text; raw tool arguments and output are never returned. */
+  title: z.string().min(1).max(160),
+  messageId: z.string().min(1),
+  target: z.object({
+    kind: z.enum(['note', 'reminder', 'task', 'memory', 'url']),
+    id: z.string().min(1).optional(),
+    url: z.string().url().refine((value) => /^https?:\/\//i.test(value), 'Only HTTP(S) targets are allowed').optional(),
+  }).optional(),
+});
+export type ToolUseEvent = z.infer<typeof ToolUseEventSchema>;
+
+/** Inclusive epoch-ms range; overlarge limits are capped instead of expanding a query. */
+export const ToolUseQuerySchema = z.object({
+  from: z.number().finite().optional(),
+  to: z.number().finite().optional(),
+  limit: z.number().int().min(1).transform((value) => Math.min(value, 500)).optional(),
+}).refine((value) => value.from === undefined || value.to === undefined || value.from <= value.to, {
+  message: 'from must be earlier than or equal to to', path: ['to'],
+});
+export type ToolUseQuery = z.infer<typeof ToolUseQuerySchema>;
+
 export const MemoryStatusSchema = z.enum(['active', 'archived', 'superseded']);
 export type MemoryStatus = z.infer<typeof MemoryStatusSchema>;
 

@@ -3,19 +3,31 @@
  * highlights matches, and "focus" on one memory's neighborhood.
  */
 import { useMemo, useState, type ReactElement } from 'react';
-import { MEMORY_KINDS, type MemoryKind } from '@neo/protocol';
-import { Button, Chip, EmptyState, GraphLegend, IconButton, MemoryNet3D, Skeleton, Switch, TextField, useT } from '@neo/ui';
+import { MEMORY_KINDS, type MemoryKind, type ToolUseEvent } from '@neo/protocol';
+import { Button, Chip, EmptyState, GraphLegend, Icon, IconButton, MemoryNet3D, Skeleton, Switch, TextField, useT } from '@neo/ui';
 import { useDebounced, useLoader } from '../../hooks/useLoader.js';
 import { useIsDesktop } from '../../hooks/useMediaQuery.js';
 import { useData } from '../../state/data.js';
 import { requireClient } from '../../state/session.js';
+import { useTimeline } from '../../state/timeline.js';
+import { navigate } from '../../router.js';
+import { getPlatform } from '../../platform/index.js';
 
 export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId: string | null; onSelect: (id: string | null) => void; focusId: string | null; onFocus: (id: string | null) => void }): ReactElement {
   const t = useT();
   const desktop = useIsDesktop();
   const version = useData((s) => s.memoryVersion);
+  // Only completed tool parts change this key; text streaming does not refetch markers.
+  const toolRevision = useTimeline((s) => s.messages.flatMap((m) => {
+    const count = m.parts.filter((p) => p.type === 'tool_result').length;
+    return count ? [`${m.id}:${m.status}:${count}`] : [];
+  }).join(','));
+  const deletedMessageIds = useTimeline((s) => s.deletedMessageIds);
+  const deletedEpisodes = useTimeline((s) => s.deletedEpisodes);
+  const privacyRevision = useTimeline((s) => s.privacyRevision);
   const [kinds, setKinds] = useState<MemoryKind[]>([...MEMORY_KINDS]);
   const [archived, setArchived] = useState(false);
+  const [showToolUses, setShowToolUses] = useState(true);
   const [query, setQuery] = useState('');
   const q = useDebounced(query.trim(), 300);
 
@@ -28,8 +40,41 @@ export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId:
         ...(allKinds ? {} : { kinds }),
         ...(focusId ? { centerId: focusId, depth: 2 } : {}),
       }),
-    [version, archived, kinds.join(','), focusId],
+    [version, toolRevision, archived, kinds.join(','), focusId],
   );
+  const range = useMemo(() => {
+    if (!graph.data) return undefined;
+    const times = graph.data.nodes.filter((n) => n.id !== 'mem_self').flatMap((n) => n.kind === 'entity' && n.lastAccessedAt !== null && n.lastAccessedAt > n.createdAt ? [n.createdAt, n.lastAccessedAt] : [n.createdAt]).filter(Number.isFinite);
+    const now = Date.now();
+    return { ...(times.length ? { from: Math.min(now, ...times) } : {}), to: Math.max(now, ...times), limit: 500 };
+  }, [graph.data, toolRevision]);
+  const toolUses = useLoader(async () => ({
+    range,
+    version,
+    privacyRevision,
+    deletedEpisodes,
+    items: range ? (await requireClient().memory.toolUses(range)).items : [],
+  }), [range, version, privacyRevision, deletedEpisodes]);
+  // Hide stale markers while a different graph range or privacy scope is loading.
+  const markers = useMemo(() => toolUses.data && toolUses.data.range === range && toolUses.data.version === version && toolUses.data.privacyRevision === privacyRevision && toolUses.data.deletedEpisodes === deletedEpisodes
+    ? toolUses.data.items.filter((event) => !deletedMessageIds[event.messageId]) : [], [toolUses.data, range, version, privacyRevision, deletedMessageIds, deletedEpisodes]);
+  const toolUseLabels = useMemo(() => Object.fromEntries(['note', 'reminder', 'task', 'search', 'memory', 'other'].map((category) => [category, t(`memoryNet.tool_${category}`)])) as Record<ToolUseEvent['category'], string>, [t]);
+  const openToolUse = (event: ToolUseEvent) => {
+    const target = event.target;
+    if (target?.id) {
+      if (target.kind === 'note') { navigate({ name: 'notes', noteId: target.id }); return; }
+      if (target.kind === 'reminder') { navigate({ name: 'reminders', reminderId: target.id }); return; }
+      if (target.kind === 'task') { navigate({ name: 'tasks', taskId: target.id }); return; }
+      if (target.kind === 'memory') { onSelect(target.id); return; }
+    }
+    if (target?.kind === 'url' && target.url) {
+      try {
+        const url = new URL(target.url);
+        if ((url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password) { getPlatform().openExternal(url.href); return; }
+      } catch { /* Fall back to the originating timeline message. */ }
+    }
+    navigate({ name: 'timeline', messageId: event.messageId });
+  };
   const matches = useLoader(async () => (q ? (await requireClient().memory.search({ query: q, limit: 30, status: ['active', ...(archived ? (['archived'] as const) : [])] })).items.map((n) => n.id) : []), [q, version, archived]);
 
   const highlight = useMemo(() => matches.data ?? [], [matches.data]);
@@ -53,7 +98,7 @@ export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId:
           />
         </div>
         <Switch checked={archived} onChange={setArchived} label={t('memoryNet.show_archived')} />
-        <IconButton icon="refresh" label={t('common.refresh')} onClick={() => void graph.reload()} loading={graph.loading && graph.data !== undefined} />
+        <IconButton icon="refresh" label={t('common.refresh')} onClick={() => void Promise.allSettled([graph.reload(), toolUses.reload()])} loading={graph.loading && graph.data !== undefined} />
       </div>
       <div className="neo-tags" role="group" aria-label={t('memoryNet.filter_kinds')}>
         {MEMORY_KINDS.map((k) => (
@@ -62,6 +107,10 @@ export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId:
             {t(`memory.kind.${k}`)}
           </Chip>
         ))}
+        <Chip size="sm" pressed={showToolUses} onClick={() => setShowToolUses((show) => !show)}>
+          <Icon name="book" size={14} />
+          {t('memoryNet.tool_uses')}
+        </Chip>
         {!allKinds && (
           <Chip size="sm" onClick={() => setKinds([...MEMORY_KINDS])}>
             {t('memoryNet.all_kinds')}
@@ -82,15 +131,17 @@ export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId:
         ) : (
           <Skeleton className="neo-memory-net-viewport" height={desktop ? 640 : 420} style={{ borderRadius: 20 }} />
         )
-      ) : graph.data.nodes.length === 0 ? (
+      ) : graph.data.nodes.length === 0 && markers.length === 0 ? (
         <EmptyState icon="network" title={t('memoryNet.empty_title')} description={t('memoryNet.empty_text')} />
       ) : (
         <>
-          <MemoryNet3D graph={graph.data} selectedId={selectedId} highlightIds={q ? highlight : undefined} onSelect={onSelect} height={desktop ? 640 : 420} showLegend={false} className="neo-memory-net-viewport" />
+          <MemoryNet3D graph={graph.data} toolUses={showToolUses ? markers : undefined} toolUseLabels={toolUseLabels} onToolUseSelect={openToolUse} selectedId={selectedId} highlightIds={q ? highlight : undefined} onSelect={onSelect} height={desktop ? 640 : 420} showLegend={false} className="neo-memory-net-viewport" />
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
             <GraphLegend />
+            <span className="neo-help" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}><Icon name="book" size={14} />{t('memoryNet.tool_uses_legend')}</span>
             <span className="neo-help">{t('memoryNet.counts', { nodes: graph.data.nodes.length, edges: graph.data.edges.length })}</span>
           </div>
+          {showToolUses && Boolean(toolUses.error) && <div role="status" className="neo-help">{t('memoryNet.tool_uses_error')} <Button variant="ghost" size="sm" onClick={() => void toolUses.reload()}>{t('common.retry')}</Button></div>}
           <p className="neo-help" style={{ margin: 0 }}>
             {t('memoryNet.hint')}
           </p>

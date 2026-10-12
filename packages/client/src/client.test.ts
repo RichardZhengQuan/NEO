@@ -9,7 +9,7 @@
  *   no reconnect after close() or 4401
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet } from './index.js';
+import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet, type ToolUseEvent } from './index.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fake fetch helpers
@@ -321,6 +321,31 @@ describe('confirmations routes', () => {
 });
 
 describe('memory routes', () => {
+  it('toolUses: reads typed tool-use events within an epoch-millisecond range', async () => {
+    const event: ToolUseEvent = {
+      id: 'msg_1:call_1', at: 1791504000000, tool: 'create_note', category: 'note',
+      title: 'Wrote note “Kyoto itinerary”', messageId: 'msg_1', target: { kind: 'note', id: 'note_1' },
+    };
+    const { client, requests } = makeClient([{ status: 200, body: { items: [event] } }]);
+    const response = await client.memory.toolUses({ from: 0, to: 1791590400000, limit: 500 });
+    expect(response.items).toEqual([event]);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/tool-uses?from=0&to=1791590400000&limit=500');
+    expect(requests[0]!.body).toBeUndefined();
+    expect(requests[0]!.headers['authorization']).toBe('Bearer test-token');
+  });
+
+  it('toolUses: omits unspecified range bounds', async () => {
+    const { client, requests } = makeClient([
+      { status: 200, body: { items: [] } },
+      { status: 200, body: { items: [] } },
+    ]);
+    await client.memory.toolUses();
+    await client.memory.toolUses({ from: undefined, to: 100 });
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/tool-uses');
+    expect(requests[1]!.url).toBe('http://localhost:7777/api/memory/tool-uses?to=100');
+  });
+
   it('search: GET /api/memory with comma-separated kinds', async () => {
     const { client, requests } = makeClient([{ status: 200, body: { items: [], total: 0 } }]);
     await client.memory.search({ kinds: ['fact', 'preference'], limit: 5 });

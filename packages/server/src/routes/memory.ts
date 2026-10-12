@@ -12,6 +12,7 @@ import {
   MemoryKindSchema,
   MemorySearchQuerySchema,
   MemoryStatusSchema,
+  ToolUseQuerySchema,
   NeoError,
   UpdateMemoryRequestSchema,
 } from '@neo/protocol';
@@ -63,6 +64,24 @@ export function registerMemory(app: Hono, services: NeoServices): void {
     }));
     const graph = await memory.graph(q);
     return c.json(graph);
+  });
+
+  // GET /api/memory/tool-uses (authenticated owner or paired device)
+  app.get('/api/memory/tool-uses', async (c) => {
+    const q = validateQuery(c, z.object({
+      from: queryNumber.optional(),
+      to: queryNumber.optional(),
+      limit: queryNumber.optional(),
+    }).pipe(ToolUseQuerySchema));
+    const events = services.conversations.toolUses?.(q) ?? [];
+    const items = await Promise.all(events.map(async (event) => {
+      if (event.tool !== 'remember' || event.title === 'Remembered something private') return event;
+      // A once-public memory may have since become private. Missing/deleted
+      // memories cannot prove their current sensitivity, so hide their title too.
+      const current = event.target?.id ? await memory.get(event.target.id).catch(() => null) : null;
+      return current?.node.sensitivity === 'normal' ? event : { ...event, title: 'Remembered something private' };
+    }));
+    return c.json({ items });
   });
 
   // GET /api/memory/journal

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as Three from 'three';
-import type { MemoryGraph, MemoryKind } from '@neo/protocol';
+import type { MemoryGraph, MemoryKind, ToolUseEvent } from '@neo/protocol';
 import { buildMessages, createTranslator } from './i18n.js';
-import { buildMemoryNet3DLayout } from './memory-net-3d-layout.js';
+import { buildMemoryNet3DLayout, toolUseFocusId } from './memory-net-3d-layout.js';
 import { createMemoryNetScene, type MemoryNetScene } from './memory-net-3d-scene.js';
 
 const DAY = 86_400_000;
@@ -39,7 +39,7 @@ function draw(at = time + 16): void {
   for (const callback of callbacks) callback(at);
 }
 
-function setup(graph: MemoryGraph, width = 800, height = 420) {
+function setup(graph: MemoryGraph, width = 800, height = 420, toolUses: ToolUseEvent[] = []) {
   const host = document.createElement('div');
   const labels = document.createElement('div');
   const canvas = document.createElement('canvas');
@@ -50,18 +50,20 @@ function setup(graph: MemoryGraph, width = 800, height = 420) {
   vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, width, height));
   const renderer = new FakeRenderer();
   const T = { ...Three, WebGLRenderer: class { constructor() { return renderer; } } } as unknown as Parameters<typeof createMemoryNetScene>[0];
-  const layout = buildMemoryNet3DLayout(graph, { now: Math.max(start, ...graph.nodes.map((memory) => memory.createdAt)) });
+  const layout = buildMemoryNet3DLayout(graph, { now: Math.max(start, ...graph.nodes.map((memory) => memory.createdAt)), toolUses });
   const onSelect = vi.fn();
   const onFocus = vi.fn();
   const onHover = vi.fn();
   const onFailure = vi.fn();
+  const onToolUseSelect = vi.fn();
+  const onToolUseGroupSelect = vi.fn();
   const controller = createMemoryNetScene(T, {
     host, labels, canvas, context: {} as WebGL2RenderingContext, layout, locale: 'en',
-    t: createTranslator('en', buildMessages('en')), onSelect, onFocus, onHover, onFailure,
+    t: createTranslator('en', buildMessages('en')), onSelect, onFocus, onHover, onFailure, onToolUseSelect, onToolUseGroupSelect,
   });
   controllers.push(controller);
   const camera = () => renderer.render.mock.calls.at(-1)![1] as Three.OrthographicCamera;
-  return { controller, renderer, camera, canvas, labels, layout, onSelect, onFocus, onHover, onFailure, width, height };
+  return { controller, renderer, camera, canvas, labels, layout, onSelect, onFocus, onHover, onFailure, onToolUseSelect, onToolUseGroupSelect, width, height };
 }
 
 function pointer(canvas: HTMLCanvasElement, type: string, x: number, y: number, pointerId = 1): void {
@@ -111,6 +113,84 @@ afterEach(() => {
 });
 
 describe('memory net 3D scene without WebGL', () => {
+  const event = (id: string, at: number, category: ToolUseEvent['category'] = 'note'): ToolUseEvent => ({
+    id, at, category, title: `Wrote note “${id}”`, tool: 'create_note', messageId: `message-${id}`, target: { kind: 'note', id },
+  });
+
+  it('projects a flat glyph outside the spine at its exact time, with a short tick and target activation', () => {
+    const toolUse = event('Kyoto itinerary', start + 2 * DAY);
+    const view = setup({ nodes: [node('oldest'), node('newest', start + 10 * DAY)], edges: [] }, 800, 420, [toolUse]);
+    draw();
+    const marker = view.labels.querySelector<HTMLButtonElement>('.neo-net3d__tool-marker')!;
+    const tick = view.labels.querySelector<HTMLElement>('.neo-net3d__tool-tick')!;
+    const position = (el: HTMLElement) => el.style.transform.match(/translate\(([-\d.]+)px, ([-\d.]+)px\)/)!.slice(1).map(Number);
+    const anchor = new Three.Vector3(0, view.layout.timeScale.yAt(toolUse.at), 0).project(view.camera());
+    const anchorY = (1 - anchor.y) * view.height / 2;
+    expect(marker.style.display).toBe('flex');
+    expect(marker.querySelector('svg')?.getAttribute('data-icon')).toBe('book');
+    expect(position(marker)[1]! + 14).toBeCloseTo(anchorY, 8);
+    expect(position(tick)[1]).toBeCloseTo(anchorY, 8);
+    expect(position(marker)[0]! + 28).toBeLessThan(view.width / 2);
+    expect(marker.getAttribute('aria-label')).toContain('Note: Wrote note “Kyoto itinerary”, Oct 3, 2026');
+    marker.dispatchEvent(new Event('pointerenter'));
+    expect(view.onHover.mock.calls.at(-1)![0].toolUses).toEqual([toolUse]);
+    marker.click();
+    expect(view.onToolUseSelect).toHaveBeenLastCalledWith(toolUse);
+    expect(view.onSelect).not.toHaveBeenCalled();
+    view.controller.key('ArrowRight');
+    draw();
+    expect(position(marker)[0]! + 28).toBeLessThan(view.width / 2);
+    expect(position(marker)[1]! + 14).toBeCloseTo(anchorY, 8);
+  });
+
+  it('keeps every grouped event keyboard-reachable alongside memories in time order', () => {
+    const a = event('a', start + 1000);
+    const b = event('b', start + 2000, 'reminder');
+    const view = setup({ nodes: [node('oldest'), node('newest', start + DAY)], edges: [] }, 800, 420, [a, b]);
+    draw();
+    const marker = view.labels.querySelector<HTMLButtonElement>('.neo-net3d__tool-marker')!;
+    expect(marker.dataset.count).toBe('2');
+    marker.click();
+    expect(view.onToolUseGroupSelect.mock.calls.at(-1)![0].events).toEqual([a, b]);
+    expect(view.onToolUseSelect).not.toHaveBeenCalled();
+    view.controller.update({ selectedId: null, focusedId: null, highlightIds: new Set(), searchActive: false });
+    for (const id of ['oldest', toolUseFocusId('a'), toolUseFocusId('b'), 'newest']) {
+      view.controller.key('ArrowUp');
+      draw();
+      expect(view.onFocus).toHaveBeenLastCalledWith(id);
+      if (id === toolUseFocusId('b')) {
+        expect(marker.dataset.active).toBe('true');
+        view.controller.key('Enter');
+        expect(view.onToolUseSelect).toHaveBeenLastCalledWith(b);
+      }
+    }
+    view.controller.key('ArrowDown');
+    view.controller.key('Enter');
+    expect(view.onToolUseSelect).toHaveBeenLastCalledWith(b);
+  });
+
+  it('groups projected glyphs at fit-all without overlap and retains all aggregated hover/chooser targets', () => {
+    const memories = Array.from({ length: 200 }, (_, index) => node(`mem_${index}`, start + index * DAY));
+    const toolUses = memories.map((memory, index) => event(`event-${index}`, memory.createdAt));
+    const view = setup({ nodes: memories, edges: [] }, 1200, 420, toolUses);
+    draw();
+    const visible = [...view.labels.querySelectorAll<HTMLButtonElement>('.neo-net3d__tool-marker')].filter((marker) => marker.style.display !== 'none');
+    expect(visible.length).toBeGreaterThan(1);
+    expect(visible.length).toBeLessThan(20);
+    const positions = visible.map((marker) => Number(marker.style.transform.match(/, ([-\d.]+)px/)! [1])).sort((a, b) => a - b);
+    for (let index = 1; index < positions.length; index++) expect(positions[index]! - positions[index - 1]!).toBeGreaterThanOrEqual(32);
+    expect(visible.reduce((sum, marker) => sum + Number(marker.dataset.count), 0)).toBe(200);
+    const grouped = visible.find((marker) => Number(marker.dataset.count) > 1)!;
+    grouped.dispatchEvent(new Event('pointerenter'));
+    const hoveredEvents = view.onHover.mock.calls.at(-1)![0].toolUses;
+    expect(hoveredEvents).toHaveLength(Number(grouped.dataset.count));
+    grouped.click();
+    expect(view.onToolUseGroupSelect.mock.calls.at(-1)![0].events).toEqual(hoveredEvents);
+    view.controller.focus(toolUseFocusId('event-50'));
+    draw();
+    expect(centerY(view.camera())).toBeCloseTo(view.layout.timeScale.yAt(toolUses[50]!.at), 8);
+  });
+
   it('fits all 200 same-day spheres, including their depth, in a wide viewport', () => {
     const kinds: MemoryKind[] = ['entity', 'fact', 'preference', 'goal', 'skill', 'episode', 'summary'];
     const view = setup({ nodes: Array.from({ length: 200 }, (_, index) => node(`mem_${index}`, start + index * 1000, kinds[index % kinds.length]!)), edges: [] }, 1200, 420);

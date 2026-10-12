@@ -1,4 +1,4 @@
-import type { MemoryEdge, MemoryGraph, MemoryKind, MemoryNode } from '@neo/protocol';
+import type { MemoryEdge, MemoryGraph, MemoryKind, MemoryNode, ToolUseEvent } from '@neo/protocol';
 
 const DAY = 86_400_000;
 const KINDS: readonly MemoryKind[] = ['entity', 'fact', 'preference', 'goal', 'skill', 'episode', 'summary'];
@@ -130,6 +130,13 @@ export interface Net3DEdge {
   spoke: boolean;
 }
 
+/** A flat glyph projects beside this spine anchor, independent of camera yaw. */
+export interface Net3DToolMarker extends Net3DPoint {
+  id: string;
+  at: number;
+  events: ToolUseEvent[];
+}
+
 export interface MemoryNet3DLayout {
   nodes: Net3DNode[];
   edges: Net3DEdge[];
@@ -137,11 +144,29 @@ export interface MemoryNet3DLayout {
   timeScale: MemoryTimeScale;
   ticks: MemoryTimeTick[];
   timeOrder: string[];
+  toolMarkers: Net3DToolMarker[];
   horizontalRadius: number;
 }
 
 export interface MemoryNet3DLayoutOptions extends MemoryTimeScaleOptions {
   iterations?: number;
+  toolUses?: readonly ToolUseEvent[];
+}
+
+export const toolUseFocusId = (id: string): string => `tool-use:${id}`;
+
+/** Keep nearby events in one glyph without moving its first event's time anchor. */
+export function groupToolUseMarkers(events: readonly ToolUseEvent[], scale: MemoryTimeScale, minSpacing = 10): Net3DToolMarker[] {
+  const sorted = events.filter((event) => Number.isFinite(event.at)).slice()
+    .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+  const markers: Net3DToolMarker[] = [];
+  for (const event of sorted) {
+    const y = scale.yAt(event.at);
+    const last = markers[markers.length - 1];
+    if (last && y - last.y < minSpacing) last.events.push(event);
+    else markers.push({ id: toolUseFocusId(event.id), at: event.at, x: 0, y, z: 0, events: [event] });
+  }
+  return markers;
 }
 
 function hashId(id: string): number {
@@ -170,6 +195,9 @@ export function buildMemoryNet3DLayout(graph: MemoryGraph, options: MemoryNet3DL
   const memories = graph.nodes.filter((node) => node.id !== 'mem_self').slice().sort((a, b) => a.id.localeCompare(b.id));
   const timestamps = memories.flatMap((node) => node.kind === 'entity' && node.lastAccessedAt !== null && node.lastAccessedAt > node.createdAt
     ? [node.createdAt, node.lastAccessedAt] : [node.createdAt]);
+  const toolUses = (options.toolUses ?? []).filter((event) => Number.isFinite(event.at));
+  // Markers use the graph's existing compression; toggling them must not move memories.
+  if (!timestamps.length) timestamps.push(...toolUses.map((event) => event.at));
   if (!timestamps.length && options.now === undefined && spine) timestamps.push(spine.createdAt);
   const timeScale = createMemoryTimeScale(timestamps, options);
   const linkedToSelf = new Map<string, number>();
@@ -276,7 +304,9 @@ export function buildMemoryNet3DLayout(graph: MemoryGraph, options: MemoryNet3DL
     spine,
     timeScale,
     ticks: generateMemoryTimeTicks(timeScale),
-    timeOrder: memoryTimeOrder(memories),
+    timeOrder: [...memories.map((node) => ({ id: node.id, at: node.createdAt })), ...toolUses.map((event) => ({ id: toolUseFocusId(event.id), at: event.at }))]
+      .sort((a, b) => finite(a.at, 0) - finite(b.at, 0) || a.id.localeCompare(b.id)).map((item) => item.id),
+    toolMarkers: groupToolUseMarkers(toolUses, timeScale),
     horizontalRadius: Math.max(24, ...positioned.map((node) => Math.hypot(node.x, node.z) + node.radius)),
   };
 }

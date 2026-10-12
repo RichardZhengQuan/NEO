@@ -29,6 +29,7 @@ Provider creation, draft tests, updates that enable or use `kind: mock`, and set
 | `POST /api/memory` | `CreateMemoryRequestSchema` | `201 MemoryNode` (`source.by = 'user'`) |
 | `GET /api/memory/stats` | | `MemoryStats` |
 | `GET /api/memory/graph?centerId&depth&limit&kinds&includeArchived` | | `MemoryGraph` |
+| `GET /api/memory/tool-uses?from&to&limit` | `ToolUseQuerySchema`: inclusive epoch-ms bounds; limit capped at 500 | `ListResponse<ToolUseEvent>`; newest successful calls from recorded episodes, returned oldest-first |
 | `GET /api/memory/journal?limit` | | `ListResponse<ConsolidationReport>` |
 | `POST /api/memory/consolidate` | | `ConsolidationReport` (force) |
 | `GET /api/memory/export?embeddings=1` | | `MemoryExport` (`Content-Disposition: attachment; filename=neo-memory-<date>.json`) |
@@ -99,6 +100,14 @@ Memory remembers automatically. `MemoryPolicy` has no `mode` or blocked-topic fi
 `NeoSettings.persona` contains only `{ avatar: string | null }`; its default is `{ avatar: null }`. For example, `PATCH /api/settings` accepts `{ "persona": { "avatar": "neo-avatar:…" } }`. Legacy `name`, `tagline`, `tone`, `traits`, `instructions`, `language` and `greeting` fields are dropped during validation. Startup migrates non-default names, tone, traits, instructions and reply language from stored settings into `preference` memories tagged `assistant-style` once. NEO's UI display name stays fixed; its conversational style and names follow remembered user preferences supplied in user-message context.
 
 Query lists such as `kinds=fact,preference` and `status=scheduled,fired` are comma-separated. Booleans are `true`/`false`/`1`/`0`.
+
+## Memory tool uses
+
+`client.memory.toolUses({ from, to, limit })` reads moments when NEO used an outside aid. Owner and device tokens have the same read access as the memory graph. Bounds are optional epoch milliseconds, inclusive, and must satisfy `from <= to`; at most 500 events are returned.
+
+Each `ToolUseEvent` contains `{ id, at, tool, category, title, messageId, target? }`. Categories are `note`, `reminder`, `task`, `search`, `memory`, or `other`. Targets contain `{ kind, id?, url? }`, where kind is `note`, `reminder`, `task`, `memory`, or `url`. The event id combines the source message and tool-call part index; `at` is the message's creation time. Events derive from persisted assistant tool-call parts paired with successful results, so unmatched, failed calls and off-record episodes are omitted. The default limit is 100; the newest matching subset is returned in chronological order. Deleting a source message removes its events automatically.
+
+Only short summaries and target references leave storage. Note/reminder/task titles come from arguments or the corresponding result. Searches use the original query, and fetch summaries use the requested URL; page titles and other untrusted web content never supply summaries. Sensitive memory writes say "Remembered something private"; forgetting uses a generic summary. External targets are restricted to HTTP(S).
 
 ## AI settings
 
