@@ -22,9 +22,11 @@ export function TimelineHeader({ avatarState, onSearch, onDate }: { avatarState:
         { label: t('timeline.jump_date'), icon: 'calendar', onSelect: onDate },
       ]} />
     )}>
-      <NeoAvatar avatar={avatar ?? null} size={28} state={avatarState} animated={avatarState !== 'idle'} title="NEO" />
+      <span className="page-header__avatar">
+        <NeoAvatar avatar={avatar ?? null} size={28} state={avatarState} animated={avatarState !== 'idle'} title="NEO" />
+        <StatusDot />
+      </span>
       <h1 className="page-header__title">NEO</h1>
-      <StatusDot />
     </PageHeader>
   );
 }
