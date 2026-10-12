@@ -1684,4 +1684,36 @@
     gap: 0.5rem;
     color: var(--neo-accent-text);
   }
+
+  /* Memory net empty state: you at the centre, the first memories still faint around you */
+  .net-seed {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin-bottom: 0.25rem;
+  }
+  .net-seed__link {
+    stroke: var(--neo-text-subtle);
+    stroke-width: 1.25;
+    stroke-dasharray: 3 4;
+    opacity: 0.7;
+  }
+  .net-seed__link--faint {
+    opacity: 0.35;
+  }
+  .net-seed__ghost {
+    opacity: 0.35;
+  }
+  .net-seed__halo {
+    fill: var(--neo-accent);
+    opacity: 0.16;
+  }
+  .net-seed__self {
+    fill: var(--neo-accent);
+  }
+  .net-seed__label {
+    fill: var(--neo-text);
+    font-size: 12px;
+    font-weight: 600;
+  }
 }
