@@ -1148,7 +1148,12 @@ describe('robustness', () => {
     expect(seen).toEqual(['created']);
   });
 
-  it('recall stays fast at 10k nodes with edges (< 200 ms)', async () => {
+  // docs/MEMORY.md promises 200 ms on an idle machine. Parallel suites and other jobs slow every
+  // sample several-fold, so by default only an order-of-magnitude regression fails; NEO_PERF_STRICT=1
+  // holds the real budget (CONTRIBUTING.md). The median of several runs ignores one-off GC pauses.
+  const recallBudgetMs = process.env['NEO_PERF_STRICT'] === '1' ? 200 : 1000;
+
+  it(`recall stays fast at 10k nodes with edges (median < ${recallBudgetMs} ms)`, async () => {
     const { svc } = setup({ embedder: new HashingEmbedder(512) });
     const words = 'apple river stone cloud piano tiger garden silver rocket violet ocean forest candle marble lemon falcon harbor meadow pepper saddle'.split(' ');
     const nodes: MemoryNode[] = [];
@@ -1169,11 +1174,15 @@ describe('robustness', () => {
     await settle(400);
     expect((await vectorIds(svc)).size).toBe(10_000);
     await svc.recall({ text: 'warm-up', reinforce: false });
-    const start = performance.now();
-    const r = await svc.recall({ text: 'tell me about the piano near the river', reinforce: true });
-    const took = performance.now() - start;
-    expect(r.items.length).toBeGreaterThan(0);
-    expect(took).toBeLessThan(200);
+    const samples: number[] = [];
+    for (let k = 0; k < 7; k++) {
+      const start = performance.now();
+      const r = await svc.recall({ text: 'tell me about the piano near the river', reinforce: true });
+      samples.push(performance.now() - start);
+      expect(r.items.length).toBeGreaterThan(0);
+    }
+    const median = [...samples].sort((a, b) => a - b)[samples.length >> 1]!;
+    expect(median, `recall samples (ms): ${samples.map((t) => t.toFixed(1)).join(', ')}`).toBeLessThan(recallBudgetMs);
   }, 60_000);
 });
 
