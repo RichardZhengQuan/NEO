@@ -9,7 +9,7 @@ import {
 } from '@neo/tunnel';
 import type { RelayFrame, ServerIdentity, TunnelHandler } from '@neo/tunnel';
 import { startRelayConnector } from './relay.js';
-import type { RelayConnector } from './relay.js';
+import type { RelayConnector, RelayConnectorStatus } from './relay.js';
 
 const connectors: RelayConnector[] = [];
 const relays: WebSocketServer[] = [];
@@ -42,6 +42,7 @@ async function fixture(options: { challenge?: boolean } = {}) {
         const frame = decodeRelayFrame(new Uint8Array(data as Buffer));
         frames.push(frame);
         onFrame?.(frame);
+        events.emit('frame');
       } else {
         const registration = { ...JSON.parse(data.toString()), nonce };
         registrations.push(registration);
@@ -50,27 +51,43 @@ async function fixture(options: { challenge?: boolean } = {}) {
       }
     });
     if (options.challenge !== false) ws.send(JSON.stringify({ type: 'challenge', version: 1, nonce: toBase64Url(nonce) }));
+    events.emit('connection');
   });
   await once(relay, 'listening');
   const port = (relay.address() as { port: number }).port;
   return {
     url: `ws://127.0.0.1:${port}`, peers, registrations, frames,
     receive(callback: (frame: RelayFrame) => void) { onFrame = callback; },
-    /**
-     * Resolves once `count` registrations have arrived. A loaded machine can starve the event loop past a
-     * vi.waitFor deadline, and the overdue timer then fires before the I/O that would have satisfied it.
-     */
+    // The waits below resolve on the relay's own events, whether the event came before or after the call.
+    // A loaded machine can starve the event loop past a vi.waitFor deadline, and the overdue timer then
+    // fires before the I/O that would have satisfied it.
+    /** Resolves once `count` connectors have connected. */
+    async connected(count = 1) {
+      while (peers.length < count) await once(events, 'connection');
+    },
+    /** Resolves once `count` registrations have arrived. */
     async registered(count = 1) {
       while (registrations.length < count) await once(events, 'registration');
+    },
+    /** Resolves once the connector has sent a Close for `connection`. */
+    async closed(connection: number) {
+      while (!frames.some(frame => frame.op === RelayOp.Close && frame.connection === connection)) await once(events, 'frame');
     },
   };
 }
 
 function connect(url: string, identity: ServerIdentity = generateServerIdentity(), tunnelHandler: TunnelHandler = handler) {
-  const status = vi.fn();
+  const reports = new EventEmitter();
+  const status = vi.fn((_status: RelayConnectorStatus, _error?: string) => { reports.emit('status'); });
   const connector = startRelayConnector({ url, identity, handler: tunnelHandler, logger: silentLogger, onStatus: status });
   connectors.push(connector);
-  return { connector, status, identity };
+  return {
+    connector, status, identity,
+    /** Resolves once the connector has reported this status, whether before or after the call. */
+    async reported(expected: RelayConnectorStatus, error?: string) {
+      while (!status.mock.calls.some(([value, message]) => value === expected && message === error)) await once(reports, 'status');
+    },
+  };
 }
 
 describe('server relay connector', () => {
@@ -96,21 +113,27 @@ describe('server relay connector', () => {
     // The connector serves Opens only after taking the relay's acknowledgement, so it has reported in by now.
     expect(status).toHaveBeenCalledWith('connected', undefined);
     const received: { type: number; payload: Uint8Array }[] = [];
-    channel.onFrame = frame => received.push(frame);
+    const responded = new Promise<void>(resolve => {
+      channel.onFrame = frame => {
+        received.push(frame);
+        if (frame.type === TunnelFrameType.ResponseEnd) resolve();
+      };
+    });
     channel.send({ type: TunnelFrameType.Request, stream: 1, payload: encodeJson({ method: 'GET', path: '/api/health', headers: [] }) });
     channel.send({ type: TunnelFrameType.RequestEnd, stream: 1, payload: new Uint8Array() });
-    await vi.waitFor(() => expect(received.some(frame => frame.type === TunnelFrameType.ResponseEnd)).toBe(true));
+    await responded;
     expect(fetch).toHaveBeenCalledWith(expect.any(Request), { ip: '127.0.0.7', via: 'relay' });
     expect(new TextDecoder().decode(received.find(frame => frame.type === TunnelFrameType.ResponseBody)!.payload)).toBe('relay response');
     channel.send({ type: TunnelFrameType.Request, stream: 0, payload: new Uint8Array() });
-    await vi.waitFor(() => expect(relay.frames.some(frame => frame.op === RelayOp.Close && frame.connection === 7)).toBe(true));
+    await relay.closed(7);
   });
 
   it('ends active tunneled WebSockets on relay loss, reconnects, and stops for good', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const relay = await fixture();
-    const closed = vi.fn();
-    const { connector, identity, status } = connect(relay.url, undefined, {
+    const closed = vi.fn<(code: number, reason: string) => void>();
+    const socketEnded = new Promise<void>(resolve => closed.mockImplementation(() => resolve()));
+    const { connector, identity, status, reported } = connect(relay.url, undefined, {
       ...handler, openWebSocket: () => ({ message() {}, close: closed }),
     });
     await relay.registered();
@@ -120,13 +143,16 @@ describe('server relay connector', () => {
     relay.receive(frame => { if (frame.op === RelayOp.Data) forwarded.send(frame.payload); });
     ws.send(encodeRelayFrame({ op: RelayOp.Open, connection: 1, payload: utf8('127.0.0.1') }));
     const channel = await openChannel(phone, { serverId: identity.serverId, serverPublicKey: identity.dh.publicKey });
-    const frames: number[] = [];
-    channel.onFrame = frame => frames.push(frame.type);
+    const opened = new Promise<void>(resolve => {
+      channel.onFrame = frame => { if (frame.type === TunnelFrameType.WsOpened) resolve(); };
+    });
     channel.send({ type: TunnelFrameType.WsOpen, stream: 1, payload: encodeJson({ path: '/api/ws' }) });
-    await vi.waitFor(() => expect(frames).toContain(TunnelFrameType.WsOpened));
+    await opened;
     ws.terminate();
-    await vi.waitFor(() => expect(closed).toHaveBeenCalledWith(1006, 'Tunnel session closed'));
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('error', 'The relay connection closed.'));
+    // The tunnel server ends each socket once, so its first close is the one under test.
+    await socketEnded;
+    expect(closed).toHaveBeenCalledWith(1006, 'Tunnel session closed');
+    await reported('error', 'The relay connection closed.');
     await relay.registered(2);
     expect(status.mock.calls.filter(call => call[0] === 'connecting')).toHaveLength(2);
     await connector.close();
@@ -195,7 +221,8 @@ describe('server relay connector', () => {
   it('rejects registration acknowledgements before a signed challenge', async () => {
     const relay = await fixture({ challenge: false });
     const { identity, status } = connect(relay.url);
-    await vi.waitFor(() => expect(relay.peers).toHaveLength(1));
+    await relay.connected();
+    expect(relay.peers).toHaveLength(1);
     const ws = relay.peers[0]!;
     const ended = once(ws, 'close');
     ws.send(JSON.stringify({ type: 'registered', serverId: identity.serverId }));
