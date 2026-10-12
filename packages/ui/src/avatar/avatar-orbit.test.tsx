@@ -227,7 +227,7 @@ describe('avatar orbits', () => {
     expect(targets.map(angle)).not.toEqual(start);
   });
 
-  it('lifts a hovered back-half portrait without changing its visual depth', () => {
+  it('lifts a hovered back-half portrait without changing its orbit depth', () => {
     render(<Harness />);
     advanceFrame(0);
     advanceFrame(21000);
@@ -237,6 +237,7 @@ describe('avatar orbits', () => {
     expect(node.dataset.orbitLifted).toBe('false');
     expect(node.style.opacity).toBe('0.6');
     expect(node.style.transform).toContain('scale(0.8)');
+    expect(Number(node.style.zIndex)).toBeLessThan(2);
     const originalAngle = angle(target);
     fireEvent.pointerEnter(node);
     expect(node.dataset.orbitLifted).toBe('true');
@@ -244,7 +245,7 @@ describe('avatar orbits', () => {
     expect(target.dataset.orbitDepth).toBe('back');
     expect(node.style.opacity).toBe('1');
     expect(node.style.transform).toContain('scale(0.9)');
-    expect(node.style.zIndex).toBe('1');
+    expect(Number(node.style.zIndex)).toBeGreaterThan(2); // Above the figure layer.
     expect(picker().dataset.orbitPaused).toBe('true');
     advance(1000);
     expect(angle(target)).toBe(originalAngle);
@@ -253,6 +254,7 @@ describe('avatar orbits', () => {
     expect(target.dataset.orbitLifted).toBe('false');
     expect(node.style.opacity).toBe('0.6');
     expect(node.style.transform).toContain('scale(0.8)');
+    expect(Number(node.style.zIndex)).toBeLessThan(2);
     expect(picker().dataset.orbitPaused).toBe('false');
   });
 
