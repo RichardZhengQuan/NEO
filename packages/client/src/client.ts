@@ -60,6 +60,8 @@ import type {
   TaskPatch,
   ToolConfirmation,
   ToolInfo,
+  ToolUseEvent,
+  ToolUseQuery,
   UiActionRequest,
   UiActionResponse,
   UpdateProviderRequest,
@@ -198,6 +200,11 @@ export class NeoClientImpl {
 
     graph: (q?: GraphQuery) =>
       this.req<MemoryGraph>('GET', '/memory/graph', { query: q as Record<string, unknown> }),
+
+    toolUses: (range?: ToolUseQuery) =>
+      this.req<ListResponse<ToolUseEvent>>('GET', '/memory/tool-uses', {
+        query: range as Record<string, unknown>,
+      }),
 
     consolidate: () => this.req<ConsolidationReport>('POST', '/memory/consolidate'),
 

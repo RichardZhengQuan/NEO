@@ -31,6 +31,7 @@ import type {
 import type { ToolResult, ToolRisk } from './tools.js';
 import type { UIAction } from './ui.js';
 import type { OffRecordState, TimelinePage, TimelineQuery, TimelineSearchHit } from './api.js';
+import type { ToolUseEvent, ToolUseQuery } from './memory.js';
 
 // ───────────────────────────── logging & time ─────────────────────────────
 
@@ -132,6 +133,8 @@ export interface ConversationStore {
   timeline(query?: TimelineQuery): TimelinePage;
   searchMessages(query: string, limit?: number): TimelineSearchHit[];
   messagesInRange(range: { from?: number; to?: number }): Message[];
+  /** Completed tool calls, oldest → newest; excludes off-record episodes. Optional for legacy/custom stores. */
+  toolUses?(query?: ToolUseQuery): ToolUseEvent[];
   /** Inclusive timestamp range. Closes every touched active episode. */
   deleteRange(range: { from?: number; to?: number }): Message[];
 }

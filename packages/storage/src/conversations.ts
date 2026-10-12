@@ -3,6 +3,7 @@ import {
   newId,
   previewOf,
   systemClock,
+  ToolUseQuerySchema,
   type Clock,
   type Conversation,
   type ConversationListQuery,
@@ -16,8 +17,12 @@ import {
   type TimelinePage,
   type TimelineQuery,
   type TimelineSearchSnippet,
+  type ToolCallPart,
+  type ToolResultPart,
+  type ToolUseQuery,
 } from '@neo/protocol';
 import { fromBool, fromJson, toBool, toJson, toNum, toNumOrNull, type NeoDatabase } from './db.js';
+import { describeToolUse } from './tool-uses.js';
 
 type Row = Record<string, unknown>;
 
@@ -83,7 +88,7 @@ function toMessage(r: Row): Message {
   return msg;
 }
 
-export function createConversationStore(db: NeoDatabase, options: { clock?: Clock } = {}): ConversationStore {
+export function createConversationStore(db: NeoDatabase, options: { clock?: Clock } = {}): ConversationStore & Required<Pick<ConversationStore, 'toolUses'>> {
   const clock = options.clock ?? systemClock;
   const offRecordState = (): OffRecordState => {
     const row = db.prepare('SELECT off_record_started_at, private_episode_id FROM timeline_state WHERE id = 1').get() as Row;
@@ -411,6 +416,46 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
     },
 
     messagesInRange,
+
+    toolUses(query: ToolUseQuery = {}) {
+      const parsed = ToolUseQuerySchema.safeParse(query);
+      if (!parsed.success) throw new NeoError('bad_request', 'Invalid tool-use range or limit.');
+      const { from, to, limit = 100 } = parsed.data;
+      const where = ["m.role = 'assistant'", 'c.off_record = 0', 'c.incognito = 0'];
+      const args: number[] = [];
+      if (from !== undefined) { where.push('m.created_at >= ?'); args.push(from); }
+      if (to !== undefined) { where.push('m.created_at <= ?'); args.push(to); }
+      // The existing messages_by_time index bounds the messages before JSON expansion.
+      // Results belong to this assistant message and must follow their matching call.
+      // A reused call id cannot accidentally borrow a later call's result.
+      const rows = db.prepare(`
+        SELECT m.id, m.created_at, m.sensitive, call.key AS part_index, call.value AS tool_call, result.value AS tool_result
+        FROM messages m INDEXED BY messages_by_time
+        JOIN conversations c ON c.id = m.conversation_id
+        JOIN json_each(m.parts) call ON json_extract(call.value, '$.type') = 'tool_call'
+        JOIN json_each(m.parts) result ON result.key = (
+          SELECT candidate.key FROM json_each(m.parts) candidate
+          WHERE candidate.key > call.key
+            AND json_extract(candidate.value, '$.type') = 'tool_result'
+            AND json_extract(candidate.value, '$.toolCallId') = json_extract(call.value, '$.id')
+            AND json_extract(candidate.value, '$.name') = json_extract(call.value, '$.name')
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(m.parts) next_call
+              WHERE next_call.key > call.key AND next_call.key < candidate.key
+                AND json_extract(next_call.value, '$.type') = 'tool_call'
+                AND json_extract(next_call.value, '$.id') = json_extract(call.value, '$.id')
+            )
+          ORDER BY candidate.key LIMIT 1
+        )
+        WHERE ${where.join(' AND ')} AND COALESCE(json_extract(result.value, '$.isError'), 0) = 0
+        ORDER BY m.created_at DESC, m.id DESC, call.key DESC LIMIT ?
+      `).all(...args, limit) as Row[];
+      return rows.reverse().map((row) => describeToolUse(
+        row.id as string, toNum(row.created_at), toNum(row.part_index),
+        fromJson<ToolCallPart>(row.tool_call, {} as ToolCallPart),
+        fromJson<ToolResultPart>(row.tool_result, {} as ToolResultPart), toBool(row.sensitive),
+      ));
+    },
 
     deleteRange(range: { from?: number; to?: number }) {
       return db.transaction(() => {

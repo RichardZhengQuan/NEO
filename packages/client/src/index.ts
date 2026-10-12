@@ -65,6 +65,8 @@ import {
   type TaskPatch,
   type ToolConfirmation,
   type ToolInfo,
+  type ToolUseEvent,
+  type ToolUseQuery,
   type UiActionRequest,
   type UiActionResponse,
   type UpdateProviderRequest,
@@ -130,6 +132,8 @@ export type {
   TaskPatch,
   ToolConfirmation,
   ToolInfo,
+  ToolUseEvent,
+  ToolUseQuery,
   UiActionRequest,
   UiActionResponse,
   UpdateProviderRequest,
@@ -220,6 +224,8 @@ export class NeoClient {
       this._impl.memory.unlink(edgeId),
     graph: (q?: GraphQuery): Promise<MemoryGraph> =>
       this._impl.memory.graph(q),
+    toolUses: (range?: ToolUseQuery): Promise<ListResponse<ToolUseEvent>> =>
+      this._impl.memory.toolUses(range),
     consolidate: (): Promise<ConsolidationReport> =>
       this._impl.memory.consolidate(),
     journal: (limit?: number): Promise<ListResponse<ConsolidationReport>> =>
