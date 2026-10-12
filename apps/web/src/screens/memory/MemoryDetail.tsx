@@ -2,10 +2,11 @@
  * Everything about one memory: the card, full content, how strong it is,
  * where it came from (with a link to the message), its associations,
  * older versions it replaced, and the controls (edit, pin, forget, restore).
+ * The self node (you, the centre of the net) shows only its links.
  */
 import { useState, type ReactElement } from 'react';
-import type { MemoryEdge, MemoryNodeDetail } from '@neo/protocol';
-import { Badge, Button, EmptyState, Icon, IconButton, MemoryNodeCard, Skeleton, formatDateTime, formatRelative, useConfirm, useLocale, useT } from '@neo/ui';
+import { SELF_MEMORY_ID, type MemoryEdge, type MemoryNodeDetail } from '@neo/protocol';
+import { Badge, Button, EmptyState, Icon, IconButton, MemoryNodeCard, Skeleton, formatDateTime, formatRelative, memoryLabel, useConfirm, useLocale, useT } from '@neo/ui';
 import { openLink } from '../../actions/links.js';
 import { useLoader } from '../../hooks/useLoader.js';
 import { errorMessage, httpStatus } from '../../lib/errors.js';
@@ -24,7 +25,7 @@ function EdgeRow({ edge, nodeId, detail, onSelect, onUnlink }: { edge: MemoryEdg
       <span className="neo-kind-dot" data-kind={other?.kind ?? 'summary'} />
       <div className="row__main">
         <button type="button" className="neo-link-btn" style={{ fontWeight: 550, fontSize: '0.875rem' }} onClick={() => onSelect(otherId)}>
-          {other?.label ?? otherId}
+          {other ? memoryLabel(other, t) : otherId}
         </button>
         <div className="row__meta">
           <span>
@@ -34,7 +35,7 @@ function EdgeRow({ edge, nodeId, detail, onSelect, onUnlink }: { edge: MemoryEdg
           {edge.coactivations > 0 && <span>{t('memoryDetail.coactivations', { n: edge.coactivations })}</span>}
         </div>
       </div>
-      <IconButton icon="unlink" label={t('memoryDetail.unlink', { label: other?.label ?? otherId })} size="sm" onClick={() => onUnlink(edge)} />
+      <IconButton icon="unlink" label={t('memoryDetail.unlink', { label: other ? memoryLabel(other, t) : otherId })} size="sm" onClick={() => onUnlink(edge)} />
     </li>
   );
 }
@@ -74,6 +75,7 @@ export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: s
 
   const { node } = detail;
   const client = requireClient();
+  const self = node.id === SELF_MEMORY_ID;
   const facts: [string, string][] = [
     [t('memoryDetail.created'), formatDateTime(node.createdAt, locale)],
     [t('memoryDetail.updated'), formatDateTime(node.updatedAt, locale)],
@@ -90,19 +92,28 @@ export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: s
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-      <MemoryNodeCard
-        node={node}
-        retention={detail.retention}
-        onTogglePin={() => void act(() => client.memory.update(node.id, { pinned: !node.pinned }))}
-        onEdit={() => setEditing(true)}
-        onRestore={() => void act(() => client.memory.update(node.id, { status: 'active' }), t('memoryDetail.restored'))}
-        onForget={() =>
-          void act(async () => {
-            await client.memory.forget([node.id]);
-            onClose();
-          }, t('memoryDetail.forgotten'))
-        }
-      />
+      {self ? (
+        <MemoryNodeCard node={node} />
+      ) : (
+        <MemoryNodeCard
+          node={node}
+          retention={detail.retention}
+          onTogglePin={() => void act(() => client.memory.update(node.id, { pinned: !node.pinned }))}
+          onEdit={() => setEditing(true)}
+          onRestore={() => void act(() => client.memory.update(node.id, { status: 'active' }), t('memoryDetail.restored'))}
+          onForget={() =>
+            void act(async () => {
+              await client.memory.forget([node.id]);
+              onClose();
+            }, t('memoryDetail.forgotten'))
+          }
+        />
+      )}
+      {self && (
+        <p className="neo-help" style={{ margin: 0 }}>
+          {t('memoryDetail.self_text')}
+        </p>
+      )}
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
         {onFocus && (
@@ -110,34 +121,38 @@ export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: s
             {t('memoryDetail.focus')}
           </Button>
         )}
-        {node.source.messageId && (
+        {node.source.messageId && !self && (
           <Button size="sm" variant="secondary" icon="message" onClick={() => openLink(`neo://timeline/${encodeURIComponent(node.source.messageId!)}`)}>
             {t('memoryDetail.open_message')}
           </Button>
         )}
       </div>
 
-      <section>
-        <h3 className="group-title">{t('memoryDetail.source')}</h3>
-        <p style={{ margin: 0, fontSize: '0.875rem' }}>
-          <Badge tone="neutral" icon={node.source.by === 'user' ? 'user' : node.source.by === 'consolidation' ? 'moon-star' : 'sparkles'}>
-            {t(`source.${node.source.by}`)}
-          </Badge>
-          {node.source.note && <span className="neo-help" style={{ marginLeft: '0.5rem' }}>{node.source.note}</span>}
-        </p>
-      </section>
+      {!self && (
+        <>
+          <section>
+            <h3 className="group-title">{t('memoryDetail.source')}</h3>
+            <p style={{ margin: 0, fontSize: '0.875rem' }}>
+              <Badge tone="neutral" icon={node.source.by === 'user' ? 'user' : node.source.by === 'consolidation' ? 'moon-star' : 'sparkles'}>
+                {t(`source.${node.source.by}`)}
+              </Badge>
+              {node.source.note && <span className="neo-help" style={{ marginLeft: '0.5rem' }}>{node.source.note}</span>}
+            </p>
+          </section>
 
-      <section>
-        <h3 className="group-title">{t('memoryDetail.details')}</h3>
-        <dl className="neo-kv" style={{ containerType: 'inline-size' }}>
-          {facts.map(([k, v]) => (
-            <div key={k} style={{ display: 'contents' }}>
-              <dt>{k}</dt>
-              <dd>{v}</dd>
-            </div>
-          ))}
-        </dl>
-      </section>
+          <section>
+            <h3 className="group-title">{t('memoryDetail.details')}</h3>
+            <dl className="neo-kv" style={{ containerType: 'inline-size' }}>
+              {facts.map(([k, v]) => (
+                <div key={k} style={{ display: 'contents' }}>
+                  <dt>{k}</dt>
+                  <dd>{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        </>
+      )}
 
       <section>
         <h3 className="group-title">{t('memoryDetail.links', { n: detail.edges.length })}</h3>

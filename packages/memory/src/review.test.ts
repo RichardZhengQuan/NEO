@@ -386,7 +386,7 @@ describe('recall: reinforcement', () => {
     const r = await svc.recall({ text: 'alpha and beta', reinforce: true });
     expect(r.items.map((i) => i.node.id)).toContain(p.id);
     expect(count(db, `SELECT COUNT(*) n FROM memory_edges WHERE type = 'related' AND ((src = ? AND dst = ?) OR (src = ? AND dst = ?))`, a.id, b.id, b.id, a.id)).toBe(1);
-    expect(count(db, `SELECT COUNT(*) n FROM memory_edges WHERE src = ? OR dst = ?`, p.id, p.id)).toBe(0);
+    expect(count(db, `SELECT COUNT(*) n FROM memory_edges WHERE type = 'related' AND (src = ? OR dst = ?)`, p.id, p.id)).toBe(0);
   });
 });
 
@@ -483,9 +483,11 @@ describe('write: observe', () => {
     const { svc, db } = setup({ llm: model });
     const r1 = await svc.observe(turn('Mia is a nurse'));
     const r2 = await svc.observe(turn('Mia is a nurse in Berlin', 'ok', T0 + 1000));
-    const edges = db.prepare('SELECT type, weight FROM memory_edges').all() as { type: string; weight: number }[];
+    const edges = db.prepare(`SELECT type, weight FROM memory_edges WHERE dst != 'mem_self'`).all() as { type: string; weight: number }[];
     const w = (t: string) => edges.filter((e) => e.type === t).map((e) => e.weight);
     expect(w('about')).toEqual([0.8]);
+    // Each episode also hangs on the self node ("Mia is a nurse" is not about the user, so it does not).
+    expect(db.prepare(`SELECT type, weight FROM memory_edges WHERE dst = 'mem_self'`).all()).toEqual([{ type: 'about', weight: 0.3 }, { type: 'about', weight: 0.3 }]);
     expect(w('mentions')).toEqual([0.6, 0.6]);
     expect(w('derived_from').length).toBeGreaterThanOrEqual(1);
     expect(w('derived_from').every((x) => x === 0.5)).toBe(true);
@@ -869,7 +871,8 @@ describe('import / export / embeddings', () => {
     const exported = await a.svc.export();
     const b = setup();
     const report = await b.svc.import(exported);
-    expect(report).toEqual({ nodes: 2, edges: 0, skipped: 0 });
+    // The self node and its two about-edges travel with the export.
+    expect(report).toEqual({ nodes: 3, edges: 2, skipped: 0 });
     await settle();
     const ids = await vectorIds(b.svc);
     expect(ids.has(n1.id) && ids.has(n2.id)).toBe(true);
@@ -883,7 +886,8 @@ describe('import / export / embeddings', () => {
     const exported = await a.svc.export({ includeEmbeddings: true });
     const dupEdge = { ...exported.edges[0]!, id: 'edge_dup' };
     const report = await a.svc.import({ ...exported, edges: [...exported.edges, dupEdge] });
-    expect(report).toEqual({ nodes: 0, edges: 0, skipped: 4 });
+    // 3 nodes (with the self node) and 4 edges (related, its duplicate, two about-edges to the self node).
+    expect(report).toEqual({ nodes: 0, edges: 0, skipped: 7 });
     await expectNeoError(a.svc.import({ format: 'nope' } as unknown as MemoryExport), 'bad_request');
   });
 

@@ -6,7 +6,7 @@
  * in the cache: `write()` (database, inside the caller's transaction) and then
  * `remember()` (cache, after commit). `put()` does both for single writes.
  */
-import type { Embedder, Logger } from '@neo/protocol';
+import { SELF_MEMORY_ID, type Embedder, type Logger } from '@neo/protocol';
 import { blobToVector, fromJson, vectorToBlob, type NeoDatabase } from '@neo/storage';
 import { nodeEmbedText } from './embedder.js';
 import { normalized } from './utils.js';
@@ -173,7 +173,8 @@ export class VectorCache {
    * device goes to the local embedder only), in batches of 64, yielding between
    * batches. Concurrent calls share one pass. Recall keeps working meanwhile:
    * nodes without a current vector are just not vector seeds. Never touches
-   * `updated_at`. Resolves to the number of nodes embedded.
+   * `updated_at`. The self node is never embedded: nothing compares against it.
+   * Resolves to the number of nodes embedded.
    */
   reembedStale(embedder: Embedder): Promise<number> {
     if (this.reembedding) {
@@ -192,10 +193,10 @@ export class VectorCache {
           const page = this.db
             .prepare(
               `SELECT id, kind, label, content, aliases, sensitivity, embedding_model FROM memory_nodes
-               WHERE (embedding_model IS NULL OR embedding_model != ?) AND id > ?
+               WHERE (embedding_model IS NULL OR embedding_model != ?) AND id > ? AND id != ?
                ORDER BY id LIMIT ${REEMBED_BATCH}`,
             )
-            .all(embedder.id, cursor) as unknown as (StaleRow & { embedding_model: string | null })[];
+            .all(embedder.id, cursor, SELF_MEMORY_ID) as unknown as (StaleRow & { embedding_model: string | null })[];
           if (!page.length) break;
           cursor = page[page.length - 1]!.id;
           // Group by target embedder; a node already embedded where it belongs is left alone.
