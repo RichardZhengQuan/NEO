@@ -2,7 +2,7 @@
  * Memories as a searchable, filterable list (paged).
  */
 import { useEffect, useState, type ReactElement } from 'react';
-import { MEMORY_KINDS, type MemoryKind, type MemoryNode, type MemorySearchQuery, type MemoryStatus } from '@neo/protocol';
+import { MEMORY_KINDS, SELF_MEMORY_ID, type MemoryKind, type MemoryNode, type MemorySearchQuery, type MemoryStatus } from '@neo/protocol';
 import { Button, Chip, EmptyState, MemoryNodeCard, Select, Skeleton, TextField, useT } from '@neo/ui';
 import { useDebounced } from '../../hooks/useLoader.js';
 import { errorMessage } from '../../lib/errors.js';
@@ -124,9 +124,9 @@ export function ListTab({ selectedId, onSelect }: { selectedId: string | null; o
                 compact
                 selected={node.id === selectedId}
                 onOpen={() => onSelect(node.id)}
-                onTogglePin={() => void act(() => client.memory.update(node.id, { pinned: !node.pinned }))}
+                onTogglePin={node.id === SELF_MEMORY_ID ? undefined : () => void act(() => client.memory.update(node.id, { pinned: !node.pinned }))}
                 onRestore={() => void act(() => client.memory.update(node.id, { status: 'active' }))}
-                onForget={() => void act(() => client.memory.forget([node.id]))}
+                onForget={node.id === SELF_MEMORY_ID ? undefined : () => void act(() => client.memory.forget([node.id]))}
               />
             ))}
           </div>

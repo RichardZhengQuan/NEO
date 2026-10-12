@@ -20,7 +20,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
 } from 'react';
-import type { MemoryEdge, MemoryGraph, MemoryKind, MemoryNode } from '@neo/protocol';
+import { SELF_MEMORY_ID, type MemoryEdge, type MemoryGraph, type MemoryKind, type MemoryNode } from '@neo/protocol';
 import { useT } from './i18n.js';
 import { Icon } from './icons.js';
 import { IconButton } from './primitives.js';
@@ -91,11 +91,13 @@ function buildSim(graph: MemoryGraph, previous: Map<string, SimNode>, width: num
     const angle = i * 2.399963; // golden angle spiral: even initial spread
     const dist = 18 * Math.sqrt(i + 1);
     const d = degree.get(node.id) ?? 0;
+    const self = node.id === SELF_MEMORY_ID;
     return {
       id: node.id,
       node,
-      x: prev?.x ?? width / 2 + Math.cos(angle) * dist,
-      y: prev?.y ?? height / 2 + Math.sin(angle) * dist,
+      // The self node starts at the centre; everything else spirals out around it.
+      x: prev?.x ?? width / 2 + (self ? 0 : Math.cos(angle) * dist),
+      y: prev?.y ?? height / 2 + (self ? 0 : Math.sin(angle) * dist),
       vx: 0,
       vy: 0,
       r: 6 + node.importance * 9 + Math.min(d, 10) * 0.6 + (n < 30 ? 2 : 0),
@@ -155,10 +157,14 @@ function tick(nodes: SimNode[], edges: SimEdge[], cx: number, cy: number, alpha:
     b.vx -= fx;
     b.vy -= fy;
   }
-  // Gentle gravity towards the center keeps islands in view.
+  // Gentle gravity towards the center keeps islands in view (a little more in a small net,
+  // so a few memories sit together instead of drifting to the edges). The self node is
+  // held closer: the net grows around you.
+  const gravity = n < 15 ? 0.022 : 0.012;
   for (const s of nodes) {
-    s.vx += (cx - s.x) * 0.012 * alpha;
-    s.vy += (cy - s.y) * 0.012 * alpha;
+    const g = s.id === SELF_MEMORY_ID ? gravity * 4 : gravity;
+    s.vx += (cx - s.x) * g * alpha;
+    s.vy += (cy - s.y) * g * alpha;
   }
   for (const s of nodes) {
     if (s.fixed) {
@@ -193,7 +199,7 @@ function readPalette(el: Element): Palette {
     text: v('--neo-text', '#16161d'),
     muted: v('--neo-text-muted', '#5f5f76'),
     surface: v('--neo-surface', '#ffffff'),
-    edge: v('--neo-text-subtle', '#8a8aa0'),
+    edge: v('--neo-text-muted', '#5f5f76'),
     accent: v('--neo-accent', '#7c5cff'),
     pin: v('--neo-tone-warning-text', '#9a5b00'),
   };
@@ -215,8 +221,14 @@ export interface MemoryGraphViewProps {
   className?: string;
 }
 
-export function MemoryGraphView({ graph, selectedId = null, highlightIds = [], onSelect, height = 420, showLegend = true, className }: MemoryGraphViewProps): ReactElement {
+export function MemoryGraphView({ graph: input, selectedId = null, highlightIds = [], onSelect, height = 420, showLegend = true, className }: MemoryGraphViewProps): ReactElement {
   const t = useT();
+  // Display labels (the self node is "You") everywhere: canvas, tooltip, list fallback, live region.
+  const selfLabel = t('memory.self');
+  const graph = useMemo(
+    () => (input.nodes.some((n) => n.id === SELF_MEMORY_ID) ? { ...input, nodes: input.nodes.map((n) => (n.id === SELF_MEMORY_ID ? { ...n, label: selfLabel } : n)) } : input),
+    [input, selfLabel],
+  );
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [supported, setSupported] = useState(true);
@@ -284,9 +296,9 @@ export function MemoryGraphView({ graph, selectedId = null, highlightIds = [], o
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
-      ctx.globalAlpha = sel === null ? 0.25 + edge.weight * 0.4 : touches ? 0.95 : 0.06;
+      ctx.globalAlpha = sel === null ? 0.35 + edge.weight * 0.5 : touches ? 0.95 : 0.08;
       ctx.strokeStyle = touches ? p.accent : p.edge;
-      ctx.lineWidth = (0.6 + edge.weight * 1.8) / Math.sqrt(v.k);
+      ctx.lineWidth = (0.9 + edge.weight * 1.9) / Math.sqrt(v.k);
       ctx.setLineDash(edge.type === 'supersedes' || edge.type === 'contradicts' ? [4, 4] : edge.type === 'similar' ? [1, 3] : []);
       ctx.stroke();
     }
@@ -295,8 +307,17 @@ export function MemoryGraphView({ graph, selectedId = null, highlightIds = [], o
     // Nodes
     for (const s of nodes) {
       const { node } = s;
-      const color = p.kind[node.kind] ?? p.kind.summary ?? '#64748b';
+      const self = s.id === SELF_MEMORY_ID;
+      const color = self ? p.accent : p.kind[node.kind] ?? p.kind.summary ?? '#64748b';
       const faded = node.status === 'archived' || node.status === 'superseded';
+      if (self) {
+        // A soft halo marks the centre of the net.
+        ctx.globalAlpha = dim(s.id) ? 0.06 : 0.18;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r + 7, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
       ctx.globalAlpha = dim(s.id) ? 0.14 : 1;
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
@@ -309,12 +330,12 @@ export function MemoryGraphView({ graph, selectedId = null, highlightIds = [], o
       } else {
         ctx.fillStyle = p.surface;
         ctx.fill();
-        ctx.globalAlpha *= 0.3 + 0.7 * Math.max(0, Math.min(1, node.retention));
+        if (!self) ctx.globalAlpha *= 0.3 + 0.7 * Math.max(0, Math.min(1, node.retention));
         ctx.fillStyle = color;
         ctx.fill();
         ctx.globalAlpha = dim(s.id) ? 0.14 : 1;
       }
-      if (node.pinned) {
+      if (node.pinned && !self) {
         ctx.beginPath();
         ctx.arc(s.x + s.r * 0.72, s.y - s.r * 0.72, 3, 0, Math.PI * 2);
         ctx.fillStyle = p.pin;
@@ -338,7 +359,7 @@ export function MemoryGraphView({ graph, selectedId = null, highlightIds = [], o
     ctx.lineJoin = 'round';
     for (const s of nodes) {
       const interesting = s.id === sel || s.id === hov || s.id === focusId || neighbors.has(s.id) || hl.has(s.id);
-      const show = interesting || (sel === null && (nodes.length <= 28 || s.r * v.k > 13 || v.k > 1.6));
+      const show = interesting || s.id === SELF_MEMORY_ID || (sel === null && (nodes.length <= 28 || s.r * v.k > 13 || v.k > 1.6));
       if (!show) continue;
       const label = truncate(s.node.label, interesting ? 40 : 22);
       const y = s.y + s.r + 4 / v.k;
@@ -723,7 +744,7 @@ export function MemoryGraphView({ graph, selectedId = null, highlightIds = [], o
           ref={canvasRef}
           role="img"
           tabIndex={0}
-          aria-label={t('memory.graph_aria', { nodes: graph.nodes.length, edges: graph.edges.length })}
+          aria-label={t('memory.graph_aria', { nodes: graph.nodes.filter((n) => n.id !== SELF_MEMORY_ID).length, edges: graph.edges.length })}
           aria-describedby={undefined}
           data-hover={hover ? 'true' : undefined}
           data-dragging={gesture.current.mode === 'node' && gesture.current.moved ? 'true' : undefined}

@@ -7,6 +7,7 @@
  * Pure read: reinforcement is applied by the caller (write.ts).
  */
 import type { EdgeType, Embedder, MemoryKind, MemoryNode, RecallQuery, RecallResult, RecalledMemory } from '@neo/protocol';
+import { SELF_MEMORY_ID } from '@neo/protocol';
 import { fromJson, toNum, type SqlValue } from '@neo/storage';
 import { MEMORY_CONSTANTS } from './constants.js';
 import { ASSISTANT_STYLE_TAG } from './assistant-style.js';
@@ -49,7 +50,8 @@ export interface RecallOutcome {
 /**
  * Candidate predicate: active (+ archived with includeArchived), not expired,
  * kind filter, and sensitive excluded unless allowSensitive. Superseded
- * memories are never candidates. With a conversationId, that
+ * memories and the self node (linked to everything about the user, so it
+ * would spread activation everywhere) are never candidates. With a conversationId, that
  * conversation's own episodes are left out: they are already in the transcript
  * (working memory). Facts learned in it stay recallable.
  */
@@ -58,8 +60,9 @@ function candidateWhere(query: RecallQuery, now: number, alias = ''): { sql: str
   const conds = [
     query.includeArchived ? `${a}status IN ('active', 'archived')` : `${a}status = 'active'`,
     `(${a}valid_until IS NULL OR ${a}valid_until > ?)`,
+    `${a}id != ?`,
   ];
-  const params: SqlValue[] = [now];
+  const params: SqlValue[] = [now, SELF_MEMORY_ID];
   if (!query.allowSensitive) conds.push(`${a}sensitivity = 'normal'`);
   if (query.kinds?.length) {
     conds.push(`${a}kind IN (${query.kinds.map(() => '?').join(',')})`);

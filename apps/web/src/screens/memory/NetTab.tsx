@@ -10,6 +10,38 @@ import { useIsDesktop } from '../../hooks/useMediaQuery.js';
 import { useData } from '../../state/data.js';
 import { requireClient } from '../../state/session.js';
 
+/** Where the net will grow: you at the centre, the first memories still faint around you. */
+function NetSeed(): ReactElement {
+  const t = useT();
+  const ghosts: { kind: MemoryKind; angle: number; dist: number }[] = [
+    { kind: 'preference', angle: -150, dist: 62 },
+    { kind: 'entity', angle: -95, dist: 54 },
+    { kind: 'fact', angle: -35, dist: 66 },
+    { kind: 'goal', angle: 25, dist: 58 },
+    { kind: 'episode', angle: 95, dist: 50 },
+    { kind: 'skill', angle: 155, dist: 60 },
+  ];
+  const at = (g: { angle: number; dist: number }) => ({ x: 120 + Math.cos((g.angle * Math.PI) / 180) * g.dist * 1.35, y: 78 + Math.sin((g.angle * Math.PI) / 180) * g.dist });
+  return (
+    <svg className="net-seed" viewBox="0 0 240 156" width="240" height="156" aria-hidden="true">
+      {ghosts.map((g, i) => {
+        const p = at(g);
+        const next = at(ghosts[(i + 1) % ghosts.length]!);
+        return (
+          <g key={g.kind}>
+            <line x1="120" y1="78" x2={p.x} y2={p.y} className="net-seed__link" />
+            {i % 2 === 0 && <line x1={p.x} y1={p.y} x2={next.x} y2={next.y} className="net-seed__link net-seed__link--faint" />}
+            <circle cx={p.x} cy={p.y} r="7" className="net-seed__ghost" style={{ fill: `var(--neo-kind-${g.kind})` }} />
+          </g>
+        );
+      })}
+      <circle cx="120" cy="78" r="22" className="net-seed__halo" />
+      <circle cx="120" cy="78" r="14" className="net-seed__self" />
+      <text x="120" y="112" textAnchor="middle" className="net-seed__label">{t('memory.self')}</text>
+    </svg>
+  );
+}
+
 export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId: string | null; onSelect: (id: string | null) => void; focusId: string | null; onFocus: (id: string | null) => void }): ReactElement {
   const t = useT();
   const desktop = useIsDesktop();
@@ -83,7 +115,7 @@ export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId:
           <Skeleton height={desktop ? 540 : 420} style={{ borderRadius: 20 }} />
         )
       ) : graph.data.nodes.length === 0 ? (
-        <EmptyState icon="network" title={t('memoryNet.empty_title')} description={t('memoryNet.empty_text')} />
+        <EmptyState art={<NetSeed />} title={t('memoryNet.empty_title')} description={t('memoryNet.empty_text')} />
       ) : (
         <>
           <MemoryGraphView graph={graph.data} selectedId={selectedId} highlightIds={highlight} onSelect={onSelect} height={desktop ? 540 : 420} showLegend={false} />

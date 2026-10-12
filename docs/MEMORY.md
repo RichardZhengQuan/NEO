@@ -21,6 +21,7 @@ Migrations in `schema.ts`:
 
 - Version 1 (`initial`): the net tables below; this migration stays unchanged.
 - Version 2 (`remove unapproved memories`): deletes legacy `pending` nodes, their FTS rows, vectors and every touching edge explicitly, including when foreign keys are disabled, and redacts related dream-journal notes. Never-approved memories are discarded rather than activated. Existing active nodes are unchanged.
+- Version 3 (`self node`): hangs every existing active or archived memory about the user on the [self node](#the-self-node), creating it when there is at least one.
 
 The current data model:
 
@@ -96,6 +97,15 @@ CREATE TABLE IF NOT EXISTS memory_meta (
 - **Hard deletes** remove the FTS row, every edge touching the node, the vector row and the node row explicitly (not only through `ON DELETE CASCADE`), so nothing survives on a connection opened without `foreign_keys`. The node also leaves every in-memory vector cache.
 - A node has **one vector row**. It lives in the embedding space the node belongs to (see the next section). `embedding_model` names that model, or is `NULL` when the node still needs a vector.
 
+## The self node
+
+The user is the centre of their own memory, so the net has one node for them: `SELF_MEMORY_ID` (`mem_self`, an `entity`, pinned, importance 1). The UI shows it as "You". It makes the net hang together the way a person's memories do: a fact about the user stays connected after the episode it came from fades.
+
+- **Links** (`self.ts`, at write time on every create path: observe, `remember`, consolidation, revisions, import, and on updates by extraction or the user; links are only ever added): every **episode**, and every other non-entity memory whose label or content refers to the user ("The user …", "user's", 用户, ユーザー, 사용자; for memories the user wrote in the memory UI, also the first person: I/me/my/我), gets `node —about→ self` at weight `SELF_LINK_WEIGHT` (0.3). Entities never link to it directly; they join through the memories about them.
+- **Names**: entity names that mean the user ("user", "the user", "me", "myself", "I", "self", 用户, 我, 我自己, ユーザー, 사용자) never create an entity. The memory links to the self node instead. `findEntityByName` never returns the self node, so an entity called "You" (a song) stays its own node.
+- **Lifetime**: created (or restored to `active`) with the first memory about the user, never archived (pinned), never merged by consolidation, never given 'similar' links, and **never embedded** (nothing compares against it). It can't be edited (`update` refuses it) or forgotten directly (`forget` skips its id); `forget` removes it with the last memory that hangs on it, without counting it as forgotten, and it comes back with the next one. Consolidation's episode clustering ignores it: every episode hangs on it, so it is not an entity episodes share.
+- **Only structure**: recall never seeds, spreads through or returns it (it is excluded from candidates). Through it every memory about the user would be two hops from every other. `findForForget` ignores it, so "forget what you know about me" can't select everything through it. A focused graph (`centerId`) stops at it unless it is the centre. `stats()` doesn't count it. Export and import carry it like any other node (merge keeps the existing one).
+
 ## Embeddings and vector spaces
 
 **Embedding text** of a node: `"<kind>: <label>. <content>"`, plus `" Also known as: <a>, <b>"` when it has aliases. A new entity created for a name embeds as `"entity: <name>. Entity: <name>"`.
@@ -160,7 +170,7 @@ recall({ text, context?, conversationId?, limit?, tokenBudget?, kinds?, allowSen
 
 Normal turns reinforce. Off-record automatic and tool recall do not write reinforcement or associations.
 
-1. **Candidates**: `status = 'active'` (plus `archived` with `includeArchived`) and not expired (`valid_until IS NULL OR valid_until > now`). With `kinds`, only those kinds. **Sensitive memories are excluded unless `allowSensitive`**. With a `conversationId`, **that timeline episode's own memory episodes are excluded**: they are already in the transcript (working memory). Facts learned in it, and other timeline episodes' memories, stay recallable. Superseded memories are never recalled. Every seed source and every spreading step is restricted to candidates.
+1. **Candidates**: `status = 'active'` (plus `archived` with `includeArchived`) and not expired (`valid_until IS NULL OR valid_until > now`). With `kinds`, only those kinds. **Sensitive memories are excluded unless `allowSensitive`**. With a `conversationId`, **that timeline episode's own memory episodes are excluded**: they are already in the transcript (working memory). Facts learned in it, and other timeline episodes' memories, stay recallable. Superseded memories and the [self node](#the-self-node) are never recalled. Every seed source and every spreading step is restricted to candidates.
 2. **Seeds** (a node's seed activation is the max over the sources, and the winning source names it):
    - *Vector*: the query is embedded per space. In the main space, `text` goes always, and `context` only if the main embedder is local, or `allowSensitive` is false, or `sendSensitiveToCloud` is set (a local model's reply may quote sensitive memories). When the main embedder is remote, the query is also embedded in the `local-hash2-512` space, with the context. Each candidate is compared in the space of its stored vector (main if it has one, else local). The **blended similarity** is
 

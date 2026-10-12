@@ -21,7 +21,7 @@ import type {
   RememberInput,
   Sensitivity,
 } from '@neo/protocol';
-import { describeUiEvent, EdgeTypeSchema, NeoError, newId, RememberInputSchema } from '@neo/protocol';
+import { describeUiEvent, EdgeTypeSchema, NeoError, newId, RememberInputSchema, SELF_MEMORY_ID } from '@neo/protocol';
 import { MEMORY_CONSTANTS } from './constants.js';
 import { ASSISTANT_STYLE_TAG, assistantStyleAspect, assistantStyleConflict, assistantStyleTags } from './assistant-style.js';
 import type { MemoryContext } from './context.js';
@@ -45,6 +45,7 @@ import { nodeEmbedText } from './embedder.js';
 import { buildExtractionInput, llmExtract, type ExtractionResult, type MemoryOp } from './extract.js';
 import { heuristicEpisode, heuristicExtract } from './heuristic.js';
 import { redactJournal } from './journal.js';
+import { dropLonelySelf, isSelfName, linkSelf } from './self.js';
 import { cleanLabel, containsTerm, deriveLabel, hasCJK, hasCredentials, looksSensitive, normalizeText } from './text.js';
 import { clamp01, dot, effectiveEdgeWeight, initialStability, normalized, reinforcedFields } from './utils.js';
 import { tagVector, vectorModel } from './vectors.js';
@@ -209,7 +210,7 @@ export async function prepareEntityVectors(
   for (const raw of names) {
     const name = raw.trim().slice(0, 120);
     const key = normalizeText(name);
-    if (!key || todo.has(key) || into.has(key) || findEntityByName(ctx.db, name)) continue;
+    if (!key || todo.has(key) || into.has(key) || isSelfName(name) || findEntityByName(ctx.db, name)) continue;
     todo.set(key, name);
   }
   const flags = [...todo.values()].map((name) => (typeof local === 'boolean' ? local : local(name)));
@@ -227,7 +228,7 @@ function findDuplicate(s: WriteSession, spec: CreateSpec): MemoryNode | null {
   const { db } = s.ctx;
   if (spec.vector) {
     const model = vectorModel(spec.vector) ?? s.model;
-    const ids = db.prepare(`SELECT id FROM memory_nodes WHERE kind = ? AND status = 'active'`).all(spec.kind) as { id: string }[];
+    const ids = db.prepare(`SELECT id FROM memory_nodes WHERE kind = ? AND status = 'active' AND id != ?`).all(spec.kind, SELF_MEMORY_ID) as { id: string }[];
     let best: { id: string; sim: number } | null = null;
     for (const { id } of ids) {
       const v = s.vectorOf(id, model);
@@ -238,8 +239,8 @@ function findDuplicate(s: WriteSession, spec: CreateSpec): MemoryNode | null {
     if (best) return getNode(db, best.id);
   }
   const rows = db
-    .prepare(`SELECT * FROM memory_nodes WHERE kind = ? AND norm_label = ? AND status = 'active'`)
-    .all(spec.kind, normalizeText(spec.label)) as unknown as NodeRow[];
+    .prepare(`SELECT * FROM memory_nodes WHERE kind = ? AND norm_label = ? AND status = 'active' AND id != ?`)
+    .all(spec.kind, normalizeText(spec.label), SELF_MEMORY_ID) as unknown as NodeRow[];
   const content = normalizeText(spec.content);
   const same = rows.find((r) => normalizeText(r.content) === content);
   return same ? getNode(db, same.id) : null;
@@ -353,7 +354,9 @@ function upsertEntity(
 }
 
 /**
- * about-edges to the spec's entities (+ episode mentions), and derived_from to the episode.
+ * about-edges to the spec's entities (+ episode mentions), derived_from to the
+ * episode, and the about-edge to the self node when the memory is about the user.
+ * Names that mean the user ("the user", "me") are the self node, never a new entity.
  */
 function linkProvenance(
   s: WriteSession,
@@ -363,6 +366,7 @@ function linkProvenance(
   derivedWeight = 0.5,
 ): void {
   for (const name of spec.entities) {
+    if (isSelfName(name)) continue;
     if (node.kind === 'entity' && normalizeText(name) === normalizeText(node.label)) continue;
     const entity = upsertEntity(s, name, {
       sensitive: spec.sensitivity === 'sensitive' || node.sensitivity === 'sensitive',
@@ -374,6 +378,7 @@ function linkProvenance(
     if (episodeId) addEdge(s.ctx.db, episodeId, entity.id, 'mentions', 0.6, s.now);
   }
   if (episodeId && episodeId !== node.id) addEdge(s.ctx.db, node.id, episodeId, 'derived_from', derivedWeight, s.now);
+  linkSelf(s.ctx.db, node, s.now);
 }
 
 /**
@@ -497,6 +502,7 @@ function createRevision(
   const about = s.ctx.db.prepare(`SELECT dst, weight FROM memory_edges WHERE src = ? AND type = 'about'`).all(old.id) as { dst: string; weight: number }[];
   for (const e of about) addEdge(s.ctx.db, node.id, e.dst, 'about', e.weight, s.now);
   if (r.episodeId) addEdge(s.ctx.db, node.id, r.episodeId, 'derived_from', 0.5, s.now);
+  linkSelf(s.ctx.db, node, s.now);
   return node;
 }
 
@@ -858,6 +864,7 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
       insertNode(db, node);
       s.writeVector(node.id, vec(episodeIdx));
       s.markNew(node);
+      linkSelf(db, node, now);
       episodeId = node.id;
       episodeNode = node;
       list(result.created, node);
@@ -933,6 +940,7 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
             ...reinforcedFields(existing, now),
           }, now)!;
           s.writeVector(updated.id, vec(opIdx[i]!));
+          linkSelf(db, updated, now);
           s.updated.add(updated.id);
           list(result.updated, updated);
           touched.push(updated);
@@ -1057,11 +1065,14 @@ export async function remember(ctx: MemoryContext, input: RememberInput, signal?
 
 // ─────────────────────────────── forget ────────────────────────────────
 
-/** Hard delete, including the older versions each node superseded (its history). */
+/**
+ * Hard delete, including the older versions each node superseded (its history).
+ * The self node is never forgotten directly: it goes with the last memory about the user.
+ */
 export function forget(ctx: MemoryContext, ids: string[]): number {
   return runWrite(ctx, ctx.clock(), (s) => {
     const all = new Set<string>();
-    const queue = [...new Set(ids)];
+    const queue = [...new Set(ids)].filter((id) => id !== SELF_MEMORY_ID);
     while (queue.length) {
       const id = queue.pop()!;
       if (all.has(id)) continue;
@@ -1079,6 +1090,8 @@ export function forget(ctx: MemoryContext, ids: string[]): number {
     );
     const deleted = deleteNodes(ctx.db, [...all]);
     for (const id of deleted) s.deleted.add(id);
+    // The self node goes with the last memory about the user (not counted as one the user forgot).
+    if (dropLonelySelf(ctx.db)) s.deleted.add(SELF_MEMORY_ID);
     // Their text must not outlive them in the consolidation journal.
     redactJournal(ctx.db, deleted.map((id) => ({ id, label: labels.get(id) ?? '' })));
     return deleted.length;
