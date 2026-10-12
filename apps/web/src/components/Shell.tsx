@@ -1,8 +1,8 @@
 /**
- * App frame. ≥ 768 px: a persistent sidebar with app navigation. Below:
- * the same panel as a drawer plus a bottom tab bar. Esc closes the drawer.
+ * App frame. ≥ 768 px: a persistent icon rail. Below: the same rail as a
+ * drawer plus icon-only bottom tabs. Esc closes the drawer.
  */
-import { useEffect, useRef, type ReactElement, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { Icon, NeoAvatar, useT } from '@neo/ui';
 import { useIsDesktop } from '../hooks/useMediaQuery.js';
 import { navigate, type Route, type RouteName } from '../router.js';
@@ -31,6 +31,59 @@ function useBadges(): Partial<Record<NavDef['name'], number>> {
   return { reminders: due };
 }
 
+function RailButton({ label, className, current, onClick, children }: {
+  label: string;
+  className: string;
+  current?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}): ReactElement {
+  const [tooltipOpen, setTooltipOpen] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focused = useRef(false);
+  const hovered = useRef(false);
+  const clearTimer = () => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
+  };
+  useEffect(() => () => {
+    if (timer.current !== null) clearTimeout(timer.current);
+  }, []);
+  return (
+    <div className="side__button" data-current={current || undefined}
+      onMouseEnter={() => {
+        hovered.current = true;
+        clearTimer();
+        timer.current = setTimeout(() => setTooltipOpen(true), 300);
+      }}
+      onMouseLeave={() => {
+        hovered.current = false;
+        clearTimer();
+        if (!focused.current) setTooltipOpen(false);
+      }}>
+      <button type="button" className={className} aria-label={label} aria-current={current ? 'page' : undefined} onClick={onClick}
+        onFocus={() => {
+          focused.current = true;
+          clearTimer();
+          setTooltipOpen(true);
+        }}
+        onBlur={() => {
+          focused.current = false;
+          if (!hovered.current) setTooltipOpen(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            clearTimer();
+            setTooltipOpen(false);
+          }
+        }}>
+        {children}
+      </button>
+      {tooltipOpen && <span className="side__tooltip" role="tooltip" aria-hidden="true">{label}</span>}
+    </div>
+  );
+}
+
 function SidePanel({ route }: { route: Route }): ReactElement {
   const t = useT();
   const persona = useSession((s) => s.settings?.persona);
@@ -39,25 +92,25 @@ function SidePanel({ route }: { route: Route }): ReactElement {
     setDrawer(false);
     navigate(r);
   };
+  const itemButton = (item: NavDef) => (
+    <RailButton key={item.name} className="nav-item" label={t(`nav.${item.name}`)} current={route.name === item.name} onClick={() => go(item.route)}>
+      <Icon name={item.icon} size={20} />
+      {badges[item.name] ? <span className="nav-item__count" aria-hidden="true">{badges[item.name]! > 9 ? '9+' : badges[item.name]}</span> : null}
+    </RailButton>
+  );
   return (
     <div className="side">
       <div className="side__head">
-        <button type="button" className="side__brand" onClick={() => go({ name: 'timeline' })} aria-label={t('nav.timeline')}>
-          <NeoAvatar avatar={persona?.avatar ?? null} size={30} animated={false} />
-          <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-            <span className="side__name">NEO</span>
+        <RailButton className="side__brand" label={t('nav.timeline')} onClick={() => go({ name: 'timeline' })}>
+          <span className="side__avatar">
+            <NeoAvatar avatar={persona?.avatar ?? null} size={32} animated={false} />
+            <StatusDot />
           </span>
-        </button>
-        <StatusDot />
+        </RailButton>
       </div>
       <nav className="side__nav" aria-label={t('nav.main')}>
-        {NAV.map((item) => (
-          <button key={item.name} type="button" className="nav-item" aria-current={route.name === item.name ? 'page' : undefined} onClick={() => go(item.route)}>
-            <Icon name={item.icon} size={17} />
-            {t(`nav.${item.name}`)}
-            {badges[item.name] ? <span className="nav-item__count">{badges[item.name]}</span> : null}
-          </button>
-        ))}
+        <div className="side__main">{NAV.filter((item) => item.name !== 'settings').map(itemButton)}</div>
+        <div className="side__bottom">{NAV.filter((item) => item.name === 'settings').map(itemButton)}</div>
       </nav>
     </div>
   );
@@ -90,10 +143,9 @@ function TabBar({ route }: { route: Route }): ReactElement {
   return (
     <nav className="tabbar" aria-label={t('nav.main')}>
       {NAV.map((item) => (
-        <button key={item.name} type="button" className="tabbar__item" aria-current={route.name === item.name ? 'page' : undefined} onClick={() => navigate(item.route)}>
-          <Icon name={item.icon} size={21} />
-          <span>{t(`nav.${item.name}`)}</span>
-          {badges[item.name] ? <span className="tabbar__badge">{badges[item.name]}</span> : null}
+        <button key={item.name} type="button" className="tabbar__item" aria-label={t(`nav.${item.name}`)} aria-current={route.name === item.name ? 'page' : undefined} onClick={() => navigate(item.route)}>
+          <Icon name={item.icon} size={24} />
+          {badges[item.name] ? <span className="tabbar__badge" aria-hidden="true">{badges[item.name]! > 9 ? '9+' : badges[item.name]}</span> : null}
         </button>
       ))}
     </nav>
