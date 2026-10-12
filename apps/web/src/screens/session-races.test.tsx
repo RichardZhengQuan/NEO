@@ -16,7 +16,7 @@ vi.mock('@neo/client', async (importOriginal) => ({
   NeoClient: vi.fn(() => ({
     timeline: { offRecord: vi.fn().mockResolvedValue({ active: false, episodeId: null, startedAt: null }), startOffRecord: vi.fn().mockResolvedValue({ active: true, episodeId: null, startedAt: 1 }), list: vi.fn() },
     tasks: { update: vi.fn() },
-    reminders: { create: vi.fn() },
+    reminders: { update: vi.fn() },
     providers: { create: vi.fn(), update: vi.fn(), list: vi.fn(), models: vi.fn().mockResolvedValue({ items: [] }) },
   })),
 }));
@@ -41,6 +41,7 @@ function renderScreen(child: ReactElement) {
 }
 
 const task: Task = { id: 'task_a', title: 'Server A task', notes: null, listId: 'list_inbox', done: false, doneAt: null, dueAt: null, priority: 0, tags: [], order: 0, parentId: null, createdAt: 0, updatedAt: 0 };
+const reminder: Reminder = { id: 'rem_a', title: 'Server A reminder', notes: null, dueAt: Date.UTC(2099, 0, 1, 9), timezone: 'UTC', recurrence: null, status: 'scheduled', firedCount: 0, lastFiredAt: null, messageId: null, createdAt: 0, updatedAt: 0 };
 const provider: ProviderView = { id: 'old', kind: 'ollama', label: 'Old provider', enabled: true, hasApiKey: false, isLocal: true };
 
 beforeEach(() => {
@@ -69,19 +70,20 @@ describe('screen mutations after a server switch (F10)', () => {
     expect(useData.getState().tasks).toEqual({});
   });
 
-  it('late reminder creation cannot populate B', async () => {
+  it('late reminder edit cannot populate B', async () => {
     const client = useSession.getState().client!;
     const response = deferred<Reminder>();
-    vi.mocked(client.reminders.create).mockReturnValueOnce(response.promise);
-    useData.setState({ remindersLoaded: true });
+    vi.mocked(client.reminders.update).mockReturnValueOnce(response.promise);
+    useData.setState({ reminders: { [reminder.id]: reminder }, remindersLoaded: true });
     const { unmount } = renderScreen(<RemindersScreen />);
-    fireEvent.click(screen.getAllByRole('button', { name: 'New reminder' })[0]!);
-    fireEvent.change(screen.getByRole('textbox', { name: /Remind me to/ }), { target: { value: 'Server A reminder' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create reminder' }));
-    expect(client.reminders.create).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Server A reminder' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
+    fireEvent.change(screen.getByRole('textbox', { name: /Remind me to/ }), { target: { value: 'Renamed on A' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(client.reminders.update).toHaveBeenCalledTimes(1);
     unmount();
     startSession({ serverUrl: 'https://b.example', token: 'b' }, 'manual');
-    await act(async () => { response.resolve({ id: 'rem_a', title: 'A', notes: null, dueAt: 1000, timezone: 'UTC', recurrence: null, status: 'scheduled', firedCount: 0, lastFiredAt: null, messageId: null, createdAt: 0, updatedAt: 0 }); });
+    await act(async () => { response.resolve({ ...reminder, title: 'Renamed on A' }); });
     expect(useData.getState().reminders).toEqual({});
   });
 

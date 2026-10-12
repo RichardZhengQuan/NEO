@@ -1,6 +1,7 @@
 /**
- * Notes: a searchable list and a Markdown editor with live preview, tags,
- * pinning and autosave. Two panes on wide screens, list → editor on phones.
+ * Notes NEO saved for you: a searchable list and a Markdown editor with live
+ * preview, tags, pinning and autosave. Two panes on wide screens, list →
+ * editor on phones. There is no "new note": you tell NEO, and it writes one.
  */
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { Note } from '@neo/protocol';
@@ -228,7 +229,6 @@ export function NotesScreen({ noteId }: { noteId?: string }): ReactElement {
   const loaded = useData((s) => s.notesLoaded);
   const [query, setQuery] = useState('');
   const [tag, setTag] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     void loadNotes(requireClient()).catch((err) => pushToast({ tone: 'error', title: errorMessage(err, t) }));
@@ -240,31 +240,9 @@ export function NotesScreen({ noteId }: { noteId?: string }): ReactElement {
   const visible = all.filter((n) => (!tag || n.tags.includes(tag)) && (!q || n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q) || n.tags.some((x) => x.toLowerCase().includes(q))));
   const current = noteId ? notes[noteId] : undefined;
 
-  const create = async () => {
-    const epoch = currentSessionEpoch();
-    setCreating(true);
-    try {
-      const note = await requireClient().notes.create({ title: '', content: '', ...(tag ? { tags: [tag] } : {}) });
-      if (!isCurrentSession(epoch)) return;
-      upsertNote(note);
-      navigate({ name: 'notes', noteId: note.id });
-    } catch (err) {
-      pushToast({ tone: 'error', title: errorMessage(err, t) });
-    } finally {
-      setCreating(false);
-    }
-  };
-
   const list = (
     <div className="page" style={desktop ? { flex: '0 0 21rem', borderRight: '1px solid var(--neo-border)' } : undefined}>
-      <PageHeader
-        title={t('nav.notes')}
-        actions={
-          <Button size="sm" variant="primary" icon="plus" onClick={() => void create()} loading={creating}>
-            {t('notes.new')}
-          </Button>
-        }
-      />
+      <PageHeader title={t('nav.notes')} />
       <div style={{ padding: '0.75rem 1rem 0.25rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
         <TextField size="sm" type="search" icon="search" value={query} onChange={setQuery} ariaLabel={t('notes.search')} placeholder={t('notes.search')} />
         {tags.length > 0 && (
@@ -315,7 +293,7 @@ export function NotesScreen({ noteId }: { noteId?: string }): ReactElement {
     </div>
   ) : (
     <div className="page" style={{ justifyContent: 'center' }}>
-      <EmptyState icon="note" title={t('notes.pick_title')} description={t('notes.pick_text')} action={<Button variant="primary" icon="plus" onClick={() => void create()}>{t('notes.new')}</Button>} />
+      <EmptyState icon="note" title={t('notes.pick_title')} description={t('notes.pick_text')} />
     </div>
   );
 
