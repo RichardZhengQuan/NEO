@@ -35,6 +35,7 @@ Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In short:
 - Throw `NeoError` (from `@neo/protocol`) across package boundaries. Inject `Clock` and `Logger` instead of calling `Date.now()` or `console` in library code.
 - Tests use vitest, sit next to the code (`src/**/*.test.ts`), and run **offline and deterministic**: fake clocks, fake fetch, in-memory SQLite.
 - The one exception, a Docker image smoke test (`packages/cli/src/docker.test.ts`), builds and runs the real image; it only runs with `NEO_DOCKER_TEST=1`.
+- The memory recall benchmark ("recall stays fast" in `packages/memory/src/review.test.ts`) asserts a median wall-clock time, so by default it only fails above 1 s: parallel suites (`pnpm -r test`, CI) slow it several-fold. When you change recall or the memory schema, check the real 200 ms budget on an otherwise idle machine with `NEO_PERF_STRICT=1 pnpm --filter @neo/memory test -t "recall stays fast"`.
 - Keep transcripts append-only. Per-turn context goes into the user message's `context` part, never into the system prompt (see "Context assembly" in the architecture doc).
 - Privacy is a feature: anything touching memory must respect the policy table at the end of [docs/MEMORY.md](docs/MEMORY.md).
 
