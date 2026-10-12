@@ -1,4 +1,4 @@
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import WebSocket, { WebSocketServer } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -30,6 +30,7 @@ async function fixture(options: { challenge?: boolean } = {}) {
   const peers: WebSocket[] = [];
   const registrations: { serverId: string; key: string; signature: string; nonce: Uint8Array }[] = [];
   const frames: RelayFrame[] = [];
+  const events = new EventEmitter();
   let onFrame: ((frame: RelayFrame) => void) | undefined;
   relay.on('connection', (ws, request) => {
     expect(request.url).toBe('/v1/server');
@@ -45,6 +46,7 @@ async function fixture(options: { challenge?: boolean } = {}) {
         const registration = { ...JSON.parse(data.toString()), nonce };
         registrations.push(registration);
         ws.send(JSON.stringify({ type: 'registered', serverId: registration.serverId }));
+        events.emit('registration');
       }
     });
     if (options.challenge !== false) ws.send(JSON.stringify({ type: 'challenge', version: 1, nonce: toBase64Url(nonce) }));
@@ -54,6 +56,13 @@ async function fixture(options: { challenge?: boolean } = {}) {
   return {
     url: `ws://127.0.0.1:${port}`, peers, registrations, frames,
     receive(callback: (frame: RelayFrame) => void) { onFrame = callback; },
+    /**
+     * Resolves once `count` registrations have arrived. A loaded machine can starve the event loop past a
+     * vi.waitFor deadline, and the overdue timer then fires before the I/O that would have satisfied it.
+     */
+    async registered(count = 1) {
+      while (registrations.length < count) await once(events, 'registration');
+    },
   };
 }
 
@@ -69,7 +78,7 @@ describe('server relay connector', () => {
     const relay = await fixture();
     const fetch = vi.fn(async () => new Response('relay response'));
     const { identity, status } = connect(relay.url + '/', undefined, { ...handler, fetch });
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('connected', undefined));
+    await relay.registered();
     expect(relay.registrations).toHaveLength(1);
     expect(verifyRelayRegistration(relay.registrations[0]!)).toBe(true);
     expect(relay.registrations[0]!.serverId).toBe(identity.serverId);
@@ -84,6 +93,8 @@ describe('server relay connector', () => {
     });
     ws.send(encodeRelayFrame({ op: RelayOp.Open, connection: 7, payload: utf8('127.0.0.7') }));
     const channel = await openChannel(phone, { serverId: identity.serverId, serverPublicKey: identity.dh.publicKey });
+    // The connector serves Opens only after taking the relay's acknowledgement, so it has reported in by now.
+    expect(status).toHaveBeenCalledWith('connected', undefined);
     const received: { type: number; payload: Uint8Array }[] = [];
     channel.onFrame = frame => received.push(frame);
     channel.send({ type: TunnelFrameType.Request, stream: 1, payload: encodeJson({ method: 'GET', path: '/api/health', headers: [] }) });
@@ -102,7 +113,7 @@ describe('server relay connector', () => {
     const { connector, identity, status } = connect(relay.url, undefined, {
       ...handler, openWebSocket: () => ({ message() {}, close: closed }),
     });
-    await vi.waitFor(() => expect(relay.registrations).toHaveLength(1));
+    await relay.registered();
     const [phone, forwarded] = linkPair();
     const ws = relay.peers[0]!;
     forwarded.onMessage = bytes => ws.send(encodeRelayFrame({ op: RelayOp.Data, connection: 1, payload: bytes }));
@@ -116,7 +127,7 @@ describe('server relay connector', () => {
     ws.terminate();
     await vi.waitFor(() => expect(closed).toHaveBeenCalledWith(1006, 'Tunnel session closed'));
     await vi.waitFor(() => expect(status).toHaveBeenCalledWith('error', 'The relay connection closed.'));
-    await vi.waitFor(() => expect(relay.registrations).toHaveLength(2), { timeout: 2500 });
+    await relay.registered(2);
     expect(status.mock.calls.filter(call => call[0] === 'connecting')).toHaveLength(2);
     await connector.close();
     await connector.close();
@@ -128,16 +139,17 @@ describe('server relay connector', () => {
   it('caps live relay sessions at 256 and releases closed sessions', async () => {
     const relay = await fixture();
     connect(relay.url);
-    await vi.waitFor(() => expect(relay.registrations).toHaveLength(1));
+    await relay.registered();
     const ws = relay.peers[0]!;
     // The connector handles this whole burst in one synchronous run, so await the relay's first reply
     // instead of racing a vi.waitFor deadline against however long that run takes on a loaded machine.
-    const replied = new Promise<void>(resolve => relay.receive(() => resolve()));
+    // Check that reply itself, not every frame seen by the time the test resumes: each accepted Open also
+    // arms a 10 s handshake timeout, and after a long enough stall those Closes land in the same read.
+    const reply = new Promise<RelayFrame>(resolve => relay.receive(resolve));
     for (let connection = 1; connection <= 257; connection++) {
       ws.send(encodeRelayFrame({ op: RelayOp.Open, connection, payload: utf8('127.0.0.1') }));
     }
-    await replied;
-    expect(relay.frames).toEqual([{ op: RelayOp.Close, connection: 257, payload: new Uint8Array() }]);
+    expect(await reply).toEqual({ op: RelayOp.Close, connection: 257, payload: new Uint8Array() });
     ws.send(encodeRelayFrame({ op: RelayOp.Close, connection: 1, payload: new Uint8Array() }));
     ws.send(encodeRelayFrame({ op: RelayOp.Open, connection: 258, payload: utf8('127.0.0.1') }));
     // A duplicate open closes the whole relay rather than replacing a live link.
@@ -149,7 +161,7 @@ describe('server relay connector', () => {
   it('ends an overflowing relay before buffering session-limit Close responses', async () => {
     const relay = await fixture();
     const { status } = connect(relay.url);
-    await vi.waitFor(() => expect(relay.registrations).toHaveLength(1));
+    await relay.registered();
     const original = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!;
     vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
       return relay.peers.includes(this) ? original.get!.call(this) : 8 * 1024 * 1024 + 1;
@@ -172,7 +184,7 @@ describe('server relay connector', () => {
   ])('rejects %s', async (_name, send) => {
     const relay = await fixture();
     const { status } = connect(relay.url);
-    await vi.waitFor(() => expect(relay.registrations).toHaveLength(1));
+    await relay.registered();
     const ws = relay.peers[0]!;
     const ended = once(ws, 'close');
     send(ws);
