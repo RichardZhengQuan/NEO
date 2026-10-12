@@ -39,12 +39,14 @@ import type {
   ProviderConfig,
   ProviderTestResult,
   ReasoningPart,
+  Source,
   StopReason,
 } from '@neo/protocol';
 import type { ProviderOptions } from './index.js';
 import { retryBeforeFirstByte } from './retry.js';
 import {
   REFUSAL_NOTE,
+  addSource,
   asCancelled,
   cancelledError,
   describeNetworkError,
@@ -137,6 +139,26 @@ export function toAnthropicMessages(messages: readonly ChatMessage[], model: str
           if (p.text) content.push({ type: 'text', text: p.text });
         } else if (p.type === 'tool_call') {
           content.push({ type: 'tool_use', id: p.id, name: p.name, input: isPlainObject(p.input) ? p.input : {} });
+        } else if (p.type === 'provider_part' && p.provider === 'anthropic' && p.model === model && isPlainObject(p.data)) {
+          const block = p.data;
+          if (block['type'] === 'native_search_message' && Array.isArray(block['content'])) {
+            // Deferred NEO calls can arrive after later server blocks. The complete
+            // snapshot preserves the upstream assistant step's original block order.
+            const original = (block['content'] as BetaContentBlockParam[]).filter(part =>
+              !opts.dropThinking || (part.type !== 'thinking' && part.type !== 'redacted_thinking'));
+            content.splice(0, content.length, ...original);
+          } else if (block['type'] === 'server_tool_use' || block['type'] === 'web_search_tool_result') {
+            content.push(block as unknown as BetaContentBlockParam);
+          } else if (block['type'] === 'text' && typeof block['text'] === 'string') {
+            // Visible deltas precede the complete cited block in the transcript.
+            const previous = content.at(-1);
+            if (previous?.type === 'text' && previous.text.endsWith(block['text'])) {
+              const prefix = previous.text.slice(0, previous.text.length - block['text'].length);
+              content.pop();
+              if (prefix) content.push({ type: 'text', text: prefix });
+              content.push(block as unknown as BetaContentBlockParam);
+            }
+          }
         }
       }
       push('assistant', content);
@@ -214,6 +236,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const current = isCurrentClaudeModel(model);
     return {
       text: true,
+      nativeWebSearch: this.baseUrl === DEFAULT_BASE_URL && /claude-(?:(?:opus|sonnet|haiku|fable|mythos)-[45]|3-[57]-(?:sonnet|haiku))/.test(model),
       tools: true,
       vision: true,
       reasoning: current,
@@ -294,6 +317,12 @@ export class AnthropicAdapter implements ProviderAdapter {
       // `auto` is the default; forced tool choice is never sent (current models reject it).
       if (request.toolChoice === 'none') params.tool_choice = { type: 'none' };
     }
+    if (request.webSearch && this.capabilities(request.model).nativeWebSearch) {
+      params.tools = [...(params.tools ?? []), {
+        type: 'web_search_20250305', name: 'web_search',
+        ...(request.webSearch.maxUses !== undefined ? { max_uses: request.webSearch.maxUses } : {}),
+      }];
+    }
     return params;
   }
 
@@ -331,12 +360,16 @@ export class AnthropicAdapter implements ProviderAdapter {
   /** Translate raw stream events into NEO events. */
   private async *translate(stream: AsyncIterable<BetaRawMessageStreamEvent>, request: ChatRequest): AsyncIterable<ChatStreamEvent> {
     type Block =
-      | { kind: 'text' }
+      | { kind: 'text'; data: Record<string, unknown> }
       | { kind: 'thinking'; text: string; signature: string }
       | { kind: 'redacted'; data: string }
       | { kind: 'tool'; id: string; name: string; json: string }
+      | { kind: 'server'; data: Record<string, unknown>; json: string }
       | { kind: 'other' };
     const blocks = new Map<number, Block>();
+    const replayBlocks = new Map<number, Record<string, unknown>>();
+    const sources: Source[] = [];
+    const nativeSearch = !!request.webSearch && this.capabilities(request.model).nativeWebSearch === true;
     /**
      * Tool calls are released at the end of the message: a refusal means the turn's tool calls
      * must not run, and a server-side fallback discards calls made before its marker. Reasoning
@@ -367,8 +400,12 @@ export class AnthropicAdapter implements ProviderAdapter {
         }
         case 'content_block_start': {
           const b = event.content_block;
+          if (nativeSearch && ['text', 'thinking', 'redacted_thinking', 'tool_use', 'server_tool_use', 'web_search_tool_result'].includes(b.type)) {
+            replayBlocks.set(event.index, { ...b });
+          }
           if (b.type === 'text') {
-            blocks.set(event.index, { kind: 'text' });
+            blocks.set(event.index, { kind: 'text', data: replayBlocks.get(event.index) ?? { ...b } });
+            collectWebCitations(sources, b.citations);
             if (b.text) {
               sawText = true;
               yield { type: 'text', text: b.text };
@@ -380,9 +417,15 @@ export class AnthropicAdapter implements ProviderAdapter {
             blocks.set(event.index, { kind: 'redacted', data: b.data });
           } else if (b.type === 'tool_use') {
             blocks.set(event.index, { kind: 'tool', id: b.id, name: b.name, json: '' });
+          } else if (b.type === 'server_tool_use' || b.type === 'web_search_tool_result') {
+            blocks.set(event.index, { kind: 'server', data: replayBlocks.get(event.index) ?? { ...b }, json: '' });
+            if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) {
+              for (const source of b.content) addSource(sources, source.url, source.title);
+            }
           } else if (b.type === 'fallback') {
             // Server-side refusal fallback: output before this marker came from a model that declined.
             toolCalls = [];
+            for (const [index, replay] of replayBlocks) if (replay['type'] === 'tool_use') replayBlocks.delete(index);
             blocks.set(event.index, { kind: 'other' });
           } else {
             blocks.set(event.index, { kind: 'other' });
@@ -393,6 +436,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           const block = blocks.get(event.index);
           const d = event.delta;
           if (d.type === 'text_delta') {
+            if (block?.kind === 'text') block.data['text'] = String(block.data['text'] ?? '') + d.text;
             if (d.text) {
               sawText = true;
               yield { type: 'text', text: d.text };
@@ -404,12 +448,25 @@ export class AnthropicAdapter implements ProviderAdapter {
             block.signature += d.signature;
           } else if (d.type === 'input_json_delta' && block?.kind === 'tool') {
             block.json += d.partial_json;
+          } else if (d.type === 'input_json_delta' && block?.kind === 'server') {
+            block.json += d.partial_json;
+          } else if (d.type === 'citations_delta') {
+            collectWebCitations(sources, [d.citation]);
+            if (block?.kind === 'text') {
+              const citations = Array.isArray(block.data['citations']) ? block.data['citations'] : [];
+              block.data['citations'] = [...citations, d.citation];
+            }
           }
           break;
         }
         case 'content_block_stop': {
           const block = blocks.get(event.index);
+          const replay = replayBlocks.get(event.index);
           if (block?.kind === 'thinking') {
+            if (replay) {
+              replay['thinking'] = block.text;
+              replay['signature'] = block.signature;
+            }
             yield {
               type: 'reasoning_part',
               part: {
@@ -426,7 +483,10 @@ export class AnthropicAdapter implements ProviderAdapter {
               part: { type: 'reasoning', text: '', provider: 'anthropic', model: request.model, redacted: true, data: { type: 'redacted_thinking', data: block.data } },
             };
           } else if (block?.kind === 'tool') {
+            if (replay && block.json) replay['input'] = parseToolInput(block.json);
             toolCalls.push({ type: 'tool_call', id: block.id, name: block.name, input: parseToolInput(block.json) });
+          } else if (block?.kind === 'server' && block.json) {
+            block.data['input'] = parseToolInput(block.json);
           }
           break;
         }
@@ -455,7 +515,12 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
 
     if (stopReason !== 'refusal') yield* toolCalls;
+    if (nativeSearch && replayBlocks.size) {
+      const content = [...replayBlocks].sort(([a], [b]) => a - b).map(([, block]) => block).filter(block => stopReason !== 'refusal' || block['type'] !== 'tool_use');
+      yield { type: 'provider_part', part: { type: 'provider_part', provider: 'anthropic', model: request.model, data: { type: 'native_search_message', content } } };
+    }
     if (stopReason === 'refusal' && !sawText) yield { type: 'text', text: REFUSAL_NOTE };
+    if (sources.length) yield { type: 'sources', items: sources };
     yield { type: 'usage', usage: makeUsage(input, output, { cacheRead, cacheWrite, reasoning: thinkingTokens }) };
     yield { type: 'done', stopReason };
   }
@@ -556,6 +621,14 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
     const neo = NeoError.from(err, 'provider_error');
     return new NeoError(neo.code, clean(neo.message), { retryable: neo.retryable, cause: err });
+  }
+}
+
+function collectWebCitations(sources: Source[], citations: unknown): void {
+  if (!Array.isArray(citations)) return;
+  for (const citation of citations) {
+    if (!isPlainObject(citation) || citation['type'] !== 'web_search_result_location') continue;
+    addSource(sources, citation['url'], citation['title'], citation['cited_text']);
   }
 }
 

@@ -101,6 +101,19 @@ describe('renderEvent', () => {
     const ev: AgentEvent = { type: 'message.completed', episodeId: 'c', conversationId: 'c', turnId: 't', message: msg };
     expect(renderEvent(ev)).toHaveLength(0);
   });
+
+  it('prints source parts as a numbered list without repeating them on completion', () => {
+    const ev: Extract<AgentEvent, { type: 'part.added' }> = {
+      type: 'part.added', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm', index: 0,
+      part: { type: 'sources', items: [{ title: 'One', url: 'https://one.example/article' }, { title: 'Two', url: 'https://two.example/article', snippet: 'Details' }] },
+    };
+    expect(renderEvent(ev).map((line) => line.text)).toEqual([
+      '  Sources',
+      '  1. One — https://one.example/article',
+      '  2. Two — https://two.example/article',
+    ]);
+    expect(renderEvent({ ...ev, part: { type: 'sources', items: [] } })).toEqual([]);
+  });
 });
 
 describe('renderEvents', () => {

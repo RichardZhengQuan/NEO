@@ -121,7 +121,7 @@ export function createProviderRegistry(configs: readonly ProviderConfig[], optio
 
 // Re-export adapters for advanced usage
 export { AnthropicAdapter } from './anthropic.js';
-export { OpenAIAdapter } from './openai.js';
+export { OpenAIAdapter, supportsOpenAIWebSearch } from './openai.js';
 export { ChatGPTAdapter } from './chatgpt.js';
 export { GeminiAdapter } from './gemini.js';
 export { MockProvider } from './mock.js';

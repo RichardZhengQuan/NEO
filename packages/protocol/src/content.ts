@@ -8,7 +8,7 @@
  */
 import { z } from 'zod';
 import { ErrorShapeSchema } from './errors.js';
-import { UIBlockSchema } from './ui.js';
+import { UIBlockSchema, isSafeLinkUrl } from './ui.js';
 
 export const ModelRefSchema = z.object({
   /** ProviderConfig.id */
@@ -53,6 +53,27 @@ export function addUsage(a: Usage | null | undefined, b: Usage | null | undefine
 // ───────────────────────────── parts ─────────────────────────────
 
 export const TextPartSchema = z.object({ type: z.literal('text'), text: z.string() });
+
+export const SourceSchema = z.object({
+  title: z.string().max(1000),
+  url: z.string().url().max(4000).refine(url => {
+    if (!/^https?:\/\//i.test(url) || !isSafeLinkUrl(url)) return false;
+    try { const parsed = new URL(url); return !parsed.username && !parsed.password; } catch { return false; }
+  }, 'Sources must use safe http(s) URLs'),
+  snippet: z.string().max(4000).optional(),
+});
+export type Source = z.infer<typeof SourceSchema>;
+/** Third-party citations, never user-authored memory input. */
+export const SourcesPartSchema = z.object({ type: z.literal('sources'), items: z.array(SourceSchema).max(100) });
+export type SourcesPart = z.infer<typeof SourcesPartSchema>;
+/** Opaque server-tool replay data, scoped to the original provider and model. */
+export const ProviderPartSchema = z.object({
+  type: z.literal('provider_part'),
+  provider: z.string(),
+  model: z.string(),
+  data: z.unknown(),
+});
+export type ProviderPart = z.infer<typeof ProviderPartSchema>;
 
 export const ImagePartSchema = z
   .object({
@@ -141,6 +162,8 @@ export const ContentPartSchema = z.discriminatedUnion('type', [
   UIPartSchema,
   UIEventPartSchema,
   ContextPartSchema,
+  SourcesPartSchema,
+  ProviderPartSchema,
 ]);
 
 export type TextPart = z.infer<typeof TextPartSchema>;
@@ -250,7 +273,7 @@ export function textOf(parts: readonly ContentPart[]): string {
 
 /** Parts that clients should render (context parts are hidden). */
 export function visibleParts(parts: readonly ContentPart[]): ContentPart[] {
-  return parts.filter((p) => p.type !== 'context');
+  return parts.filter((p) => p.type !== 'context' && p.type !== 'provider_part');
 }
 
 /** One-line preview of a message for lists and notifications. */

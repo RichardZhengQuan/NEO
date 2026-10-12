@@ -91,6 +91,7 @@ const en: Messages = {
   'chat.error_title': "NEO couldn't finish this reply",
   'chat.stopped': 'Stopped',
   'chat.copy_message': 'Copy message',
+  'chat.sources': 'Sources',
 
   // blocks
   'block.copy_code': 'Copy code',
@@ -258,6 +259,7 @@ const zhCN: Messages = {
   'chat.error_title': 'NEO 没能完成这条回复',
   'chat.stopped': '已停止',
   'chat.copy_message': '复制消息',
+  'chat.sources': '来源',
 
   'block.copy_code': '复制代码',
   'image.load_from': '从 {host} 加载图片',

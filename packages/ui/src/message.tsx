@@ -2,7 +2,7 @@
  * MessageView and ConfirmationCard.
  *
  * Renders exactly the protocol's content parts (content.ts): text, image,
- * reasoning, tool_call, tool_result, ui, ui_event; `context` parts are hidden.
+ * reasoning, tool_call, tool_result, ui, ui_event, sources; context and provider replay parts are hidden.
  * A tool_call and its tool_result are paired into one chip (running → done /
  * error); tool confirmations appear inline under the call they belong to.
  */
@@ -14,6 +14,7 @@ import type {
   Message,
   RecalledMemorySummary,
   ReasoningPart,
+  Source,
   ToolCallPart,
   ToolConfirmation,
   ToolResultPart,
@@ -31,6 +32,8 @@ import { NeoAvatar } from './avatar/index.js';
 import type { AvatarState } from './avatar/index.js';
 import { copyText } from './clipboard.js';
 import { SafeImage } from './remote-image.js';
+import { useLinkClick } from './links.js';
+import { isSafeLinkUrl } from '@neo/protocol';
 
 /** Tools whose calls only exist to show UI; their chips would be noise. */
 const SILENT_TOOLS = new Set(['render_ui']);
@@ -311,6 +314,28 @@ interface RenderItem {
   node: ReactElement;
 }
 
+function SourceLink({ source }: { source: Source }): ReactElement {
+  const onClick = useLinkClick(source.url);
+  return <a className="neo-source" href={source.url} target="_blank" rel="noopener noreferrer" title={source.snippet ? `${source.title}\n${source.snippet}` : source.url} onClick={onClick}>{source.title || source.url}</a>;
+}
+
+function SourcesView({ sources }: { sources: Source[] }): ReactElement | null {
+  const t = useT();
+  const seen = new Set<string>();
+  const items = sources.filter((source) => {
+    if (!/^https?:\/\//i.test(source.url) || !isSafeLinkUrl(source.url) || seen.has(source.url)) return false;
+    seen.add(source.url);
+    return true;
+  });
+  if (!items.length) return null;
+  return (
+    <div className="neo-sources" role="group" aria-label={t('chat.sources')}>
+      <span className="neo-sources__label">{t('chat.sources')}</span>
+      {items.map((source) => <SourceLink key={source.url} source={source} />)}
+    </div>
+  );
+}
+
 export function MessageView(props: MessageViewProps): ReactElement {
   const {
     message,
@@ -447,6 +472,7 @@ export function MessageView(props: MessageViewProps): ReactElement {
   }
 
   const hasText = plainText.length > 0;
+  const sources = parts.flatMap((part) => part.type === 'sources' ? part.items : []);
   const lastIsTextOrReasoning = parts[lastIndex]?.type === 'text' || parts[lastIndex]?.type === 'reasoning';
   const state: AvatarState = avatarState ?? (streaming ? (hasText && lastIsTextOrReasoning ? 'speaking' : 'thinking') : 'idle');
   const failed = message.status === 'error';
@@ -464,6 +490,7 @@ export function MessageView(props: MessageViewProps): ReactElement {
             {item.node}
           </div>
         ))}
+        <SourcesView sources={sources} />
         {streaming && !lastIsTextOrReasoning && items.length === 0 && (
           <span className="neo-thinking" role="status" aria-label={t('chat.thinking')}>
             <span />

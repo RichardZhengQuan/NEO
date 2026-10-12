@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AI_CAPABILITIES, detectApiKeyProvider, modelSupportsCapability, pickDefaultCapabilities } from './ai.js';
+import { AI_CAPABILITIES, detectApiKeyProvider, modelSupportsCapability, pickDefaultCapabilities, resolveSearchMode } from './ai.js';
 import { DEFAULT_SETTINGS, NeoSettingsSchema, applySettingsPatch, deepMerge, migrateSettings } from './config.js';
 import { DEFAULT_CAPABILITIES, OPENROUTER_PRESET, type ModelCapabilities, type ModelInfo } from './providers.js';
 
@@ -106,7 +106,7 @@ describe('AI settings compatibility', () => {
   it('migrates an old settings blob and mirrors the canonical assignments', () => {
     const old = { defaultModel: text, memoryModel: { provider: 'other', model: 'other-model' }, embedding, locale: 'zh' };
     const parsed = NeoSettingsSchema.parse(old);
-    expect(parsed.ai).toEqual({ mode: 'simple', capabilities: { text, embedding, speechToText: null, textToSpeech: null, image: null, video: null } });
+    expect(parsed.ai).toEqual({ mode: 'simple', search: { mode: 'auto', engine: null }, capabilities: { text, embedding, speechToText: null, textToSpeech: null, image: null, video: null } });
     expect(parsed.memoryModel).toEqual(text);
     expect(parsed.defaultModel).toEqual(text);
     expect(parsed.embedding).toEqual(embedding);
@@ -154,5 +154,20 @@ describe('AI settings compatibility', () => {
 
   it('validates every reserved capability now', () => {
     expect(() => applySettingsPatch(DEFAULT_SETTINGS, { ai: { capabilities: { video: { provider: '', model: '' } } } })).toThrow();
+  });
+});
+
+describe('search mode resolution', () => {
+  it('replaces endpoint-specific settings when switching engine providers', () => {
+    const base = applySettingsPatch(DEFAULT_SETTINGS, { ai: { search: { engine: { provider: 'searxng', baseUrl: 'https://search.example' } } } });
+    expect(applySettingsPatch(base, { ai: { search: { engine: { provider: 'brave' } } } }).ai.search.engine).toEqual({ provider: 'brave' });
+  });
+  it.each([
+    ['auto', true, true, 'native'], ['auto', true, false, 'native'],
+    ['auto', false, true, 'engine'], ['auto', false, false, 'off'],
+    ['engine', true, true, 'engine'], ['engine', true, false, 'off'],
+    ['off', true, true, 'off'], ['off', false, false, 'off'],
+  ] as const)('%s with native=%s and engine=%s resolves to %s', (mode, native, engine, expected) => {
+    expect(resolveSearchMode({ mode, engine: null }, native, engine)).toBe(expected);
   });
 });

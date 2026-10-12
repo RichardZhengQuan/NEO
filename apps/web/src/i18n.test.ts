@@ -11,6 +11,7 @@ const sources = import.meta.glob(['./**/*.ts', './**/*.tsx', '!./**/*.test.ts', 
 /** Keys built at runtime from a prefix + a known set of values. */
 const DYNAMIC: Record<string, readonly string[]> = {
   'ai.reasoning_': ['off', 'low', 'medium', 'high'],
+  'ai.search_': ['auto', 'engine', 'off'],
   'chat.risk.': ['read', 'write', 'external', 'dangerous'],
   'chat.suggestion.': ['remind', 'remember', 'dashboard', 'tasks'],
   'dataSettings.mode_': ['local', 'server'],

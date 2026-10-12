@@ -5,6 +5,7 @@ import { createProvider } from '@neo/providers';
 import type { NeoServices } from '../index.js';
 import { validateBody } from './helpers.js';
 import { connectSimpleProvider, deriveProviderId, providerView, saveProvider } from '../provider-connections.js';
+import { settingsView } from '../search-settings.js';
 
 /** Check if a provider id is from the config file (not the DB). */
 function isConfigProvider(services: NeoServices, id: string): boolean {
@@ -23,7 +24,7 @@ export function registerProviders(app: Hono, services: NeoServices): void {
     return c.json({
       items: allConfigs.map((config) => providerView(config, secrets)),
       defaultModel: currentSettings.defaultModel,
-      ai: currentSettings.ai,
+      ai: settingsView(currentSettings, secrets).ai,
     });
   });
 

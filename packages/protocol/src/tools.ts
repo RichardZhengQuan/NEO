@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { UIBlock } from './ui.js';
 import type { ToolSpec } from './providers.js';
 import type { Logger } from './services.js';
+import type { Source } from './content.js';
 
 export const PermissionLevelSchema = z.enum(['auto', 'confirm', 'deny']);
 export type PermissionLevel = z.infer<typeof PermissionLevelSchema>;
@@ -39,6 +40,7 @@ export interface ToolContext {
 }
 
 export interface ToolResult {
+  sources?: Source[];
   /** JSON-serializable value given to the model. Keep it compact. */
   output: unknown;
   /** Blocks rendered to the user (the model is told they were shown). */

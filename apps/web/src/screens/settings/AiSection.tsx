@@ -20,7 +20,7 @@ export function AiSection(): ReactElement {
   return (
     <>
       <Section title={t('ai.connections')} description={t('ai.connections_help')}>
-        <ProviderSetup existing={providers?.items ?? []} onDone={() => undefined} />
+        <ProviderSetup existing={providers?.items ?? []} onDone={() => undefined} configureSearch />
       </Section>
       <Section title={t('ai.behaviour')} description={t('ai.behaviour_help')}>
         <div className="neo-card">

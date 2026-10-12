@@ -91,7 +91,7 @@ export async function connectSimpleProvider(services: NeoServices, config: Provi
     const committed = { ...config, id };
     const capabilities = pickDefaultCapabilities(committed, models);
     if (!capabilities.text) throw new NeoError('provider_error', 'This provider did not offer a text model. Choose models in Advanced.');
-    const saved = saveProvider(services, { ...committed, defaultModel: capabilities.text.model, apiKeySecret: `provider:${id}` }, apiKey, null, { mode: 'simple', capabilities });
+    const saved = saveProvider(services, { ...committed, defaultModel: capabilities.text.model, apiKeySecret: `provider:${id}` }, apiKey, null, { mode: 'simple', capabilities, search: services.settings.get().ai.search });
     services.refreshEmbeddingProvider?.(saved.id);
     services.events.publish({ type: 'provider.connected', provider: providerView(saved, services.secrets), ...(options.state ? { state: options.state } : {}) });
     return saved;

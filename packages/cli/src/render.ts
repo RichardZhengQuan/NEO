@@ -71,6 +71,12 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
       if (part.type === 'reasoning' && opts.showReasoning) {
         return [{ text: dim(`[reasoning] ${part.text}`) }];
       }
+      if (part.type === 'sources' && part.items.length) {
+        return [
+          { text: dim('  Sources') },
+          ...part.items.map((source, index) => ({ text: `  ${index + 1}. ${source.title || source.url} — ${source.url}` })),
+        ];
+      }
       return [];
     }
 

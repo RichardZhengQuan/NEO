@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
-import { silentLogger, validateUIBlocks, type ToolContext, type ToolResult } from '@neo/protocol';
+import { SourcesPartSchema, silentLogger, type ToolContext, type ToolResult } from '@neo/protocol';
 import {
   checkSsrf,
   createWebFetchTool,
@@ -454,6 +454,7 @@ describe('web_search', () => {
     expect(url.searchParams.get('q')).toBe('neo ai');
     expect(url.searchParams.get('format')).toBe('json');
     expect(res.output).toMatchObject({ results: [{ title: 'NEO', url: 'https://neo.example/', snippet: 'An assistant & more' }] });
+    expect(res.sources).toEqual([{ title: 'NEO', url: 'https://neo.example/', snippet: 'An assistant & more' }]);
   });
 
   it('Brave and Tavily request shapes; missing API keys fail without a request', async () => {
@@ -481,7 +482,7 @@ describe('web_search', () => {
     expect(tool.inputSchema.safeParse({ query: 'q', count: 11 }).success).toBe(false);
   });
 
-  it('returns a valid ui list of link actions, dropping unsafe URLs and trimming long text', async () => {
+  it('returns valid sources, dropping unsafe URLs and trimming long text', async () => {
     const f = fakeFetch(() =>
       json({
         results: [
@@ -495,10 +496,9 @@ describe('web_search', () => {
     const res = await createWebSearchTool({ provider: 'searxng', baseUrl: 'http://127.0.0.1:8888' }, f.fn).execute({ query: 'q' }, ctx());
     const results = (res.output as { results: { url: string }[] }).results;
     expect(results.map((r) => r.url)).toEqual(['https://long.example/', 'https://untitled.example/path']);
-    expect(validateUIBlocks(res.ui).ok).toBe(true);
-    const block = res.ui![0] as { type: string; items: { action?: { kind: string; url: string } }[] };
-    expect(block.type).toBe('list');
-    expect(block.items.map((i) => i.action?.kind)).toEqual(['link', 'link']);
+    expect(SourcesPartSchema.safeParse({ type: 'sources', items: res.sources }).success).toBe(true);
+    expect(res.sources).toEqual(results);
+    expect(res.ui).toBeUndefined();
   });
 
   it('times out and reports provider errors without leaking the key', async () => {

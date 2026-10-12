@@ -102,12 +102,13 @@ Query lists such as `kinds=fact,preference` and `status=scheduled,fired` are com
 
 ## AI settings
 
-`NeoSettings.ai` contains `mode: 'simple' | 'advanced'` and `capabilities`. Each of `text`, `embedding`, `speechToText`, `textToSpeech`, `image` and `video` is `{ provider: string, model: string } | null`. For example:
+`NeoSettings.ai` contains `mode: 'simple' | 'advanced'`, `capabilities` and `search`. Each of `text`, `embedding`, `speechToText`, `textToSpeech`, `image` and `video` is `{ provider: string, model: string } | null`. For example:
 
 ```json
 {
   "ai": {
     "mode": "advanced",
+    "search": { "mode": "auto", "engine": null },
     "capabilities": {
       "text": { "provider": "anthropic", "model": "claude-sonnet-5-5" },
       "embedding": { "provider": "openai", "model": "text-embedding-3-small" },
@@ -124,7 +125,18 @@ Send that object, or a deep partial such as `{ "ai": { "capabilities": { "image"
 
 Stored settings without `ai` are upgraded on load: `defaultModel ?? memoryModel` becomes Text, `embedding` becomes the embedding assignment, mode is Simple and the remaining assignments are null. `defaultModel` and `memoryModel` are compatibility mirrors of Text; `embedding` mirrors the embedding assignment. Legacy patches to these aliases are accepted when an `ai` patch is absent. New code should read and write `ai`. See [Providers](PROVIDERS.md#capability-settings-and-defaults) for model selection and capability detection.
 
+Search defaults to `{ mode: 'auto', engine: null }` for old blobs (including existing `ai` objects) and new settings. `auto` prefers the current Text model's native search, then an engine; `engine` forces an engine, and `off` disables both. `engine: null` uses the boot `webSearch` engine, if configured. An override is `{ provider: 'searxng' | 'brave' | 'tavily', baseUrl?, hasApiKey? }` in responses. Model listings expose `capabilities.nativeWebSearch`.
+
+To save a key, PATCH `{ "ai": { "search": { "mode": "engine", "engine": { "provider": "brave", "apiKey": "your-key" } } } }`. The server stores the key encrypted, retains only a scoped internal reference, and never returns the key or reference in settings, provider lists or events. Omit `apiKey` to keep the saved key on the same provider/base URL; `apiKey: null` clears it. Changing provider/base URL clears the old key unless a replacement is supplied. `engine: null` removes the override and its saved key. SearXNG uses `baseUrl`; Brave and Tavily need a saved key. A client-supplied `apiKeySecret` is rejected.
+
+## Sources and native replay parts
+
+An assistant message can append `{ type: 'sources', items: [{ title: string, url: string, snippet?: string }] }`. URLs are safe HTTP(S) links without credentials, with at most 100 sources per turn. Native provider citations/grounding and engine tool results both use this part. `part.added` delivers it during a turn, and completed messages persist it. The UI renders favicon-less Sources link chips using the platform's external-link operation; the CLI renders a numbered list.
+
+`provider_part: { type: 'provider_part', provider: string, model: string, data: unknown }` is hidden opaque hosted-tool replay data. Adapters replay only their own provider/model payloads to preserve upstream block order and citations. These parts and sources are never accepted as user message input or copied into memory extraction as user-authored text. Grounded assistant answers are excluded from automatic extraction, while the user's own text remains eligible.
+
 ## OpenRouter sign-in
+
 
 Start and cancel require the owner token; paired device tokens cannot initiate account authorization. Start creates a random state and server-side PKCE verifier with a 10-minute TTL. Only the S256 challenge is placed in the authorization URL, together with `callback_url`, `key_label=NEO` and `state`. The callback URL uses `config.server.publicUrl` when set, otherwise the request origin; local desktop ports can vary.
 

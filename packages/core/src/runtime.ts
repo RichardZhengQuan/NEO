@@ -12,6 +12,7 @@ import {
   modelRefToString,
   newId,
   randomToken,
+  resolveSearchMode,
   silentLogger,
   systemClock,
   wrapUntrusted,
@@ -57,6 +58,8 @@ export interface AgentRuntimeDeps {
   providers: ProviderRegistry;
   memory: MemoryService;
   tools: ToolRegistry;
+  /** The composition root resolves encrypted settings or the configured default search engine. */
+  resolveSearchTool?(settings: NeoSettings): ToolDefinition | undefined;
   logger?: Logger;
   clock?: Clock;
 }
@@ -80,6 +83,9 @@ export class AgentRuntime implements AgentRuntimeApi {
   private readonly providers: ProviderRegistry;
   private readonly memory: MemoryService;
   private readonly tools: ToolRegistry;
+  private readonly resolveSearchTool: AgentRuntimeDeps['resolveSearchTool'];
+  /** Old episodes retain this declaration even after the engine is removed. Execution still uses the registry. */
+  private previousSearchTool: ToolDefinition | undefined;
   private readonly logger: Logger;
   private readonly clock: Clock;
 
@@ -99,6 +105,7 @@ export class AgentRuntime implements AgentRuntimeApi {
   private readonly busy = new Map<string, string>();
   private readonly listeners = new Set<(event: AgentEvent) => void>();
   private readonly services: TurnServices;
+  private readonly episodeSearchModes = new Map<string, 'native' | 'engine' | 'off'>();
 
   constructor(deps: AgentRuntimeDeps) {
     this.conversations = deps.conversations;
@@ -106,20 +113,25 @@ export class AgentRuntime implements AgentRuntimeApi {
     this.providers = deps.providers;
     this.memory = deps.memory;
     this.tools = deps.tools;
+    this.resolveSearchTool = deps.resolveSearchTool;
     this.logger = deps.logger ?? silentLogger;
     this.clock = deps.clock ?? systemClock;
+    this.configureSearchTool(this.settingsStore.get());
     this.services = {
       conversations: this.conversations,
       settings: this.settingsStore,
       providers: this.providers,
       memory: this.memory,
       tools: this.tools,
+      searchMode: (settings, adapter, model) => this.searchMode(settings, adapter, model),
+      searchTool: () => this.previousSearchTool,
       confirmations: this.confirmations,
       logger: this.logger,
       clock: this.clock,
       broadcast: (event) => this.broadcast(event),
     };
     this.settingsStore.onChange((settings) => {
+      this.configureSearchTool(settings);
       // Apply overrides here too: the runtime must not depend on the server's listener ordering.
       for (const [name, permission] of Object.entries(settings.tools.permissions)) this.tools.setPermission(name, permission);
       for (const def of this.tools.list()) {
@@ -141,6 +153,7 @@ export class AgentRuntime implements AgentRuntimeApi {
     const parts = validateUserParts(input.parts);
     const settings = this.settingsStore.get();
     const { adapter, model } = this.resolveModel(settings);
+    this.configureSearchTool(settings);
     return this.beginTurn(conv, parts, adapter, model, settings);
   }
 
@@ -160,6 +173,8 @@ export class AgentRuntime implements AgentRuntimeApi {
       if (this.turns.size) throw new NeoError('conflict', 'A turn is already running in the timeline.');
       if (pending.cancelled) throw new NeoError('cancelled', 'The turn was cancelled.');
       const { adapter, model } = this.resolveModel(settings);
+      this.configureSearchTool(settings);
+      const searchMode = this.searchMode(settings, adapter, model);
 
       let history = current ? this.conversations.messages(current.id) : [];
       let previous = offRecord && current && !history.length
@@ -168,7 +183,9 @@ export class AgentRuntime implements AgentRuntimeApi {
       const now = this.clock();
       const lastAt = current?.lastMessageAt ?? history.at(-1)?.createdAt;
       const gap = lastAt !== undefined && lastAt !== null && now - lastAt >= settings.timeline.episodeGapMinutes * 60_000;
-      if (current && (gap || (current.offRecord ?? current.incognito) !== offRecord)) {
+      const previousSearchMode = current && (this.episodeSearchModes.get(current.id) ?? (current.toolset?.includes('web_search') ? 'engine' : 'off'));
+      const searchChanged = current?.toolset !== null && previousSearchMode !== searchMode;
+      if (current && (gap || searchChanged || (current.offRecord ?? current.incognito) !== offRecord)) {
         this.conversations.closeEpisode(current.id);
         current = null;
       }
@@ -246,7 +263,9 @@ export class AgentRuntime implements AgentRuntimeApi {
       if (this.busy.get(record.conversationId) === record.turnId) this.busy.delete(record.conversationId);
     };
     try {
-      const handle = await startTurn(this.services, { record, conversation: conv, parts, adapter, model, settings, release, ...context });
+      const searchMode = this.searchMode(settings, adapter, model);
+      this.episodeSearchModes.set(conv.id, searchMode);
+      const handle = await startTurn(this.services, { record, conversation: conv, parts, adapter, model, settings, searchMode, release, ...context });
       this.turnDone.set(record.turnId, handle.done);
       void handle.done.then(() => this.turnDone.delete(record.turnId));
       return handle;
@@ -254,6 +273,26 @@ export class AgentRuntime implements AgentRuntimeApi {
       release();
       throw err;
     }
+  }
+
+  private configureSearchTool(settings: NeoSettings): void {
+    if (!this.resolveSearchTool) return;
+    const tool = this.resolveSearchTool(settings);
+    if (tool) this.previousSearchTool = tool;
+    let nativeWebSearch = false;
+    try {
+      const { adapter, model } = this.resolveModel(settings);
+      nativeWebSearch = adapter.capabilities(model).nativeWebSearch === true;
+    } catch {
+      // Search engine settings remain usable before the user connects their AI.
+    }
+    if (tool && resolveSearchMode(settings.ai.search, nativeWebSearch, true) === 'engine') this.tools.register(tool);
+    else this.tools.unregister('web_search');
+  }
+
+  private searchMode(settings: NeoSettings, adapter: ProviderAdapter, model: string): 'native' | 'engine' | 'off' {
+    const engine = this.resolveSearchTool ? this.resolveSearchTool(settings) : this.tools.get('web_search');
+    return resolveSearchMode(settings.ai.search, adapter.capabilities(model).nativeWebSearch === true, !!engine);
   }
 
   /** Every turn follows the global Text capability, with a provider default for legacy settings. */
