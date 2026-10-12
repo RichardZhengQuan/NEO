@@ -310,13 +310,41 @@ describe('htmlToText', () => {
     expect(out.title).not.toMatch(/[\uD800-\uDBFF]$/);
   });
 
-  it('is linear on pathological markup', () => {
-    for (const evil of ['<i> </i>'.repeat(250_000), '<script'.repeat(60_000), '<a href="'.repeat(60_000), '<!--'.repeat(60_000), '<p>'.repeat(100_000) + 'end', '<nav><nav>'.repeat(30_000)]) {
+  // Linear means the same amount of markup costs the same however it is split. Each sample times `factor`
+  // copies of a small input against one input `factor` times as long: linear code takes about as long for
+  // both, quadratic code (rescanning the rest of the document at every tag) `factor` times longer. The two
+  // sides do equal work, so machine load slows both alike, and the median of 7 pair ratios after a warm-up
+  // ignores one-off pauses. The default bound catches roughly quadratic growth and holds under parallel
+  // suites; NEO_PERF_STRICT=1 also catches milder superlinear growth, on an otherwise idle machine
+  // (CONTRIBUTING.md). The inputs are small enough that a quadratic regression fails in seconds.
+  const factor = 16;
+  const maxRatio = process.env['NEO_PERF_STRICT'] === '1' ? 3 : 8;
+
+  it(`is linear on pathological markup (${factor}× the input takes < ${maxRatio}× the time of ${factor} small ones)`, () => {
+    const cases: [unit: string, reps: number, tail?: string][] = [
+      ['<i> </i>', 16_000],
+      ['<script', 8_000],
+      ['<a href="', 8_000],
+      ['<!--', 8_000],
+      ['<p>', 32_000, 'end'],
+      ['<nav><nav>', 16_000],
+    ];
+    const time = (html: string, times: number) => {
       const started = performance.now();
-      htmlToText(evil);
-      expect(performance.now() - started).toBeLessThan(1500);
+      for (let k = 0; k < times; k++) htmlToText(html);
+      return performance.now() - started;
+    };
+    for (const [unit, reps, tail = ''] of cases) {
+      const small = unit.repeat(reps / factor) + tail;
+      const large = unit.repeat(reps) + tail;
+      time(small, factor);
+      time(large, 1);
+      const ratios: number[] = [];
+      for (let k = 0; k < 7; k++) ratios.push(time(large, 1) / time(small, factor));
+      const median = [...ratios].sort((a, b) => a - b)[ratios.length >> 1]!;
+      expect(median, `${JSON.stringify(unit)} time ratios: ${ratios.map((r) => r.toFixed(2)).join(', ')}`).toBeLessThan(maxRatio);
     }
-  });
+  }, 60_000);
 
   it('does not decode entities twice and handles unknown ones', () => {
     expect(htmlToText('<p>&amp;amp; &bogus; &#0; &#x110000; A&nbsp;B</p>').text).toBe('&amp; &bogus; � � A B');

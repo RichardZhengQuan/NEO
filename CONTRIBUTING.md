@@ -37,6 +37,7 @@ Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In short:
 - The one exception, a Docker image smoke test (`packages/cli/src/docker.test.ts`), builds and runs the real image; it only runs with `NEO_DOCKER_TEST=1`.
 - Keep transcripts append-only. Per-turn context goes into the user message's `context` part, never into the system prompt (see "Context assembly" in the architecture doc).
 - Privacy is a feature: anything touching memory must respect the policy table at the end of [docs/MEMORY.md](docs/MEMORY.md).
+- For performance, assert the property itself rather than a wall-clock time where you can: the recurrence catch-up test counts the candidates `nextOccurrence` checks, and the `htmlToText` linearity test compares equal amounts of work at two input sizes. Parallel suites (`pnpm -r test`, CI) slow every timing sample several-fold, so tests that do time things take the median of several runs after a warm-up and by default only fail on a gross regression. `NEO_PERF_STRICT=1` applies the tight bounds, for an otherwise idle machine: `NEO_PERF_STRICT=1 pnpm --filter @neo/tools test -t "is linear"`.
 
 ## Pull requests
 
