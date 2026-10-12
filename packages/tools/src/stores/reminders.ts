@@ -5,6 +5,7 @@
  * series; it fixes the local time of day for recurrences. Updating `dueAt`
  * re-anchors the reminder; snoozing changes `dueAt` only.
  */
+import { createHash } from 'node:crypto';
 import {
   NeoError,
   ReminderInputSchema,
@@ -41,6 +42,7 @@ function toReminder(r: Row): Reminder {
     firedCount: toNum(r.fired_count),
     lastFiredAt: toNumOrNull(r.last_fired_at),
     messageId: (r.message_id as string | null) ?? null,
+    ...(typeof r.creation_key === 'string' ? { creationKey: r.creation_key } : {}),
     createdAt: toNum(r.created_at),
     updatedAt: toNum(r.updated_at),
   };
@@ -101,30 +103,43 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
 
     create(input: ReminderInput): Reminder {
       const data = parseInput(ReminderInputSchema, input, 'reminder');
-      const now = clock();
-      const reminder: Reminder = {
-        id: newId('rem', now),
-        title: requireText(data.title, 'title'),
-        notes: data.notes ?? null,
-        dueAt: Math.round(data.dueAt),
-        timezone: assertTimeZone(data.timezone ?? defaultTimezone),
-        recurrence: data.recurrence ?? null,
-        status: 'scheduled',
-        firedCount: 0,
-        lastFiredAt: null,
+      const normalized = {
+        title: requireText(data.title, 'title'), notes: data.notes ?? null, dueAt: Math.round(data.dueAt),
+        timezone: assertTimeZone(data.timezone ?? defaultTimezone), recurrence: data.recurrence ?? null,
         messageId: data.messageId ?? null,
-        createdAt: now,
-        updatedAt: now,
       };
-      db.prepare(
-        `INSERT INTO reminders (id, title, notes, due_at, anchor_at, timezone, recurrence, status, fired_count, last_fired_at, message_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        reminder.id, reminder.title, reminder.notes, reminder.dueAt, reminder.dueAt, reminder.timezone,
-        toJson(reminder.recurrence), reminder.status, 0, null, reminder.messageId, now, now,
-      );
-      emit({ type: 'upsert', reminder });
-      return reminder;
+      // Keep the accepted creation identity independent of later edits, snoozes and recurrence advancement.
+      const recurrence = normalized.recurrence ? {
+        ...normalized.recurrence,
+        ...(normalized.recurrence.byWeekday ? { byWeekday: [...new Set(normalized.recurrence.byWeekday)].sort((a, b) => a - b) } : {}),
+        ...(normalized.recurrence.byMonthDay ? { byMonthDay: [...new Set(normalized.recurrence.byMonthDay)].sort((a, b) => a - b) } : {}),
+      } : null;
+      const fingerprint = data.creationKey ? createHash('sha256').update(JSON.stringify({ ...normalized, recurrence })).digest('hex') : null;
+      const result = db.transaction(() => {
+        if (data.creationKey) {
+          const existing = db.prepare('SELECT * FROM reminders WHERE creation_key = ?').get(data.creationKey) as Row | undefined;
+          if (existing) {
+            if (existing.creation_fingerprint !== fingerprint) throw new NeoError('conflict', 'This reminder creation key was already used with different values.');
+            return { reminder: toReminder(existing), created: false };
+          }
+        }
+        const now = clock();
+        const reminder: Reminder = {
+          id: newId('rem', now), ...normalized,
+          ...(data.creationKey ? { creationKey: data.creationKey } : {}),
+          status: 'scheduled', firedCount: 0, lastFiredAt: null, createdAt: now, updatedAt: now,
+        };
+        db.prepare(
+          `INSERT INTO reminders (id, title, notes, due_at, anchor_at, timezone, recurrence, status, fired_count, last_fired_at, message_id, creation_key, creation_fingerprint, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          reminder.id, reminder.title, reminder.notes, reminder.dueAt, reminder.dueAt, reminder.timezone,
+          toJson(reminder.recurrence), reminder.status, 0, null, reminder.messageId, data.creationKey ?? null, fingerprint, now, now,
+        );
+        return { reminder, created: true };
+      });
+      if (result.created) emit({ type: 'upsert', reminder: result.reminder });
+      return result.reminder;
     },
 
     update(id: string, patch: ReminderPatch): Reminder {

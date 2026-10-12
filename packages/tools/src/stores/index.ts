@@ -178,6 +178,15 @@ export const toolsMigrations: Migration[] = [
       }
     },
   },
+  {
+    version: 7,
+    name: 'reminder_creation_keys',
+    up: `
+      ALTER TABLE reminders ADD COLUMN creation_key TEXT;
+      ALTER TABLE reminders ADD COLUMN creation_fingerprint TEXT;
+      CREATE UNIQUE INDEX idx_reminders_creation_key ON reminders(creation_key) WHERE creation_key IS NOT NULL;
+    `,
+  },
 ];
 
 export function createProductivityStores(

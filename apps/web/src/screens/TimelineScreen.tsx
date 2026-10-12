@@ -9,6 +9,9 @@ import { navigate } from '../router.js';
 import { loadOffRecord, loadTimeline } from '../state/connection.js';
 import { useData } from '../state/data.js';
 import { useChatDrafts } from '../state/chat-drafts.js';
+import { openPlanTomorrow } from '../actions/plan-tomorrow.js';
+import { isPlanTomorrowIntent } from '../lib/plan-intent.js';
+import { planForSession, usePlanTomorrowState } from '../state/plan-tomorrow.js';
 import { pushToast } from '../state/notifications.js';
 import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from '../state/session.js';
 import { prependOlder, setTimeline, useTimeline } from '../state/timeline.js';
@@ -27,6 +30,9 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   const client = useSession((s) => s.client);
   const sessionEpoch = useSession((s) => s.sessionEpoch);
   const draftStore = useChatDrafts((s) => s.store);
+  const timezone = useSession((s) => s.settings?.timezone ?? 'UTC');
+  const planState = usePlanTomorrowState();
+  const retainedPlan = planState.latestKey ? planForSession(undefined, timezone) : null;
   useEffect(() => {
     if (!client) return;
     const epoch = currentSessionEpoch();
@@ -114,7 +120,12 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   };
   const send = async (text: string, images: ImagePart[], restoreDraft?: () => void) => {
     const body = composeBody(text, images);
-    if ((!body.text && !body.parts) || noProvider || privacyBusy || !entry.offRecordLoaded) return;
+    if ((!body.text && !body.parts) || privacyBusy || !entry.offRecordLoaded) return;
+    if (images.length === 0 && isPlanTomorrowIntent(text)) {
+      openPlanTomorrow({ timezone, intent: text });
+      return;
+    }
+    if (noProvider) return;
     const active = requireClient();
     const epoch = currentSessionEpoch();
     setSending(true);
@@ -141,6 +152,7 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   const dock = (jumpButton: ReactNode) => (
     <div className="chat-dock" data-off-record={entry.offRecord || undefined}>
       {jumpButton}
+      {retainedPlan && <div className="timeline-scene-resume"><Button size="sm" variant="secondary" icon="calendar" onClick={() => openPlanTomorrow({ date: retainedPlan.date, timezone })}>{t('plan.resume')}</Button></div>}
       {entry.offRecord && <div className="timeline-private-banner" role="status"><Icon name="eye-off" size={16} />{t('timeline.off_record_banner')}</div>}
       <div className="timeline-composer">
         <RetainedStateScope key={entry.offRecord ? 'off-record' : 'recorded'} scope={entry.offRecord ? 'composer:off-record' : 'composer:recorded'}>

@@ -1,5 +1,7 @@
 @import "tailwindcss";
 @import "@neo/ui/styles.css";
+
+.timeline-scene-resume { display: flex; justify-content: flex-end; margin: 0 0 .5rem; }
 @source "../../../packages/ui/src";
 
 /* ───────────────────────────── base ───────────────────────────── */

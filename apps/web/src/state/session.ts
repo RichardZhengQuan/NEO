@@ -12,6 +12,7 @@ import { useData } from './data.js';
 import { useToasts } from './notifications.js';
 import { setDrawer } from './ui.js';
 import { resetChatDrafts } from './chat-drafts.js';
+import { resetPlanTomorrow } from './plan-tomorrow.js';
 
 export type Phase = 'booting' | 'connect' | 'offline' | 'ready';
 
@@ -91,6 +92,7 @@ function resetSessionData(): void {
   for (const cleanup of [...sessionCleanups]) cleanup();
   sessionCleanups.clear();
   resetChatDrafts();
+  resetPlanTomorrow();
   resetTimeline();
   useData.setState({
     reminders: {}, remindersLoaded: false,
