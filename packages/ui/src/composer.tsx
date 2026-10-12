@@ -19,6 +19,7 @@ import type { ImagePart } from '@neo/protocol';
 import { Icon } from './icons.js';
 import { IconButton } from './primitives.js';
 import { useT } from './i18n.js';
+import { useRetainedState } from './retained-state.js';
 
 /** Imperative handle for keyboard shortcuts (⌘/ focuses the composer). */
 export interface ComposerHandle {
@@ -28,7 +29,8 @@ export interface ComposerHandle {
 }
 
 export interface ComposerProps {
-  onSend: (text: string, images: ImagePart[]) => void;
+  /** Restore the submitted draft after a failure, provided no newer input replaced it. */
+  onSend: (text: string, images: ImagePart[], restoreDraft?: () => void) => void;
   onCancel?: () => void;
   /** A turn is running: the send button becomes Stop. */
   busy?: boolean;
@@ -37,7 +39,7 @@ export interface ComposerProps {
   autoFocus?: boolean;
   /** Extra controls under the input (model picker, incognito toggle…). */
   toolbar?: ReactNode;
-  /** Called whenever the draft text changes (drives the avatar's "listening" state). */
+  /** Called when draft text changes, including when a retained draft returns. */
   onDraftChange?: (text: string) => void;
   /** Enter sends (default). Pass false on touch keyboards so Enter inserts a line break. */
   enterToSend?: boolean;
@@ -67,8 +69,15 @@ function readImage(file: File): Promise<ImagePart | null> {
 
 interface Attachment {
   part: ImagePart;
-  preview: string;
   name: string;
+}
+
+interface ComposerDraft {
+  text: string;
+  images: Attachment[];
+  revision: number;
+  /** A send starts a new input; unfinished reads from the old input are discarded. */
+  generation: number;
 }
 
 export function Composer({
@@ -86,8 +95,8 @@ export function Composer({
   maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
 }: ComposerProps): ReactElement {
   const t = useT();
-  const [text, setTextState] = useState('');
-  const [images, setImages] = useState<Attachment[]>([]);
+  const [draft, setDraft] = useRetainedState<ComposerDraft>('composer', () => ({ text: '', images: [], revision: 0, generation: 0 }));
+  const { text, images } = draft;
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -95,10 +104,15 @@ export function Composer({
   const composing = useRef(false);
   const draftCb = useRef(onDraftChange);
   draftCb.current = onDraftChange;
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+
+  useEffect(() => {
+    draftCb.current?.(text);
+  }, [text]);
 
   const setText = (value: string) => {
-    setTextState(value);
-    draftCb.current?.(value);
+    setDraft((current) => ({ ...current, text: value, revision: current.revision + 1 }));
   };
 
   useImperativeHandle(handleRef, () => ({
@@ -126,20 +140,27 @@ export function Composer({
     if (autoFocus) textareaRef.current?.focus();
   }, [autoFocus]);
 
-  // Release object URLs when the composer goes away.
-  const imagesRef = useRef(images);
-  imagesRef.current = images;
-  useEffect(() => () => imagesRef.current.forEach((img) => URL.revokeObjectURL(img.preview)), []);
-
   const canSend = !busy && !disabled && (text.trim().length > 0 || images.length > 0);
 
   const send = () => {
     if (!canSend) return;
-    onSend(text.trim(), images.map((i) => i.part));
-    images.forEach((img) => URL.revokeObjectURL(img.preview));
-    setText('');
-    setImages([]);
+    const submitted = draftRef.current;
+    if (!submitted.text.trim() && submitted.images.length === 0) return;
+    const clearedRevision = submitted.revision + 1;
+    const clearedGeneration = submitted.generation + 1;
+    setDraft({ text: '', images: [], revision: clearedRevision, generation: clearedGeneration });
+    const restoreDraft = () => {
+      setDraft((current) => current.revision === clearedRevision && current.generation === clearedGeneration
+        ? { ...submitted, revision: current.revision + 1, generation: current.generation }
+        : current);
+    };
     setError(null);
+    try {
+      onSend(submitted.text.trim(), submitted.images.map((i) => i.part), restoreDraft);
+    } catch (error) {
+      restoreDraft();
+      throw error;
+    }
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -151,6 +172,7 @@ export function Composer({
 
   const addFiles = async (files: File[]) => {
     if (!allowImages) return;
+    const generation = draftRef.current.generation;
     setError(null);
     const candidates = files.filter((f) => IMAGE_TYPES.test(f.type));
     if (candidates.length < files.length) setError(t('chat.image_unsupported'));
@@ -166,9 +188,13 @@ export function Composer({
     const next: Attachment[] = [];
     parts.forEach((part, i) => {
       const file = accepted[i]!;
-      if (part) next.push({ part, preview: URL.createObjectURL(file), name: file.name });
+      if (part) next.push({ part, name: file.name });
     });
-    if (next.length) setImages((prev) => [...prev, ...next]);
+    if (next.length) setDraft((current) => {
+      if (current.generation !== generation) return current;
+      const added = next.slice(0, MAX_IMAGES - current.images.length);
+      return added.length ? { ...current, images: [...current.images, ...added], revision: current.revision + 1 } : current;
+    });
   };
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -190,11 +216,7 @@ export function Composer({
   };
 
   const removeImage = (index: number) => {
-    setImages((prev) => {
-      const img = prev[index];
-      if (img) URL.revokeObjectURL(img.preview);
-      return prev.filter((_, j) => j !== index);
-    });
+    setDraft((current) => ({ ...current, images: current.images.filter((_, j) => j !== index), revision: current.revision + 1 }));
   };
 
   return (
@@ -215,8 +237,8 @@ export function Composer({
       {images.length > 0 && (
         <div className="neo-composer__thumbs">
           {images.map((img, i) => (
-            <div key={img.preview} className="neo-composer__thumb">
-              <img src={img.preview} alt={img.name} />
+            <div key={`${i}:${img.name}`} className="neo-composer__thumb">
+              <img src={`data:${img.part.mediaType};base64,${img.part.data}`} alt={img.name} />
               <button type="button" aria-label={t('chat.remove_image', { name: img.name })} onClick={() => removeImage(i)}>
                 <Icon name="x" size={11} />
               </button>

@@ -11,6 +11,7 @@ import { resetTimeline } from './timeline.js';
 import { useData } from './data.js';
 import { useToasts } from './notifications.js';
 import { setDrawer } from './ui.js';
+import { resetChatDrafts } from './chat-drafts.js';
 
 export type Phase = 'booting' | 'connect' | 'offline' | 'ready';
 
@@ -89,6 +90,7 @@ export function onSessionEnd(cleanup: () => void): () => void {
 function resetSessionData(): void {
   for (const cleanup of [...sessionCleanups]) cleanup();
   sessionCleanups.clear();
+  resetChatDrafts();
   resetTimeline();
   useData.setState({
     reminders: {}, remindersLoaded: false,

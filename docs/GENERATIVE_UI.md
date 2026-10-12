@@ -97,6 +97,12 @@ Model tool-call approvals use a separate server-generated `ToolConfirmation.id` 
 - Streaming: blocks appear when their part arrives (tool results). Text streams token by token with a caret.
 - Never throw. An invalid block (it can't happen after server validation, but old data might) renders a small "Can't display this content" fallback with the text rendering inside `<details>`.
 
+### Unfinished chat input
+
+Within the current app session, leaving the timeline or switching generated tabs and accordion sections preserves composer text and image attachments, form edits, field selections, and the current generated view. A pending form submission remains pending after returning, so navigation does not enable a duplicate submission. Failed chat sends restore their draft unless newer input has replaced it.
+
+The app owns an in-memory `RetainedStateProvider` store; generated controls are scoped by message, UI part, and nested block identity. Standalone `@neo/ui` controls retain their normal local-state behavior unless wrapped in this provider. No draft is written to browser storage or synchronized to another device, and reloading or restarting the app clears it. Disconnecting or changing the connected session clears all drafts. Recorded and off-record composer drafts are separate; ending an off-record exchange or deleting a message removes its retained input and invalidates pending writes to that input.
+
 ## Prompting the model (core system prompt excerpt)
 
 > You can show rich UI with the `render_ui` tool: cards, lists, tables, charts, stats, forms, buttons, timelines, and more. Use it when structure helps: comparisons (table), numbers over time (chart), options to choose from (buttons with `message` actions), collecting details (form), plans (timeline). Keep text answers for simple replies. After `render_ui`, don't repeat its content in prose; add at most one sentence. Reminders, tasks and memories you create are shown automatically.

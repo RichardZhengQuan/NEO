@@ -1,13 +1,14 @@
 /** The continuous relationship: one stream, one composer, no chat selection. */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { textOf, type ConfirmationDecision, type ImagePart, type Message, type UIAction } from '@neo/protocol';
-import { Button, Composer, Icon, Spinner, useAvatarState, useConfirm, useT, useUiActionConfirm, type ComposerHandle, type LiveData } from '@neo/ui';
+import { Button, Composer, Icon, RetainedStateProvider, RetainedStateScope, Spinner, useAvatarState, useConfirm, useT, useUiActionConfirm, type ComposerHandle, type LiveData } from '@neo/ui';
 import { cancelTurn, composeBody, deleteMessage, respondToConfirmation, retryTurn, runUiAction, sendMessage, setOffRecord } from '../actions/timeline.js';
 import { openLink } from '../actions/links.js';
 import { useCoarsePointer } from '../hooks/useMediaQuery.js';
 import { navigate } from '../router.js';
 import { loadOffRecord, loadTimeline } from '../state/connection.js';
 import { useData } from '../state/data.js';
+import { useChatDrafts } from '../state/chat-drafts.js';
 import { pushToast } from '../state/notifications.js';
 import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from '../state/session.js';
 import { prependOlder, setTimeline, useTimeline } from '../state/timeline.js';
@@ -24,6 +25,8 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   const coarse = useCoarsePointer();
   const entry = useTimeline();
   const client = useSession((s) => s.client);
+  const sessionEpoch = useSession((s) => s.sessionEpoch);
+  const draftStore = useChatDrafts((s) => s.store);
   useEffect(() => {
     if (!client) return;
     const epoch = currentSessionEpoch();
@@ -109,7 +112,7 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
     const provider = providers?.items.find((p) => p.id === message.model!.provider);
     return `${provider?.label ?? message.model.provider} · ${message.model.model}`;
   };
-  const send = async (text: string, images: ImagePart[]) => {
+  const send = async (text: string, images: ImagePart[], restoreDraft?: () => void) => {
     const body = composeBody(text, images);
     if ((!body.text && !body.parts) || noProvider || privacyBusy || !entry.offRecordLoaded) return;
     const active = requireClient();
@@ -121,7 +124,7 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
       await sendMessage(active, body, t);
     } catch {
       // Failed sends restore the draft; the action already reported the error.
-      if (text && isCurrentSession(epoch, active)) composer.current?.setText(text);
+      if (isCurrentSession(epoch, active)) restoreDraft?.();
     } finally { setSending(false); }
   };
   const onConfirm = (id: string, decision: ConfirmationDecision) => respondToConfirmation(requireClient(), id, decision, t);
@@ -140,9 +143,11 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
       {jumpButton}
       {entry.offRecord && <div className="timeline-private-banner" role="status"><Icon name="eye-off" size={16} />{t('timeline.off_record_banner')}</div>}
       <div className="timeline-composer">
-        <Composer handleRef={setComposer} onSend={(text, images) => void send(text, images)} onCancel={() => void cancelTurn(requireClient(), t)}
-          busy={busy || sending} disabled={noProvider || privacyBusy || !entry.offRecordLoaded} onDraftChange={setComposerText} enterToSend={!coarse}
-          placeholder={noProvider ? t('chat.connect_ai') : t('chat.placeholder')} autoFocus={!coarse && !noProvider} />
+        <RetainedStateScope key={entry.offRecord ? 'off-record' : 'recorded'} scope={entry.offRecord ? 'composer:off-record' : 'composer:recorded'}>
+          <Composer handleRef={setComposer} onSend={(text, images, restoreDraft) => void send(text, images, restoreDraft)} onCancel={() => void cancelTurn(requireClient(), t)}
+            busy={busy || sending} disabled={noProvider || privacyBusy || !entry.offRecordLoaded} onDraftChange={setComposerText} enterToSend={!coarse}
+            placeholder={noProvider ? t('chat.connect_ai') : t('chat.placeholder')} autoFocus={!coarse && !noProvider} />
+        </RetainedStateScope>
         <button type="button" className={`neo-btn neo-btn--sm neo-btn--${entry.offRecord ? 'secondary' : 'ghost'} timeline-off-record`} aria-pressed={entry.offRecord}
           title={t('timeline.off_record')} aria-busy={privacyBusy || undefined} disabled={!client || sending || privacyBusy || !entry.offRecordLoaded} onClick={() => void setOffRecord(requireClient(), !entry.offRecord, t).catch(() => undefined)}>
           {privacyBusy ? <Spinner size={14} /> : <Icon name="eye-off" size={14} />}{t('timeline.off_record')}
@@ -152,17 +157,19 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
     </div>
   );
   return (
-    <div className="page timeline-page">
-      <TimelineHeader avatarState={avatarState} onSearch={() => setOverlay('search')} onDate={() => setOverlay('date')} />
-      {loadFailed && <div className="timeline-load-error" role="alert"><span>{t('timeline.load_error')}</span><Button size="sm" onClick={() => setReloadToken((n) => n + 1)}>{t('common.retry')}</Button></div>}
-      {entry.loaded && entry.messages.length === 0 ? <><div className="chat-scroll timeline-empty"><EmptyTimeline avatarState={avatarState} noProvider={noProvider} onSuggestion={(text) => void send(text, [])} onConnect={openAiSettings} /></div>{dock(null)}</> : (
-        <MessageList entry={entry} assistantAvatar={persona?.avatar ?? null} avatarState={avatarState} live={live} modelLabel={modelLabel}
-          onConfirm={onConfirm} onUiAction={onUiAction} onRetry={(message) => void retryTurn(requireClient(), message, t)}
-          onDelete={(message) => void deleteMessage(requireClient(), message.id, t, confirm).catch(() => undefined)} onOpenMemory={(id) => openLink(`neo://memory/${id}`)}
-          onLoadOlder={loadOlder} onLatest={latest} stickToken={stickToken} jump={jump} dock={dock} />
-      )}
-      {overlay === 'search' && <TimelineSearch onClose={() => setOverlay(null)} onJump={(id) => loadAnchor(id, true)} />}
-      {overlay === 'date' && <JumpToDate onClose={() => setOverlay(null)} onJump={(date) => loadAnchor(date, false)} />}
-    </div>
+    <RetainedStateProvider key={sessionEpoch} store={draftStore}>
+      <div className="page timeline-page">
+        <TimelineHeader avatarState={avatarState} onSearch={() => setOverlay('search')} onDate={() => setOverlay('date')} />
+        {loadFailed && <div className="timeline-load-error" role="alert"><span>{t('timeline.load_error')}</span><Button size="sm" onClick={() => setReloadToken((n) => n + 1)}>{t('common.retry')}</Button></div>}
+        {entry.loaded && entry.messages.length === 0 ? <><div className="chat-scroll timeline-empty"><EmptyTimeline avatarState={avatarState} noProvider={noProvider} onSuggestion={(text) => void send(text, [])} onConnect={openAiSettings} /></div>{dock(null)}</> : (
+          <MessageList entry={entry} assistantAvatar={persona?.avatar ?? null} avatarState={avatarState} live={live} modelLabel={modelLabel}
+            onConfirm={onConfirm} onUiAction={onUiAction} onRetry={(message) => void retryTurn(requireClient(), message, t)}
+            onDelete={(message) => void deleteMessage(requireClient(), message.id, t, confirm).catch(() => undefined)} onOpenMemory={(id) => openLink(`neo://memory/${id}`)}
+            onLoadOlder={loadOlder} onLatest={latest} stickToken={stickToken} jump={jump} dock={dock} />
+        )}
+        {overlay === 'search' && <TimelineSearch onClose={() => setOverlay(null)} onJump={(id) => loadAnchor(id, true)} />}
+        {overlay === 'date' && <JumpToDate onClose={() => setOverlay(null)} onJump={(date) => loadAnchor(date, false)} />}
+      </div>
+    </RetainedStateProvider>
   );
 }

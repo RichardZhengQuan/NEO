@@ -25,6 +25,7 @@ import type {
 import { Icon } from './icons.js';
 import { Markdown } from './markdown.js';
 import { BlockList, type LiveData, type OnUIAction } from './blocks.js';
+import { RetainedStateScope } from './retained-state.js';
 import { useT, type TranslateFn } from './i18n.js';
 import { Badge, Button, IconButton, Spinner, type Tone } from './primitives.js';
 import { useConfirm, type ConfirmOptions } from './confirm.js';
@@ -452,7 +453,17 @@ export function MessageView(props: MessageViewProps): ReactElement {
         }
         break;
       case 'ui':
-        items.push({ key: `u${part.id}`, node: <BlockList blocks={[part.block]} uiId={part.id} onAction={onAction} live={live} /> });
+        items.push({ key: `u${part.id}`, node: (
+          <RetainedStateScope scope="messages">
+            <RetainedStateScope scope={message.id}>
+              <RetainedStateScope scope="ui">
+                <RetainedStateScope scope={part.id}>
+                  <BlockList blocks={[part.block]} uiId={part.id} onAction={onAction} live={live} />
+                </RetainedStateScope>
+              </RetainedStateScope>
+            </RetainedStateScope>
+          </RetainedStateScope>
+        ) });
         break;
       case 'image': {
         const src = imageSrc(part);

@@ -49,6 +49,9 @@ export { LinkProvider, useLinkClick, useOpenLink } from './links.js';
 export { formatDateTime, formatDate, formatTime, formatRelative, formatCompact, formatNumber, dayKey } from './format.js';
 export { copyText } from './clipboard.js';
 
+export type { RetainedStateStore, RetainedStateSnapshot } from './retained-state.js';
+export { createRetainedStateStore, RetainedStateProvider, RetainedStateScope, useRetainedState } from './retained-state.js';
+
 // ───────────────────────────── generative UI ─────────────────────────────
 
 export type { UIActionContext, OnUIAction, LiveData, BlockRendererProps } from './blocks.js';
