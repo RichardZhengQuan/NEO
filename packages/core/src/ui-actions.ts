@@ -78,7 +78,7 @@ function findForm(block: UIBlock): FormBlock | null {
 
 /**
  * The action `actionId` declared by `block`: a form submission, a live-widget
- * control (task toggle, reminder snooze/done, memory forget) or an
+ * control (task toggle, reminder snooze/done, memory forget, change apply) or an
  * action listed in the block tree. Null when the block declares no such action.
  */
 export function resolveStoredAction(block: UIBlock, actionId: string, values?: Record<string, unknown>): ResolvedUiAction | null {
@@ -95,8 +95,11 @@ export function resolveStoredAction(block: UIBlock, actionId: string, values?: R
   }
   const widget = resolveWidgetAction(block, actionId, clientValues);
   if (widget) return { action: widget };
+  if (actionId.startsWith('change.apply:')) return null;
   const action = collectActions([block]).find((a) => a.id === actionId);
   if (!action) return null;
+  // Only a trusted changes snapshot may provide apply_change input.
+  if (action.kind === 'tool' && action.tool === 'apply_change') return null;
   return clientValues ? { action, values: clientValues } : { action };
 }
 
@@ -151,14 +154,22 @@ function patchReminder(block: ReminderBlock, reminder: Record<string, unknown>):
  * Apply a tool's output to the live widgets of a block tree: `{ task }` updates the
  * matching item of `tasks` widgets, `{ reminder }` the matching `reminder` widget
  * (the shapes returned by update_task / snooze_reminder / complete_reminder…).
+ * `{ change }` marks a proposed change applied alongside any task/reminder update.
  * Returns the patched block, or null when nothing changed or the result would be invalid.
  */
 export function patchWidgetBlock(block: UIBlock, output: unknown): UIBlock | null {
   if (!isPlainObject(output)) return null;
   const task = isPlainObject(output.task) && typeof output.task.id === 'string' ? output.task : null;
   const reminder = isPlainObject(output.reminder) && typeof output.reminder.id === 'string' ? output.reminder : null;
-  if (!task && !reminder) return null;
+  const change = isPlainObject(output.change) && typeof output.change.id === 'string' && output.change.status === 'applied' ? output.change : null;
+  if (!task && !reminder && !change) return null;
   const patched = mapTree(block, (b) => {
+    if (change && b.type === 'changes' && b.items.some((item) => item.id === change.id)) {
+      return { ...b, items: b.items.map((item) => item.id === change.id ? {
+        ...item, status: 'applied' as const,
+        ...(item.kind === 'reminder.create' && typeof change.reminderId === 'string' ? { reminderId: change.reminderId } : {}),
+      } : item) };
+    }
     if (task && b.type === 'tasks' && b.tasks.some((t) => t.id === task.id)) {
       return { ...b, tasks: b.tasks.map((t) => (t.id === task.id ? patchTask(t, task) : t)) };
     }

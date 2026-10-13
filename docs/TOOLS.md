@@ -36,6 +36,8 @@ Times: tools accept `when`/`due` strings parsed by `parseDateTime(input, now, ti
 | `list_tasks` | read / auto | `{ list?, done?, query?, limit? }` | tasks + ui `tasks` |
 | `update_task` | write / auto | `{ id, title?, done?, due?: string\|null, priority?, notes?, list? }` | task (used by task checkboxes) |
 | `delete_task` | dangerous / confirm | `{ id }` | `{ deleted }` |
+| `propose_changes` | read / auto | `{ title?, note?, changes: [{ kind: 'task.update', taskId, due?, title?, priority?, done? } \| { kind: 'reminder.create', title, when, notes? } \| { kind: 'reminder.update', reminderId, when?, title? }] }` | snapshots current values and returns proposed edits + **ui**: `changes` block; nothing is written |
+| `apply_change` (UI-only) | write / auto | `{ item: ChangeItem }` | applies one stored proposed item after checking its before state; output `{ change: { id, status: 'applied', reminderId? }, task? , reminder? }`. Reminder creation is idempotent through its `creationKey` |
 | `create_note` | write / auto | `{ title?, content, tags? }` | note |
 | `search_notes` | read / auto | `{ query?, tag?, limit? }` | notes (title + 200-char excerpt) + ui `list` |
 | `get_note` | read / auto | `{ id }` | full note |

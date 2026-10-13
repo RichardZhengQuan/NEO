@@ -11,7 +11,22 @@ import { clip, friendlyTime, localIso } from './format.js';
 /** Most tasks a tasks widget can hold (TasksBlockSchema). */
 const WIDGET_MAX = 100;
 
-const DUE_HELP = 'Due date/time: "tomorrow", "friday 17:00", "in 3 days", an ISO date ("2026-10-12") or epoch ms.';
+export const DUE_HELP = 'Due date/time: "tomorrow", "friday 17:00", "in 3 days", an ISO date ("2026-10-12") or epoch ms.';
+
+export function taskOutput(t: Task, timezone: string, stores: ProductivityStores) {
+  return {
+    id: t.id,
+    listId: t.listId,
+    list: stores.tasks.lists().find((l) => l.id === t.listId)?.name ?? 'Tasks',
+    title: t.title,
+    done: t.done,
+    dueAt: t.dueAt,
+    dueLocal: t.dueAt === null ? null : localIso(t.dueAt, timezone),
+    priority: t.priority,
+    tags: t.tags,
+    notes: t.notes,
+  };
+}
 
 export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
   const { tasks } = stores;
@@ -29,19 +44,6 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
     if (!t) throw new NeoError('not_found', `No task with id "${id}". Use list_tasks to find it.`);
     return t;
   };
-
-  const taskOutput = (t: Task, timezone: string) => ({
-    id: t.id,
-    listId: t.listId,
-    list: listName(t.listId),
-    title: t.title,
-    done: t.done,
-    dueAt: t.dueAt,
-    dueLocal: t.dueAt === null ? null : localIso(t.dueAt, timezone),
-    priority: t.priority,
-    tags: t.tags,
-    notes: t.notes,
-  });
 
   const widget = (title: string, items: Task[], listId?: string): UIBlock => ({
     type: 'tasks',
@@ -92,7 +94,7 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
         tags: input.tags ?? [],
       });
       return {
-        output: { task: taskOutput(task, ctx.timezone) },
+        output: { task: taskOutput(task, ctx.timezone, stores) },
         ui: [listWidget(list, task)],
         summary: `Added “${clip(task.title, 60)}” to ${list.name}${dueAt !== null ? ` (due ${friendlyTime(dueAt, ctx.timezone, ctx.locale)})` : ''}`,
       };
@@ -126,7 +128,7 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
       const items = tasks.list({ listId: list?.id, done: input.done, query: input.query, limit: input.limit ?? 50 });
       const title = list ? list.name : input.query ? `Tasks matching “${input.query}”` : input.done === true ? 'Completed tasks' : 'Tasks';
       return {
-        output: { tasks: items.map((t) => taskOutput(t, ctx.timezone)), total: items.length, ...(list ? { list: { id: list.id, name: list.name } } : {}) },
+        output: { tasks: items.map((t) => taskOutput(t, ctx.timezone, stores)), total: items.length, ...(list ? { list: { id: list.id, name: list.name } } : {}) },
         ui: [widget(title, items, list?.id)],
         summary: `${items.length} task${items.length === 1 ? '' : 's'}${list ? ` in ${list.name}` : ''}`,
       };
@@ -161,7 +163,7 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
       if (input.list !== undefined) patch.listId = resolveOrCreateList(input.list).id;
       const task = tasks.update(existing.id, patch);
       const what = input.done === true ? 'Completed' : input.done === false ? 'Reopened' : 'Updated';
-      return { output: { task: taskOutput(task, ctx.timezone) }, summary: `${what} “${clip(task.title, 60)}”` };
+      return { output: { task: taskOutput(task, ctx.timezone, stores) }, summary: `${what} “${clip(task.title, 60)}”` };
     },
   });
 

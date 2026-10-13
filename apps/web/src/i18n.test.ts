@@ -10,9 +10,6 @@ const sources = import.meta.glob(['./**/*.ts', './**/*.tsx', '!./**/*.test.ts', 
 
 /** Keys built at runtime from a prefix + a known set of values. */
 const DYNAMIC: Record<string, readonly string[]> = {
-  'plan.stage_': ['edit', 'review', 'saving', 'saved', 'partial', 'error'],
-  'plan.status_': ['pending', 'saving', 'saved', 'error', 'invalid'],
-  'plan.invalid.': ['deleted', 'done', 'changed', 'time', 'past', 'session', 'reminder-unknown', 'source-unavailable'],
   'ai.reasoning_': ['off', 'low', 'medium', 'high'],
   'ai.search_': ['auto', 'engine', 'off'],
   'chat.risk.': ['read', 'write', 'external', 'dangerous'],

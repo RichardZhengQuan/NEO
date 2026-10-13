@@ -23,7 +23,6 @@ export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 export type Route =
   | { name: 'timeline'; messageId?: string }
-  | { name: 'plan-tomorrow'; date?: string }
   | { name: 'memory'; tab: MemoryTab; nodeId?: string }
   | { name: 'reminders'; reminderId?: string }
   | { name: 'tasks'; listId?: string; taskId?: string }
@@ -37,11 +36,6 @@ export type RouteName = Route['name'];
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const safeId = (s: string | undefined): string | undefined => (s && SAFE_ID.test(s) ? s : undefined);
-const safeDate = (value: string | null): string | undefined => {
-  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
-  const date = new Date(`${value}T00:00:00Z`);
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value ? value : undefined;
-};
 
 function isMemoryTab(s: string | undefined): s is MemoryTab {
   return MEMORY_TABS.includes(s as MemoryTab);
@@ -54,10 +48,8 @@ function isSection(s: string | undefined): s is SettingsSection {
 function routeFrom(segments: string[], query: URLSearchParams): Route {
   const [first = 'timeline', second, third, fourth] = segments;
   switch (first) {
-    case 'plan-tomorrow': {
-      const date = safeDate(query.get('date'));
-      return date ? { name: 'plan-tomorrow', date } : { name: 'plan-tomorrow' };
-    }
+    case 'plan-tomorrow':
+      return { name: 'timeline' };
     case 'chat': {
       const messageId = safeId(query.get('messageId') ?? ((third === 'message' || third === 'messages') ? fourth : third));
       return messageId ? { name: 'timeline', messageId } : { name: 'timeline' };
@@ -113,8 +105,6 @@ export function parseRoute(hash: string): Route {
 /** Canonical hash for a route. */
 export function routeToHash(route: Route): string {
   switch (route.name) {
-    case 'plan-tomorrow':
-      return route.date ? `#/plan-tomorrow?date=${encodeURIComponent(route.date)}` : '#/plan-tomorrow';
     case 'timeline':
       if (route.messageId) return `#/timeline?messageId=${encodeURIComponent(route.messageId)}`;
       return '#/';

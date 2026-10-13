@@ -5,15 +5,8 @@
 import { z } from 'zod';
 import { NeoError, RecurrenceSchema, defineTool, describeRecurrence, type ProductivityStores, type Reminder, type ReminderPatch, type ReminderStatus, type UIBlock } from '@neo/protocol';
 import type { Clock } from '@neo/protocol';
-import { parseDateTime } from '../time.js';
 import { clip, friendlyTime, localIso, weekdayName } from './format.js';
-
-/** Times this far in the past are rejected (they would fire immediately as "missed"). */
-const PAST_TOLERANCE_MS = 60_000;
-
-const WHEN_HELP =
-  'When to fire: a phrase like "in 10 minutes", "in 2 hours", "tomorrow 9am", "tonight", "friday 14:00", "today 18:30", ' +
-  'an ISO time ("2026-10-12T09:00", local time when there is no offset) or epoch ms.';
+import { parseFuture, WHEN_HELP } from './future.js';
 
 const RecurrenceInput = RecurrenceSchema.describe(
   'Repeat rule. freq: hourly|daily|weekly|monthly|yearly; interval (every N periods, default 1); byWeekday (0=Sunday … 6=Saturday, ' +
@@ -52,13 +45,6 @@ export function reminderBlock(r: Reminder): UIBlock {
 export function createReminderTools(stores: ProductivityStores, _clock?: Clock) {
   const { reminders } = stores;
 
-  const parseFuture = (when: string | number, now: number, timezone: string): number => {
-    const dueAt = parseDateTime(when, now, timezone);
-    if (dueAt < now - PAST_TOLERANCE_MS) {
-      throw new NeoError('bad_request', `That time (${localIso(dueAt, timezone)} ${timezone}) is in the past; it is now ${localIso(now, timezone)}. Pick a future time.`);
-    }
-    return dueAt;
-  };
   const mustGet = (id: string): Reminder => {
     const r = reminders.get(id);
     if (!r) throw new NeoError('not_found', `No reminder with id "${id}". Use list_reminders to find it.`);

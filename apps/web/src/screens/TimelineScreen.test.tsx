@@ -6,6 +6,7 @@ import { appDictionaries } from '../i18n.js';
 import { navigate } from '../router.js';
 import { emptyEntry, useTimeline } from '../state/timeline.js';
 import { useSession } from '../state/session.js';
+import { resetChatDrafts } from '../state/chat-drafts.js';
 import { ProviderSetup } from '../components/ProviderSetup.js';
 import { AiSection } from './settings/AiSection.js';
 import { TimelineScreen } from './TimelineScreen.js';
@@ -24,6 +25,7 @@ function renderTimeline(locale = 'en') {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetChatDrafts();
   useSession.setState({ settings: DEFAULT_SETTINGS, providers: { items: [], defaultModel: null }, models: {}, client: null });
   useTimeline.setState({ ...emptyEntry(), loaded: true, offRecordLoaded: true }, true);
   HTMLElement.prototype.scrollTo = vi.fn();
@@ -32,13 +34,13 @@ afterEach(cleanup);
 
 describe('timeline without AI', () => {
   it.each([
-    ['en', 'Connect an AI to start chatting', 'Open AI settings', 'Type “Plan tomorrow” or keep a draft…'],
-    ['zh-CN', '连接 AI 后即可开始聊天', '打开 AI 设置', '输入“规划明天”，或保留草稿…'],
-  ])('shows empty-chat and composer guidance in %s and opens Settings → AI', (locale, prompt, action, localPlaceholder) => {
+    ['en', 'Connect an AI to start chatting', 'Open AI settings'],
+    ['zh-CN', '连接 AI 后即可开始聊天', '打开 AI 设置'],
+  ])('shows empty-chat and composer guidance in %s and opens Settings → AI', (locale, prompt, action) => {
     renderTimeline(locale);
 
     expect(screen.getByRole('heading', { name: prompt })).toBeTruthy();
-    expect((screen.getByRole('textbox', { name: localPlaceholder }) as HTMLTextAreaElement).disabled).toBe(false);
+    expect((screen.getByRole('textbox', { name: prompt }) as HTMLTextAreaElement).disabled).toBe(false);
     expect((screen.getByRole('button', { name: locale === 'en' ? 'Send' : '发送' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole('list', { name: /Things to try/ })).toBeNull();
     const buttons = screen.getAllByRole('button', { name: action });
@@ -68,12 +70,30 @@ describe('timeline without AI', () => {
     renderTimeline();
 
     expect(screen.getByText('My saved message')).toBeTruthy();
-    expect(screen.getByText('Plan tomorrow uses your saved tasks and reminders. Connect an AI for other requests.')).toBeTruthy();
-    expect((screen.getByRole('textbox', { name: 'Type “Plan tomorrow” or keep a draft…' }) as HTMLTextAreaElement).disabled).toBe(false);
+    expect(screen.getByText('Connect an AI to start chatting')).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: 'Connect an AI to start chatting' }) as HTMLTextAreaElement).disabled).toBe(false);
     expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Open AI settings' }));
     expect(navigate).toHaveBeenCalledWith({ name: 'settings', section: 'ai' });
     expect(useTimeline.getState().messages).toHaveLength(1);
+  });
+
+  it('keeps any composer draft editable and unsendable across navigation without AI', () => {
+    const view = renderTimeline();
+    const draft = 'Help me organize tomorrow.\nKeep this unfinished request.';
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: draft } });
+    expect(textbox.disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    expect(textbox.value).toBe(draft);
+    expect(useTimeline.getState().messages).toEqual([]);
+    expect(navigate).not.toHaveBeenCalled();
+
+    view.unmount();
+    renderTimeline();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(draft);
+    expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('becomes ready when an enabled provider connects and returns to guidance when disabled', () => {

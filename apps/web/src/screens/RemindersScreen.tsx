@@ -27,7 +27,6 @@ import {
 } from '@neo/ui';
 import { Menu } from '../components/Menu.js';
 import { PageHeader } from '../components/PageHeader.js';
-import { openPlanTomorrow } from '../actions/plan-tomorrow.js';
 import { errorMessage } from '../lib/errors.js';
 import { describeRecurrence, presetOf, recurrenceFor, weekdayName, type RepeatPreset } from '../lib/recurrence.js';
 import { fromLocalInputValue, listTimeZones, nextTimeOfDay, toLocalInputValue, tomorrowAt, wallTimeOf } from '../lib/time.js';
@@ -319,7 +318,7 @@ export function RemindersScreen({ highlightId }: { highlightId?: string }): Reac
 
   return (
     <div className="page">
-      <PageHeader title={t('nav.reminders')} actions={loaded && upcoming.length > 0 ? <Button size="sm" variant="secondary" icon="calendar" onClick={() => openPlanTomorrow({ timezone: timeZone ?? 'UTC' })}>{t('plan.open')}</Button> : undefined} />
+      <PageHeader title={t('nav.reminders')} />
       <div className="page-body">
         <div className="page-inner">
           <NotificationNudge />

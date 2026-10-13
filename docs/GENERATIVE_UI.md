@@ -45,6 +45,7 @@ Every rendered block becomes a `ui` part `{ type: 'ui', id: 'ui_…', block, too
 | `countdown` | `label`, `until` (epoch ms), `doneText` | live ticking |
 | `reminder` | `reminderId`, `title`, `dueAt`, `timezone`, `recurrenceText`, `status` | **live widget**: Snooze 10 min / 1 h, Done |
 | `tasks` | `title`, `listId`, `tasks[{id,title,done,dueAt,priority}]` | **live widget**: checkboxes |
+| `changes` | `title`, `note`, `timezone`, `items[{id,kind,status,…}]` | **live widget**: review before → after and apply selected changes |
 | `memory` | `title`, `note`, `nodes[{id,kind,label,content,status}]` | Forget (active) |
 
 Limits: at most 50 top-level blocks, 300 blocks per message, nesting depth 8, action ids unique within a message. Tones are `neutral | accent | info | success | warning | danger`. Icons are lucide-style names (`bell`, `calendar`, `check-circle`, `map-pin`, `brain`…) or a single emoji.
@@ -93,7 +94,7 @@ Checklist for a PR that adds a block type:
 | `link` | `url` | open (in-app for `neo://…`, browser otherwise) |
 | `copy` | `text` | copy to clipboard |
 
-The model-written `confirm` text can provide an extra client prompt, but it never authorizes execution. For live widgets the client sends the reserved ids from `widgetActionId` (`task.toggle:<id>`, `reminder.snooze:<min>`, `reminder.complete`, `memory.forget:<id>`). The server resolves them against the **stored** block with `resolveWidgetAction`, so a client can only touch items the block actually shows.
+The model-written `confirm` text can provide an extra client prompt, but it never authorizes execution. For live widgets the client sends the reserved ids from `widgetActionId` (`task.toggle:<id>`, `reminder.snooze:<min>`, `reminder.complete`, `memory.forget:<id>`, `change.apply:<id>`). The server resolves them against the **stored** block with `resolveWidgetAction`, so a client can only touch items the block actually shows.
 
 Request: `POST /api/timeline/ui-action { messageId, uiId, actionId, values?, confirmationToken? }`.
 
@@ -135,19 +136,15 @@ Within the current app session, leaving the timeline or switching generated tabs
 
 The app owns an in-memory `RetainedStateProvider` store; generated controls are scoped by message, UI part, and nested block identity. Standalone `@neo/ui` controls retain their normal local-state behavior unless wrapped in this provider. No draft is written to browser storage or synchronized to another device, and reloading or restarting the app clears it. Disconnecting or changing the connected session clears all drafts. Recorded and off-record composer drafts are separate; ending an off-record exchange or deleting a message removes its retained input and invalidates pending writes to that input.
 
-### Plan tomorrow
+### Proposed changes
 
-Planning is a contextual scene, opened by an explicit “Plan tomorrow” chat request, the planning action on Tasks or Reminders when relevant saved items exist, or the read-only `plan_tomorrow` tool's card. The explicit local chat command works without a configured AI provider; other requests stay unsendable while their drafts remain editable. It has no permanent navigation item. Chat offers **Resume plan** only after a plan exists in the current session.
+For planning or reorganizing saved tasks and reminders, NEO first reads the relevant items with `list_tasks` and `list_reminders`, describes a short plan, then calls the read-only `propose_changes` tool. It returns one reusable `changes` live widget with concrete task updates, one-off reminder creations and reminder updates. Each update includes the current values of exactly the fields being changed and their proposed values. Dates are shown in the block's timezone; no task durations or calendar availability are inferred. A single direct edit uses the regular task or reminder tool.
 
-The scene uses the next calendar date in the configured timezone and reads existing tasks and reminders. It initially selects up to three unfinished tasks due tomorrow, earlier, or without a due date; later tasks remain available as unselected alternatives. Saved reminders show only their next scheduled due time. These are context, not calendar availability or projected recurrence instances. Target times are editable due times, not invented task durations. Adding a reminder is optional and starts unchecked.
+Nothing changes until the user selects pending items and applies them. The widget runs selected items sequentially through the UI-only `apply_change` tool using `change.apply:<id>` actions; the server resolves each item from the stored block. Task and reminder updates compare the current store values against the proposed `before` snapshot, and reminder updates also require a scheduled reminder. Changed or deleted items require a fresh proposal. Successful items are marked applied and are never run again by the widget; partial failures show individual errors and retry only remaining selected items. Checkbox choices survive navigation within a `RetainedStateProvider`.
 
-**Review plan** shows the exact before/after due times and requested new reminders. **Apply changes** writes through the existing tasks and reminders APIs. Successful writes have individual receipts; a partial save keeps those receipts and retries only the remaining operations. Changed, completed, deleted, unverifiable, or past-due selections require another review. Unknown reminder outcomes remain unresolved until verified; retries cannot blindly create a second reminder.
+Each proposed reminder creation has an opaque UUID `creationKey`. The store persists the key and its payload fingerprint: a matching repeat returns the existing reminder, a different payload fails, and deleting the reminder leaves its key consumed so delayed replay cannot recreate it. New reminder due times must still pass the future-time rule when applied. The key is separate from user-visible notes.
 
-Each reviewed reminder creation uses an opaque UUID `creationKey` through the existing API. The reminder store persists that key with its original payload fingerprint: a repeated matching request returns the existing reminder, and a different payload with the same key fails with `409`. Deleting a keyed reminder retains its consumed key, so delayed replay cannot recreate it; a new intentional creation uses a fresh key. This metadata is separate from user-visible notes. Clients still reconcile an unknown response by reading saved reminders, so a server that does not support the key cannot cause a blind duplicate retry.
-
-Switching scenes retains choices, target times, optional reminders, disclosure selections, review stage, pending saves, and their results. Composer drafts and generated form edits use the same existing session retention boundary. Reloading, restarting, disconnecting, or changing server sessions clears these in-memory drafts. Private and recorded plans are separate; ending private mode removes its plan and prevents late responses from restoring it. Saved tasks and reminders remain governed by the existing productivity APIs.
-
-The tool and prompt are available to new assistant episodes. Existing episodes retain their frozen toolset and prompt; the explicit local chat intent and Tasks/Reminders actions can open the scene immediately.
+Only tools create `changes` blocks, through `propose_changes`. Model-authored `render_ui` and inline UI cannot create them, including inside nested containers. Existing episodes retain their frozen toolset and prompt; new episodes receive the planning tool and guidance.
 
 ## Prompting the model (core system prompt excerpt)
 

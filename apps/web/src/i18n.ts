@@ -3,7 +3,6 @@
  * in English and Simplified Chinese; plurals use `_one` / `_other` suffixes.
  */
 import type { Messages } from '@neo/ui';
-import { planDictionaries } from './plan-i18n.js';
 
 const en: Messages = {
   // ── common ──
@@ -1595,4 +1594,4 @@ const zhCN: Messages = {
   'dataSettings.source_code': '源代码',
 };
 
-export const appDictionaries: Record<'en' | 'zh-CN', Messages> = { en: { ...en, ...planDictionaries.en }, 'zh-CN': { ...zhCN, ...planDictionaries['zh-CN'] } };
+export const appDictionaries: Record<'en' | 'zh-CN', Messages> = { en, 'zh-CN': zhCN };

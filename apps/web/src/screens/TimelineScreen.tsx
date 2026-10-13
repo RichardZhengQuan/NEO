@@ -9,9 +9,6 @@ import { navigate } from '../router.js';
 import { loadOffRecord, loadTimeline } from '../state/connection.js';
 import { useData } from '../state/data.js';
 import { useChatDrafts } from '../state/chat-drafts.js';
-import { openPlanTomorrow } from '../actions/plan-tomorrow.js';
-import { isPlanTomorrowIntent } from '../lib/plan-intent.js';
-import { planForSession, usePlanTomorrowState } from '../state/plan-tomorrow.js';
 import { pushToast } from '../state/notifications.js';
 import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from '../state/session.js';
 import { prependOlder, setTimeline, useTimeline } from '../state/timeline.js';
@@ -30,9 +27,6 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   const client = useSession((s) => s.client);
   const sessionEpoch = useSession((s) => s.sessionEpoch);
   const draftStore = useChatDrafts((s) => s.store);
-  const timezone = useSession((s) => s.settings?.timezone ?? 'UTC');
-  const planState = usePlanTomorrowState();
-  const retainedPlan = Object.keys(planState.drafts).length ? planForSession(undefined, timezone) : null;
   useEffect(() => {
     if (!client) return;
     const epoch = currentSessionEpoch();
@@ -121,10 +115,6 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   const send = async (text: string, images: ImagePart[], restoreDraft?: () => void) => {
     const body = composeBody(text, images);
     if ((!body.text && !body.parts) || privacyBusy || !entry.offRecordLoaded) return;
-    if (images.length === 0 && isPlanTomorrowIntent(text)) {
-      openPlanTomorrow({ timezone, intent: text });
-      return;
-    }
     if (noProvider) { restoreDraft?.(); return; }
     const active = requireClient();
     const epoch = currentSessionEpoch();
@@ -152,22 +142,21 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   const dock = (jumpButton: ReactNode) => (
     <div className="chat-dock" data-off-record={entry.offRecord || undefined}>
       {jumpButton}
-      {retainedPlan && <div className="timeline-scene-resume"><Button size="sm" variant="secondary" icon="calendar" onClick={() => openPlanTomorrow({ date: retainedPlan.date, timezone })}>{t('plan.resume')}</Button></div>}
       {entry.offRecord && <div className="timeline-private-banner" role="status"><Icon name="eye-off" size={16} />{t('timeline.off_record_banner')}</div>}
       <div className="timeline-composer">
         <RetainedStateScope key={entry.offRecord ? 'off-record' : 'recorded'} scope={entry.offRecord ? 'composer:off-record' : 'composer:recorded'}>
           <Composer handleRef={setComposer} onSend={(text, images, restoreDraft) => void send(text, images, restoreDraft)} onCancel={() => void cancelTurn(requireClient(), t)}
             busy={busy || sending} disabled={privacyBusy || !entry.offRecordLoaded}
-            sendDisabled={noProvider ? (text, images) => images.length > 0 || !isPlanTomorrowIntent(text) : false}
+            sendDisabled={noProvider}
             onDraftChange={setComposerText} enterToSend={!coarse}
-            placeholder={noProvider ? t('plan.local_placeholder') : t('chat.placeholder')} autoFocus={!coarse && !noProvider} />
+            placeholder={noProvider ? t('chat.connect_ai') : t('chat.placeholder')} autoFocus={!coarse && !noProvider} />
         </RetainedStateScope>
         <button type="button" className={`neo-btn neo-btn--sm neo-btn--${entry.offRecord ? 'secondary' : 'ghost'} timeline-off-record`} aria-pressed={entry.offRecord}
           title={t('timeline.off_record')} aria-busy={privacyBusy || undefined} disabled={!client || sending || privacyBusy || !entry.offRecordLoaded} onClick={() => void setOffRecord(requireClient(), !entry.offRecord, t).catch(() => undefined)}>
           {privacyBusy ? <Spinner size={14} /> : <Icon name="eye-off" size={14} />}{t('timeline.off_record')}
         </button>
       </div>
-      {noProvider && <div className="timeline-connect"><p className="neo-help">{t('plan.local_hint')}</p><Button size="sm" variant="secondary" icon="settings" onClick={openAiSettings}>{t('chat.open_ai_settings')}</Button></div>}
+      {noProvider && <div className="timeline-connect"><p className="neo-help">{t('chat.connect_ai')}</p><Button size="sm" variant="secondary" icon="settings" onClick={openAiSettings}>{t('chat.open_ai_settings')}</Button></div>}
     </div>
   );
   return (

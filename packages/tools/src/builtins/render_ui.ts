@@ -5,7 +5,7 @@
  * The description carries a compact catalogue built from UI_BLOCK_TYPES.
  */
 import { z } from 'zod';
-import { MAX_UI_DEPTH, UI_BLOCK_TYPES, defineTool, uiBlocksToText, validateUIBlocks, type UIBlockType } from '@neo/protocol';
+import { MAX_UI_DEPTH, UI_BLOCK_TYPES, defineTool, findToolOnlyBlock, uiBlocksToText, validateUIBlocks, type UIBlockType } from '@neo/protocol';
 
 /** Key props per block type ("?" = optional). Kept in sync with UI_BLOCK_TYPES by the type checker. */
 const BLOCK_PROPS: Record<UIBlockType, string> = {
@@ -36,6 +36,7 @@ const BLOCK_PROPS: Record<UIBlockType, string> = {
   countdown: 'label, until (epoch ms), doneText?',
   reminder: 'reminderId, title, dueAt, status (prefer create_reminder, which adds it)',
   tasks: 'tasks[{id, title, done}], title?, listId? (prefer list_tasks)',
+  changes: '(only via propose_changes)',
   memory: 'nodes[{id, kind, label, status?}] (prefer remember/recall)',
 };
 
@@ -61,6 +62,9 @@ export const renderUiTool = defineTool({
     const result = validateUIBlocks(input.blocks);
     if (!result.ok) {
       return { isError: true, output: { error: `The UI blocks are invalid, nothing was shown. Fix and retry:\n${result.error}` }, summary: 'Invalid UI' };
+    }
+    if (findToolOnlyBlock(result.blocks)) {
+      return { isError: true, output: { error: 'The UI blocks are invalid, nothing was shown. changes blocks come from propose_changes; use that tool to propose task and reminder edits.' }, summary: 'Invalid UI' };
     }
     const types = [...new Set(result.blocks.map((b) => b.type))].join(', ');
     return {

@@ -7,7 +7,7 @@
  *   <details>.
  * - Actions go through `onAction(action, { uiId, values })`. Live widgets send
  *   the reserved ids from `widgetActionId` (task.toggle:<id>, reminder.snooze:<min>,
- *   reminder.complete, memory.forget:<id>), which the server
+ *   reminder.complete, memory.forget:<id>, change.apply:<id>), which the server
  *   resolves against the stored block.
  * - `confirm` on a message / event / link / copy action asks first (in-app
  *   dialog). Tool actions ignore it: the server confirms them with its own
@@ -19,6 +19,7 @@ import {
   useEffect,
   useId,
   useMemo,
+  useRef,
   useState,
   type ErrorInfo,
   type FormEvent,
@@ -36,6 +37,8 @@ import {
   type ButtonsBlock,
   type CalloutBlock,
   type CardBlock,
+  type ChangeItem,
+  type ChangesBlock,
   type CodeBlock,
   type CountdownBlock,
   type DividerBlock,
@@ -117,7 +120,7 @@ const TONE_ICON: Record<Tone, string> = {
 function useActionRunner(onAction: OnUIAction | undefined, uiId: string | undefined) {
   const confirm = useConfirm();
   const [busy, setBusy] = useState<string | null>(null);
-  const run = async (action: UIAction, values?: Record<string, unknown>): Promise<boolean> => {
+  const run = async (action: UIAction, values?: Record<string, unknown>, onError?: (error: unknown) => void): Promise<boolean> => {
     if (!onAction) return false;
     // Model-written `confirm` text only guards actions that stay on the client
     // side of the conversation (message / event / link / copy). Tool actions are
@@ -133,7 +136,8 @@ function useActionRunner(onAction: OnUIAction | undefined, uiId: string | undefi
       if (values) ctx.values = values;
       await onAction(action, ctx);
       return true;
-    } catch {
+    } catch (error) {
+      onError?.(error);
       return false;
     } finally {
       setBusy(null);
@@ -1122,6 +1126,120 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
   );
 }
 
+function ChangeDetails({ item, timezone }: { item: ChangeItem; timezone?: string }): ReactElement {
+  const t = useT();
+  const locale = useLocale();
+  const time = (dueAt: number | null | undefined) => dueAt == null ? t('block.changes_no_due') : formatDateTime(dueAt, locale, timezone);
+  const priority = (value: number | undefined) => value ? t(`task.priority_${value}`) : t('block.changes_no_priority');
+  if (item.kind === 'reminder.create') return <div className="neo-change__details">{time(item.dueAt)}</div>;
+  return (
+    <div className="neo-change__details">
+      {item.after.dueAt !== undefined && <p>{t('block.changes_due', { from: time(item.before.dueAt), to: time(item.after.dueAt) })}</p>}
+      {item.after.title !== undefined && <p>{t('block.changes_title_field', { from: item.before.title ?? '', to: item.after.title })}</p>}
+      {item.kind === 'task.update' && item.after.priority !== undefined && <p>{priority(item.before.priority)} → {priority(item.after.priority)}</p>}
+      {item.kind === 'task.update' && item.after.done !== undefined && <p>{t(item.after.done ? 'block.changes_mark_done' : 'block.changes_reopen')}</p>}
+    </div>
+  );
+}
+
+type ChangeApplyState = {
+  running: boolean;
+  applying: string | null;
+  results: Record<string, { status: 'applied' } | { status: 'failed'; error: string }>;
+};
+
+function ChangesRenderer({ block, uiId, onAction }: BlockRendererProps & { block: ChangesBlock }): ReactElement {
+  const t = useT();
+  const id = useId();
+  const runner = useActionRunner(onAction, uiId);
+  const [selected, setSelected] = useRetainedState<Record<string, boolean>>('selection', () => Object.fromEntries(block.items.map((item) => [item.id, item.status !== 'applied'])));
+  const [state, setState] = useRetainedState<ChangeApplyState>('apply', { running: false, applying: null, results: {} });
+  const running = useRef(false);
+  const currentBlock = useRef(block);
+  currentBlock.current = block;
+  const isApplied = (item: ChangeItem) => item.status === 'applied' || state.results[item.id]?.status === 'applied';
+  const pending = block.items.filter((item) => !isApplied(item) && (selected[item.id] ?? true));
+  const retry = pending.some((item) => state.results[item.id]?.status === 'failed');
+  const applyLabel = t(retry ? 'block.changes_retry' : 'block.changes_apply', { n: pending.length });
+  const allApplied = block.items.every(isApplied);
+  const apply = async () => {
+    if (!onAction || state.running || running.current || pending.length === 0) return;
+    running.current = true;
+    setState((previous) => ({ ...previous, running: true }));
+    try {
+      for (const item of pending) {
+        if (currentBlock.current.items.find((current) => current.id === item.id)?.status === 'applied') continue;
+        setState((previous) => ({ ...previous, applying: item.id }));
+        let error = t('block.changes_failed');
+        const ok = await runner.run(
+          { id: widgetActionId.changeApply(item.id), kind: 'tool', tool: 'apply_change', label: t('block.changes_apply_item'), input: {} },
+          undefined,
+          (cause) => { if (cause instanceof Error && cause.message) error = cause.message; else if (typeof cause === 'string' && cause) error = cause; },
+        );
+        setState((previous) => ({
+          ...previous,
+          applying: null,
+          results: { ...previous.results, [item.id]: ok ? { status: 'applied' } : { status: 'failed', error } },
+        }));
+      }
+    } finally {
+      running.current = false;
+      setState((previous) => ({ ...previous, running: false, applying: null }));
+    }
+  };
+  return (
+    <section className="neo-card neo-widget neo-changes" aria-label={block.title ?? t('block.changes_title')}>
+      <div className="neo-widget__head">
+        <span className="neo-widget__icon"><Icon name="list-checks" size={18} /></span>
+        <div className="neo-change__main">
+          <p className="neo-widget__title">{block.title ?? t('block.changes_title')}</p>
+          {block.note && <p className="neo-changes__note neo-help">{block.note}</p>}
+        </div>
+      </div>
+      <ul className="neo-changes__list">
+        {block.items.map((item) => {
+          const applied = isApplied(item);
+          const result = state.results[item.id];
+          const applying = state.applying === item.id;
+          const checkboxId = `${id}-${item.id}`;
+          const kind = item.kind === 'task.update' ? 'task' : item.kind === 'reminder.create' ? 'new_reminder' : 'reminder';
+          return (
+            <li key={item.id} className="neo-change" data-state={applied ? 'applied' : applying ? 'applying' : result?.status ?? 'pending'}>
+              {applied ? <span className="neo-change__check" aria-hidden="true"><Icon name="check" size={16} /></span> : (
+                <input
+                  id={checkboxId}
+                  className="neo-checkbox neo-change__check"
+                  type="checkbox"
+                  checked={selected[item.id] ?? true}
+                  disabled={state.running || !onAction}
+                  onChange={(event) => setSelected((previous) => ({ ...previous, [item.id]: event.target.checked }))}
+                />
+              )}
+              <div className="neo-change__main">
+                {applied ? <p className="neo-change__title">{item.title}</p> : <label htmlFor={checkboxId} className="neo-change__title">{item.title}</label>}
+                <span className="neo-change__kind">{t(`block.changes_kind_${kind}`)}</span>
+                <ChangeDetails item={item} timezone={block.timezone} />
+                <div className="neo-change__status" aria-live="polite" aria-atomic="true">
+                  {applied ? <span className="neo-change__applied">{t('block.changes_applied')}</span> : applying ? (
+                    <span><Spinner size={12} />{t('block.changes_applying')}</span>
+                  ) : result?.status === 'failed' ? <span className="neo-error-text">{result.error}</span> : null}
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="neo-widget__actions" aria-live="polite">
+        {allApplied ? <span className="neo-change__applied" role="status">{t('block.changes_all_applied')}</span> : (
+          <Button variant="primary" aria-label={applyLabel} loading={state.running} disabled={!onAction || pending.length === 0} onClick={() => void apply()}>
+            {applyLabel}
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}
+
 type MemoryResolution = 'forgotten';
 
 function MemoryWidgetRenderer({ block, uiId, onAction, live }: BlockRendererProps & { block: MemoryBlock }): ReactElement {
@@ -1247,6 +1365,8 @@ function renderBlock(props: BlockRendererProps): ReactElement {
       return <ReminderRenderer {...props} block={block} />;
     case 'tasks':
       return <TasksRenderer {...props} block={block} />;
+    case 'changes':
+      return <ChangesRenderer {...props} block={block} />;
     case 'memory':
       return <MemoryWidgetRenderer {...props} block={block} />;
     default:
