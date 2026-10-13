@@ -190,6 +190,11 @@ export interface ReminderStore {
   /** Record a firing: advances recurring reminders or marks one-shots 'fired'. */
   markFired(id: string, firedAt: number): ReminderFiring;
   onChange(listener: (event: { type: 'upsert'; reminder: Reminder } | { type: 'delete'; id: string }) => void): () => void;
+  /**
+   * Set messageId to null for every reminder whose messageId is in the given set.
+   * Called by the server's delete route after messages are removed.
+   */
+  clearMessageLinks(messageIds: string[]): void;
 }
 
 export interface TaskListQuery {

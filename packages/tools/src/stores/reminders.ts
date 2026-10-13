@@ -252,5 +252,23 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
         listeners.delete(listener);
       };
     },
+
+    clearMessageLinks(messageIds: string[]): void {
+      if (!messageIds.length) return;
+      const now = clock();
+      const affected = db.transaction(() => {
+        const reminders: Reminder[] = [];
+        // Range deletions are unbounded; keep each query within SQLite's parameter limit.
+        for (let i = 0; i < messageIds.length; i += 500) {
+          const ids = messageIds.slice(i, i + 500);
+          const placeholders = ids.map(() => '?').join(', ');
+          reminders.push(...(db.prepare(`SELECT * FROM reminders WHERE message_id IN (${placeholders})`).all(...ids) as Row[]).map(toReminder));
+          db.prepare(`UPDATE reminders SET message_id = NULL, updated_at = ? WHERE message_id IN (${placeholders})`)
+            .run(now, ...ids);
+        }
+        return reminders;
+      });
+      for (const reminder of affected) emit({ type: 'upsert', reminder: { ...reminder, messageId: null, updatedAt: now } });
+    },
   };
 }

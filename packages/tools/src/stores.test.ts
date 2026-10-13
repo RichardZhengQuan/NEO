@@ -1,6 +1,6 @@
 /** Review tests for the productivity stores and their migrations. */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { migrate, openDatabase, type NeoDatabase } from '@neo/storage';
+import { createConversationStore, migrate, openDatabase, storageMigrations, type NeoDatabase } from '@neo/storage';
 import { INBOX_LIST_ID, NeoError, type ProductivityStores } from '@neo/protocol';
 import { createProductivityStores, toolsMigrations } from './stores/index.js';
 
@@ -137,6 +137,48 @@ describe('ReminderStore', () => {
     expect(stores.reminders.list({ limit: -3 })).toHaveLength(1);
     expect(stores.reminders.list({ limit: 1.7 })).toHaveLength(1);
     expect(stores.reminders.list({ status: [] })).toHaveLength(2);
+  });
+
+  it('clearMessageLinks sets messageId to null for the given message ids and emits updated reminders', () => {
+    migrate(t.db, 'storage', storageMigrations);
+    const conversations = createConversationStore(t.db, { clock: () => t.now });
+    const episode = conversations.createEpisode();
+    for (const id of ['msg-x', 'msg-y']) {
+      conversations.appendMessage({ id, conversationId: episode.id, role: 'user', parts: [{ type: 'text', text: id }], createdAt: t.now, status: 'complete' });
+    }
+    const r = stores.reminders;
+    const linked = r.create({ title: 'linked', dueAt: t.now + 60_000, messageId: 'msg-x' });
+    const completed = r.complete(r.create({ title: 'completed linked', dueAt: t.now + 60_000, messageId: 'msg-x' }).id);
+    const other = r.create({ title: 'other linked', dueAt: t.now + 60_000, messageId: 'msg-y' });
+    const unlinked = r.create({ title: 'unlinked', dueAt: t.now + 60_000 });
+    const events: unknown[] = [];
+    r.onChange(event => events.push(event));
+    t.setNow(t.now + 1000);
+
+    r.clearMessageLinks(['msg-x', 'msg-x', 'msg-z']);
+    expect(r.get(linked.id)).toEqual({ ...linked, messageId: null, updatedAt: t.now });
+    expect(r.get(completed.id)).toEqual({ ...completed, messageId: null, updatedAt: t.now });
+    expect(r.get(other.id)).toEqual(other);
+    expect(r.get(unlinked.id)).toEqual(unlinked);
+    expect(events).toHaveLength(2);
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'upsert', reminder: r.get(linked.id) },
+      { type: 'upsert', reminder: r.get(completed.id) },
+    ]));
+
+    r.clearMessageLinks([]);
+    r.clearMessageLinks(['msg-z', 'msg-x']);
+    expect(events).toHaveLength(2);
+  });
+
+  it('clearMessageLinks handles large message-id sets', () => {
+    const r = stores.reminders;
+    const reminder = r.create({ title: 'linked', dueAt: t.now + 60_000, messageId: 'msg-last' });
+    const messageIds = Array.from({ length: 40_000 }, (_, i) => `missing-${i}`);
+    messageIds.push('msg-last');
+
+    r.clearMessageLinks(messageIds);
+    expect(r.get(reminder.id)?.messageId).toBeNull();
   });
 });
 
