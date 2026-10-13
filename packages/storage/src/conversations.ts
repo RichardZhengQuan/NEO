@@ -67,6 +67,7 @@ function toConversation(r: Row): Conversation {
     ephemeral: toBool(r.ephemeral),
     startedAt: toNum(r.started_at ?? r.created_at),
     closedAt: toNumOrNull(r.closed_at),
+    searchMode: (r.search_mode as 'native' | 'engine' | 'off') || undefined,
   };
 }
 
@@ -249,6 +250,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
         id,
       );
       if (hasEpisodes() && patch.closedAt !== undefined) db.prepare('UPDATE conversations SET closed_at = ? WHERE id = ?').run(patch.closedAt, id);
+      if (hasEpisodes() && patch.searchMode !== undefined) db.prepare('UPDATE conversations SET search_mode = ? WHERE id = ?').run(patch.searchMode, id);
       return next;
     },
 

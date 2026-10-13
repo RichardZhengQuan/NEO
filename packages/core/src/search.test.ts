@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { type ContentPart, type ToolDefinition } from '@neo/protocol';
-import { collect, deferred, ev, harness, runTurn, ScriptedAdapter, settle, userText } from './fakes.test-utils.js';
+import { collect, deferred, ev, harness, runTurn, ScriptedAdapter, ScriptedRegistry, settle, userText } from './fakes.test-utils.js';
+import { AgentRuntime } from './runtime.js';
 
 const source = { title: 'Weather', url: 'https://weather.example/today', snippet: 'Sunny' };
 const searchTool: ToolDefinition = {
@@ -171,5 +172,84 @@ describe('runtime search', () => {
     expect(message.parts.filter(part => part.type === 'sources')).toEqual([
       { type: 'sources', items: [source] }, { type: 'sources', items: [{ title: 'More', url: 'https://more.example/' }] },
     ]);
+  });
+});
+
+describe('runtime restart — episode continuity', () => {
+  it('continues the same episode after a restart when search mode is unchanged (native)', async () => {
+    const adapter = new ScriptedAdapter({ caps: { nativeWebSearch: true } });
+    const h = harness({ adapters: [adapter] });
+    const first = await h.runtime.sendTimeline({ parts: userText('Before restart') });
+    await first.done;
+    // Simulate a restart: new runtime on the same stores, clock continues.
+    const runtime2 = new AgentRuntime({
+      conversations: h.conversations,
+      settings: h.settings,
+      providers: new ScriptedRegistry([new ScriptedAdapter({ caps: { nativeWebSearch: true } })]),
+      memory: h.memory,
+      tools: h.tools,
+      clock: h.clock,
+    });
+    const second = await runtime2.sendTimeline({ parts: userText('After restart') });
+    await second.done;
+    expect(second.episodeId).toBe(first.episodeId);
+  });
+
+  it('continues the same episode after a restart when search mode is unchanged (engine)', async () => {
+    const h = harness({
+      tools: [],
+      resolveSearchTool: settings => settings.ai.search.engine ? searchTool : undefined,
+      settings: { ai: { search: { engine: { provider: 'searxng', baseUrl: 'http://127.0.0.1:8080' } } } },
+    });
+    const first = await h.runtime.sendTimeline({ parts: userText('Before restart') });
+    await first.done;
+    const runtime2 = new AgentRuntime({
+      conversations: h.conversations,
+      settings: h.settings,
+      providers: h.providers,
+      memory: h.memory,
+      tools: h.tools,
+      resolveSearchTool: settings => settings.ai.search.engine ? searchTool : undefined,
+      clock: h.clock,
+    });
+    const second = await runtime2.sendTimeline({ parts: userText('After restart') });
+    await second.done;
+    expect(second.episodeId).toBe(first.episodeId);
+  });
+
+  it('continues the same episode after a restart when search mode is unchanged (off)', async () => {
+    const h = harness({ settings: { ai: { search: { mode: 'off' } } } });
+    const first = await h.runtime.sendTimeline({ parts: userText('Before restart') });
+    await first.done;
+    const runtime2 = new AgentRuntime({
+      conversations: h.conversations,
+      settings: h.settings,
+      providers: h.providers,
+      memory: h.memory,
+      tools: h.tools,
+      clock: h.clock,
+    });
+    const second = await runtime2.sendTimeline({ parts: userText('After restart') });
+    await second.done;
+    expect(second.episodeId).toBe(first.episodeId);
+  });
+
+  it('closes the episode after a restart when search mode actually changes (off -> native)', async () => {
+    const h = harness({ settings: { ai: { search: { mode: 'off' } } } });
+    const first = await h.runtime.sendTimeline({ parts: userText('Before restart') });
+    await first.done;
+    // Settings now expose native search; update before building the new runtime.
+    h.settings.update({ ai: { search: { mode: 'auto' } } });
+    const runtime2 = new AgentRuntime({
+      conversations: h.conversations,
+      settings: h.settings,
+      providers: new ScriptedRegistry([new ScriptedAdapter({ caps: { nativeWebSearch: true } })]),
+      memory: h.memory,
+      tools: h.tools,
+      clock: h.clock,
+    });
+    const second = await runtime2.sendTimeline({ parts: userText('After restart') });
+    await second.done;
+    expect(second.episodeId).not.toBe(first.episodeId);
   });
 });

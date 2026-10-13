@@ -193,6 +193,11 @@ export const storageMigrations: Migration[] = [
           WHERE off_record = 1 AND ephemeral = 1 AND closed_at IS NULL ORDER BY started_at DESC, rowid DESC LIMIT 1);
     `,
   },
+  {
+    version: 7,
+    name: 'persist episode search mode',
+    up: `ALTER TABLE conversations ADD COLUMN search_mode TEXT;`,
+  },
 ];
 
 /** Startup can retire orphan references after checking config-file providers as well. */

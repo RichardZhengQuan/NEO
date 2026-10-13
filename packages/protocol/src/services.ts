@@ -101,7 +101,7 @@ export interface NewConversation {
 }
 
 export type ConversationPatch = Partial<
-  Pick<Conversation, 'title' | 'model' | 'pinned' | 'archived' | 'systemPrompt' | 'toolset' | 'lastMessageAt' | 'preview' | 'closedAt'>
+  Pick<Conversation, 'title' | 'model' | 'pinned' | 'archived' | 'systemPrompt' | 'toolset' | 'lastMessageAt' | 'preview' | 'closedAt' | 'searchMode'>
 >;
 
 export type MessagePatch = Partial<Pick<Message, 'parts' | 'status' | 'error' | 'usage' | 'model' | 'sensitive'>>;

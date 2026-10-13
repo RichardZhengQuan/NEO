@@ -22,7 +22,7 @@ describe('timeline migration', () => {
     store.update(b.id, { archived: true });
     for (const item of [message('a_first', a.id, 100), message('b_first', b.id, 200), message('a_last', a.id, 300), message('b_last', b.id, 400), message('private', privateEpisode.id, 500)]) store.appendMessage(item);
     const transcript = db.prepare('SELECT * FROM messages ORDER BY rowid').all();
-    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([5, 6]);
+    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([5, 6, 7]);
     expect(db.prepare('SELECT * FROM messages ORDER BY rowid').all()).toEqual(transcript);
     expect(store.currentEpisode()).toBeNull();
     expect(store.get(a.id)).toMatchObject({ kind: 'episode', startedAt: 100, closedAt: 300, pinned: true, systemPrompt: 'frozen', toolset: ['get_datetime'] });
