@@ -119,6 +119,20 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
     }
     return mustGet(id);
   };
+  const refreshEpisodePreview = (episodeId: string): void => {
+    const rows = db.prepare(
+      'SELECT parts, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC',
+    ).iterate(episodeId);
+    let preview: string | null = null;
+    let lastMessageAt: number | null = null;
+    for (const row of rows) {
+      if (lastMessageAt === null) lastMessageAt = toNum(row.created_at);
+      preview = previewOf(fromJson(row.parts, [])) || null;
+      if (preview) break;
+    }
+    db.prepare('UPDATE conversations SET preview = ?, last_message_at = ?, updated_at = ? WHERE id = ?')
+      .run(preview, lastMessageAt, clock(), episodeId);
+  };
   const create = (input: NewConversation = {}): Conversation => {
     const now = clock();
     const id = newId('conv', now);
@@ -331,7 +345,9 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
         const message = getMessage(id);
         if (!message) return false;
         if (hasEpisodes()) closeEpisode(message.conversationId);
-        return toNum(db.prepare('DELETE FROM messages WHERE id = ?').run(id).changes) > 0;
+        const deleted = toNum(db.prepare('DELETE FROM messages WHERE id = ?').run(id).changes) > 0;
+        if (deleted) refreshEpisodePreview(message.conversationId);
+        return deleted;
       });
     },
 
@@ -463,8 +479,10 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
       return db.transaction(() => {
         const { clause, args } = rangeQuery(range);
         const messages = messagesInRange(range);
-        for (const id of new Set(messages.map((message) => message.conversationId))) closeEpisode(id);
+        const episodeIds = new Set(messages.map((message) => message.conversationId));
+        for (const id of episodeIds) closeEpisode(id);
         db.prepare(`DELETE FROM messages${clause}`).run(...args);
+        for (const id of episodeIds) refreshEpisodePreview(id);
         return messages;
       });
     },

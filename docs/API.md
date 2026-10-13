@@ -17,8 +17,8 @@ Provider creation, draft tests, updates that enable or use `kind: mock`, and set
 | `POST /api/timeline/cancel` | `{ turnId? }` | `{ cancelled }`; absent id cancels the running timeline turn |
 | `POST /api/timeline/ui-action` | `UiActionRequestSchema` | `UiActionResponse`; message/event actions start a timeline turn, tool actions resolve the stored source message |
 | `GET /api/timeline/search?q&limit` | | `ListResponse<TimelineSearchHit>` with `{ messageId, episodeId, createdAt, snippet: { text, highlights } }`; full-text search of visible message text; snippet ranges are described below |
-| `DELETE /api/timeline/messages/:id` | | `TimelineDeleteResult`: `{ deleted, messageIds, derivedMemories }`; deletes message parts and FTS rows and closes the touched episode |
-| `DELETE /api/timeline?from&to` | | `TimelineDeleteResult`; at least one ISO bound required, inclusive timestamps, `from <= to`. Derived memories remain |
+| `DELETE /api/timeline/messages/:id` | | `TimelineDeleteResult`: `{ deleted, messageIds, derivedMemories }`; deletes message parts and FTS rows and closes the touched episode; the episode's preview and `last_message_at` are refreshed from remaining messages; `messageId` on any reminder linked to the deleted message is cleared to `null` |
+| `DELETE /api/timeline?from&to` | | `TimelineDeleteResult`; at least one ISO bound required, inclusive timestamps, `from <= to`. Derived memories remain. Each touched episode's preview and `last_message_at` are refreshed; `messageId` on any reminder linked to a deleted message is cleared to `null` |
 | `GET /api/timeline/off-record` | | `OffRecordState`: `{ active, episodeId, startedAt }`; inactive ids/timestamps are null |
 | `POST /api/timeline/off-record/start` | `{}` | `OffRecordState`; idempotently closes the normal episode and enters persisted private mode, creating an empty private episode without needing a provider |
 | `POST /api/timeline/off-record/end` | | `{ deleted }` episode count; settles private work then deletes new ephemeral off-record episodes and their messages/FTS rows; without a private session it is a no-op |

@@ -16,7 +16,7 @@ import { queryLimit, validateBody, validateQuery } from './helpers.js';
 const isoDate = z.string().datetime({ offset: true }).transform(value => Date.parse(value));
 
 export function registerTimeline(app: Hono, services: NeoServices): void {
-  const { conversations, runtime, memory } = services;
+  const { conversations, runtime, memory, stores } = services;
 
   app.get('/api/timeline', c => {
     const query = validateQuery(c, z.object({
@@ -98,6 +98,7 @@ export function registerTimeline(app: Hono, services: NeoServices): void {
     }
     await runtime.waitForIdle([...episodeIds]);
     const messageIds = remove();
+    stores.reminders.clearMessageLinks(messageIds);
     const derivedMemories = (await memory.findBySource(messageIds)).length;
     return { deleted: messageIds.length, messageIds, derivedMemories };
   }

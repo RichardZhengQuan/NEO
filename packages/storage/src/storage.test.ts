@@ -280,6 +280,86 @@ describe('conversation store', () => {
     expect(store.delete(c.id)).toBe(true);
     expect(store.messages(c.id)).toHaveLength(0);
   });
+
+  it('deleting the latest message restores the previous episode preview and timestamp', () => {
+    db = openNeoDatabase(':memory:');
+    let t = 3000;
+    const store = createConversationStore(db, { clock: () => t++ });
+    const episode = store.createEpisode();
+    const first = store.appendMessage({
+      id: 'msg-a', conversationId: episode.id, role: 'user', parts: [{ type: 'text', text: 'first message' }], createdAt: 1000, status: 'complete',
+    });
+    store.appendMessage({
+      id: 'msg-b', conversationId: episode.id, role: 'user', parts: [{ type: 'text', text: 'second message' }], createdAt: 2000, status: 'complete',
+    });
+    expect(store.get(episode.id)?.preview).toBe('second message');
+
+    expect(store.deleteMessage('msg-b')).toBe(true);
+    expect(store.get(episode.id)?.preview).toBe('first message');
+    expect(store.get(episode.id)?.lastMessageAt).toBe(first.createdAt);
+  });
+
+  it('deleting both messages clears the episode preview and timestamp', () => {
+    db = openNeoDatabase(':memory:');
+    const store = createConversationStore(db);
+    const episode = store.createEpisode();
+    for (const [id, createdAt, text] of [['msg-a', 1000, 'first message'], ['msg-b', 2000, 'second message']] as const) {
+      store.appendMessage({ id, conversationId: episode.id, role: 'user', parts: [{ type: 'text', text }], createdAt, status: 'complete' });
+    }
+
+    expect(store.deleteMessage('msg-a')).toBe(true);
+    expect(store.deleteMessage('msg-b')).toBe(true);
+    expect(store.get(episode.id)?.preview).toBeNull();
+    expect(store.get(episode.id)?.lastMessageAt).toBeNull();
+  });
+
+  it('deleting a range refreshes every affected episode and preserves unaffected episodes', () => {
+    db = openNeoDatabase(':memory:');
+    let t = 6000;
+    const store = createConversationStore(db, { clock: () => t++ });
+    const append = (episodeId: string, id: string, createdAt: number, text: string) => store.appendMessage({
+      id, conversationId: episodeId, role: 'user', parts: [{ type: 'text', text }], createdAt, status: 'complete',
+    });
+    const first = store.createEpisode();
+    append(first.id, 'kept', 1000, 'kept message');
+    append(first.id, 'deleted-latest', 2000, 'deleted preview');
+    const second = store.createEpisode();
+    append(second.id, 'deleted-first', 2500, 'first deleted message');
+    append(second.id, 'deleted-last', 3000, 'last deleted message');
+    const third = store.createEpisode();
+    append(third.id, 'unaffected', 4000, 'unaffected message');
+    const unaffected = store.get(third.id);
+
+    expect(store.deleteRange({ from: 2000, to: 3000 }).map(message => message.id)).toEqual(['deleted-latest', 'deleted-first', 'deleted-last']);
+    expect(store.get(first.id)?.preview).toBe('kept message');
+    expect(store.get(first.id)?.lastMessageAt).toBe(1000);
+    expect(store.get(second.id)?.preview).toBeNull();
+    expect(store.get(second.id)?.lastMessageAt).toBeNull();
+    expect(store.get(third.id)).toEqual(unaffected);
+  });
+
+  it('deleting messages retains older previewable content behind messages without previews', () => {
+    db = openNeoDatabase(':memory:');
+    const store = createConversationStore(db);
+    const episode = store.createEpisode();
+    for (const [id, text] of [['msg-z', 'earlier text'], ['msg-a', 'latest text at the same timestamp']] as const) {
+      store.appendMessage({ id, conversationId: episode.id, role: 'user', parts: [{ type: 'text', text }], createdAt: 0, status: 'complete' });
+    }
+    for (let i = 1; i <= 51; i++) {
+      store.appendMessage({ id: `empty-${i}`, conversationId: episode.id, role: 'assistant', parts: [], createdAt: i, status: 'complete' });
+    }
+    store.appendMessage({
+      id: 'deleted', conversationId: episode.id, role: 'user', parts: [{ type: 'text', text: 'deleted preview' }], createdAt: 52, status: 'complete',
+    });
+
+    store.deleteMessage('deleted');
+    expect(store.get(episode.id)?.preview).toBe('latest text at the same timestamp');
+    expect(store.get(episode.id)?.lastMessageAt).toBe(51);
+
+    store.deleteRange({ from: 1 });
+    expect(store.get(episode.id)?.preview).toBe('latest text at the same timestamp');
+    expect(store.get(episode.id)?.lastMessageAt).toBe(0);
+  });
 });
 
 describe('settings, secrets, devices, push, providers', () => {
