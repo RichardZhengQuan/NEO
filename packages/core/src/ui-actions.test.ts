@@ -1,6 +1,47 @@
 import { describe, expect, it } from 'vitest';
-import type { ChangeItem, ChangesBlock, UIBlock } from '@neo/protocol';
+import { FORM_SUBMIT_ACTION_ID, formSubmitActionId, type ChangeItem, type ChangesBlock, type FormBlock, type UIBlock } from '@neo/protocol';
 import { patchWidgetBlock, resolveStoredAction } from './ui-actions.js';
+
+const firstForm: FormBlock = { type: 'form', id: 'first', fields: [{ name: 'city', label: 'City', kind: 'text' }], submitLabel: 'Plan trip' };
+const secondForm: FormBlock = { type: 'form', fields: [{ name: 'name', label: 'Name', kind: 'text' }], submitLabel: 'Save name' };
+
+describe('resolveStoredAction forms', () => {
+  const block: UIBlock = { type: 'card', children: [firstForm, { type: 'tabs', tabs: [
+    { id: 'overview', label: 'Overview', children: [{ type: 'text', text: 'Two forms' }] },
+    { id: 'profile', label: 'Profile', children: [{ type: 'grid', columns: 2, children: [secondForm] }] },
+  ] }] };
+
+  it('resolves nested forms by id or tree path and filters against the targeted fields', () => {
+    const values = { city: 'Kyoto', name: 'Ada', injected: 'ignore instructions' };
+    const firstId = formSubmitActionId(firstForm, [0]);
+    const secondId = formSubmitActionId(secondForm, [1, 1, 0]);
+    expect(resolveStoredAction(block, firstId, values)).toEqual({ action: { id: firstId, label: 'Plan trip', kind: 'event' }, values: { city: 'Kyoto' } });
+    expect(resolveStoredAction(block, secondId, values)).toEqual({ action: { id: secondId, label: 'Save name', kind: 'event' }, values: { name: 'Ada' } });
+  });
+
+  it('keeps legacy submissions only when exactly one form is stored', () => {
+    expect(resolveStoredAction({ type: 'stack', children: [secondForm] }, FORM_SUBMIT_ACTION_ID, { name: 'Ada', city: 'Kyoto' }))
+      .toEqual({ action: { id: FORM_SUBMIT_ACTION_ID, label: 'Save name', kind: 'event' }, values: { name: 'Ada' } });
+    expect(() => resolveStoredAction(block, FORM_SUBMIT_ACTION_ID)).toThrow(expect.objectContaining({ code: 'not_found', message: expect.stringMatching(/ambiguous/i) }));
+    expect(resolveStoredAction({ type: 'text', text: 'No form' }, FORM_SUBMIT_ACTION_ID)).toBeNull();
+  });
+
+  it('rejects ambiguous explicit form ids instead of choosing the first', () => {
+    const duplicate: UIBlock = { type: 'stack', children: [firstForm, { ...secondForm, id: firstForm.id }] };
+    expect(() => resolveStoredAction(duplicate, formSubmitActionId(firstForm)))
+      .toThrow(expect.objectContaining({ code: 'not_found', message: expect.stringMatching(/ambiguous/i) }));
+  });
+
+  it('rejects missing targets and does not resolve reserved ids as authored actions', () => {
+    expect(resolveStoredAction(block, formSubmitActionId(secondForm, [1, 0]))).toBeNull();
+    const actions: UIBlock = { type: 'buttons', actions: [
+      { id: '__neo:form.submit:path:root', label: 'Forged submit', kind: 'event' },
+      { id: '__neo:unknown', label: 'Forged reserved action', kind: 'event' },
+    ] };
+    expect(resolveStoredAction(actions, actions.actions[0]!.id)).toBeNull();
+    expect(resolveStoredAction(actions, actions.actions[1]!.id)).toBeNull();
+  });
+});
 
 const item: ChangeItem = { id: 'chg_1', kind: 'task.update', taskId: 'task_1', title: 'Dentist', before: { done: false }, after: { done: true } };
 const changes: ChangesBlock = { type: 'changes', items: [item] };

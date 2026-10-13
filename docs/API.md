@@ -190,6 +190,8 @@ A model tool call that requires approval emits `tool.confirmation` with a `ToolC
 
 UI actions have a separate confirmation round trip:
 
+Reminder and form controls use the target-aware ids documented in [Generative UI actions](GENERATIVE_UI.md#actions). Legacy reminder ids and `__submit` are accepted only for a single matching widget in the stored UI tree; ambiguous actions return `404 not_found`.
+
 1. Send `POST /api/timeline/ui-action` with `{ messageId, uiId, actionId, values? }`. The server resolves the stored action and validates its tool input. A denied tool returns `tool_denied`; a tool with `confirm` permission or `dangerous` risk returns `{ kind: "confirm", confirmation: { token, tool, title, description, risk, expiresAt } }` without executing it.
 2. Show the returned `title` and `description` and ask the user to approve. These are generated from the tool definition and validated input, rather than the model's labels or `confirm` text.
 3. On approval, repeat the same request with `confirmationToken: confirmation.token`. The token is bound to the conversation, message, UI part, action, tool, validated input and form values, and expires after `agent.confirmationTimeoutSec`. It permits one execution and is consumed even if the execution fails. The server re-checks tool permission before executing and returns the usual `{ kind: "tool", output, isError, summary? }` response.

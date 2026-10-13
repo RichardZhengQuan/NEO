@@ -6,13 +6,14 @@
 import { createHash } from 'node:crypto';
 import {
   FORM_SUBMIT_ACTION_ID,
+  UI_ACTION_ID_PREFIX,
   NeoError,
-  childBlocks,
   collectActions,
+  formSubmitActionId,
   resolveWidgetAction,
   validateUIBlocks,
+  walkUIBlocks,
   type ContentPart,
-  type FormBlock,
   type UIAction,
   type UIBlock,
   type UIPart,
@@ -67,15 +68,6 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function findForm(block: UIBlock): FormBlock | null {
-  if (block.type === 'form') return block;
-  for (const child of childBlocks(block)) {
-    const form = findForm(child);
-    if (form) return form;
-  }
-  return null;
-}
-
 /**
  * The action `actionId` declared by `block`: a form submission, a live-widget
  * control (task toggle, reminder snooze/done, memory forget, change apply) or an
@@ -83,19 +75,22 @@ function findForm(block: UIBlock): FormBlock | null {
  */
 export function resolveStoredAction(block: UIBlock, actionId: string, values?: Record<string, unknown>): ResolvedUiAction | null {
   const clientValues = isPlainObject(values) ? values : undefined;
-  if (actionId === FORM_SUBMIT_ACTION_ID) {
-    const form = findForm(block);
-    if (!form) return null;
+  if (actionId === FORM_SUBMIT_ACTION_ID || actionId.startsWith(`${UI_ACTION_ID_PREFIX}form.submit:`)) {
+    const forms = [...walkUIBlocks(block)].filter(({ block: candidate, path }) => candidate.type === 'form'
+      && (actionId === FORM_SUBMIT_ACTION_ID || formSubmitActionId(candidate, path) === actionId));
+    if (forms.length > 1) throw new NeoError('not_found', `Action "${actionId}" is ambiguous: more than one form matches.`);
+    const form = forms[0]?.block;
+    if (!form || form.type !== 'form') return null;
     const fields = new Set(form.fields.map((f) => f.name));
     const declared = Object.fromEntries(Object.entries(clientValues ?? {}).filter(([name]) => fields.has(name)));
     return {
-      action: { id: FORM_SUBMIT_ACTION_ID, label: form.submitLabel || 'Submit', kind: 'event' },
+      action: { id: actionId, label: form.submitLabel || 'Submit', kind: 'event' },
       values: declared,
     };
   }
   const widget = resolveWidgetAction(block, actionId, clientValues);
   if (widget) return { action: widget };
-  if (actionId.startsWith('change.apply:')) return null;
+  if (actionId.startsWith(UI_ACTION_ID_PREFIX) || actionId.startsWith('change.apply:')) return null;
   const action = collectActions([block]).find((a) => a.id === actionId);
   if (!action) return null;
   // Only a trusted changes snapshot may provide apply_change input.

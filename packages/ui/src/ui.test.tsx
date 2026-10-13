@@ -4,8 +4,8 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createRef, type ReactElement } from 'react';
-import type { Message, MemoryNode, ToolConfirmation, UIAction, UIBlock, UiActionConfirmation } from '@neo/protocol';
-import { FORM_SUBMIT_ACTION_ID, SELF_MEMORY_ID } from '@neo/protocol';
+import type { FormBlock, Message, MemoryNode, ToolConfirmation, UIAction, UIBlock, UiActionConfirmation } from '@neo/protocol';
+import { formSubmitActionId, SELF_MEMORY_ID, walkUIBlocks, widgetActionId } from '@neo/protocol';
 import { I18nProvider, buildMessages, createTranslator, dictionaries, useT } from './i18n.js';
 import { BlockList, BlockRenderer, formatCell, validateFormField, type OnUIAction } from './blocks.js';
 import { ConfirmationCard, MessageView, humanizeToolName, uiActionConfirmOptions, useUiActionConfirm } from './message.js';
@@ -316,7 +316,7 @@ describe('block actions', () => {
     spy.mockRestore();
   });
 
-  it('form submit sends __submit with the values and validates required fields', async () => {
+  it('form submit sends its target id with the values and validates required fields', async () => {
     const { calls, onAction } = capture();
     const { container } = wrap(
       <BlockRenderer
@@ -333,9 +333,60 @@ describe('block actions', () => {
     fireEvent.change(inputs[1]!, { target: { value: '3' } });
     fireEvent.click(screen.getByText('Go'));
     await waitFor(() => expect(calls).toHaveLength(1));
-    expect(calls[0]!.action.id).toBe(FORM_SUBMIT_ACTION_ID);
+    expect(calls[0]!.action.id).toBe('__neo:form.submit:path:root');
     expect(calls[0]!.values).toEqual({ email: 'a@b.co', n: 3 });
     expect(await screen.findByText('Sent')).toBeTruthy();
+  });
+
+  it.each([false, true])('nested forms send their own stored-tree submit ids (explicit ids: %s)', async (identified) => {
+    const { calls, onAction } = capture();
+    const first: FormBlock = {
+      type: 'form', ...(identified ? { id: 'form:first' } : {}),
+      fields: [{ name: 'first', label: 'First value', kind: 'text', defaultValue: 'one' }], submitLabel: 'Send first',
+    };
+    const second: FormBlock = {
+      type: 'form', ...(identified ? { id: 'form:second' } : {}),
+      fields: [{ name: 'second', label: 'Second value', kind: 'text', defaultValue: 'two' }], submitLabel: 'Send second',
+    };
+    const block: UIBlock = {
+      type: 'card', children: [
+        { type: 'grid', columns: 2, children: [{ type: 'text', text: 'Grid spacer' }, { type: 'stack', children: [first] }] },
+        {
+          type: 'tabs', tabs: [
+            { id: 'overview', label: 'Overview', children: [{ type: 'text', text: 'Overview one' }, { type: 'text', text: 'Overview two' }] },
+            {
+              id: 'details', label: 'Details', children: [{
+                type: 'accordion', items: [
+                  { id: 'hidden', title: 'Hidden', children: [{ type: 'text', text: 'Hidden one' }, { type: 'text', text: 'Hidden two' }] },
+                  { id: 'visible', title: 'Visible', open: true, children: [{ type: 'text', text: 'Item spacer' }, second] },
+                ],
+              }],
+            },
+          ],
+        },
+      ],
+    };
+    const forms = [...walkUIBlocks(block)].filter((entry): entry is typeof entry & { block: FormBlock } => entry.block.type === 'form');
+    expect(forms.map((entry) => entry.path)).toEqual([[0, 1, 0], [1, 2, 3]]);
+    wrap(<BlockRenderer block={block} uiId="ui_nested" onAction={onAction} />);
+    fireEvent.click(screen.getByText('Send first'));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    fireEvent.click(screen.getByRole('tab', { name: 'Details' }));
+    fireEvent.click(screen.getByText('Send second'));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls.map((call) => call.action.id)).toEqual(forms.map((entry) => formSubmitActionId(entry.block, entry.path)));
+    expect(new Set(calls.map((call) => call.action.id)).size).toBe(2);
+    expect(calls.map((call) => call.uiId)).toEqual(['ui_nested', 'ui_nested']);
+    expect(calls.map((call) => call.values)).toEqual([{ first: 'one' }, { second: 'two' }]);
+  });
+
+  it('a UI part rendered through BlockList keeps the root form path empty', async () => {
+    const { calls, onAction } = capture();
+    const form: FormBlock = { type: 'form', fields: [{ name: 'value', label: 'Value', kind: 'text' }], submitLabel: 'Send root' };
+    wrap(<BlockList blocks={[form]} uiId="ui_root" onAction={onAction} />);
+    fireEvent.click(screen.getByText('Send root'));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]!.action.id).toBe(formSubmitActionId(form));
   });
 
   it('validateFormField checks email, url and ranges', () => {
@@ -379,7 +430,34 @@ describe('block actions', () => {
     await enabled('Done');
     fireEvent.click(screen.getByText('Done'));
     await waitFor(() => expect(calls).toHaveLength(3));
-    expect(calls.map((c) => c.action.id)).toEqual(['reminder.snooze:10', 'reminder.snooze:60', 'reminder.complete']);
+    expect(calls.map((c) => c.action.id)).toEqual([widgetActionId.reminderSnooze('rem_1', 10), widgetActionId.reminderSnooze('rem_1', 60), widgetActionId.reminderComplete('rem_1')]);
+  });
+
+  it.each([
+    ['card', (children: UIBlock[]): UIBlock => ({ type: 'card', children })],
+    ['grid', (children: UIBlock[]): UIBlock => ({ type: 'grid', columns: 2, children })],
+    ['stack', (children: UIBlock[]): UIBlock => ({ type: 'stack', children })],
+    ['tabs', (children: UIBlock[]): UIBlock => ({ type: 'tabs', tabs: [{ id: 'both', label: 'Both', children }] })],
+    ['accordion', (children: UIBlock[]): UIBlock => ({ type: 'accordion', items: [{ id: 'both', title: 'Both', open: true, children }] })],
+  ] as const)('two reminders in a %s send ids naming their own reminder', async (_container, makeBlock) => {
+    const { calls, onAction } = capture();
+    const block = makeBlock([
+      { type: 'reminder', reminderId: 'rem:first', title: 'First reminder', dueAt: 1, status: 'scheduled' },
+      { type: 'reminder', reminderId: 'rem:second', title: 'Second reminder', dueAt: 1, status: 'scheduled' },
+    ]);
+    wrap(<BlockRenderer block={block} uiId="ui_reminders" onAction={onAction} />);
+    fireEvent.click(screen.getAllByText('Snooze 10 min')[1]!);
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Done' })[1]).toHaveProperty('disabled', false));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Done' })[1]!);
+    await waitFor(() => expect(calls).toHaveLength(2));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Done' })[0]!);
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls.map((call) => call.action.id)).toEqual([
+      widgetActionId.reminderSnooze('rem:second', 10),
+      widgetActionId.reminderComplete('rem:second'),
+      widgetActionId.reminderComplete('rem:first'),
+    ]);
+    expect(calls.map((call) => call.uiId)).toEqual(['ui_reminders', 'ui_reminders', 'ui_reminders']);
   });
 
   it('completed reminders have no controls', () => {

@@ -6,8 +6,7 @@
  *   "Can't display this content" fallback with the plain-text rendering inside
  *   <details>.
  * - Actions go through `onAction(action, { uiId, values })`. Live widgets send
- *   the reserved ids from `widgetActionId` (task.toggle:<id>, reminder.snooze:<min>,
- *   reminder.complete, memory.forget:<id>, change.apply:<id>), which the server
+ *   the reserved ids from `widgetActionId` (including reminder ids), which the server
  *   resolves against the stored block.
  * - `confirm` on a message / event / link / copy action asks first (in-app
  *   dialog). Tool actions ignore it: the server confirms them with its own
@@ -27,7 +26,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  FORM_SUBMIT_ACTION_ID,
+  formSubmitActionId,
   UIBlockSchema,
   isSafeImageUrl,
   isSafeLinkUrl,
@@ -101,6 +100,8 @@ export interface BlockRendererProps {
   depth?: number;
   /** Stable structural identity supplied by container renderers for blocks without ids. */
   stateKey?: string;
+  /** Child indexes from the stored UI part's root, in childBlocks order. */
+  blockPath?: readonly number[];
 }
 
 const MAX_DEPTH = 8;
@@ -224,7 +225,7 @@ function HeadingRenderer({ block }: { block: HeadingBlock }): ReactElement {
   return <h2 className="neo-block-heading">{block.text}</h2>;
 }
 
-function CardRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: CardBlock }): ReactElement {
+function CardRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: CardBlock }): ReactElement {
   const runner = useActionRunner(onAction, uiId);
   const hasImage = Boolean(block.imageUrl && isSafeImageUrl(block.imageUrl));
   const body = (
@@ -244,7 +245,7 @@ function CardRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps
       )}
       {block.children && block.children.length > 0 && (
         <div style={{ marginTop: block.title || block.icon || block.subtitle ? '0.75rem' : 0 }}>
-          <BlockList blocks={block.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+          <BlockList blocks={block.children} parentPath={blockPath} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
         </div>
       )}
       {block.actions && block.actions.length > 0 && (
@@ -584,7 +585,7 @@ function FormFieldControl({ field, id, value, error, onChange }: { field: FormFi
   );
 }
 
-function FormRenderer({ block, uiId, onAction }: BlockRendererProps & { block: FormBlock }): ReactElement {
+function FormRenderer({ block, uiId, onAction, blockPath = [] }: BlockRendererProps & { block: FormBlock }): ReactElement {
   const t = useT();
   const formId = useId();
   const [values, setValues] = useRetainedState<Record<string, FieldValue>>('form:values', () => Object.fromEntries(block.fields.map((f) => [f.name, initialValue(f)])));
@@ -604,7 +605,7 @@ function FormRenderer({ block, uiId, onAction }: BlockRendererProps & { block: F
     if (invalid || !onAction || state === 'sending') return;
     setState('sending');
     try {
-      await onAction({ id: FORM_SUBMIT_ACTION_ID, kind: 'event', label: block.submitLabel ?? t('common.submit') }, { uiId, values });
+      await onAction({ id: formSubmitActionId(block, blockPath), kind: 'event', label: block.submitLabel ?? t('common.submit') }, { uiId, values });
       setState('sent');
     } catch {
       setState('error');
@@ -787,31 +788,33 @@ function DividerRenderer({ block }: { block: DividerBlock }): ReactElement {
 
 // ── containers ───────────────────────────────────────────────────────────
 
-function GridRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: GridBlock }): ReactElement {
+function GridRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: GridBlock }): ReactElement {
   const cols = Math.min(4, Math.max(1, Math.round(block.columns)));
   return (
     <div className="neo-grid" data-cols={cols} style={{ ['--neo-cols' as string]: cols }}>
       {block.children.map((child, i) => (
-        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} blockPath={[...blockPath, i]} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
       ))}
     </div>
   );
 }
 
-function StackRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: StackBlock }): ReactElement {
+function StackRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: StackBlock }): ReactElement {
   return (
     <div className="neo-stack" data-direction={block.direction ?? 'vertical'} data-gap={block.gap ?? 'md'}>
       {block.children.map((child, i) => (
-        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} blockPath={[...blockPath, i]} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
       ))}
     </div>
   );
 }
 
-function TabsRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: TabsBlock }): ReactElement {
+function TabsRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: TabsBlock }): ReactElement {
   const prefix = useId();
   const [active, setActive] = useRetainedState('tabs:active', block.tabs[0]?.id ?? '');
-  const current = block.tabs.find((tab) => tab.id === active) ?? block.tabs[0];
+  const currentIndex = Math.max(0, block.tabs.findIndex((tab) => tab.id === active));
+  const current = block.tabs[currentIndex];
+  const childOffset = block.tabs.slice(0, currentIndex).reduce((count, tab) => count + tab.children.length, 0);
   return (
     <div>
       <Tabs
@@ -824,7 +827,7 @@ function TabsRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps
       {current && (
         <div className="neo-tabpanel" role="tabpanel" id={`${prefix}-panel-${current.id}`} aria-labelledby={`${prefix}-tab-${current.id}`}>
           <RetainedStateScope key={current.id} scope={`tab:${current.id}`}>
-            <BlockList blocks={current.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+            <BlockList blocks={current.children} parentPath={blockPath} childOffset={childOffset} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
           </RetainedStateScope>
         </div>
       )}
@@ -832,14 +835,15 @@ function TabsRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps
   );
 }
 
-function AccordionRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: AccordionBlock }): ReactElement {
+function AccordionRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: AccordionBlock }): ReactElement {
   const prefix = useId();
   const [open, setOpen] = useRetainedState<Record<string, boolean>>('accordion:open', () => Object.fromEntries(block.items.map((item) => [item.id, item.open ?? false])));
   return (
     <div className="neo-accordion">
-      {block.items.map((item) => {
+      {block.items.map((item, itemIndex) => {
         const isOpen = open[item.id] ?? false;
         const panelId = `${prefix}-${item.id}`;
+        const childOffset = block.items.slice(0, itemIndex).reduce((count, previous) => count + previous.children.length, 0);
         return (
           <div key={item.id} className="neo-accordion__item">
             <button
@@ -857,7 +861,7 @@ function AccordionRenderer({ block, uiId, onAction, live, depth }: BlockRenderer
             {isOpen && (
               <div id={panelId} className="neo-accordion__panel">
                 <RetainedStateScope scope={`item:${item.id}`}>
-                  <BlockList blocks={item.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+                  <BlockList blocks={item.children} parentPath={blockPath} childOffset={childOffset} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
                 </RetainedStateScope>
               </div>
             )}
@@ -1012,9 +1016,9 @@ function ReminderRenderer({ block, uiId, onAction, live }: BlockRendererProps & 
   const tz = fresh?.timezone ?? block.timezone;
   const active = status === 'scheduled' || status === 'fired';
   const actions: UIAction[] = [
-    { id: widgetActionId.reminderSnooze(10), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_10'), icon: 'alarm-clock', input: { id: block.reminderId, minutes: 10 } },
-    { id: widgetActionId.reminderSnooze(60), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_60'), input: { id: block.reminderId, minutes: 60 } },
-    { id: widgetActionId.reminderComplete(), kind: 'tool', tool: 'complete_reminder', label: t('reminder.done'), icon: 'check', style: 'primary', input: { id: block.reminderId } },
+    { id: widgetActionId.reminderSnooze(block.reminderId, 10), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_10'), icon: 'alarm-clock', input: { id: block.reminderId, minutes: 10 } },
+    { id: widgetActionId.reminderSnooze(block.reminderId, 60), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_60'), input: { id: block.reminderId, minutes: 60 } },
+    { id: widgetActionId.reminderComplete(block.reminderId), kind: 'tool', tool: 'complete_reminder', label: t('reminder.done'), icon: 'check', style: 'primary', input: { id: block.reminderId } },
   ];
   return (
     <section className="neo-card neo-widget" data-state={status} aria-label={t('reminder.widget_label', { title })}>
@@ -1401,17 +1405,21 @@ export function BlockList({
   onAction,
   live,
   depth = 0,
+  parentPath,
+  childOffset = 0,
 }: {
   blocks: UIBlock[];
   uiId?: string;
   onAction?: OnUIAction;
   live?: LiveData;
   depth?: number;
+  parentPath?: readonly number[];
+  childOffset?: number;
 }): ReactElement {
   return (
     <div className={`neo-blocks${depth === 0 ? ' neo-blocks--root' : ''}`}>
       {blocks.map((block, i) => (
-        <BlockRenderer key={block?.id ?? i} stateKey={blockStateKey(block, i)} block={block} uiId={uiId} onAction={onAction} live={live} depth={depth} />
+        <BlockRenderer key={block?.id ?? i} stateKey={blockStateKey(block, i)} blockPath={parentPath ? [...parentPath, childOffset + i] : []} block={block} uiId={uiId} onAction={onAction} live={live} depth={depth} />
       ))}
     </div>
   );
