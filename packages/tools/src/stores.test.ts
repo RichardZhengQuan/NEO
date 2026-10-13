@@ -189,6 +189,65 @@ describe('TaskStore', () => {
     expect(stores.tasks.update(task.id, { done: false }).doneAt).toBeNull();
   });
 
+  it('moving a parent task to another list moves its subtasks and emits upsert for each', () => {
+    const list = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Epic', listId: list.id });
+    const child1 = stores.tasks.create({ title: 'Step 1', listId: list.id, parentId: parent.id });
+    const child2 = stores.tasks.create({ title: 'Step 2', listId: list.id, parentId: parent.id });
+    const unrelated = stores.tasks.create({ title: 'Unrelated', listId: list.id });
+
+    t.setNow(t.now + 1000);
+    const events: Array<{ type: string; id: string; listId: string }> = [];
+    stores.tasks.onChange((e) =>
+      events.push(e.type === 'upsert' ? { type: 'upsert', id: e.task.id, listId: e.task.listId } : { type: 'delete', id: e.id, listId: '' }),
+    );
+
+    stores.tasks.update(parent.id, { listId: INBOX_LIST_ID });
+
+    // Parent and both subtasks must appear in the inbox
+    expect(stores.tasks.get(parent.id)?.listId).toBe(INBOX_LIST_ID);
+    expect(stores.tasks.get(child1.id)?.listId).toBe(INBOX_LIST_ID);
+    expect(stores.tasks.get(child2.id)?.listId).toBe(INBOX_LIST_ID);
+
+    // updatedAt bumped for all three
+    expect(stores.tasks.get(parent.id)?.updatedAt).toBe(t.now);
+    expect(stores.tasks.get(child1.id)?.updatedAt).toBe(t.now);
+    expect(stores.tasks.get(child2.id)?.updatedAt).toBe(t.now);
+
+    // Unrelated task in the same list stays put
+    expect(stores.tasks.get(unrelated.id)?.listId).toBe(list.id);
+
+    // Three upsert events: one for the parent and one for each subtask
+    const upserts = events.filter((e) => e.type === 'upsert');
+    expect(upserts).toHaveLength(3);
+    expect(upserts.map((e) => e.id).sort()).toEqual([parent.id, child1.id, child2.id].sort());
+    expect(upserts.every((e) => e.listId === INBOX_LIST_ID)).toBe(true);
+  });
+
+  it('moving a parent task rolls back all changes when a subtask move fails', () => {
+    const list = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Epic', listId: list.id });
+    const child1 = stores.tasks.create({ title: 'Step 1', listId: list.id, parentId: parent.id });
+    const child2 = stores.tasks.create({ title: 'Step 2', listId: list.id, parentId: parent.id });
+    t.db.exec(`
+      CREATE TRIGGER reject_subtask_move BEFORE UPDATE OF list_id ON tasks
+      WHEN OLD.parent_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM tasks WHERE parent_id = OLD.parent_id AND list_id != OLD.list_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'subtask move failed');
+      END;
+    `);
+
+    t.setNow(t.now + 1000);
+    const events: string[] = [];
+    stores.tasks.onChange((e) => events.push(e.type));
+
+    expect(() => stores.tasks.update(parent.id, { listId: INBOX_LIST_ID })).toThrow('subtask move failed');
+    for (const task of [parent, child1, child2]) expect(stores.tasks.get(task.id)).toEqual(task);
+    expect(events).toEqual([]);
+  });
+
   it('deleteList moves tasks to the inbox, bumps updatedAt and emits an upsert per moved task', () => {
     const list = stores.tasks.createList({ name: 'Groceries' });
     const ids = [stores.tasks.create({ title: 'milk', listId: list.id }).id, stores.tasks.create({ title: 'eggs', listId: list.id }).id];

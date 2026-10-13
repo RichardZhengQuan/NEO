@@ -215,35 +215,47 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
     },
 
     update(id: string, patch: TaskPatch): Task {
-      const data = parseInput(TaskPatchSchema, patch, 'task update');
-      const existing = mustGetTask(id);
-      if (data.listId !== undefined) mustGetList(data.listId);
-      if (data.parentId !== undefined) requireParent(data.parentId, id);
-      const now = clock();
-      const done = data.done ?? existing.done;
-      const movedList = data.listId !== undefined && data.listId !== existing.listId;
-      const updated: Task = {
-        ...existing,
-        title: data.title !== undefined ? requireText(data.title, 'title') : existing.title,
-        notes: data.notes !== undefined ? data.notes : existing.notes,
-        done,
-        doneAt: done ? (existing.done ? existing.doneAt : now) : null,
-        dueAt: data.dueAt !== undefined ? data.dueAt : existing.dueAt,
-        priority: data.priority ?? existing.priority,
-        tags: data.tags ?? existing.tags,
-        listId: data.listId ?? existing.listId,
-        order: data.order ?? (movedList ? nextOrder('tasks', data.listId) : existing.order),
-        parentId: data.parentId !== undefined ? data.parentId : existing.parentId,
-        updatedAt: now,
-      };
-      db.prepare(
-        `UPDATE tasks SET list_id = ?, title = ?, notes = ?, done = ?, done_at = ?, due_at = ?, priority = ?, tags = ?, "order" = ?, parent_id = ?, updated_at = ? WHERE id = ?`,
-      ).run(
-        updated.listId, updated.title, updated.notes, updated.done ? 1 : 0, updated.doneAt, updated.dueAt, updated.priority,
-        toJson(updated.tags), updated.order, updated.parentId, now, id,
-      );
-      emit({ type: 'upsert', task: updated });
-      return updated;
+      return db.transaction(() => {
+        const data = parseInput(TaskPatchSchema, patch, 'task update');
+        const existing = mustGetTask(id);
+        if (data.listId !== undefined) mustGetList(data.listId);
+        if (data.parentId !== undefined) requireParent(data.parentId, id);
+        const now = clock();
+        const done = data.done ?? existing.done;
+        const movedList = data.listId !== undefined && data.listId !== existing.listId;
+        const updated: Task = {
+          ...existing,
+          title: data.title !== undefined ? requireText(data.title, 'title') : existing.title,
+          notes: data.notes !== undefined ? data.notes : existing.notes,
+          done,
+          doneAt: done ? (existing.done ? existing.doneAt : now) : null,
+          dueAt: data.dueAt !== undefined ? data.dueAt : existing.dueAt,
+          priority: data.priority ?? existing.priority,
+          tags: data.tags ?? existing.tags,
+          listId: data.listId ?? existing.listId,
+          order: data.order ?? (movedList ? nextOrder('tasks', data.listId) : existing.order),
+          parentId: data.parentId !== undefined ? data.parentId : existing.parentId,
+          updatedAt: now,
+        };
+        db.prepare(
+          `UPDATE tasks SET list_id = ?, title = ?, notes = ?, done = ?, done_at = ?, due_at = ?, priority = ?, tags = ?, "order" = ?, parent_id = ?, updated_at = ? WHERE id = ?`,
+        ).run(
+          updated.listId, updated.title, updated.notes, updated.done ? 1 : 0, updated.doneAt, updated.dueAt, updated.priority,
+          toJson(updated.tags), updated.order, updated.parentId, now, id,
+        );
+        const subtasks: Task[] = [];
+        if (movedList) {
+          const rows = db.prepare('SELECT * FROM tasks WHERE parent_id = ?').all(id) as Row[];
+          for (const row of rows) {
+            const subtask: Task = { ...toTask(row), listId: updated.listId, updatedAt: now };
+            db.prepare('UPDATE tasks SET list_id = ?, updated_at = ? WHERE id = ?').run(subtask.listId, now, subtask.id);
+            subtasks.push(subtask);
+          }
+        }
+        for (const task of subtasks) emit({ type: 'upsert', task });
+        emit({ type: 'upsert', task: updated });
+        return updated;
+      });
     },
 
     delete(id: string): boolean {
