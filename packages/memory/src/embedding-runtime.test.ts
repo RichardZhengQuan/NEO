@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Embedder } from '@neo/protocol';
+import type { Embedder, ProviderAdapter } from '@neo/protocol';
 import { silentLogger } from '@neo/protocol';
 import { openNeoDatabase, type NeoDatabase } from '@neo/storage';
 import { createMemoryService, HashingEmbedder } from './index.js';
+import { createProviderEmbedder } from './embedder.js';
 
 const databases: NeoDatabase[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
@@ -10,7 +11,7 @@ afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 function setup(embedder: Embedder & { isLocal?: boolean }) {
   const db = openNeoDatabase(':memory:');
   databases.push(db);
-  return { db, memory: createMemoryService({ db, embedder, logger: silentLogger }) };
+  return { db, memory: createMemoryService({ db, embedder, logger: silentLogger, clock: () => 1_800_000_000_000 }) };
 }
 
 function deferred() {
@@ -70,5 +71,93 @@ describe('live embedding changes', () => {
     await vi.waitFor(() => expect(db.prepare('SELECT model FROM memory_vectors WHERE node_id = ?').get(node.id)).toEqual({ model: 'new-model' }));
     expect((await memory.recall({ text: 'constellation', reinforce: false })).items).toEqual([]);
     expect((await memory.recall({ text: 'Cardinal', reinforce: false })).items.map(item => item.node.id)).toContain(node.id);
+  });
+});
+
+describe('same-id embedder settings change', () => {
+  it('re-embeds all nodes when same id but settings (base URL) change', async () => {
+    const initial = {
+      id: 'provider:model', dimensions: 2, isLocal: true,
+      settingsFingerprint: JSON.stringify({ baseUrl: 'https://old.example/v1' }),
+      embed: vi.fn(async (texts: string[]) => texts.map(() => new Float32Array(2))),
+    };
+    const { db, memory } = setup(initial);
+    for (const label of ['Cardinal record', 'Harbour record']) {
+      await memory.remember({ kind: 'entity', label, content: `A distinct stored entity: ${label}`, source: { by: 'user' } });
+    }
+    await vi.waitFor(() => {
+      expect(db.prepare('SELECT embedding_model FROM memory_nodes WHERE kind = ?').all('entity')).toEqual([
+        { embedding_model: initial.id }, { embedding_model: initial.id },
+      ]);
+    });
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => new Float32Array([0, 1])));
+    const next = {
+      id: initial.id, dimensions: 2, isLocal: true,
+      settingsFingerprint: JSON.stringify({ baseUrl: 'https://new.example/v1' }),
+      embed,
+    };
+    memory.setEmbedder(next);
+    await vi.waitFor(() => {
+      expect(embed).toHaveBeenCalled();
+      expect(embed.mock.calls.flatMap(([texts]) => texts)).toHaveLength(2);
+      expect(db.prepare('SELECT embedding_model FROM memory_nodes WHERE kind = ?').all('entity')).toEqual([
+        { embedding_model: initial.id }, { embedding_model: initial.id },
+      ]);
+    });
+  });
+
+  it('does not re-embed when same id and same settings', async () => {
+    const initial = {
+      id: 'provider:model', dimensions: 2, isLocal: true,
+      settingsFingerprint: JSON.stringify({ baseUrl: 'https://old.example/v1' }),
+      embed: vi.fn(async (texts: string[]) => texts.map(() => new Float32Array(2))),
+    };
+    const { db, memory } = setup(initial);
+    for (const label of ['Cardinal record', 'Harbour record']) {
+      await memory.remember({ kind: 'entity', label, content: `A distinct stored entity: ${label}`, source: { by: 'user' } });
+    }
+    await vi.waitFor(() => {
+      expect(db.prepare('SELECT embedding_model FROM memory_nodes WHERE kind = ?').all('entity')).toEqual([
+        { embedding_model: initial.id }, { embedding_model: initial.id },
+      ]);
+    });
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => new Float32Array(2)));
+    memory.setEmbedder({ ...initial, embed });
+    await memory.stats();
+    expect(embed).not.toHaveBeenCalled();
+  });
+});
+
+describe('provider embedder settings fingerprint', () => {
+  it('captures vector settings with stable nested key ordering at creation time', () => {
+    const config: ProviderAdapter['config'] = {
+      id: 'provider', kind: 'openai-compatible', enabled: true,
+      baseUrl: 'https://old.example/v1',
+      options: { dimensions: 2, routing: [{ region: 'east', version: 1 }] },
+      headers: { 'x-region': 'east', 'x-version': '1' },
+    };
+    const embed = vi.fn<NonNullable<ProviderAdapter['embed']>>();
+    const adapter = { id: config.id, kind: config.kind, config, embed } as unknown as ProviderAdapter;
+    const initial = createProviderEmbedder(adapter, 'model');
+    const reordered = createProviderEmbedder({ ...adapter, config: {
+      ...config,
+      options: { routing: [{ version: 1, region: 'east' }], dimensions: 2 },
+      headers: { 'x-version': '1', 'x-region': 'east' },
+    } }, 'model');
+    expect(reordered.settingsFingerprint).toBe(initial.settingsFingerprint);
+    for (const changed of [
+      { ...config, baseUrl: 'https://new.example/v1' },
+      { ...config, options: { ...config.options, dimensions: 3 } },
+      { ...config, headers: { ...config.headers, 'x-region': 'west' } },
+    ]) {
+      const next = createProviderEmbedder({ ...adapter, config: changed }, 'model');
+      expect(next.id).toBe(initial.id);
+      expect(next.settingsFingerprint).not.toBe(initial.settingsFingerprint);
+    }
+    const fingerprint = initial.settingsFingerprint;
+    config.baseUrl = 'https://new.example/v1';
+    expect(initial.settingsFingerprint).toBe(fingerprint);
+    expect(createProviderEmbedder(adapter, 'model').settingsFingerprint).not.toBe(fingerprint);
+    expect(embed).not.toHaveBeenCalled();
   });
 });
