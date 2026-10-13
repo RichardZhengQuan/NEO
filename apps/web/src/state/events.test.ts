@@ -138,6 +138,23 @@ describe('handleServerEvent', () => {
     expect(useData.getState().reminderDeletions.rem_1).toBe(true);
   });
 
+  it('sets remindersLoaded only when the list is complete (fewer than 500 items)', async () => {
+    const { ctx, client } = context();
+    // Partial list: fewer than MAX_PAGE items → list is complete
+    client.reminders.list.mockResolvedValueOnce({ items: [reminder], nextCursor: null });
+    await loadReminders(ctx.client);
+    expect(useData.getState().remindersLoaded).toBe(true);
+
+    // Reset state
+    useData.setState({ reminders: {}, reminderDeletions: {}, remindersLoaded: false });
+
+    // Full page: exactly 500 items → list may be truncated, must not mark as loaded
+    const fullPage = Array.from({ length: 500 }, (_, i) => ({ ...reminder, id: `rem_${i}` }));
+    client.reminders.list.mockResolvedValueOnce({ items: fullPage, nextCursor: null });
+    await loadReminders(ctx.client);
+    expect(useData.getState().remindersLoaded).toBe(false);
+  });
+
   it('task and note events update their caches', () => {
     const { ctx } = context();
     const task = { id: 'task_1', listId: 'list_inbox', title: 'Milk', notes: null, done: false, doneAt: null, dueAt: null, priority: 0, tags: [], order: 0, parentId: null, createdAt: 0, updatedAt: 0 };

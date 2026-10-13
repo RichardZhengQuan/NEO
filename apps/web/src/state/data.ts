@@ -48,7 +48,7 @@ export async function loadReminders(client: NeoClient): Promise<void> {
   const epoch = currentSessionEpoch();
   const { items } = await client.reminders.list({ limit: MAX_PAGE });
   if (!isCurrentSession(epoch, client)) return;
-  useData.setState((s) => ({ reminders: byId(items.filter((r) => !s.reminderDeletions[r.id])), remindersLoaded: true }));
+  useData.setState((s) => ({ reminders: byId(items.filter((r) => !s.reminderDeletions[r.id])), remindersLoaded: items.length < MAX_PAGE }));
 }
 
 export function upsertReminder(r: Reminder): void {
