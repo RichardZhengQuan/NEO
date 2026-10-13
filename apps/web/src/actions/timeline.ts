@@ -268,7 +268,7 @@ export async function runUiAction(
         throw new Error(error ?? res.summary ?? 'tool failed');
       }
       // Quiet success for live widgets (the widget itself updates); others get a confirmation.
-      if (!quietWidget && (!/^(task\.toggle|reminder\.|memory\.)/.test(input.action.id) || res.summary)) {
+      if (!quietWidget && (!/^(task\.toggle|(?:__neo:)?reminder\.|memory\.)/.test(input.action.id) || res.summary)) {
         pushToast({ tone: 'success', title: res.summary ?? t('chat.action_done'), icon: 'check-circle' });
       }
       if (input.action.id.startsWith('memory.') || (input.action.kind === 'tool' && /memory|forget|remember/.test(input.action.tool))) {

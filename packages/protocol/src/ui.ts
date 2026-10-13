@@ -8,6 +8,7 @@
  * Interactions come back as {@link UIAction}s.
  */
 import { z } from 'zod';
+import { NeoError } from './errors.js';
 
 // ───────────────────────────── primitives ─────────────────────────────
 
@@ -74,7 +75,10 @@ export const UIActionSchema = z.discriminatedUnion('kind', [
 export type UIAction = z.infer<typeof UIActionSchema>;
 export type UIActionKind = UIAction['kind'];
 
-/** Implicit action id used when a `form` block is submitted (values travel in the UI event). */
+/** Reserved namespace for built-in actions; model-authored actions may not use it. */
+export const UI_ACTION_ID_PREFIX = '__neo:';
+
+/** Legacy form submit id; accepted only when the stored tree has one form. */
 export const FORM_SUBMIT_ACTION_ID = '__submit';
 
 // ───────────────────────────── leaf blocks ─────────────────────────────
@@ -667,6 +671,23 @@ export function childBlocks(block: UIBlock): UIBlock[] {
   }
 }
 
+/** Stable block key: an encoded explicit id, or child indexes from the UI part's root. */
+export function uiBlockKey(block: UIBlock, path: readonly number[]): string {
+  return block.id !== undefined ? `id:${encodeURIComponent(block.id)}` : `path:${path.length ? path.join('.') : 'root'}`;
+}
+
+/** Traverse a stored tree in childBlocks order, including hidden tabs and accordion items. */
+export function* walkUIBlocks(root: UIBlock, path: readonly number[] = []): Generator<{ block: UIBlock; path: readonly number[]; key: string }> {
+  yield { block: root, path, key: uiBlockKey(root, path) };
+  const children = childBlocks(root);
+  for (let i = 0; i < children.length; i++) yield* walkUIBlocks(children[i]!, [...path, i]);
+}
+
+/** Target-aware form submit id; values travel in the UI event. */
+export function formSubmitActionId(form: FormBlock, path: readonly number[] = []): string {
+  return `${UI_ACTION_ID_PREFIX}form.submit:${uiBlockKey(form, path)}`;
+}
+
 export const TOOL_ONLY_BLOCK_TYPES = ['changes'] as const;
 
 /** Find a tool-only widget anywhere in a block tree, including closed containers. */
@@ -714,6 +735,8 @@ export function validateUIBlocks(input: unknown): UIValidationResult {
   if (tooDeep) return { ok: false, error: `UI blocks may nest at most ${MAX_UI_DEPTH} levels deep.` };
   if (count > MAX_UI_BLOCKS) return { ok: false, error: `At most ${MAX_UI_BLOCKS} UI blocks are allowed per message.` };
   const ids = collectActions(parsed.data).map((a) => a.id);
+  const reserved = ids.find((id) => id.startsWith(UI_ACTION_ID_PREFIX));
+  if (reserved) return { ok: false, error: `Action id "${reserved}" uses the reserved "${UI_ACTION_ID_PREFIX}" prefix.` };
   const dup = ids.find((id, i) => ids.indexOf(id) !== i);
   if (dup) return { ok: false, error: `Duplicate action id "${dup}"; action ids must be unique within a message.` };
   return { ok: true, blocks: parsed.data };
@@ -964,26 +987,43 @@ export function uiBlocksToText(blocks: UIBlock[]): string {
  */
 export const widgetActionId = {
   taskToggle: (taskId: string) => `task.toggle:${taskId}`,
-  reminderSnooze: (minutes: number) => `reminder.snooze:${minutes}`,
-  reminderComplete: () => 'reminder.complete',
+  reminderSnooze: (reminderId: string, minutes: number) => `${UI_ACTION_ID_PREFIX}reminder.snooze:${encodeURIComponent(reminderId)}:${minutes}`,
+  reminderComplete: (reminderId: string) => `${UI_ACTION_ID_PREFIX}reminder.complete:${encodeURIComponent(reminderId)}`,
   memoryForget: (nodeId: string) => `memory.forget:${nodeId}`,
   changeApply: (itemId: string) => `change.apply:${itemId}`,
 } as const;
 
-function allBlocks(root: UIBlock): UIBlock[] {
-  const out: UIBlock[] = [];
-  const visit = (b: UIBlock) => {
-    out.push(b);
-    childBlocks(b).forEach(visit);
-  };
-  visit(root);
-  return out;
-}
-
 /** Map a widget action id to the tool action it stands for, or null when it doesn't apply to this block tree. */
 export function resolveWidgetAction(root: UIBlock, actionId: string, values?: Record<string, unknown>): UIAction | null {
+  const blocks = [...walkUIBlocks(root)].map(({ block }) => block);
+  const snooze = actionId.match(/^__neo:reminder\.snooze:([^:]+):([^:]+)$/);
+  const complete = actionId.match(/^__neo:reminder\.complete:([^:]+)$/);
+  const legacySnooze = actionId.match(/^reminder\.snooze:([^:]+)$/);
+  const legacyComplete = actionId === 'reminder.complete';
+  if (snooze || complete || legacySnooze || legacyComplete) {
+    const minutes = snooze || legacySnooze ? Number(snooze?.[2] ?? legacySnooze?.[1]) : undefined;
+    if (minutes !== undefined && (!Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60)) return null;
+    let reminderId: string | undefined;
+    if (snooze || complete) {
+      try {
+        reminderId = decodeURIComponent((snooze ?? complete)![1]!);
+      } catch {
+        return null;
+      }
+    }
+    const reminders = blocks.filter((b): b is ReminderBlock => b.type === 'reminder'
+      && (reminderId === undefined || b.reminderId === reminderId));
+    if (reminderId === undefined && reminders.length > 1) {
+      throw new NeoError('not_found', 'This reminder action is ambiguous; the stored UI contains multiple reminders.');
+    }
+    const reminder = reminders[0];
+    if (!reminder) return null;
+    return minutes === undefined
+      ? { id: actionId, label: 'Done', kind: 'tool', tool: 'complete_reminder', input: { id: reminder.reminderId } }
+      : { id: actionId, label: `Snooze ${minutes} min`, kind: 'tool', tool: 'snooze_reminder', input: { id: reminder.reminderId, minutes } };
+  }
   const [verb, arg = ''] = actionId.split(/:(.*)/s, 2) as [string, string | undefined];
-  for (const b of allBlocks(root)) {
+  for (const b of blocks) {
     if (b.type === 'changes' && verb === 'change.apply') {
       const item = b.items.find((item) => item.id === arg && item.status !== 'applied');
       if (item) return { id: actionId, label: 'Apply change', kind: 'tool', tool: 'apply_change', input: { item } };
@@ -993,14 +1033,6 @@ export function resolveWidgetAction(root: UIBlock, actionId: string, values?: Re
       if (!task) continue;
       const done = typeof values?.done === 'boolean' ? values.done : !task.done;
       return { id: actionId, label: done ? 'Complete task' : 'Reopen task', kind: 'tool', tool: 'update_task', input: { id: task.id, done } };
-    }
-    if (b.type === 'reminder' && verb === 'reminder.snooze') {
-      const minutes = Number(arg);
-      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60) return null;
-      return { id: actionId, label: `Snooze ${minutes} min`, kind: 'tool', tool: 'snooze_reminder', input: { id: b.reminderId, minutes } };
-    }
-    if (b.type === 'reminder' && verb === 'reminder.complete') {
-      return { id: actionId, label: 'Done', kind: 'tool', tool: 'complete_reminder', input: { id: b.reminderId } };
     }
     if (b.type === 'memory' && verb.startsWith('memory.') && b.nodes.some((n) => n.id === arg)) {
       if (verb === 'memory.forget')

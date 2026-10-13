@@ -393,7 +393,7 @@ describe('widget actions', () => {
       type: 'card',
       children: [{ type: 'reminder', reminderId: 'rem_1', title: 'Water', dueAt: 0, status: 'fired' }],
     };
-    expect(resolveWidgetAction(card, widgetActionId.reminderSnooze(10))).toMatchObject({ tool: 'snooze_reminder', input: { id: 'rem_1', minutes: 10 } });
+    expect(resolveWidgetAction(card, widgetActionId.reminderSnooze('rem_1', 10))).toMatchObject({ tool: 'snooze_reminder', input: { id: 'rem_1', minutes: 10 } });
     expect(resolveWidgetAction(card, 'reminder.snooze:999999')).toBeNull();
     const mem: UIBlock = { type: 'memory', nodes: [{ id: 'mem_1', kind: 'fact', label: 'x' }] };
     expect(resolveWidgetAction(mem, widgetActionId.memoryForget('mem_1'))).toMatchObject({ tool: 'forget', confirm: expect.any(String) });

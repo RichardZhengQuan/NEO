@@ -27,7 +27,7 @@ Every rendered block becomes a `ui` part `{ type: 'ui', id: 'ui_…', block, too
 | `chart` | `kind` bar/line/area/pie/donut, `series[{name,data[{x,y}]}]`, `title`, `xLabel`, `yLabel`, `unit`, `stacked` | SVG, themed palette |
 | `stat` | `label`, `value`, `unit`, `delta`, `deltaLabel`, `caption`, `tone`, `icon` | KPI tile |
 | `progress` | `label`, `value` 0-1, `caption`, `tone` | |
-| `form` | `title`, `description`, `fields[]`, `submitLabel` | submit sends the action id `__submit` with `values` |
+| `form` | `title`, `description`, `fields[]`, `submitLabel` | submit sends a target-aware id from `formSubmitActionId` with `values` |
 | `buttons` | `actions[]`, `layout` | |
 | `image` / `gallery` | `url`, `alt`, `caption` | https or `data:image/(png|jpeg|gif|webp|avif)` only |
 | `callout` | `tone`, `title`, `text`, `icon` | |
@@ -94,7 +94,23 @@ Checklist for a PR that adds a block type:
 | `link` | `url` | open (in-app for `neo://…`, browser otherwise) |
 | `copy` | `text` | copy to clipboard |
 
-The model-written `confirm` text can provide an extra client prompt, but it never authorizes execution. For live widgets the client sends the reserved ids from `widgetActionId` (`task.toggle:<id>`, `reminder.snooze:<min>`, `reminder.complete`, `memory.forget:<id>`, `change.apply:<id>`). The server resolves them against the **stored** block with `resolveWidgetAction`, so a client can only touch items the block actually shows.
+The model-written `confirm` text can provide an extra client prompt, but it never authorizes execution. For live widgets the client sends ids from `widgetActionId`. The server resolves them against the **stored** block with `resolveWidgetAction`, so a client can only touch items the block actually shows.
+
+| Control | Action id |
+|---|---|
+| Task toggle | `task.toggle:<taskId>` |
+| Reminder snooze | `__neo:reminder.snooze:<encodedReminderId>:<minutes>` |
+| Reminder done | `__neo:reminder.complete:<encodedReminderId>` |
+| Memory forget | `memory.forget:<nodeId>` |
+| Proposed change apply | `change.apply:<itemId>` |
+| Form submit (with block `id`) | `__neo:form.submit:id:<encodedBlockId>` |
+| Form submit (without block `id`) | `__neo:form.submit:path:<path>` |
+
+`__neo:` is reserved for built-in controls: `validateUIBlocks` rejects model-authored action ids with that prefix. Authored ids otherwise allow arbitrary characters, are 1–64 characters long and must be unique within a message. Target ids use `encodeURIComponent`, so colons in a reminder or form id cannot change the action's meaning. Stored block schemas and fields are unchanged.
+
+Forms use `formSubmitActionId(form, path)`, built on `uiBlockKey(block, path)`. `walkUIBlocks(root)` yields `{ block, path, key }`, with `[]` for the root and zero-based child indexes in `childBlocks` order; tabs and accordion sections flatten their children in declaration order, including hidden sections. Paths are dot-separated indexes (`0.2.1`), or `root` for the root block. A block id takes precedence over its path. The server finds exactly that form and forwards only its declared field values in a `ui_event`, preserving the submitted action id and the form's submit label. Duplicate form ids are ambiguous and rejected.
+
+Older clients may send `reminder.snooze:<minutes>`, `reminder.complete` or `__submit`. The server accepts a legacy reminder id only when the stored UI tree contains exactly one reminder block, and `__submit` only when it contains exactly one form. Multiple matches return `not_found` with an ambiguous-action message; the server never chooses the first match. Missing targets remain undeclared actions.
 
 Request: `POST /api/timeline/ui-action { messageId, uiId, actionId, values?, confirmationToken? }`.
 
