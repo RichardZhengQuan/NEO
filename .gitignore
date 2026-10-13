@@ -13,6 +13,9 @@ coverage/
 *.tsbuildinfo
 *.log
 
+# local audit and release evidence
+/output/
+
 # local NEO data (databases, keys, tokens)
 .neo-data/
 
