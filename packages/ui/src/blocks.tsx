@@ -93,6 +93,12 @@ export interface LiveData {
   tasks?: Record<string, Task>;
   /** Current status of memories shown in memory widgets. */
   memories?: Record<string, { status: MemoryStatus }>;
+  /**
+   * True once the client has loaded the full reminder list from the server.
+   * When true, an id absent from `reminders` is treated as deleted.
+   * Optional so other clients (desktop, mobile) keep working without this flag.
+   */
+  remindersListLoaded?: boolean;
 }
 
 export interface BlockRendererProps {
@@ -997,12 +1003,14 @@ function ReminderRenderer({ block, uiId, onAction, live }: BlockRendererProps & 
   const locale = useLocale();
   const runner = useActionRunner(onAction, uiId);
   const fresh = live?.reminders?.[block.reminderId];
-  const status = fresh === null ? 'deleted' : fresh?.status ?? block.status;
-  const dueAt = fresh?.dueAt ?? block.dueAt;
-  const title = fresh?.title ?? block.title;
-  const tz = fresh?.timezone ?? block.timezone;
-  const notes = fresh ? fresh.notes : block.notes;
-  const recurrenceText = fresh ? (fresh.recurrence ? describeRecurrence(fresh.recurrence) : undefined) : block.recurrenceText;
+  // When the full list has loaded, an id absent from the record means deleted.
+  const effectiveFresh = (fresh === undefined && live?.remindersListLoaded && live.reminders !== undefined) ? null : fresh;
+  const status = effectiveFresh === null ? 'deleted' : effectiveFresh?.status ?? block.status;
+  const dueAt = effectiveFresh?.dueAt ?? block.dueAt;
+  const title = effectiveFresh?.title ?? block.title;
+  const tz = effectiveFresh?.timezone ?? block.timezone;
+  const notes = effectiveFresh ? effectiveFresh.notes : block.notes;
+  const recurrenceText = effectiveFresh ? (effectiveFresh.recurrence ? describeRecurrence(effectiveFresh.recurrence) : undefined) : block.recurrenceText;
   const active = status === 'scheduled' || status === 'fired';
   const actions: UIAction[] = [
     { id: widgetActionId.reminderSnooze(block.reminderId, 10), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_10'), icon: 'alarm-clock', input: { id: block.reminderId, minutes: 10 } },

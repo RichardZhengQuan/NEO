@@ -82,6 +82,7 @@ beforeEach(() => {
     notesLoaded: false,
     reminders: {},
     remindersLoaded: false,
+    remindersComplete: false,
     tasks: {},
     taskLists: [],
     tasksLoaded: false,

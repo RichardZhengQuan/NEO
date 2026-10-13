@@ -43,6 +43,7 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   const providers = useSession((s) => s.providers);
   const selectedModel = useSession((s) => s.settings?.ai.capabilities.text);
   const reminders = useData((s) => s.reminders);
+  const remindersComplete = useData((s) => s.remindersComplete);
   const reminderDeletions = useData((s) => s.reminderDeletions);
   const tasks = useData((s) => s.tasks);
   const searchRequested = useUi((s) => s.timelineSearchRequested);
@@ -107,7 +108,7 @@ export function TimelineScreen({ messageId }: { messageId?: string }): ReactElem
   const busy = entry.turn !== null;
   const streamingMessage = entry.turn ? entry.messages.find((m) => m.id === entry.turn!.assistantMessageId) : undefined;
   const avatarState = useAvatarState({ busy, text: streamingMessage ? textOf(streamingMessage.parts) : '', typing: composerText.trim() !== '' });
-  const live: LiveData = useMemo(() => ({ reminders: { ...reminders, ...Object.fromEntries(Object.keys(reminderDeletions).map((id) => [id, null])) }, tasks }), [reminders, reminderDeletions, tasks]);
+  const live: LiveData = useMemo(() => ({ reminders: { ...reminders, ...Object.fromEntries(Object.keys(reminderDeletions).map((id) => [id, null])) }, tasks, remindersListLoaded: remindersComplete }), [reminders, reminderDeletions, tasks, remindersComplete]);
   const modelLabel = (message: Message): string | undefined => {
     if (!message.model) return undefined;
     const provider = providers?.items.find((p) => p.id === message.model!.provider);

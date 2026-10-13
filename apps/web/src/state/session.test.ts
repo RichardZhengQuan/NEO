@@ -54,7 +54,7 @@ beforeEach(() => {
   useTimeline.setState(emptyEntry(), true);
   sessionStorage.clear();
   useData.setState({
-    reminders: {}, reminderDeletions: {}, remindersLoaded: false,
+    reminders: {}, reminderDeletions: {}, remindersLoaded: false, remindersComplete: false,
     tasks: {}, taskLists: [], tasksLoaded: false,
     notes: {}, notesLoaded: false,
     memoryVersion: 0,
