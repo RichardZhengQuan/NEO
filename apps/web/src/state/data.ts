@@ -11,7 +11,10 @@ import { currentSessionEpoch, isCurrentSession } from './session.js';
 export interface DataState {
   reminders: Record<string, Reminder>;
   reminderDeletions: Record<string, true>;
+  /** True after at least one successful reminder list load; used by refreshLoadedData to decide whether to reload on reconnect. */
   remindersLoaded: boolean;
+  /** True when the loaded reminder list is complete (fewer than MAX_PAGE items). Used to know whether absent ids are deletions. */
+  remindersComplete: boolean;
   tasks: Record<string, Task>;
   taskLists: TaskList[];
   tasksLoaded: boolean;
@@ -27,6 +30,7 @@ export const useData = create<DataState>(() => ({
   reminders: {},
   reminderDeletions: {},
   remindersLoaded: false,
+  remindersComplete: false,
   tasks: {},
   taskLists: [],
   tasksLoaded: false,
@@ -48,7 +52,7 @@ export async function loadReminders(client: NeoClient): Promise<void> {
   const epoch = currentSessionEpoch();
   const { items } = await client.reminders.list({ limit: MAX_PAGE });
   if (!isCurrentSession(epoch, client)) return;
-  useData.setState((s) => ({ reminders: byId(items.filter((r) => !s.reminderDeletions[r.id])), remindersLoaded: items.length < MAX_PAGE }));
+  useData.setState((s) => ({ reminders: byId(items.filter((r) => !s.reminderDeletions[r.id])), remindersLoaded: true, remindersComplete: items.length < MAX_PAGE }));
 }
 
 export function upsertReminder(r: Reminder): void {

@@ -6,7 +6,7 @@ import { buildMessages, createTranslator } from '@neo/ui';
 import { appDictionaries } from '../i18n.js';
 import { EventSequencer, handleServerEvent, runReminderAction, type EventContext } from './events.js';
 import { emptyEntry, useTimeline } from './timeline.js';
-import { loadReminders, useData } from './data.js';
+import { loadReminders, refreshLoadedData, useData } from './data.js';
 import { useToasts } from './notifications.js';
 import { useSession } from './session.js';
 
@@ -138,21 +138,40 @@ describe('handleServerEvent', () => {
     expect(useData.getState().reminderDeletions.rem_1).toBe(true);
   });
 
-  it('sets remindersLoaded only when the list is complete (fewer than 500 items)', async () => {
+  it('remindersLoaded is true after any successful load; remindersComplete is true only when fewer than 500 items', async () => {
     const { ctx, client } = context();
     // Partial list: fewer than MAX_PAGE items → list is complete
     client.reminders.list.mockResolvedValueOnce({ items: [reminder], nextCursor: null });
     await loadReminders(ctx.client);
     expect(useData.getState().remindersLoaded).toBe(true);
+    expect(useData.getState().remindersComplete).toBe(true);
 
     // Reset state
-    useData.setState({ reminders: {}, reminderDeletions: {}, remindersLoaded: false });
+    useData.setState({ reminders: {}, reminderDeletions: {}, remindersLoaded: false, remindersComplete: false });
 
-    // Full page: exactly 500 items → list may be truncated, must not mark as loaded
+    // Full page: exactly 500 items → list may be truncated; still marks as loaded (for reconnect), but not complete
     const fullPage = Array.from({ length: 500 }, (_, i) => ({ ...reminder, id: `rem_${i}` }));
     client.reminders.list.mockResolvedValueOnce({ items: fullPage, nextCursor: null });
     await loadReminders(ctx.client);
-    expect(useData.getState().remindersLoaded).toBe(false);
+    expect(useData.getState().remindersLoaded).toBe(true);
+    expect(useData.getState().remindersComplete).toBe(false);
+  });
+
+  it('refreshLoadedData reloads reminders when 500+ were loaded (reconnect does not skip)', async () => {
+    const { ctx, client } = context();
+    // Seed state as if we already loaded 500+ reminders
+    const fullPage = Array.from({ length: 500 }, (_, i) => ({ ...reminder, id: `rem_${i}` }));
+    client.reminders.list.mockResolvedValueOnce({ items: fullPage, nextCursor: null });
+    await loadReminders(ctx.client);
+    expect(useData.getState().remindersLoaded).toBe(true);
+    expect(useData.getState().remindersComplete).toBe(false);
+
+    // Now simulate a reconnect: refreshLoadedData should call loadReminders again
+    const refreshPage = Array.from({ length: 10 }, (_, i) => ({ ...reminder, id: `rem_${i}` }));
+    client.reminders.list.mockResolvedValueOnce({ items: refreshPage, nextCursor: null });
+    await refreshLoadedData(ctx.client);
+    // loadReminders was called again (once for initial load, once for refresh)
+    expect(client.reminders.list).toHaveBeenCalledTimes(2);
   });
 
   it('task and note events update their caches', () => {
