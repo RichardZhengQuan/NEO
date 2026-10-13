@@ -49,6 +49,38 @@ Every rendered block becomes a `ui` part `{ type: 'ui', id: 'ui_…', block, too
 
 Limits: at most 50 top-level blocks, 300 blocks per message, nesting depth 8, action ids unique within a message. Tones are `neutral | accent | info | success | warning | danger`. Icons are lucide-style names (`bell`, `calendar`, `check-circle`, `map-pin`, `brain`…) or a single emoji.
 
+## When to add a block
+
+UI is data. A feature shows UI by returning blocks in a tool result or through `render_ui`. Don't build a screen, route or React component for one request or scenario. App screens exist only for what NEO keeps for the user: the timeline, memory, tasks, notes, reminders and settings.
+
+The normal way to add a feature is a tool that returns existing blocks. `create_reminder` returns a live `reminder` widget, `list_tasks` a `tasks` widget, and `remember` a `memory` card. A read-only tool can answer with a `card`, `list` or `table`.
+
+Add a new block type only when one of these holds, and say which in the PR:
+
+1. It shows or changes NEO's own data through NEO's tools, like the live `reminder`, `tasks` and `memory` widgets, and more than one feature will use it.
+2. The model keeps building the same thing badly from existing blocks. Include real examples in the PR.
+
+Prefer a new optional prop on an existing block over a new type. Topic cards are compositions, not new types: a weather, flight or recipe card is `card` + `grid` + `stat`/`keyvalue`.
+
+The block catalogue is a public contract: every client must render every type. Each block type costs:
+
+- **Forever:** blocks are stored in the append-only timeline, so a type can never be removed or renamed, and existing props can't become required or change meaning. Old messages must keep rendering. It's the same rule as storage migrations: never change one that may already have run.
+- **Every request:** each type adds a line to `BLOCK_PROPS` in `packages/tools/src/builtins/render_ui.ts`, sent to the model on every turn. More look-alike types make the model pick the wrong one more often.
+- **Every client:** a React renderer in `@neo/ui` for web, desktop and mobile, a `uiBlockToText` rendering for the CLI and notifications, and an implementation in any future native client.
+
+Models and plugins never ship HTML, CSS or scripts. Third-party code returns data and NEO draws it, which keeps a confused model or an untrusted plugin from running code on the user's device.
+
+NEO is modeled on a person: people tell NEO what they want and NEO does it with its tools. Don't add forms or buttons where users create tasks, notes, reminders or memories by hand. The screens show what NEO keeps and allow viewing, editing, checking off and deleting.
+
+Checklist for a PR that adds a block type:
+
+- The zod schema and `UIBlock` union member in `packages/protocol/src/ui.ts`, plus `UI_BLOCK_TYPES`, `childBlocks` (containers only) and `uiBlockToText`.
+- Widget controls through `widgetActionId` and `resolveWidgetAction` in the same file. The server resolves every action against the stored block, so a client can only act on what the block shows. Add live-widget patching in `packages/core/src/ui-actions.ts` if a tool result should update the stored block.
+- A catalogue line in `BLOCK_PROPS` in `packages/tools/src/builtins/render_ui.ts`.
+- The React renderer in `packages/ui/src/blocks.tsx`. It must work at 360 px, be accessible and never throw. Add en and zh-CN strings in `packages/ui/src/i18n.tsx`.
+- Tests next to each change.
+- A row in the Block catalogue table above.
+
 ## Actions
 
 `UIAction = { id, label, style?, icon?, confirm?, kind, … }`:

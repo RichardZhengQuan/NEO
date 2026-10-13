@@ -40,12 +40,21 @@ Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In short:
 - Privacy is a feature: anything touching memory must respect the policy table at the end of [docs/MEMORY.md](docs/MEMORY.md).
 - For performance, assert the property itself rather than a wall-clock time where you can: the recurrence catch-up test counts the candidates `nextOccurrence` checks, and the `htmlToText` linearity test compares equal amounts of work at two input sizes. Parallel suites (`pnpm -r test`, CI) slow every timing sample several-fold, so tests that do time things take the median of several runs after a warm-up and by default only fail on a gross regression. `NEO_PERF_STRICT=1` applies the tight bounds, for an otherwise idle machine: `NEO_PERF_STRICT=1 pnpm --filter @neo/tools test -t "is linear"`.
 
+## Adding features and UI
+
+- Add features as tools that return existing blocks, or use `render_ui`. See [When to add a block](docs/GENERATIVE_UI.md#when-to-add-a-block) for the rules and checklist.
+- Don't build a screen, route or React component for one request or scenario. App screens are for the timeline, memory, tasks, notes, reminders and settings.
+- People tell NEO what they want and NEO uses its tools. Screens allow viewing, editing, checking off and deleting; don't add forms or buttons for creating tasks, notes, reminders or memories by hand.
+- Prefer optional props and compositions. A new type needs either a live widget for NEO's own data used by more than one feature, or real examples of the model repeatedly building it badly from existing blocks. Say which in the PR.
+- Every block type is a permanent public contract. Keep old messages rendering, support every client, and return data rather than HTML, CSS or scripts.
+
 ## Pull requests
 
 1. Open an issue first for larger changes, so we can agree on the approach.
 2. Keep PRs focused. Include tests that fail without your change.
 3. `pnpm typecheck && pnpm test` must pass (CI runs them plus `pnpm build`).
 4. Update the relevant doc in `docs/` when you change behavior.
+5. New block types need the [block checklist](docs/GENERATIVE_UI.md#when-to-add-a-block).
 
 ## Reporting security issues
 
