@@ -8,7 +8,9 @@ import {
   FORM_SUBMIT_ACTION_ID,
   UI_ACTION_ID_PREFIX,
   NeoError,
+  RecurrenceSchema,
   collectActions,
+  describeRecurrence,
   formSubmitActionId,
   resolveWidgetAction,
   validateUIBlocks,
@@ -141,6 +143,14 @@ function patchReminder(block: ReminderBlock, reminder: Record<string, unknown>):
   const next = { ...block };
   if (typeof reminder.dueAt === 'number') next.dueAt = reminder.dueAt;
   if (typeof reminder.title === 'string') next.title = reminder.title.slice(0, 300);
+  if (typeof reminder.timezone === 'string') next.timezone = reminder.timezone.slice(0, 64);
+  if (typeof reminder.notes === 'string') next.notes = reminder.notes.slice(0, 5000);
+  else if (reminder.notes === null) delete next.notes;
+  if (reminder.recurrence === null) delete next.recurrenceText;
+  else if (reminder.recurrence !== undefined) {
+    const recurrence = RecurrenceSchema.safeParse(reminder.recurrence);
+    if (recurrence.success) next.recurrenceText = describeRecurrence(recurrence.data).slice(0, 200);
+  }
   if (REMINDER_STATUSES.includes(reminder.status as ReminderBlock['status'])) next.status = reminder.status as ReminderBlock['status'];
   return next;
 }
@@ -150,6 +160,7 @@ function patchReminder(block: ReminderBlock, reminder: Record<string, unknown>):
  * matching item of `tasks` widgets, `{ reminder }` the matching `reminder` widget
  * (the shapes returned by update_task / snooze_reminder / complete_reminder…).
  * `{ change }` marks a proposed change applied alongside any task/reminder update.
+ * `{ forgotten, ids }` marks matching memory nodes forgotten, using ids rather than labels.
  * Returns the patched block, or null when nothing changed or the result would be invalid.
  */
 export function patchWidgetBlock(block: UIBlock, output: unknown): UIBlock | null {
@@ -157,7 +168,9 @@ export function patchWidgetBlock(block: UIBlock, output: unknown): UIBlock | nul
   const task = isPlainObject(output.task) && typeof output.task.id === 'string' ? output.task : null;
   const reminder = isPlainObject(output.reminder) && typeof output.reminder.id === 'string' ? output.reminder : null;
   const change = isPlainObject(output.change) && typeof output.change.id === 'string' && output.change.status === 'applied' ? output.change : null;
-  if (!task && !reminder && !change) return null;
+  const forgottenIds = Array.isArray(output.forgotten) && Array.isArray(output.ids) && output.ids.every((id) => typeof id === 'string')
+    ? new Set(output.ids as string[]) : null;
+  if (!task && !reminder && !change && !forgottenIds?.size) return null;
   const patched = mapTree(block, (b) => {
     if (change && b.type === 'changes' && b.items.some((item) => item.id === change.id)) {
       return { ...b, items: b.items.map((item) => item.id === change.id ? {
@@ -169,6 +182,9 @@ export function patchWidgetBlock(block: UIBlock, output: unknown): UIBlock | nul
       return { ...b, tasks: b.tasks.map((t) => (t.id === task.id ? patchTask(t, task) : t)) };
     }
     if (reminder && b.type === 'reminder' && b.reminderId === reminder.id) return patchReminder(b, reminder);
+    if (forgottenIds && b.type === 'memory' && b.nodes.some((node) => forgottenIds.has(node.id))) {
+      return { ...b, nodes: b.nodes.map((node) => forgottenIds.has(node.id) ? { ...node, status: 'forgotten' as const } : node) };
+    }
     return b;
   });
   if (JSON.stringify(patched) === JSON.stringify(block)) return null;

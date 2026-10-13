@@ -19,3 +19,16 @@ describe('render_ui tool-only widgets', () => {
     },
   );
 });
+
+it('exposes supported presentation props in the compact catalogue', () => {
+  const description = renderUiTool.description;
+  expect(description).toMatch(/- list:.*imageUrl\?/);
+  expect(description).toMatch(/- image:.*aspectRatio\?/);
+  expect(description).toMatch(/- form:.*placeholder\?.*help\?.*min\?.*max\?.*step\?/);
+  expect(description).toMatch(/- reminder:.*notes\?.*timezone\?.*recurrenceText\?/);
+  expect(description).toMatch(/- countdown:.*timezone\?/);
+  expect(description).toMatch(/- table:.*currency\?.*USD default/);
+  expect(description).toMatch(/- memory:.*content\?.*recall with show:true/);
+  expect(description).toContain('images: http(s)');
+  expect(description.length).toBeLessThan(4000);
+});

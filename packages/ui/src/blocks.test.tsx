@@ -1,0 +1,94 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import type { Reminder, ReminderBlock, UIBlock } from '@neo/protocol';
+import { BlockRenderer, formatCell, type LiveData, type OnUIAction } from './blocks.js';
+import { I18nProvider } from './i18n.js';
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+const reminder: ReminderBlock = { type: 'reminder', reminderId: 'rem_1', title: 'Stretch', notes: 'Walk outside\nBring water', dueAt: 1791864000000, timezone: 'UTC', recurrenceText: 'every day', status: 'scheduled' };
+const fresh: Reminder = { id: 'rem_1', title: 'Stretch', notes: null, dueAt: reminder.dueAt, timezone: 'UTC', recurrence: null, status: 'scheduled', firedCount: 0, lastFiredAt: null, messageId: null, createdAt: 0, updatedAt: 0 };
+
+function widget(block: UIBlock, live?: LiveData, onAction?: OnUIAction, locale = 'en') {
+  return <I18nProvider locale={locale}><BlockRenderer block={block} live={live} onAction={onAction} /></I18nProvider>;
+}
+
+describe('reminder state', () => {
+  it('shows notes as a muted caption with the full text available', () => {
+    const notes = 'A long reminder note.\n'.repeat(100);
+    const { container } = render(widget({ ...reminder, notes }));
+    const caption = container.querySelector('.neo-widget__notes');
+    expect(caption?.textContent).toBe(notes);
+    expect(caption?.getAttribute('title')).toBe(notes);
+  });
+
+  it('uses fresh notes and removes the caption when notes are cleared', () => {
+    const view = render(widget(reminder, { reminders: { rem_1: { ...fresh, notes: 'Fresh notes' } } }));
+    expect(screen.getByText('Fresh notes')).toBeTruthy();
+    expect(screen.queryByText(reminder.notes!)).toBeNull();
+    view.rerender(widget(reminder, { reminders: { rem_1: fresh } }));
+    expect(view.container.querySelector('.neo-widget__notes')).toBeNull();
+  });
+
+  it('uses live recurrence and clears stale recurrence for one-off reminders', () => {
+    const view = render(widget(reminder, { reminders: { rem_1: { ...fresh, recurrence: { freq: 'weekly', interval: 2, byWeekday: [1] } } } }));
+    expect(screen.getByText('every 2 weeks on Mon')).toBeTruthy();
+    expect(screen.queryByText('every day')).toBeNull();
+    view.rerender(widget(reminder, { reminders: { rem_1: fresh } }));
+    expect(screen.queryByText('every 2 weeks on Mon')).toBeNull();
+    expect(screen.queryByText('every day')).toBeNull();
+  });
+
+  it.each([['en', 'Deleted'], ['zh-CN', '已删除']])('shows known deletions without active controls in %s', (locale, label) => {
+    const { container } = render(widget(reminder, { reminders: { rem_1: null } }, vi.fn(), locale));
+    expect(screen.getByText(label!)).toBeTruthy();
+    expect(container.querySelector('[data-state="deleted"]')).toBeTruthy();
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('keeps saved snapshots active when live data has not loaded their id', () => {
+    render(widget(reminder, { reminders: {} }, vi.fn()));
+    expect(screen.getByRole('button', { name: 'Done' })).toBeTruthy();
+    expect(screen.queryByText('Deleted')).toBeNull();
+  });
+});
+
+describe('memory status', () => {
+  it('keeps a stored forgotten node resolved after remount despite stale live data', async () => {
+    const block: UIBlock = { type: 'memory', nodes: [{ id: 'mem_1', kind: 'fact', label: 'Likes tea', status: 'active' }] };
+    const onAction = vi.fn(async () => undefined);
+    const view = render(widget(block, undefined, onAction));
+    fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+    expect(await screen.findByText('Forgotten')).toBeTruthy();
+    expect(onAction.mock.calls).toHaveLength(1);
+    view.unmount();
+    render(widget({ ...block, nodes: [{ ...block.nodes[0]!, status: 'forgotten' }] }, { memories: { mem_1: { status: 'active' } } }, onAction));
+    expect(screen.getByRole('status').textContent).toBe('Forgotten');
+    expect(screen.queryByRole('button', { name: 'Forget' })).toBeNull();
+  });
+
+  it('shows a stored forgotten status even without action handling', () => {
+    render(widget({ type: 'memory', nodes: [{ id: 'mem_1', kind: 'fact', label: 'Likes tea', status: 'forgotten' }] }));
+    expect(screen.getByText('Forgotten')).toBeTruthy();
+  });
+});
+
+describe('formatted blocks', () => {
+  it('uses countdown timezone for the visible date and timer label', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-10-13T00:00:00Z');
+    const until = Date.parse('2026-10-14T00:00:00Z');
+    render(widget({ type: 'countdown', label: 'Launch', until, timezone: 'Asia/Singapore' }));
+    expect(screen.getByRole('timer').getAttribute('aria-label')).toBe('Launch: Oct 14, 2026, 8:00 AM');
+    expect(screen.getByText('Oct 14, 2026, 8:00 AM')).toBeTruthy();
+  });
+
+  it.each(['en', 'zh-CN'])('uses table column currency and defaults old columns to USD in %s', (locale) => {
+    const { container } = render(widget({ type: 'table', columns: [{ key: 'old', label: 'Old', format: 'currency' }, { key: 'eur', label: 'Euro', format: 'currency', currency: 'EUR' }, { key: 'jpy', label: 'Yen', format: 'currency', currency: 'JPY' }], rows: [{ old: 1234.5, eur: 1234.5, jpy: 1234.5 }] }, undefined, undefined, locale));
+    expect(Array.from(container.querySelectorAll('td'), (cell) => cell.textContent)).toEqual(['USD', 'EUR', 'JPY'].map((currency) => new Intl.NumberFormat(locale, { style: 'currency', currency }).format(1234.5)));
+    expect(formatCell(1234.5, 'currency', locale, 'EUR')).toBe(new Intl.NumberFormat(locale, { style: 'currency', currency: 'EUR' }).format(1234.5));
+  });
+});

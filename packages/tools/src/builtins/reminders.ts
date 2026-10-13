@@ -35,6 +35,7 @@ export function reminderBlock(r: Reminder): UIBlock {
     type: 'reminder',
     reminderId: r.id,
     title: clip(r.title, 300),
+    ...(r.notes !== null ? { notes: r.notes } : {}),
     dueAt: r.dueAt,
     timezone: r.timezone,
     ...(r.recurrence ? { recurrenceText: clip(describeRecurrence(r.recurrence), 200) } : {}),
@@ -98,23 +99,12 @@ export function createReminderTools(stores: ProductivityStores, _clock?: Clock) 
     }),
     risk: 'read',
     defaultPermission: 'auto',
-    async execute(input, ctx) {
+    async execute(input) {
       const status = input.status ?? 'upcoming';
       const filter: Record<typeof status, ReminderStatus[] | undefined> = { upcoming: ['scheduled'], fired: ['fired'], completed: ['completed'], all: undefined };
       const list = reminders.list({ status: filter[status], limit: input.limit ?? 20 });
-      const ui: UIBlock[] = [
-        {
-          type: 'list',
-          title: status === 'upcoming' ? 'Upcoming reminders' : status === 'all' ? 'Reminders' : `${status[0]!.toUpperCase()}${status.slice(1)} reminders`,
-          items: list.map((r) => ({
-            id: r.id,
-            title: clip(r.title, 300),
-            subtitle: clip(`${friendlyTime(r.dueAt, r.timezone, ctx.locale)}${r.recurrence ? ` · ${describeRecurrence(r.recurrence)}` : ''}`, 1000),
-            meta: r.status,
-            icon: r.recurrence ? 'repeat' : 'bell',
-          })),
-        },
-      ];
+      const ui = list.slice(0, 10).map(reminderBlock);
+      if (list.length > 10) ui.push({ type: 'link', url: 'neo://reminders', title: `Show all ${list.length} reminders` });
       return {
         output: { reminders: list.map(reminderOutput), total: list.length },
         ui,

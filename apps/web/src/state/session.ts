@@ -93,7 +93,7 @@ function resetSessionData(): void {
   resetChatDrafts();
   resetTimeline();
   useData.setState({
-    reminders: {}, remindersLoaded: false,
+    reminders: {}, reminderDeletions: {}, remindersLoaded: false,
     tasks: {}, taskLists: [], tasksLoaded: false,
     notes: {}, notesLoaded: false,
     memoryVersion: 0,

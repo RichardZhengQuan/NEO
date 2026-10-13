@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FORM_SUBMIT_ACTION_ID, formSubmitActionId, type ChangeItem, type ChangesBlock, type FormBlock, type UIBlock } from '@neo/protocol';
+import { FORM_SUBMIT_ACTION_ID, describeRecurrence, formSubmitActionId, widgetActionId, type ChangeItem, type ChangesBlock, type FormBlock, type ReminderBlock, type UIBlock } from '@neo/protocol';
 import { patchWidgetBlock, resolveStoredAction } from './ui-actions.js';
 
 const firstForm: FormBlock = { type: 'form', id: 'first', fields: [{ name: 'city', label: 'City', kind: 'text' }], submitLabel: 'Plan trip' };
@@ -73,5 +73,74 @@ describe('patchWidgetBlock changes', () => {
   it('ignores unmatched or invalid receipts', () => {
     expect(patchWidgetBlock(changes, { change: { id: 'unknown', status: 'applied' } })).toBeNull();
     expect(patchWidgetBlock(changes, { change: { id: item.id, status: 'pending' } })).toBeNull();
+  });
+});
+
+describe('patchWidgetBlock reminders', () => {
+  const reminder: ReminderBlock = { type: 'reminder', reminderId: 'rem_1', title: 'Call', dueAt: 1000, status: 'scheduled', notes: 'Bring notes', recurrenceText: 'every day' };
+
+  it('updates notes without changing unrelated reminder snapshots', () => {
+    const block: UIBlock = { type: 'tabs', tabs: [{ id: 'today', label: 'Today', children: [reminder, { ...reminder, reminderId: 'rem_2' }] }] };
+    expect(patchWidgetBlock(block, { reminder: { id: 'rem_1', notes: 'Bring the report' } }))
+      .toEqual({ type: 'tabs', tabs: [{ id: 'today', label: 'Today', children: [{ ...reminder, notes: 'Bring the report' }, { ...reminder, reminderId: 'rem_2' }] }] });
+    expect(reminder.notes).toBe('Bring notes');
+  });
+
+  it('removes cleared notes instead of retaining them through serialization', () => {
+    const cleared = patchWidgetBlock(reminder, { reminder: { id: 'rem_1', notes: null } });
+    expect(cleared).toEqual({ type: 'reminder', reminderId: 'rem_1', title: 'Call', dueAt: 1000, status: 'scheduled', recurrenceText: 'every day' });
+    expect(cleared).not.toHaveProperty('notes');
+    expect(patchWidgetBlock(reminder, { reminder: { id: 'rem_1', dueAt: 2000 } })).toMatchObject({ notes: 'Bring notes' });
+  });
+
+  it('bounds notes and preserves an explicit empty caption', () => {
+    expect(patchWidgetBlock(reminder, { reminder: { id: 'rem_1', notes: 'a'.repeat(5001) } }))
+      .toMatchObject({ notes: 'a'.repeat(5000) });
+    expect(patchWidgetBlock(reminder, { reminder: { id: 'rem_1', notes: '' } })).toMatchObject({ notes: '' });
+  });
+
+  it('keeps rescheduled times in their new timezone after the widget is stored', () => {
+    const block = { ...reminder, timezone: 'UTC' };
+    expect(patchWidgetBlock(block, { reminder: { id: 'rem_1', dueAt: 2000, timezone: 'Asia/Singapore' } }))
+      .toMatchObject({ dueAt: 2000, timezone: 'Asia/Singapore' });
+    expect(patchWidgetBlock(block, { reminder: { id: 'rem_1', dueAt: 2000 } })).toMatchObject({ timezone: 'UTC' });
+    expect(patchWidgetBlock(block, { reminder: { id: 'rem_1', timezone: 'z'.repeat(65) } })).toMatchObject({ timezone: 'z'.repeat(64) });
+  });
+
+  it('refreshes recurrence text with the shared description and removes one-time recurrence text', () => {
+    const recurrence = { freq: 'weekly' as const, interval: 2, byWeekday: [3, 1], count: 8 };
+    expect(patchWidgetBlock(reminder, { reminder: { id: 'rem_1', recurrence } }))
+      .toMatchObject({ recurrenceText: describeRecurrence(recurrence) });
+    expect(patchWidgetBlock(reminder, { reminder: { id: 'rem_1', recurrence: { freq: 'monthly', byMonthDay: [-1] } } }))
+      .toMatchObject({ recurrenceText: 'every month on the last day' });
+    const oneTime = patchWidgetBlock(reminder, { reminder: { id: 'rem_1', recurrence: null } });
+    expect(oneTime).not.toHaveProperty('recurrenceText');
+    expect(patchWidgetBlock(reminder, { reminder: { id: 'rem_1', dueAt: 2000 } })).toMatchObject({ recurrenceText: 'every day' });
+    expect(patchWidgetBlock(reminder, { reminder: { id: 'rem_1', recurrence: { freq: 'never' } } })).toBeNull();
+  });
+});
+
+describe('patchWidgetBlock memory', () => {
+  const first = { id: 'mem_1', kind: 'preference', label: 'Window seats', content: 'Choose a window seat.', status: 'active' as const };
+  const sameLabel = { ...first, id: 'mem_2' };
+  const memory: UIBlock = { type: 'memory', nodes: [first, sameLabel] };
+
+  it('marks only matching ids forgotten in nested blocks and preserves their content', () => {
+    const block: UIBlock = { type: 'accordion', items: [{ id: 'memories', title: 'Memories', children: [memory] }] };
+    const patched = patchWidgetBlock(block, { forgotten: ['Window seats'], ids: ['mem_1'] });
+    expect(patched).toEqual({ type: 'accordion', items: [{ id: 'memories', title: 'Memories', children: [{ type: 'memory', nodes: [{ ...first, status: 'forgotten' }, sameLabel] }] }] });
+    expect(first.status).toBe('active');
+    expect(patched && resolveStoredAction(patched, widgetActionId.memoryForget('mem_1'))).toBeNull();
+    expect(patched && resolveStoredAction(patched, widgetActionId.memoryForget('mem_2'))?.action)
+      .toMatchObject({ tool: 'forget', input: { ids: ['mem_2'] } });
+    expect(patched && patchWidgetBlock(patched, { forgotten: ['Window seats'], ids: ['mem_1'] })).toBeNull();
+  });
+
+  it('requires ids from a successful forget receipt instead of matching labels', () => {
+    expect(patchWidgetBlock(memory, { forgotten: ['Window seats'] })).toBeNull();
+    expect(patchWidgetBlock(memory, { ids: ['mem_1'] })).toBeNull();
+    expect(patchWidgetBlock(memory, { forgotten: [], ids: [] })).toBeNull();
+    expect(patchWidgetBlock(memory, { forgotten: ['Window seats'], ids: ['missing'] })).toBeNull();
+    expect(patchWidgetBlock(memory, { forgotten: ['Window seats'], ids: [1] })).toBeNull();
   });
 });

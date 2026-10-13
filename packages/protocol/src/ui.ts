@@ -123,6 +123,7 @@ export const TableBlockSchema = z.object({
         label: z.string().max(100),
         align: z.enum(['left', 'center', 'right']).optional(),
         format: z.enum(['text', 'number', 'currency', 'percent', 'date']).optional(),
+        currency: z.string().regex(/^[A-Z]{3}$/).optional(),
       }),
     )
     .min(1)
@@ -315,6 +316,7 @@ export const CountdownBlockSchema = z.object({
   label: z.string().max(200),
   /** Epoch ms. */
   until: z.number(),
+  timezone: z.string().max(64).optional(),
   doneText: z.string().max(200).optional(),
 });
 
@@ -324,6 +326,7 @@ export const ReminderBlockSchema = z.object({
   type: z.literal('reminder'),
   reminderId: z.string().min(1).max(64),
   title: z.string().max(300),
+  notes: z.string().max(5000).optional(),
   dueAt: z.number(),
   timezone: z.string().max(64).optional(),
   recurrenceText: z.string().max(200).optional(),
@@ -432,7 +435,7 @@ export const MemoryBlockSchema = z.object({
         kind: z.string().max(30),
         label: z.string().max(300),
         content: z.string().max(2000).optional(),
-        status: z.enum(['active', 'archived', 'superseded']).optional(),
+        status: z.enum(['active', 'archived', 'superseded', 'forgotten']).optional(),
       }),
     )
     .min(1)
@@ -802,7 +805,27 @@ function fmtTime(ms: number, timezone?: string): string {
 }
 
 function actionsText(actions: UIAction[] | undefined): string {
-  return actions && actions.length ? actions.map((a) => `[${a.label}]`).join(' ') : '';
+  return actions && actions.length ? actions.map((a) => `[${a.label}]${a.kind === 'link' ? ` <${a.url}>` : ''}`).join(' ') : '';
+}
+
+/** Shared table formatting for visual clients and plain-text fallbacks. */
+export function formatTableCell(value: string | number | boolean | null | undefined, format: string | undefined, locale = 'en-US', currency = 'USD'): string {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'boolean') return value ? '✓' : '✗';
+  try {
+    if (typeof value === 'number') {
+      if (format === 'currency') return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(value);
+      if (format === 'percent') return new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 1 }).format(value);
+      if (format !== 'date') return new Intl.NumberFormat(locale, { maximumFractionDigits: 4 }).format(value);
+    }
+    if (format === 'date') {
+      const date = new Date(value);
+      if (!Number.isNaN(date.getTime())) return new Intl.DateTimeFormat(locale, { dateStyle: 'medium' }).format(date);
+    }
+  } catch {
+    // Invalid stored formats fall back to their original value.
+  }
+  return String(value);
 }
 
 /** Render a block tree as readable plain text (CLI, notifications, model summaries). */
@@ -837,18 +860,18 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       block.items.forEach((item, i) => {
         const bullet = block.ordered ? `${i + 1}.` : '-';
         const extra = [item.subtitle, item.meta, item.badge].filter(Boolean).join(' · ');
-        push(`${bullet} ${item.title}${extra ? ` — ${extra}` : ''}${item.action ? ` [${item.action.label}]` : ''}`);
+        push(`${bullet} ${item.title}${extra ? ` — ${extra}` : ''}${item.action ? ` ${actionsText([item.action])}` : ''}`);
       });
       break;
     case 'table': {
       if (block.caption) push(block.caption);
       const cols = block.columns;
-      const cell = (v: unknown) => (v === null || v === undefined ? '' : String(v));
-      const widths = cols.map((c) => Math.min(40, Math.max(c.label.length, ...block.rows.map((r) => cell(r[c.key]).length))));
+      const cell = (r: TableBlock['rows'][number], c: TableBlock['columns'][number]) => formatTableCell(r[c.key], c.format, 'en-US', c.currency);
+      const widths = cols.map((c) => Math.min(40, Math.max(c.label.length, ...block.rows.map((r) => cell(r, c).length))));
       const row = (vals: string[]) => vals.map((v, i) => v.slice(0, 40).padEnd(widths[i] ?? 0)).join(' │ ');
       push(row(cols.map((c) => c.label)));
       push(widths.map((w) => '─'.repeat(w)).join('─┼─'));
-      for (const r of block.rows.slice(0, 50)) push(row(cols.map((c) => cell(r[c.key]))));
+      for (const r of block.rows.slice(0, 50)) push(row(cols.map((c) => cell(r, c))));
       if (block.rows.length > 50) push(`… ${block.rows.length - 50} more rows`);
       break;
     }
@@ -869,12 +892,21 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       const pct = Math.round(block.value * 100);
       const filled = Math.round(block.value * 20);
       push(`${block.label ? `${block.label} ` : ''}[${'█'.repeat(filled)}${'░'.repeat(20 - filled)}] ${pct}%`);
+      if (block.caption) push(block.caption);
       break;
     }
     case 'form':
       push(`📝 ${block.title ?? 'Form'}`);
       if (block.description) push(block.description);
-      for (const f of block.fields) push(`  • ${f.label}${f.required ? ' *' : ''} (${f.kind})`);
+      for (const f of block.fields) {
+        push(`  • ${f.label}${f.required ? ' *' : ''} (${f.kind})`);
+        if (f.help) push(`    ${f.help}`);
+        if (f.placeholder) push(`    ${f.placeholder}`);
+        if (f.options?.length) push(`    Options: ${f.options.map((o) => `${o.label} (${o.value})`).join(', ')}`);
+        const bounds = [f.min !== undefined ? `min ${f.min}` : '', f.max !== undefined ? `max ${f.max}` : '', f.step !== undefined ? `step ${f.step}` : ''].filter(Boolean);
+        if (bounds.length) push(`    ${bounds.join(', ')}`);
+        if (f.defaultValue !== undefined) push(`    Default: ${Array.isArray(f.defaultValue) ? f.defaultValue.join(', ') : f.defaultValue}`);
+      }
       push(`  [${block.submitLabel ?? 'Submit'}]`);
       break;
     case 'buttons':
@@ -884,12 +916,13 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       push(`🖼  ${block.alt}${block.caption ? ` — ${block.caption}` : ''}`);
       break;
     case 'gallery':
-      for (const img of block.images) push(`🖼  ${img.alt}`);
+      for (const img of block.images) push(`🖼  ${img.alt}${img.caption ? ` — ${img.caption}` : ''}`);
       break;
     case 'callout':
       push(`${TONE_PREFIX[block.tone]} ${block.title ? `${block.title}: ` : ''}${block.text}`);
       break;
     case 'code':
+      if (block.filename) push(block.filename);
       push(`\`\`\`${block.language ?? ''}\n${block.code}\n\`\`\``);
       break;
     case 'quote':
@@ -932,16 +965,17 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       push(block.items.map((t) => `#${t.label}`).join(' '));
       break;
     case 'countdown':
-      push(`⏳ ${block.label} — ${fmtTime(block.until)}`);
+      push(`⏳ ${block.label} — ${fmtTime(block.until, block.timezone)}`);
       break;
     case 'reminder':
       push(
         `⏰ ${block.title} — ${fmtTime(block.dueAt, block.timezone)}${block.recurrenceText ? ` (${block.recurrenceText})` : ''} [${block.status}]`,
       );
+      if (block.notes) push(block.notes);
       break;
     case 'tasks':
       if (block.title) push(block.title);
-      for (const t of block.tasks) push(`  ${t.done ? '☑' : '☐'} ${t.title}${t.dueAt ? ` (due ${fmtTime(t.dueAt)})` : ''}`);
+      for (const t of block.tasks) push(`  ${t.done ? '☑' : '☐'} ${t.title}${t.dueAt != null ? ` (due ${fmtTime(t.dueAt)})` : ''}${t.priority ? ` [priority ${t.priority}]` : ''}`);
       break;
     case 'changes':
       push(block.title ?? 'Proposed changes');
@@ -950,6 +984,7 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
         const applied = item.status === 'applied' ? ' (applied)' : '';
         if (item.kind === 'reminder.create') {
           push(`• New reminder: ${item.title}, ${fmtTime(item.dueAt, block.timezone ?? item.timezone)}${applied}`);
+          if (item.notes) push(`  ${item.notes}`);
           continue;
         }
         const edits: string[] = [];
@@ -967,7 +1002,10 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       break;
     case 'memory':
       push(`🧠 ${block.title ?? 'Memory'}${block.note ? ` — ${block.note}` : ''}`);
-      for (const n of block.nodes) push(`  • [${n.kind}] ${n.label}`);
+      for (const n of block.nodes) {
+        push(`  • [${n.kind}] ${n.label}${n.status && n.status !== 'active' ? ` (${n.status})` : ''}`);
+        if (n.content && n.content !== n.label) push(`    ${n.content}`);
+      }
       break;
   }
   return lines.join('\n');
@@ -1034,7 +1072,7 @@ export function resolveWidgetAction(root: UIBlock, actionId: string, values?: Re
       const done = typeof values?.done === 'boolean' ? values.done : !task.done;
       return { id: actionId, label: done ? 'Complete task' : 'Reopen task', kind: 'tool', tool: 'update_task', input: { id: task.id, done } };
     }
-    if (b.type === 'memory' && verb.startsWith('memory.') && b.nodes.some((n) => n.id === arg)) {
+    if (b.type === 'memory' && verb.startsWith('memory.') && b.nodes.some((n) => n.id === arg && n.status !== 'forgotten')) {
       if (verb === 'memory.forget')
         return { id: actionId, label: 'Forget', kind: 'tool', tool: 'forget', input: { ids: [arg] }, style: 'danger', confirm: 'Forget this memory for good?' };
     }

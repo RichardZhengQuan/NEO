@@ -27,7 +27,7 @@ Times: tools accept `when`/`due` strings parsed by `parseDateTime(input, now, ti
 | `get_datetime` | read / auto | `{ timezone? }` | `{ epochMs, iso, local, timezone, weekday }` |
 | `calculate` | read / auto | `{ expression }` | `{ result }` via `evaluateExpression` (no eval) |
 | `create_reminder` | write / auto | `{ title, when, recurrence?: {freq, interval?, byWeekday?, byMonthDay?, count?, until?}, notes? }` | creates a reminder in the user's timezone. Output `{ reminder }` + **ui**: `reminder` block (the client draws Snooze/Done controls) |
-| `list_reminders` | read / auto | `{ status?: 'upcoming'\|'fired'\|'completed'\|'all', limit? }` | reminders + ui `list` |
+| `list_reminders` | read / auto | `{ status?: 'upcoming'\|'fired'\|'completed'\|'all', limit? }` | reminders + up to 10 top-level live `reminder` widgets; overflow adds a Show all link to `neo://reminders`; empty results show only the summary |
 | `update_reminder` | write / auto | `{ id, title?, when?, recurrence?: … \| null, notes? }` | updated reminder + ui `reminder` |
 | `snooze_reminder` | write / auto | `{ id, minutes }` | reminder |
 | `complete_reminder` | write / auto | `{ id }` | reminder |
@@ -38,15 +38,15 @@ Times: tools accept `when`/`due` strings parsed by `parseDateTime(input, now, ti
 | `delete_task` | dangerous / confirm | `{ id }` | `{ deleted }` |
 | `propose_changes` | read / auto | `{ title?, note?, changes: [{ kind: 'task.update', taskId, due?, title?, priority?, done? } \| { kind: 'reminder.create', title, when, notes? } \| { kind: 'reminder.update', reminderId, when?, title? }] }` | snapshots current values and returns proposed edits + **ui**: `changes` block; nothing is written |
 | `apply_change` (UI-only) | write / auto | `{ item: ChangeItem }` | applies one stored proposed item after checking its before state; output `{ change: { id, status: 'applied', reminderId? }, task? , reminder? }`. Reminder creation is idempotent through its `creationKey` |
-| `create_note` | write / auto | `{ title?, content, tags? }` | note |
-| `search_notes` | read / auto | `{ query?, tag?, limit? }` | notes (title + 200-char excerpt) + ui `list` |
-| `get_note` | read / auto | `{ id }` | full note |
-| `update_note` | write / auto | `{ id, title?, content?, append?, tags? }` | updates title/tags, or appends `content` when `append: true`; preserves existing text and refuses full-content replacement |
-| `replace_note` | dangerous / confirm | `{ id, content }` | replaces all note content after confirmation, including clearing it; title and tags stay unchanged |
+| `create_note` | write / auto | `{ title?, content, tags? }` | note + ui `card` preview (bounded title and ~1000-character Markdown excerpt) with an Open link |
+| `search_notes` | read / auto | `{ query?, tag?, limit? }` | notes (title + 200-char excerpt) + ui `list` with Open actions to `neo://notes/<id>` |
+| `get_note` | read / auto | `{ id }` | full note + bounded ui `card` preview with an Open link |
+| `update_note` | write / auto | `{ id, title?, content?, append?, tags? }` | updates title/tags, or appends `content` when `append: true`; preserves existing text and refuses full-content replacement; bounded ui `card` preview with an Open link |
+| `replace_note` | dangerous / confirm | `{ id, content }` | replaces all note content after confirmation, including clearing it; title and tags stay unchanged; bounded ui `card` preview with an Open link |
 | `delete_note` | dangerous / confirm | `{ id }` | `{ deleted }` |
 | `remember` | write / auto | `{ content, kind?, label?, importance?, entities?, pinned? }` | `memory.remember({ …, source: { by: 'tool', conversationId, messageId } })`, where `conversationId` is the episode id. Unavailable off the record. Ui: `memory` block (active → Forget) |
-| `recall` | read / auto | `{ query, limit? }` | `memory.recall({ text, limit, allowSensitive: ctx.allowSensitive })` → `[{ id, kind, label, content, reason }]` |
-| `forget` | dangerous / confirm | `{ query?, ids? }` | resolves ids (`findForForget(query)` when no ids). `describeCall` names them. Then `memory.forget(ids)` → `{ forgotten: [labels] }` |
+| `recall` | read / auto | `{ query, limit?, show? }` | `memory.recall({ text, limit, allowSensitive: ctx.allowSensitive })` → `[{ id, kind, label, content, reason }]`; `show: true` adds a `memory` block when results exist. Use it for requests about what NEO remembers; omit it for NEO's own lookups |
+| `forget` | dangerous / confirm | `{ query?, ids? }` | resolves ids (`findForForget(query)` when no ids). `describeCall` names them. Then `memory.forget(ids)` → `{ forgotten: [labels], ids }` so stored memory widgets stay forgotten |
 | `web_fetch` | external / auto | `{ url, maxChars? (default 20 000) }` | GET with 10 s timeout, 2 MB cap, only http(s). HTML → readable text (strip script/style/nav/footer, decode entities, collapse whitespace, keep title and link URLs). Output `{ url, title, text, truncated? }` with untrusted text. Titles are bounded to 300 characters. `maxChars` bounds the complete serialized JSON output, including metadata and escaping; `truncated: true` marks any omitted content. Text is shortened first, then title and unusually long URL metadata if necessary. **SSRF guard** (`src/net.ts`): resolve DNS through the system resolver and refuse loopback, private, link-local, CGNAT, metadata, unspecified and multicast addresses, including IPv4 embedded in IPv6, unless `allowPrivateNetwork`. The default transport pins the connection to the vetted addresses (no DNS-rebinding window). Redirects are followed manually (≤ 5) with the same check. `198.18.0.0/15` is allowed because some local proxies hand out fake IPs from it |
 | `web_search` | external / auto | `{ query, count? (≤ 10) }` | registered at runtime when AI search resolves to an engine. Supports SearXNG (`/search?format=json`), Brave (`api.search.brave.com/res/v1/web/search`) and Tavily (`api.tavily.com/search`). Output `{ query, results: [{ title, url, snippet }] }` (untrusted) + assistant `sources` part |
 | `render_ui` | read / auto | `{ blocks: object[] }` | validates with `validateUIBlocks`. Invalid input returns `isError` with the zod message so the model retries. Output `{ shown: true, text: uiBlocksToText(blocks).slice(0, 1000) }` + **ui**: the blocks |

@@ -26,6 +26,8 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  describeRecurrence,
+  formatTableCell,
   formSubmitActionId,
   UIBlockSchema,
   isSafeImageUrl,
@@ -86,7 +88,8 @@ export type OnUIAction = (action: UIAction, context: UIActionContext) => void | 
 
 /** Fresh state for live widgets (from the app's stores), keyed by id. */
 export interface LiveData {
-  reminders?: Record<string, Reminder>;
+  /** Null marks a known deletion; missing ids still use the saved snapshot. */
+  reminders?: Record<string, Reminder | null>;
   tasks?: Record<string, Task>;
   /** Current status of memories shown in memory widgets. */
   memories?: Record<string, { status: MemoryStatus }>;
@@ -319,24 +322,8 @@ function ListRenderer({ block, uiId, onAction }: BlockRendererProps & { block: L
   );
 }
 
-export function formatCell(value: string | number | boolean | null | undefined, format: string | undefined, locale: string): string {
-  if (value === null || value === undefined || value === '') return '—';
-  if (typeof value === 'boolean') return value ? '✓' : '✗';
-  try {
-    if (typeof value === 'number') {
-      if (format === 'currency') return new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD' }).format(value);
-      if (format === 'percent') return new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 1 }).format(value);
-      if (format === 'date') return formatDate(value, locale);
-      return new Intl.NumberFormat(locale, { maximumFractionDigits: 4 }).format(value);
-    }
-    if (format === 'date') {
-      const d = new Date(value);
-      if (!Number.isNaN(d.getTime())) return formatDate(d.getTime(), locale);
-    }
-  } catch {
-    // fall through
-  }
-  return String(value);
+export function formatCell(value: string | number | boolean | null | undefined, format: string | undefined, locale: string, currency = 'USD'): string {
+  return formatTableCell(value, format, locale, currency);
 }
 
 const TABLE_PAGE = 50;
@@ -365,7 +352,7 @@ function TableRenderer({ block }: { block: TableBlock }): ReactElement {
             <tr key={ri}>
               {block.columns.map((col) => (
                 <td key={col.key} style={{ textAlign: col.align ?? (numeric(col.format) ? 'right' : 'left') }}>
-                  {formatCell(row[col.key], col.format, locale)}
+                  {formatCell(row[col.key], col.format, locale, col.currency)}
                 </td>
               ))}
             </tr>
@@ -986,7 +973,7 @@ function CountdownRenderer({ block }: { block: CountdownBlock }): ReactElement {
   ];
   const visible = units[0]![0] > 0 ? units : units.slice(1);
   return (
-    <div className="neo-card neo-countdown" role="timer" aria-label={`${block.label}: ${formatDateTime(block.until, locale)}`}>
+    <div className="neo-card neo-countdown" role="timer" aria-label={`${block.label}: ${formatDateTime(block.until, locale, block.timezone)}`}>
       <span className="neo-countdown__label">{block.label}</span>
       <div className="neo-countdown__units" aria-hidden="true">
         {visible.map(([n, label], i) => (
@@ -996,7 +983,7 @@ function CountdownRenderer({ block }: { block: CountdownBlock }): ReactElement {
           </span>
         ))}
       </div>
-      <span className="neo-help">{formatDateTime(block.until, locale)}</span>
+      <span className="neo-help">{formatDateTime(block.until, locale, block.timezone)}</span>
     </div>
   );
 }
@@ -1010,10 +997,12 @@ function ReminderRenderer({ block, uiId, onAction, live }: BlockRendererProps & 
   const locale = useLocale();
   const runner = useActionRunner(onAction, uiId);
   const fresh = live?.reminders?.[block.reminderId];
-  const status = fresh?.status ?? block.status;
+  const status = fresh === null ? 'deleted' : fresh?.status ?? block.status;
   const dueAt = fresh?.dueAt ?? block.dueAt;
   const title = fresh?.title ?? block.title;
   const tz = fresh?.timezone ?? block.timezone;
+  const notes = fresh ? fresh.notes : block.notes;
+  const recurrenceText = fresh ? (fresh.recurrence ? describeRecurrence(fresh.recurrence) : undefined) : block.recurrenceText;
   const active = status === 'scheduled' || status === 'fired';
   const actions: UIAction[] = [
     { id: widgetActionId.reminderSnooze(block.reminderId, 10), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_10'), icon: 'alarm-clock', input: { id: block.reminderId, minutes: 10 } },
@@ -1033,15 +1022,16 @@ function ReminderRenderer({ block, uiId, onAction, live }: BlockRendererProps & 
               <time dateTime={new Date(dueAt).toISOString()}>{formatDateTime(dueAt, locale, tz)}</time>
               {active && <> · {formatRelative(dueAt, locale)}</>}
             </span>
-            {block.recurrenceText && (
+            {recurrenceText && (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                 <Icon name="repeat" size={12} />
-                {block.recurrenceText}
+                {recurrenceText}
               </span>
             )}
           </div>
+          {notes && <p className="neo-widget__notes" title={notes}>{notes}</p>}
         </div>
-        <Badge tone={REMINDER_TONE[status]}>{t(`reminder.status.${status}`)}</Badge>
+        <Badge tone={status === 'deleted' ? 'neutral' : REMINDER_TONE[status]}>{t(`reminder.status.${status}`)}</Badge>
       </div>
       {active && onAction && (
         <div className="neo-widget__actions">
@@ -1266,8 +1256,8 @@ function MemoryWidgetRenderer({ block, uiId, onAction, live }: BlockRendererProp
       </div>
       <div>
         {block.nodes.map((node) => {
-          const status = live?.memories?.[node.id]?.status ?? node.status ?? 'active';
-          const result = resolved[node.id];
+          const status = node.status === 'forgotten' ? node.status : live?.memories?.[node.id]?.status ?? node.status ?? 'active';
+          const result = status === 'forgotten' ? 'forgotten' : resolved[node.id];
           return (
             <div key={node.id} className="neo-mem-row">
               <div className="neo-mem-row__main">

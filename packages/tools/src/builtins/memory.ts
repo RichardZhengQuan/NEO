@@ -2,7 +2,7 @@
  * Memory tools: remember, recall and forget.
  */
 import { z } from 'zod';
-import { MemoryKindSchema, NeoError, defineTool, type MemoryNode, type MemoryService, type UIBlock } from '@neo/protocol';
+import { MemoryKindSchema, NeoError, SELF_MEMORY_ID, defineTool, type MemoryNode, type MemoryService, type UIBlock } from '@neo/protocol';
 import { clip } from './format.js';
 
 const SENSITIVE_LABEL = '(a sensitive memory)';
@@ -74,6 +74,7 @@ export function createMemoryTools(memory: MemoryService) {
     inputSchema: z.object({
       query: z.string().min(1).max(1000),
       limit: z.number().int().min(1).max(20).optional().describe('Default 8.'),
+      show: z.boolean().optional().describe('Set true when the user asks what NEO remembers; leave off for your own lookups.'),
     }),
     risk: 'read',
     defaultPermission: 'auto',
@@ -99,6 +100,13 @@ export function createMemoryTools(memory: MemoryService) {
       const hasSensitive = result.items.some((m) => m.node.sensitivity === 'sensitive');
       return {
         output: { memories },
+        ...(input.show && memories.length ? {
+          ui: [{
+            type: 'memory' as const,
+            title: 'Recalled memories',
+            nodes: result.items.map(({ node }) => ({ id: node.id, kind: clip(node.kind, 30), label: clip(node.label, 300), content: clip(node.content, 2000), status: node.status })),
+          }],
+        } : {}),
         summary: `${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} recalled`,
         ...(hasSensitive ? { sensitive: true } : {}),
       };
@@ -152,7 +160,7 @@ export function createMemoryTools(memory: MemoryService) {
       const deleted = await memory.forget(ids);
       for (const id of ids) labels.delete(id);
       if (deleted === 0) throw new NeoError('not_found', 'None of those memories exist (already forgotten?).');
-      return { output: { forgotten }, summary: `Forgot ${deleted} memor${deleted === 1 ? 'y' : 'ies'}`, ...(sensitive ? { sensitive: true } : {}) };
+      return { output: { forgotten, ids: ids.filter(id => id !== SELF_MEMORY_ID) }, summary: `Forgot ${deleted} memor${deleted === 1 ? 'y' : 'ies'}`, ...(sensitive ? { sensitive: true } : {}) };
     },
   });
 
