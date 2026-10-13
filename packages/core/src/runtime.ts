@@ -129,6 +129,11 @@ export class AgentRuntime implements AgentRuntimeApi {
       logger: this.logger,
       clock: this.clock,
       broadcast: (event) => this.broadcast(event),
+      patchConversationWidgets: (conversationId, result) => {
+        for (const message of this.conversations.messages(conversationId)) {
+          this.patchWidgets(message, result);
+        }
+      },
     };
     this.settingsStore.onChange((settings) => {
       this.configureSearchTool(settings);
