@@ -38,6 +38,7 @@ const en: Messages = {
   'nav.notes': 'Notes',
   'nav.settings': 'Settings',
   'nav.avatar': 'Avatar',
+  'nav.badge_label': '{name}, {count} due',
 
   // ── connection status ──
   'status.idle': 'Not connected',
@@ -856,6 +857,7 @@ const zhCN: Messages = {
   'nav.notes': '笔记',
   'nav.settings': '设置',
   'nav.avatar': '形象',
+  'nav.badge_label': '{name}，{count} 条待处理',
 
   'status.idle': '未连接',
   'status.connecting': '正在连接…',

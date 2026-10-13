@@ -31,8 +31,9 @@ function useBadges(): Partial<Record<NavDef['name'], number>> {
   return { reminders: due };
 }
 
-function RailButton({ label, className, current, onClick, children }: {
+function RailButton({ label, ariaLabel, className, current, onClick, children }: {
   label: string;
+  ariaLabel?: string;
   className: string;
   current?: boolean;
   onClick: () => void;
@@ -61,7 +62,7 @@ function RailButton({ label, className, current, onClick, children }: {
         clearTimer();
         if (!focused.current) setTooltipOpen(false);
       }}>
-      <button type="button" className={className} aria-label={label} aria-current={current ? 'page' : undefined} onClick={onClick}
+      <button type="button" className={className} aria-label={ariaLabel ?? label} aria-current={current ? 'page' : undefined} onClick={onClick}
         onFocus={() => {
           focused.current = true;
           clearTimer();
@@ -87,21 +88,27 @@ function RailButton({ label, className, current, onClick, children }: {
 function SidePanel({ route }: { route: Route }): ReactElement {
   const t = useT();
   const persona = useSession((s) => s.settings?.persona);
+  const wsStatus = useSession((s) => s.wsStatus);
   const badges = useBadges();
+  const homeAriaLabel = `${t('nav.timeline')}, ${t(`status.${wsStatus}`)}`;
   const go = (r: Route) => {
     setDrawer(false);
     navigate(r);
   };
-  const itemButton = (item: NavDef) => (
-    <RailButton key={item.name} className="nav-item" label={t(`nav.${item.name}`)} current={route.name === item.name} onClick={() => go(item.route)}>
-      <Icon name={item.icon} size={20} />
-      {badges[item.name] ? <span className="nav-item__count" aria-hidden="true">{badges[item.name]! > 9 ? '9+' : badges[item.name]}</span> : null}
-    </RailButton>
-  );
+  const itemButton = (item: NavDef) => {
+    const count = badges[item.name];
+    const ariaLabel = count ? t('nav.badge_label', { name: t(`nav.${item.name}`), count }) : undefined;
+    return (
+      <RailButton key={item.name} className="nav-item" label={t(`nav.${item.name}`)} ariaLabel={ariaLabel} current={route.name === item.name} onClick={() => go(item.route)}>
+        <Icon name={item.icon} size={20} />
+        {count ? <span className="nav-item__count" aria-hidden="true">{count > 9 ? '9+' : count}</span> : null}
+      </RailButton>
+    );
+  };
   return (
     <div className="side">
       <div className="side__head">
-        <RailButton className="side__brand" label={t('nav.timeline')} onClick={() => go({ name: 'timeline' })}>
+        <RailButton className="side__brand" label={t('nav.timeline')} ariaLabel={homeAriaLabel} onClick={() => go({ name: 'timeline' })}>
           <span className="side__avatar">
             <NeoAvatar avatar={persona?.avatar ?? null} size={32} animated={false} />
             <StatusDot />
@@ -142,12 +149,16 @@ function TabBar({ route }: { route: Route }): ReactElement {
   const badges = useBadges();
   return (
     <nav className="tabbar" aria-label={t('nav.main')}>
-      {NAV.map((item) => (
-        <button key={item.name} type="button" className="tabbar__item" aria-label={t(`nav.${item.name}`)} aria-current={route.name === item.name ? 'page' : undefined} onClick={() => navigate(item.route)}>
-          <Icon name={item.icon} size={24} />
-          {badges[item.name] ? <span className="tabbar__badge" aria-hidden="true">{badges[item.name]! > 9 ? '9+' : badges[item.name]}</span> : null}
-        </button>
-      ))}
+      {NAV.map((item) => {
+        const count = badges[item.name];
+        const ariaLabel = count ? t('nav.badge_label', { name: t(`nav.${item.name}`), count }) : t(`nav.${item.name}`);
+        return (
+          <button key={item.name} type="button" className="tabbar__item" aria-label={ariaLabel} aria-current={route.name === item.name ? 'page' : undefined} onClick={() => navigate(item.route)}>
+            <Icon name={item.icon} size={24} />
+            {count ? <span className="tabbar__badge" aria-hidden="true">{count > 9 ? '9+' : count}</span> : null}
+          </button>
+        );
+      })}
     </nav>
   );
 }
