@@ -51,10 +51,20 @@ Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In short:
 ## Pull requests
 
 1. Open an issue first for larger changes, so we can agree on the approach.
-2. Keep PRs focused. Include tests that fail without your change.
+2. Keep PRs focused. Include tests that fail without your change, and say in the PR which test fails when you put the old code back (the red check).
 3. `pnpm typecheck && pnpm test` must pass (CI runs them plus `pnpm build`).
 4. Update the relevant doc in `docs/` when you change behavior.
 5. New block types need the [block checklist](docs/GENERATIVE_UI.md#when-to-add-a-block).
+6. Fill in the template's Verification section: what you ran and on which commit, the red check, what you tried for real, and what you didn't run. A check you didn't run is listed as not run, never left out.
+7. Code that talks to a real service or device (AI providers, Sign in with ChatGPT, the relay, phone pairing) is tried against the real thing before anything is built on it. Until then the PR says so under Not run, and nobody calls it working.
+
+The owner merges only after CI has finished green on the PR's head commit (a cancelled run doesn't count), with `gh pr merge <N> --merge --match-head-commit <sha>` so nothing pushed after the review gets in.
+
+AI agents working on NEO also follow [AGENTS.md](AGENTS.md), [LESSONS.md](LESSONS.md) and [docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md).
+
+## Rules from lessons
+
+Rules that started as entries in [LESSONS.md](LESSONS.md) and were seen on three different days. Every review checks them. None yet.
 
 ## Reporting security issues
 
