@@ -31,7 +31,6 @@ import { navigate } from '../router.js';
 import { loadTasks, removeTask, removeTaskList, upsertTask, upsertTaskList, useData } from '../state/data.js';
 import { pushToast } from '../state/notifications.js';
 import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from '../state/session.js';
-import { openPlanTomorrow } from '../actions/plan-tomorrow.js';
 
 function listName(list: TaskList | undefined, t: (k: string) => string): string {
   if (!list) return t('tasks.inbox');
@@ -217,7 +216,6 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
   const t = useT();
   const confirm = useConfirm();
   const desktop = useIsDesktop();
-  const timezone = useSession((s) => s.settings?.timezone ?? 'UTC');
   const tasks = useData((s) => s.tasks);
   const lists = useData((s) => s.taskLists);
   const loaded = useData((s) => s.tasksLoaded);
@@ -288,18 +286,15 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
       <PageHeader
         title={desktop ? t('nav.tasks') : listName(current, t)}
         actions={
-          <>
-            {loaded && all.some((task) => !task.done) && <Button size="sm" variant="secondary" icon="calendar" onClick={() => openPlanTomorrow({ timezone })}>{t('plan.open')}</Button>}
-            {current && current.id !== INBOX_LIST_ID && (
-              <Menu
-                label={t('tasks.list_actions')}
-                items={[
-                  { label: t('tasks.rename_list'), icon: 'edit', onSelect: () => setListModal(current) },
-                  { label: t('tasks.delete_list'), icon: 'trash', danger: true, onSelect: () => void deleteList(current) },
-                ]}
-              />
-            )}
-          </>
+          current && current.id !== INBOX_LIST_ID && (
+            <Menu
+              label={t('tasks.list_actions')}
+              items={[
+                { label: t('tasks.rename_list'), icon: 'edit', onSelect: () => setListModal(current) },
+                { label: t('tasks.delete_list'), icon: 'trash', danger: true, onSelect: () => void deleteList(current) },
+              ]}
+            />
+          )
         }
       />
       <div style={{ display: 'flex', flex: 1, minHeight: 0, flexDirection: desktop ? 'row' : 'column' }}>

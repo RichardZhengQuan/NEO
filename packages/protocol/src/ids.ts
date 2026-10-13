@@ -13,6 +13,7 @@ export const ID_PREFIXES = [
   'cons', // consolidation report
   'rem', // reminder
   'task', // task
+  'chg', // proposed change item
   'list', // task list
   'note', // note
   'ntf', // notification

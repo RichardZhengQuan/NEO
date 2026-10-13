@@ -345,6 +345,76 @@ export const TasksBlockSchema = z.object({
     .max(100),
 });
 
+export const TaskFieldsSchema = z.object({
+  dueAt: z.number().nullable().optional(),
+  title: z.string().min(1).max(1000).optional(),
+  priority: z.number().int().min(0).max(3).optional(),
+  done: z.boolean().optional(),
+}).strict();
+export type TaskFields = z.infer<typeof TaskFieldsSchema>;
+
+export const ReminderFieldsSchema = z.object({
+  dueAt: z.number().optional(),
+  title: z.string().min(1).max(500).optional(),
+}).strict();
+export type ReminderFields = z.infer<typeof ReminderFieldsSchema>;
+
+function matchingFields(item: { before: object; after: object }): boolean {
+  const before = Object.keys(item.before);
+  const after = Object.keys(item.after);
+  return after.length > 0 && before.length === after.length
+    && after.every((key) => before.includes(key))
+    && Object.values(item.before).every((value) => value !== undefined)
+    && Object.values(item.after).every((value) => value !== undefined);
+}
+
+const changeItemBase = {
+  id: z.string().min(1).max(64),
+  status: z.enum(['pending', 'applied']).optional(),
+};
+
+/** Trusted before/after snapshots created by productivity tools, never by the model. */
+export const ChangeItemSchema = z.discriminatedUnion('kind', [
+  z.object({
+    ...changeItemBase,
+    kind: z.literal('task.update'),
+    taskId: z.string().min(1).max(64),
+    title: z.string().max(500),
+    before: TaskFieldsSchema,
+    after: TaskFieldsSchema,
+  }).refine(matchingFields, 'Before must contain exactly the fields in a non-empty after.'),
+  z.object({
+    ...changeItemBase,
+    kind: z.literal('reminder.create'),
+    title: z.string().min(1).max(500),
+    dueAt: z.number(),
+    timezone: z.string().max(64).optional(),
+    notes: z.string().max(5000).optional(),
+    creationKey: z.uuid(),
+    reminderId: z.string().min(1).max(64).optional(),
+  }),
+  z.object({
+    ...changeItemBase,
+    kind: z.literal('reminder.update'),
+    reminderId: z.string().min(1).max(64),
+    title: z.string().max(500),
+    before: ReminderFieldsSchema,
+    after: ReminderFieldsSchema,
+  }).refine(matchingFields, 'Before must contain exactly the fields in a non-empty after.'),
+]);
+export type ChangeItem = z.infer<typeof ChangeItemSchema>;
+
+/** Reviewable edits; each pending item applies its stored snapshot through apply_change. */
+export const ChangesBlockSchema = z.object({
+  ...blockId,
+  type: z.literal('changes'),
+  title: z.string().max(200).optional(),
+  note: z.string().max(500).optional(),
+  timezone: z.string().max(64).optional(),
+  items: z.array(ChangeItemSchema).min(1).max(50)
+    .refine((items) => new Set(items.map((item) => item.id)).size === items.length, 'Change item ids must be unique.'),
+});
+
 /** Shows memories NEO just formed or recalled, with forget controls. */
 export const MemoryBlockSchema = z.object({
   ...blockId,
@@ -389,6 +459,7 @@ export type TagsBlock = z.infer<typeof TagsBlockSchema>;
 export type CountdownBlock = z.infer<typeof CountdownBlockSchema>;
 export type ReminderBlock = z.infer<typeof ReminderBlockSchema>;
 export type TasksBlock = z.infer<typeof TasksBlockSchema>;
+export type ChangesBlock = z.infer<typeof ChangesBlockSchema>;
 export type MemoryBlock = z.infer<typeof MemoryBlockSchema>;
 
 export interface CardBlock {
@@ -455,6 +526,7 @@ export type UIBlock =
   | CountdownBlock
   | ReminderBlock
   | TasksBlock
+  | ChangesBlock
   | MemoryBlock;
 
 export type UIBlockType = UIBlock['type'];
@@ -488,6 +560,7 @@ export const UIBlockSchema: z.ZodType<UIBlock> = z.lazy(() =>
     CountdownBlockSchema,
     ReminderBlockSchema,
     TasksBlockSchema,
+    ChangesBlockSchema,
     MemoryBlockSchema,
   ]),
 );
@@ -567,6 +640,7 @@ export const UI_BLOCK_TYPES: readonly UIBlockType[] = [
   'countdown',
   'reminder',
   'tasks',
+  'changes',
   'memory',
 ];
 
@@ -591,6 +665,18 @@ export function childBlocks(block: UIBlock): UIBlock[] {
     default:
       return [];
   }
+}
+
+export const TOOL_ONLY_BLOCK_TYPES = ['changes'] as const;
+
+/** Find a tool-only widget anywhere in a block tree, including closed containers. */
+export function findToolOnlyBlock(blocks: readonly UIBlock[]): UIBlock | null {
+  for (const block of blocks) {
+    if (TOOL_ONLY_BLOCK_TYPES.some((type) => type === block.type)) return block;
+    const nested = findToolOnlyBlock(childBlocks(block));
+    if (nested) return nested;
+  }
+  return null;
 }
 
 /** Every action reachable in a block tree (card actions, buttons, list item actions). */
@@ -643,7 +729,23 @@ export function extractInlineUI(text: string): { text: string; blocks: UIBlock[]
   const stripped = text.replace(/```neo-ui\s*\n([\s\S]*?)```/g, (_m, json: string) => {
     try {
       const result = validateUIBlocks(JSON.parse(json));
-      if (result.ok) blocks.push(...result.blocks);
+      if (result.ok) {
+        const filter = (list: UIBlock[]): UIBlock[] => list.flatMap((block): UIBlock[] => {
+          if (TOOL_ONLY_BLOCK_TYPES.some((type) => type === block.type)) {
+            errors.push('The changes block is only available via propose_changes, not inline UI.');
+            return [];
+          }
+          switch (block.type) {
+            case 'card': return [{ ...block, ...(block.children ? { children: filter(block.children) } : {}) }];
+            case 'grid':
+            case 'stack': return [{ ...block, children: filter(block.children) }];
+            case 'tabs': return [{ ...block, tabs: block.tabs.map((tab) => ({ ...tab, children: filter(tab.children) })) }];
+            case 'accordion': return [{ ...block, items: block.items.map((item) => ({ ...item, children: filter(item.children) })) }];
+            default: return [block];
+          }
+        });
+        blocks.push(...filter(result.blocks));
+      }
       else errors.push(result.error);
     } catch (e) {
       errors.push(`Invalid neo-ui JSON: ${(e as Error).message}`);
@@ -818,6 +920,28 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       if (block.title) push(block.title);
       for (const t of block.tasks) push(`  ${t.done ? '☑' : '☐'} ${t.title}${t.dueAt ? ` (due ${fmtTime(t.dueAt)})` : ''}`);
       break;
+    case 'changes':
+      push(block.title ?? 'Proposed changes');
+      if (block.note) push(block.note);
+      for (const item of block.items) {
+        const applied = item.status === 'applied' ? ' (applied)' : '';
+        if (item.kind === 'reminder.create') {
+          push(`• New reminder: ${item.title}, ${fmtTime(item.dueAt, block.timezone ?? item.timezone)}${applied}`);
+          continue;
+        }
+        const edits: string[] = [];
+        if (item.after.dueAt !== undefined) {
+          const time = (value: number | null | undefined) => value == null ? 'No due date' : fmtTime(value, block.timezone);
+          edits.push(`due ${time(item.before.dueAt)} → ${time(item.after.dueAt)}`);
+        }
+        if (item.after.title !== undefined) edits.push(`title ${item.before.title} → ${item.after.title}`);
+        if (item.kind === 'task.update') {
+          if (item.after.priority !== undefined) edits.push(`priority ${item.before.priority} → ${item.after.priority}`);
+          if (item.after.done !== undefined) edits.push(item.after.done ? 'Mark done' : 'Reopen');
+        }
+        push(`• ${item.title}: ${edits.join('; ')}${applied}`);
+      }
+      break;
     case 'memory':
       push(`🧠 ${block.title ?? 'Memory'}${block.note ? ` — ${block.note}` : ''}`);
       for (const n of block.nodes) push(`  • [${n.kind}] ${n.label}`);
@@ -834,7 +958,7 @@ export function uiBlocksToText(blocks: UIBlock[]): string {
 
 /**
  * Built-in controls of live widgets (task checkboxes, reminder snooze/done,
- * memory forget). Clients send these action ids to the
+ * memory forget, proposed change apply). Clients send these action ids to the
  * ui-action endpoint; the server resolves them against the STORED block with
  * {@link resolveWidgetAction}, so a client can only act on items the block shows.
  */
@@ -843,6 +967,7 @@ export const widgetActionId = {
   reminderSnooze: (minutes: number) => `reminder.snooze:${minutes}`,
   reminderComplete: () => 'reminder.complete',
   memoryForget: (nodeId: string) => `memory.forget:${nodeId}`,
+  changeApply: (itemId: string) => `change.apply:${itemId}`,
 } as const;
 
 function allBlocks(root: UIBlock): UIBlock[] {
@@ -859,6 +984,10 @@ function allBlocks(root: UIBlock): UIBlock[] {
 export function resolveWidgetAction(root: UIBlock, actionId: string, values?: Record<string, unknown>): UIAction | null {
   const [verb, arg = ''] = actionId.split(/:(.*)/s, 2) as [string, string | undefined];
   for (const b of allBlocks(root)) {
+    if (b.type === 'changes' && verb === 'change.apply') {
+      const item = b.items.find((item) => item.id === arg && item.status !== 'applied');
+      if (item) return { id: actionId, label: 'Apply change', kind: 'tool', tool: 'apply_change', input: { item } };
+    }
     if (b.type === 'tasks' && verb === 'task.toggle') {
       const task = b.tasks.find((t) => t.id === arg);
       if (!task) continue;

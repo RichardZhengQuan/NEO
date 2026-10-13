@@ -30,7 +30,6 @@ const OnboardingScreen = lazyScreen(() => import('./screens/OnboardingScreen.js'
 const RemindersScreen = lazyScreen(() => import('./screens/RemindersScreen.js').then((m) => ({ default: m.RemindersScreen })));
 const SettingsScreen = lazyScreen(() => import('./screens/SettingsScreen.js').then((m) => ({ default: m.SettingsScreen })));
 const TasksScreen = lazyScreen(() => import('./screens/TasksScreen.js').then((m) => ({ default: m.TasksScreen })));
-const PlanTomorrowScreen = lazyScreen(() => import('./screens/PlanTomorrowScreen.js').then((m) => ({ default: m.PlanTomorrowScreen })));
 
 function ScreenFallback(): ReactElement {
   return (
@@ -149,8 +148,6 @@ function useShortcuts(): void {
 
 function Screen({ route }: { route: Route }): ReactElement {
   switch (route.name) {
-    case 'plan-tomorrow':
-      return <PlanTomorrowScreen date={route.date} />;
     case 'memory':
       return <MemoryScreen tab={route.tab} nodeId={route.nodeId} />;
     case 'reminders':

@@ -11,13 +11,13 @@ import { createNoteTools } from './notes.js';
 import { createMemoryTools } from './memory.js';
 import { createWebFetchTool, createWebSearchTool } from './web.js';
 import { renderUiTool } from './render_ui.js';
-import { createPlanTomorrowTool } from './plan_tomorrow.js';
+import { createChangeTools } from './changes.js';
 
 export function createBuiltinTools(deps: BuiltinToolDeps): ToolDefinition[] {
   const tools: ToolDefinition[] = [
     getDatetimeTool,
     calculateTool,
-    createPlanTomorrowTool(deps.stores),
+    ...createChangeTools(deps.stores),
     ...createReminderTools(deps.stores),
     ...createTaskTools(deps.stores),
     ...createNoteTools(deps.stores),

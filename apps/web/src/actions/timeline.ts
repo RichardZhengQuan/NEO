@@ -255,17 +255,20 @@ export async function runUiAction(
     }
   }
 
+  const quietWidget = input.action.id.startsWith('change.apply:');
   switch (res.kind) {
     case 'turn':
       applyTurnResponse(res);
       return;
     case 'tool':
       if (res.isError) {
-        pushToast({ tone: 'error', title: res.summary ?? t('chat.action_failed') });
-        throw new Error(res.summary ?? 'tool failed');
+        const error = typeof res.output === 'object' && res.output !== null && 'error' in res.output && typeof res.output.error === 'string' ? res.output.error : undefined;
+        // The changes widget shows each item's result in its own row.
+        if (!quietWidget) pushToast({ tone: 'error', title: error ?? res.summary ?? t('chat.action_failed') });
+        throw new Error(error ?? res.summary ?? 'tool failed');
       }
       // Quiet success for live widgets (the widget itself updates); others get a confirmation.
-      if (!/^(task\.toggle|reminder\.|memory\.)/.test(input.action.id) || res.summary) {
+      if (!quietWidget && (!/^(task\.toggle|reminder\.|memory\.)/.test(input.action.id) || res.summary)) {
         pushToast({ tone: 'success', title: res.summary ?? t('chat.action_done'), icon: 'check-circle' });
       }
       if (input.action.id.startsWith('memory.') || (input.action.kind === 'tool' && /memory|forget|remember/.test(input.action.tool))) {
