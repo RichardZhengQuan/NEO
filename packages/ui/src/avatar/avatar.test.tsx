@@ -10,6 +10,7 @@ import {
 import { PORTRAIT_ART } from './art.js';
 import { PORTRAITS } from './portraits.data.js';
 import { NeoAvatar } from './neo-avatar.js';
+import { AVATAR_CSS } from './styles.js';
 import { AvatarPicker } from './avatar-picker.js';
 import { useAvatarState, type AvatarActivity } from './use-avatar-state.js';
 
@@ -100,6 +101,20 @@ describe('NeoAvatar', () => {
     const root = container.querySelector('.neo-av') as HTMLElement;
     expect(root.classList.contains('neo-av--still')).toBe(true);
     expect(root.style.width).toBe('28px');
+  });
+
+  it('shows a half-open mouth for flap avatars while speaking with motion off', () => {
+    const { container } = render(
+      <NeoAvatar avatar={{ kind: 'boy', bg: '#EEE2DF' }} state="speaking" animated={false} />,
+    );
+    const root = container.querySelector('.neo-av')!;
+    expect(root.classList.contains('neo-av--still')).toBe(true);
+    expect(root.getAttribute('data-state')).toBe('speaking');
+    expect(container.querySelectorAll('.neo-av-flap-half').length).toBeGreaterThan(0);
+    // CSS rules can't be tested via jsdom computed styles; verify they're present in
+    // the exported stylesheet instead.
+    expect(AVATAR_CSS).toContain('.neo-av--still[data-state=speaking] .neo-av-flap-half{opacity:1}');
+    expect(AVATAR_CSS).toContain('@media (prefers-reduced-motion:reduce){.neo-av[data-state=speaking] .neo-av-flap-half{opacity:1}}');
   });
 
   it('injects its stylesheet once', () => {

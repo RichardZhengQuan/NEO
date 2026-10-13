@@ -66,6 +66,8 @@ export const AVATAR_CSS = `
 
 .neo-av--still *{animation:none!important}
 @media (prefers-reduced-motion:reduce){.neo-av *{animation:none!important;transition:none!important}}
+.neo-av--still[data-state=speaking] .neo-av-flap-half{opacity:1}
+@media (prefers-reduced-motion:reduce){.neo-av[data-state=speaking] .neo-av-flap-half{opacity:1}}
 
 /* ── picker ── */
 .neo-avp{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;font-size:14px;color:var(--neo-text,#111118)}
