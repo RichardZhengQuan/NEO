@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig, startServer } from '@neo/server';
 import QRCode from 'qrcode';
@@ -78,5 +79,47 @@ describe('serve startup owner-token disclosure', () => {
   it('local startup shows the owner token with --show-token when stdout is captured', async () => {
     const banner = await startup('local', false, true);
     expect(banner).toContain(ownerToken);
+  });
+});
+
+describe('serve data directory configuration', () => {
+  it('config-file dataDir: loadConfig is called without a dataDir override when only --config is given', async () => {
+    vi.stubEnv('NEO_DATA_DIR', '');
+    vi.mocked(loadConfig).mockReturnValue({
+      mode: 'local',
+      dataDir: '/from/config/file',
+      server: {},
+    } as ReturnType<typeof loadConfig>);
+    void runServe({ config: '/some/config.json' }).catch(() => {/* ignore keep-alive */});
+    await vi.waitFor(() => expect(loadConfig).toHaveBeenCalled());
+    const callArgs = vi.mocked(loadConfig).mock.calls[0]![0]!;
+    expect(callArgs.overrides?.dataDir).toBeUndefined();
+    expect(callArgs.path).toBe('/some/config.json');
+  });
+
+  it('leaves NEO_DATA_DIR to loadConfig when no --data-dir flag is given', async () => {
+    vi.stubEnv('NEO_DATA_DIR', '/from/env');
+    vi.mocked(loadConfig).mockReturnValue({
+      mode: 'local',
+      dataDir: '/from/env',
+      server: {},
+    } as ReturnType<typeof loadConfig>);
+    void runServe({ config: '/some/config.json' }).catch(() => {/* ignore keep-alive */});
+    await vi.waitFor(() => expect(loadConfig).toHaveBeenCalled());
+    const callArgs = vi.mocked(loadConfig).mock.calls[0]![0]!;
+    expect(callArgs.overrides?.dataDir).toBeUndefined();
+  });
+
+  it('expands an explicit --data-dir flag into an override ahead of NEO_DATA_DIR', async () => {
+    vi.stubEnv('NEO_DATA_DIR', '/from/env');
+    vi.mocked(loadConfig).mockReturnValue({
+      mode: 'local',
+      dataDir: homedir(),
+      server: {},
+    } as ReturnType<typeof loadConfig>);
+    void runServe({ config: '/some/config.json', dataDir: '~' }).catch(() => {/* ignore keep-alive */});
+    await vi.waitFor(() => expect(loadConfig).toHaveBeenCalled());
+    const callArgs = vi.mocked(loadConfig).mock.calls[0]![0]!;
+    expect(callArgs.overrides?.dataDir).toBe(homedir());
   });
 });
