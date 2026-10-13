@@ -183,7 +183,11 @@ export class AgentRuntime implements AgentRuntimeApi {
       const now = this.clock();
       const lastAt = current?.lastMessageAt ?? history.at(-1)?.createdAt;
       const gap = lastAt !== undefined && lastAt !== null && now - lastAt >= settings.timeline.episodeGapMinutes * 60_000;
-      const previousSearchMode = current && (this.episodeSearchModes.get(current.id) ?? (current.toolset?.includes('web_search') ? 'engine' : 'off'));
+      const previousSearchMode = current && (
+        this.episodeSearchModes.get(current.id) ??
+        current.searchMode ??
+        (current.toolset?.includes('web_search') ? 'engine' : 'off')
+      );
       const searchChanged = current?.toolset !== null && previousSearchMode !== searchMode;
       if (current && (gap || searchChanged || (current.offRecord ?? current.incognito) !== offRecord)) {
         this.conversations.closeEpisode(current.id);
@@ -265,6 +269,7 @@ export class AgentRuntime implements AgentRuntimeApi {
     try {
       const searchMode = this.searchMode(settings, adapter, model);
       this.episodeSearchModes.set(conv.id, searchMode);
+      if (conv.searchMode !== searchMode) this.conversations.update(conv.id, { searchMode });
       const handle = await startTurn(this.services, { record, conversation: conv, parts, adapter, model, settings, searchMode, release, ...context });
       this.turnDone.set(record.turnId, handle.done);
       void handle.done.then(() => this.turnDone.delete(record.turnId));

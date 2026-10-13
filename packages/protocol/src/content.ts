@@ -231,6 +231,8 @@ export const ConversationSchema = z.object({
   ephemeral: z.boolean().optional(),
   startedAt: z.number().optional(),
   closedAt: z.number().nullable().optional(),
+  /** Resolved search mode recorded at the first turn. Persists across restarts so the episode boundary check is stable. */
+  searchMode: z.enum(['native', 'engine', 'off']).optional(),
 });
 export type Conversation = z.infer<typeof ConversationSchema>;
 
