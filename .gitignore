@@ -19,3 +19,6 @@ coverage/
 # generated native projects (run `npx cap add ios|android`)
 apps/mobile/ios/
 apps/mobile/android/
+
+# backups of AGENTS.md and CLAUDE.md kept by agent tools
+.one-mind/

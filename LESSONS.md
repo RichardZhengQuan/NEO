@@ -1,0 +1,84 @@
+# Lessons
+
+Mistakes NEO has already made, and a few things that went right, so no agent makes them twice. Read this before you start work.
+
+The nightly lessons loop ([docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md)) adds entries from what merged that day. A lesson seen on three different days becomes a rule in [CONTRIBUTING.md](CONTRIBUTING.md) and leaves this file. Each entry looks like this:
+
+```
+## <One sentence: the rule>
+
+- <What happened, with PRs, commits or CI runs, and what it cost>
+- Fixed in <PR or commit>.
+- Done right: <an example of doing it right, if there is one>
+- Seen N× (YYYY-MM-DD, ...).
+```
+
+## Merge only after CI has finished green on the PR's head commit, and merge one PR at a time
+
+- #12 was merged 22 seconds after its CI run started; the run (38218092424) finished 92 seconds after the merge. #26 was merged 32 seconds before its run on the head commit (38353710923) finished. Both runs passed, by luck: a failure wouldn't have stopped either merge.
+- #16, #17, #18 and #19 were merged within 43 seconds. Each merge cancelled the CI run of the one before, so only #19's merge commit was ever tested on `main` (#14's run was cancelled the same way). On 2026-10-13, #23 and #24 were merged 5 seconds apart and #23's run (38347786676) was cancelled.
+- Fixed in #27: CI no longer cancels runs on `main`. Requiring the `check` job before GitHub allows a merge is a branch-protection setting only the owner can turn on.
+- Seen 2× (2026-10-12, 2026-10-13).
+
+## Read every review comment, from people or bots, before merging, and fix each finding or say in the PR why it waits
+
+- #1 was merged 22 seconds after Codex posted three inline findings. #3 fixed the 11 findings of a separate review, which covered only one of the three. The other two are still open: `neo serve --config <file>` ignores the file's `dataDir` and opens `~/.neo`, so NEO looks like it lost all its data (`packages/cli/src/commands/serve.ts`); and moving a parent task to another list hides its subtasks (`apps/web/src/screens/TasksScreen.tsx`).
+- #2 was merged with an unanswered Codex finding too (see the animation entry below).
+- Seen 1× (2026-10-11).
+
+## Get the independent review before merging, not after
+
+- #1 put the whole codebase on `main` with CI as the only check. The independent review afterwards found 11 bugs, 8 of them P1, including a client-supplied `apiKeySecret` that let a paired device send another provider's key to any URL, and sensitive memories replayed to cloud models. #3 fixed them.
+- Seen 1× (2026-10-11).
+
+## When you fix one case of a flaky pattern, find every case and fix them all in the same PR
+
+- #6 replaced one `vi.waitFor` poll in the relay session-cap test while its own stress run showed another poll in the same file failing 3 times in 24. #9 had to come back for that poll, and #11 for the rest.
+- Single-sample wall-clock assertions in the memory and tools tests failed under load one at a time, and took #5, #8 and #10 to replace.
+- Done right: #11 converted every remaining wait in the file and showed with stress runs that the old waits failed and the new ones didn't.
+- Seen 1× (2026-10-12).
+
+## In async tests, await a promise registered on the event itself instead of polling with `vi.waitFor`
+
+- On a loaded machine Node runs overdue timers before the I/O that delivers the event, so a 1 s `vi.waitFor` deadline expires even though the code is right. #4 wrote the relay and tunnel test waits this way; #6, #9 and #11 had to replace them after stress runs failed 48 of 48, 43 of 48 and 43 of 192 times.
+- Done right: register the promise on the event source before triggering the work, then prove it with a stall injection: the old wait fails and the new one passes (#9, #11).
+- Seen 2× (2026-10-11, 2026-10-12).
+
+## When a PR lists a real-use check as not run, open a `needs-owner` issue for it before merging, so it isn't forgotten
+
+- PRs said honestly what they hadn't tried, but nothing tracked it, and more was built on top. #4 never ran phone pairing on a phone. #13's Sign in with ChatGPT and OpenRouter only met local fakes. #18 then added native web search for five providers without calling any of them. As of 2026-10-13 no PR shows NEO talking to a live AI provider at all.
+- #16's 3D memory net was never seen rendering: the browser pane was hidden, and the scene doesn't draw while hidden.
+- Seen 2× (2026-10-11, 2026-10-12).
+
+## Serve and cache assets so a failure can't stick
+
+- Since #1 the server answered every missing path with `index.html` and 200, and the service worker cached `/assets/*` by URL without checking the response type. When a figure image went missing during a rebuild, its HTML stand-in was cached as the image, and the figure image (from #13) never retried, so the onboarding figure stayed broken after the file came back.
+- Fixed in #20: the server 404s a missing path that has a file extension, the service worker never caches `text/html` under an asset URL (cache bumped to `neo-shell-v4`), and the figure retries on its own.
+- Seen 1× (2026-10-12).
+
+## Write a test's expected value from what the user must see, not from what the code produces now
+
+- #13's avatar orbit test asserted that a hovered rear portrait had z-index `'1'`: the buggy value. The portrait stayed hidden behind the figure (z-index 2–3) while the test passed. #21 fixed the line and asserts the hovered portrait sits above the figure.
+- Seen 1× (2026-10-12).
+
+## When you change an animation, check the still state too: `animated={false}` and prefers-reduced-motion
+
+- #2 moved the girl's speaking mouth onto the lip-flap frames the boy and dog already used. Those frames start at opacity 0 and only the animation shows them, so with motion off none of the three has a mouth while speaking (`packages/ui/src/avatar/styles.ts`). Codex flagged it on #2. Still open.
+- Seen 1× (2026-10-11).
+
+## Do expensive per-connection work when the protocol first needs it, not in the constructor
+
+- #4's Noise responder generated its ephemeral key and re-derived its static key in the constructor, which ran for every relay Open before the phone had sent anything. A burst of 256 Opens blocked the event loop for 0.3–0.9 s on an idle machine and 2–5 s under load.
+- Fixed in #7: the key is generated in `writeMessage2` and the static-key check is cached per key pair.
+- Done right: #7's test counts curve operations through a pass-through mock, so it fails the same way on any machine.
+- Seen 1× (2026-10-11).
+
+## Before delegating UI work, put the rules and the target blocks in the brief
+
+- Codex built #22 as a dedicated Plan tomorrow screen, with its own route, state, strings and phrase matcher, against the then-unwritten rule that features are tools returning existing blocks. #23 wrote the rule down and #24 replaced the screen with a reusable `changes` block.
+- Seen 1× (2026-10-12).
+
+## Done right: when parallel branches edit the same file, say in the PR which branch owns it and which merge folds in the other
+
+- #15 named `feat/memory-net-3d` as the owner of `NetTab.tsx` and said the later merge would fold in the other's change. #16 did exactly that, with no conflict and no regression.
+- Seen 1× (2026-10-12).
