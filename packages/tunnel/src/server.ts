@@ -1,5 +1,7 @@
 import {
   TUNNEL_BODY_CHUNK,
+  TUNNEL_FRAME_HEADER,
+  TUNNEL_MAX_FRAME,
   TunnelCloseCode,
   TunnelFrameType,
 } from '@neo/protocol';
@@ -353,7 +355,13 @@ export function serveTunnel(link: MessageLink, options: {
           finishSocket(stream, 1011, 'Invalid WebSocket message');
           return;
         }
-        outgoing({ type: TunnelFrameType.WsMessage, stream, payload: utf8Encoder.encode(text) });
+        const payload = utf8Encoder.encode(text);
+        if (payload.byteLength + TUNNEL_FRAME_HEADER > TUNNEL_MAX_FRAME) {
+          reset(stream, 'too_large');
+          finishSocket(stream, 1009, 'Message too large');
+          return;
+        }
+        outgoing({ type: TunnelFrameType.WsMessage, stream, payload });
       },
       close(code, reason) {
         if (closed || state.closed) return;

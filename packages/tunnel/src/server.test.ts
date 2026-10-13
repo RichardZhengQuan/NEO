@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TUNNEL_BODY_CHUNK, TunnelCloseCode, TunnelFrameType } from '@neo/protocol';
+import { TUNNEL_BODY_CHUNK, TUNNEL_FRAME_HEADER, TUNNEL_MAX_FRAME, TunnelCloseCode, TunnelFrameType } from '@neo/protocol';
 import type { TunnelReset } from '@neo/protocol';
 import { openChannel } from './channel.js';
 import type { SecureChannel } from './channel.js';
@@ -277,6 +277,77 @@ describe('tunnel server validation and ownership', () => {
     client.send({ type: TunnelFrameType.WsOpen, stream: 3, payload: encodeJson({ path: '/api/ws' }) });
     expect(decodeJson<TunnelReset>((await frames.next(TunnelFrameType.Reset, 3)).payload).code).toBe('limit');
     expect(openWebSocket).toHaveBeenCalledOnce();
+  });
+
+  it('resets an oversized WebSocket message and keeps the tunnel open', async () => {
+    const sockets: TunnelSocket[] = [];
+    const handlerClosed = [vi.fn(), vi.fn()];
+    const onClose = vi.fn();
+    const { client, frames, request, end } = await session({ onClose, handler: {
+      fetch: async () => new Response('ok'),
+      openWebSocket: (_path, _peer, socket) => {
+        const close = handlerClosed[sockets.length]!;
+        sockets.push(socket);
+        return { message(text) { socket.send(text); }, close };
+      },
+    } });
+    for (const stream of [1, 2]) {
+      const opened = frames.next(TunnelFrameType.WsOpened, stream);
+      client.send({ type: TunnelFrameType.WsOpen, stream, payload: encodeJson({ path: '/api/ws' }) });
+      await opened;
+    }
+    request(3);
+
+    const maxPayload = TUNNEL_MAX_FRAME - TUNNEL_FRAME_HEADER;
+    const message = 'x'.repeat(maxPayload);
+    const delivered = frames.next(TunnelFrameType.WsMessage, 1);
+    sockets[0]!.send(message);
+    expect(new TextDecoder().decode((await delivered).payload)).toBe(message);
+
+    // ASCII is one byte per character, so this is one byte over the payload limit.
+    const reset = frames.next(TunnelFrameType.Reset, 1);
+    sockets[0]!.send(message + 'x');
+    expect(handlerClosed[0]).toHaveBeenCalledExactlyOnceWith(1009, 'Message too large');
+    expect(decodeJson<TunnelReset>((await reset).payload).code).toBe('too_large');
+    expect(client.closed).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(handlerClosed[1]).not.toHaveBeenCalled();
+
+    const echo = frames.next(TunnelFrameType.WsMessage, 2);
+    client.send({ type: TunnelFrameType.WsMessage, stream: 2, payload: new TextEncoder().encode('still connected') });
+    expect(new TextDecoder().decode((await echo).payload)).toBe('still connected');
+    const response = frames.next(TunnelFrameType.ResponseEnd, 3);
+    end(3);
+    await response;
+    expect(client.closed).toBe(false);
+    expect(handlerClosed[1]).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('applies the WebSocket payload limit to UTF-8 bytes rather than characters', async () => {
+    let serverSocket: TunnelSocket | undefined;
+    const handlerClosed = vi.fn();
+    const { client, frames } = await session({ handler: {
+      fetch: async () => new Response(),
+      openWebSocket: (_path, _peer, socket) => {
+        serverSocket = socket;
+        return { message() {}, close: handlerClosed };
+      },
+    } });
+    const opened = frames.next(TunnelFrameType.WsOpened, 1);
+    client.send({ type: TunnelFrameType.WsOpen, stream: 1, payload: encodeJson({ path: '/api/ws' }) });
+    await opened;
+
+    // Each é takes two UTF-8 bytes; the extra ASCII byte puts the message just over the limit.
+    const message = 'é'.repeat((TUNNEL_MAX_FRAME - TUNNEL_FRAME_HEADER) / 2);
+    const delivered = frames.next(TunnelFrameType.WsMessage, 1);
+    serverSocket!.send(message);
+    expect(new TextDecoder().decode((await delivered).payload)).toBe(message);
+    const reset = frames.next(TunnelFrameType.Reset, 1);
+    serverSocket!.send(message + 'x');
+    expect(handlerClosed).toHaveBeenCalledExactlyOnceWith(1009, 'Message too large');
+    expect(decodeJson<TunnelReset>((await reset).payload).code).toBe('too_large');
+    expect(client.closed).toBe(false);
   });
 
   it('sends WsOpened before synchronous handler messages, isolates throws, and closes handlers once', async () => {
