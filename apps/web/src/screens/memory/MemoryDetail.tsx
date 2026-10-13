@@ -35,7 +35,9 @@ function EdgeRow({ edge, nodeId, detail, onSelect, onUnlink }: { edge: MemoryEdg
           {edge.coactivations > 0 && <span>{t('memoryDetail.coactivations', { n: edge.coactivations })}</span>}
         </div>
       </div>
-      <IconButton icon="unlink" label={t('memoryDetail.unlink', { label: other ? memoryLabel(other, t) : otherId })} size="sm" onClick={() => onUnlink(edge)} />
+      {otherId !== SELF_MEMORY_ID && (
+        <IconButton icon="unlink" label={t('memoryDetail.unlink', { label: other ? memoryLabel(other, t) : otherId })} size="sm" onClick={() => onUnlink(edge)} />
+      )}
     </li>
   );
 }
