@@ -90,7 +90,7 @@ function SidePanel({ route }: { route: Route }): ReactElement {
   const persona = useSession((s) => s.settings?.persona);
   const wsStatus = useSession((s) => s.wsStatus);
   const badges = useBadges();
-  const homeAriaLabel = `${t('nav.timeline')}, ${t(`status.${wsStatus}`)}`;
+  const homeAriaLabel = t('nav.home_label', { name: t('nav.timeline'), status: t(`status.${wsStatus}`) });
   const go = (r: Route) => {
     setDrawer(false);
     navigate(r);

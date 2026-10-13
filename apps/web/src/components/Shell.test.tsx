@@ -181,7 +181,10 @@ describe('accessible names for badges and status', () => {
     renderShell(locale);
     const expectedStatus = appDictionaries[locale]['status.open'];
     const expectedName = appDictionaries[locale]['nav.timeline'];
-    expect(screen.getByRole('button', { name: `${expectedName}, ${expectedStatus}` }).className).toBe('side__brand');
+    const expectedHome = (appDictionaries[locale]['nav.home_label'] as string)
+      .replace('{name}', expectedName as string)
+      .replace('{status}', expectedStatus as string);
+    expect(screen.getByRole('button', { name: expectedHome }).className).toBe('side__brand');
   });
 });
 
