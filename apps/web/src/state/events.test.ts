@@ -6,7 +6,7 @@ import { buildMessages, createTranslator } from '@neo/ui';
 import { appDictionaries } from '../i18n.js';
 import { EventSequencer, handleServerEvent, runReminderAction, type EventContext } from './events.js';
 import { emptyEntry, useTimeline } from './timeline.js';
-import { useData } from './data.js';
+import { loadReminders, useData } from './data.js';
 import { useToasts } from './notifications.js';
 import { useSession } from './session.js';
 
@@ -30,6 +30,7 @@ const reminder: Reminder = {
 function fakeClient() {
   return {
     reminders: {
+      list: vi.fn(async () => ({ items: [reminder], nextCursor: null })),
       snooze: vi.fn(async (id: string) => ({ ...reminder, id, status: 'scheduled' as const, dueAt: 9999 })),
       complete: vi.fn(async (id: string) => ({ ...reminder, id, status: 'completed' as const })),
     },
@@ -55,7 +56,7 @@ function context(over: Partial<EventContext> = {}) {
 
 beforeEach(() => {
   useTimeline.setState(emptyEntry(), true);
-  useData.setState({ reminders: {}, tasks: {}, notes: {}, memoryVersion: 0, notifications: [], unreadNotifications: 0 });
+  useData.setState({ reminders: {}, reminderDeletions: {}, tasks: {}, notes: {}, memoryVersion: 0, notifications: [], unreadNotifications: 0 });
   useToasts.setState({ toasts: [] });
   useSession.setState({ settings: null });
 });
@@ -122,7 +123,19 @@ describe('handleServerEvent', () => {
     expect(useData.getState().reminders.rem_1!.status).toBe('completed');
     handleServerEvent({ type: 'reminder.deleted', reminderId: 'rem_1' }, ctx);
     expect(useData.getState().reminders.rem_1).toBeUndefined();
+    expect(useData.getState().reminderDeletions.rem_1).toBe(true);
     expect(ctx.syncReminders).toHaveBeenCalledTimes(2);
+    handleServerEvent({ type: 'reminder.updated', reminder }, ctx);
+    expect(useData.getState().reminderDeletions.rem_1).toBeUndefined();
+    expect(useData.getState().reminders.rem_1).toEqual(reminder);
+  });
+
+  it('keeps known deletions when a reminder list response still includes the old item', async () => {
+    const { ctx } = context();
+    handleServerEvent({ type: 'reminder.deleted', reminderId: 'rem_1' }, ctx);
+    await loadReminders(ctx.client);
+    expect(useData.getState().reminders.rem_1).toBeUndefined();
+    expect(useData.getState().reminderDeletions.rem_1).toBe(true);
   });
 
   it('task and note events update their caches', () => {

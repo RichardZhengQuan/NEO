@@ -7,6 +7,8 @@ import { navigate } from '../router.js';
 import { emptyEntry, useTimeline } from '../state/timeline.js';
 import { useSession } from '../state/session.js';
 import { resetChatDrafts } from '../state/chat-drafts.js';
+import { useData } from '../state/data.js';
+import { handleServerEvent, type EventContext } from '../state/events.js';
 import { ProviderSetup } from '../components/ProviderSetup.js';
 import { AiSection } from './settings/AiSection.js';
 import { TimelineScreen } from './TimelineScreen.js';
@@ -28,9 +30,25 @@ beforeEach(() => {
   resetChatDrafts();
   useSession.setState({ settings: DEFAULT_SETTINGS, providers: { items: [], defaultModel: null }, models: {}, client: null });
   useTimeline.setState({ ...emptyEntry(), loaded: true, offRecordLoaded: true }, true);
+  useData.setState({ reminders: {}, reminderDeletions: {}, tasks: {} });
   HTMLElement.prototype.scrollTo = vi.fn();
 });
 afterEach(cleanup);
+
+describe('live reminders in the timeline', () => {
+  it('shows deleted status after a delete event and after remounting', () => {
+    useTimeline.setState({ messages: [{ id: 'msg_1', episodeId: 'ep_1', conversationId: 'ep_1', role: 'assistant', parts: [{ type: 'ui', id: 'ui_1', block: { type: 'reminder', reminderId: 'rem_1', title: 'Stretch', dueAt: 1, status: 'scheduled' } }], createdAt: 0, status: 'complete' }] });
+    const view = renderTimeline();
+    expect(screen.getByRole('button', { name: 'Snooze 10 min' })).toBeTruthy();
+    act(() => handleServerEvent({ type: 'reminder.deleted', reminderId: 'rem_1' }, { syncReminders: vi.fn() } as unknown as EventContext));
+    expect(screen.getByText('Deleted')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Snooze 10 min' })).toBeNull();
+    view.unmount();
+    renderTimeline();
+    expect(screen.getByText('Deleted')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Snooze 10 min' })).toBeNull();
+  });
+});
 
 describe('timeline without AI', () => {
   it.each([

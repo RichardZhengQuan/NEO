@@ -23,13 +23,13 @@ Every rendered block becomes a `ui` part `{ type: 'ui', id: 'ui_…', block, too
 | `heading` | `text`, `level` 1-3 | |
 | `card` | `title`, `subtitle`, `icon`, `imageUrl`, `tone`, `children[]`, `actions[]`, `footer` | container |
 | `list` | `title`, `ordered`, `items[{id,title,subtitle,icon,imageUrl,meta,badge,tone,action}]` | |
-| `table` | `caption`, `columns[{key,label,align,format}]`, `rows[]` | `format`: number, currency, percent, date (epoch ms) |
-| `chart` | `kind` bar/line/area/pie/donut, `series[{name,data[{x,y}]}]`, `title`, `xLabel`, `yLabel`, `unit`, `stacked` | SVG, themed palette |
+| `table` | `caption`, `columns[{key,label,align,format,currency}]`, `rows[]` | `format`: number, currency, percent, date (epoch ms); `currency`: 3 uppercase ISO 4217 letters, defaults to USD |
+| `chart` | `kind` bar/line/area/pie/donut, `series[{name,data[{x,y}]}]`, `title`, `xLabel`, `yLabel`, `unit`, `stacked` | SVG, themed palette; `x` values are categorical, ordered as first seen |
 | `stat` | `label`, `value`, `unit`, `delta`, `deltaLabel`, `caption`, `tone`, `icon` | KPI tile |
 | `progress` | `label`, `value` 0-1, `caption`, `tone` | |
-| `form` | `title`, `description`, `fields[]`, `submitLabel` | submit sends a target-aware id from `formSubmitActionId` with `values` |
+| `form` | `title`, `description`, `fields[{name,label,kind,required,placeholder,help,options,min,max,step,defaultValue}]`, `submitLabel` | submit sends a target-aware id from `formSubmitActionId` with `values` |
 | `buttons` | `actions[]`, `layout` | |
-| `image` / `gallery` | `url`, `alt`, `caption` | https or `data:image/(png|jpeg|gif|webp|avif)` only |
+| `image` / `gallery` | image: `url`, `alt`, `caption`, `aspectRatio`; gallery: `images[{url,alt,caption}]` | HTTP(S) or base64 `data:image/(png|jpeg|gif|webp|avif)` only |
 | `callout` | `tone`, `title`, `text`, `icon` | |
 | `code` | `code`, `language`, `filename` | copy button |
 | `quote` | `text`, `cite` | |
@@ -42,11 +42,11 @@ Every rendered block becomes a `ui` part `{ type: 'ui', id: 'ui_…', block, too
 | `timeline` | `items[{time,title,description,icon,tone}]` | |
 | `keyvalue` | `title`, `items[{key,value}]` | |
 | `tags` | `items[{label,tone,icon}]` | |
-| `countdown` | `label`, `until` (epoch ms), `doneText` | live ticking |
-| `reminder` | `reminderId`, `title`, `dueAt`, `timezone`, `recurrenceText`, `status` | **live widget**: Snooze 10 min / 1 h, Done |
+| `countdown` | `label`, `until` (epoch ms), `timezone`, `doneText` | live ticking; optional timezone (max 64), defaults to the viewer's timezone |
+| `reminder` | `reminderId`, `title`, `notes`, `dueAt`, `timezone`, `recurrenceText`, `status` | **live widget**: Snooze 10 min / 1 h, Done; optional notes (max 5000), omitted when absent; deleted reminders show Deleted |
 | `tasks` | `title`, `listId`, `tasks[{id,title,done,dueAt,priority}]` | **live widget**: checkboxes |
 | `changes` | `title`, `note`, `timezone`, `items[{id,kind,status,…}]` | **live widget**: review before → after and apply selected changes |
-| `memory` | `title`, `note`, `nodes[{id,kind,label,content,status}]` | Forget (active) |
+| `memory` | `title`, `note`, `nodes[{id,kind,label,content,status}]` | Forget with confirmation; forgotten status persists in the widget. `recall` shows UI only with `show: true` |
 
 Limits: at most 50 top-level blocks, 300 blocks per message, nesting depth 8, action ids unique within a message. Tones are `neutral | accent | info | success | warning | danger`. Icons are lucide-style names (`bell`, `calendar`, `check-circle`, `map-pin`, `brain`…) or a single emoji.
 
@@ -56,12 +56,15 @@ UI is data. A feature shows UI by returning blocks in a tool result or through `
 
 The normal way to add a feature is a tool that returns existing blocks. `create_reminder` returns a live `reminder` widget, `list_tasks` a `tasks` widget, and `remember` a `memory` card. A read-only tool can answer with a `card`, `list` or `table`.
 
+Before changing the block contract, check whether the problem is missing tool output, an omitted catalogue property, action targeting, live-state refresh, text fallback, or an unsupported input or provider capability, and fix that layer first. Tools may return existing compositions directly; tools NEO also uses for its own lookups should show UI only when it helps the user's request.
+
 Add a new block type only when one of these holds, and say which in the PR:
 
 1. It shows or changes NEO's own data through NEO's tools, like the live `reminder`, `tasks` and `memory` widgets, and more than one feature will use it.
 2. The model keeps building the same thing badly from existing blocks. Include real examples in the PR.
+3. A shipping feature needs a content primitive or interaction that existing blocks and optional props can't express, such as audio or video playback. Add it in the same PR as the first feature that produces it, with its loading and failure behavior, accessible controls and a meaningful text fallback. A capability listed in provider settings is not enough on its own.
 
-Prefer a new optional prop on an existing block over a new type. Topic cards are compositions, not new types: a weather, flight or recipe card is `card` + `grid` + `stat`/`keyvalue`.
+Hypothetical requests are not evidence that the model keeps building something badly; show real examples. Prefer a new optional prop on an existing block over a new type. New optional props need defined semantics and backward-compatible defaults. Topic cards are compositions, not new types: a weather, flight or recipe card is `card` + `grid` + `stat`/`keyvalue`.
 
 The block catalogue is a public contract: every client must render every type. Each block type costs:
 

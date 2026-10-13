@@ -54,7 +54,7 @@ beforeEach(() => {
   useTimeline.setState(emptyEntry(), true);
   sessionStorage.clear();
   useData.setState({
-    reminders: {}, remindersLoaded: false,
+    reminders: {}, reminderDeletions: {}, remindersLoaded: false,
     tasks: {}, taskLists: [], tasksLoaded: false,
     notes: {}, notesLoaded: false,
     memoryVersion: 0,
@@ -88,7 +88,7 @@ describe('startSession cache reset (F10)', () => {
       episodes: { conv_a1: { ...makeEpisode('conv_a1'), episodeId: 'conv_a1' } },
       loaded: true,
     });
-    useData.setState((s) => ({ ...s, notes: { note_a1: makeNote('note_a1', 'Server A note') }, notesLoaded: true }));
+    useData.setState((s) => ({ ...s, reminderDeletions: { rem_a1: true }, notes: { note_a1: makeNote('note_a1', 'Server A note') }, notesLoaded: true }));
 
     // Switch to server B.
     startSession({ serverUrl: 'https://server-b.example', token: 'tok_b' }, 'manual');
@@ -98,6 +98,7 @@ describe('startSession cache reset (F10)', () => {
     expect(convState.loaded).toBe(false);
 
     const dataState = useData.getState();
+    expect(dataState.reminderDeletions).toEqual({});
     expect(dataState.notes).toEqual({});
     expect(dataState.notesLoaded).toBe(false);
   });

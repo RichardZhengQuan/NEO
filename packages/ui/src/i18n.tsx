@@ -154,6 +154,7 @@ const en: Messages = {
   'reminder.status.fired': 'Due now',
   'reminder.status.completed': 'Done',
   'reminder.status.cancelled': 'Cancelled',
+  'reminder.status.deleted': 'Deleted',
 
   // tasks
   'task.priority_1': 'Low priority',
@@ -341,6 +342,7 @@ const zhCN: Messages = {
   'reminder.status.fired': '到时间了',
   'reminder.status.completed': '已完成',
   'reminder.status.cancelled': '已取消',
+  'reminder.status.deleted': '已删除',
 
   'task.priority_1': '低优先级',
   'task.priority_2': '中优先级',

@@ -6,8 +6,10 @@ import {
   UIBlockSchema,
   childBlocks,
   formSubmitActionId,
+  formatTableCell,
   resolveWidgetAction,
   uiBlockKey,
+  uiBlockToText,
   validateUIBlocks,
   walkUIBlocks,
   widgetActionId,
@@ -155,5 +157,120 @@ describe('reserved built-in action namespace', () => {
   it('leaves other model action characters and legacy stored widget blocks valid', () => {
     expect(validateUIBlocks({ type: 'buttons', actions: [{ id: 'model:action / %', label: 'Open', kind: 'event' }] }).ok).toBe(true);
     expect(validateUIBlocks({ type: 'card', children: [form, reminder('rem_1')] }).ok).toBe(true);
+  });
+});
+
+describe('compatible block properties', () => {
+  it('accepts stored blocks without the new optional properties', () => {
+    const blocks: UIBlock[] = [
+      reminder('rem_old'),
+      { type: 'countdown', label: 'Launch', until: 0 },
+      { type: 'table', columns: [{ key: 'cost', label: 'Cost', format: 'currency' }], rows: [{ cost: 12 }] },
+      { type: 'memory', nodes: [{ id: 'mem_old', kind: 'fact', label: 'Old memory' }] },
+    ];
+    expect(validateUIBlocks(blocks)).toEqual({ ok: true, blocks });
+    expect(uiBlockToText(blocks[2]!)).toContain('$12.00');
+    expect(uiBlockToText(blocks[3]!)).toContain('[fact] Old memory');
+    expect(uiBlockToText(blocks[3]!)).not.toContain('active');
+  });
+
+  it('accepts the new properties and forgotten widget snapshots', () => {
+    const blocks: UIBlock[] = [
+      { ...reminder('rem_notes'), notes: 'n'.repeat(5000) },
+      { type: 'countdown', label: 'Launch', until: 0, timezone: 'Asia/Singapore' },
+      { type: 'table', columns: [{ key: 'cost', label: 'Cost', format: 'currency', currency: 'SGD' }], rows: [] },
+      { type: 'memory', nodes: [{ id: 'mem_old', kind: 'fact', label: 'Old memory', status: 'forgotten' }] },
+    ];
+    expect(validateUIBlocks(blocks)).toEqual({ ok: true, blocks });
+  });
+
+  it.each([
+    { ...reminder('rem_notes'), notes: 'n'.repeat(5001) },
+    { type: 'countdown', label: 'Launch', until: 0, timezone: 'z'.repeat(65) },
+    ...['usd', 'US', 'USDD', '12$'].map((currency) => ({ type: 'table', columns: [{ key: 'cost', label: 'Cost', currency }], rows: [] })),
+  ])('rejects out-of-contract properties: %j', (block) => {
+    expect(validateUIBlocks(block).ok).toBe(false);
+  });
+});
+
+describe('meaningful text fallback', () => {
+  const instant = Date.UTC(2026, 9, 13, 16, 30);
+
+  it('formats table columns with their currency and readable dates', () => {
+    const text = uiBlockToText({
+      type: 'table', columns: [
+        { key: 'amount', label: 'Amount', format: 'number' },
+        { key: 'price', label: 'Price', format: 'currency', currency: 'EUR' },
+        { key: 'oldPrice', label: 'Old price', format: 'currency' },
+        { key: 'fraction', label: 'Fraction', format: 'percent' },
+        { key: 'date', label: 'Date', format: 'date' },
+      ],
+      rows: [{ amount: 1234.5, price: 42, oldPrice: 10, fraction: 0.42, date: instant }],
+    });
+    expect(text).toContain('1,234.5');
+    expect(text).toContain('€42.00');
+    expect(text).toContain('$10.00');
+    expect(text).toContain('42%');
+    expect(text).toContain(new Intl.DateTimeFormat('en-US', { dateStyle: 'medium' }).format(instant));
+    expect(text).not.toContain(String(instant));
+    expect(text).not.toContain('0.42');
+  });
+
+  it('keeps table missing values, booleans, date strings and invalid formats readable', () => {
+    expect(formatTableCell(null, 'number')).toBe('—');
+    expect(formatTableCell(undefined, 'currency')).toBe('—');
+    expect(formatTableCell('', 'text')).toBe('—');
+    expect(formatTableCell(true, undefined)).toBe('✓');
+    expect(formatTableCell(false, undefined)).toBe('✗');
+    expect(formatTableCell('2026-10-13T16:30:00Z', 'date')).toBe(formatTableCell(instant, 'date'));
+    expect(formatTableCell('unknown', 'date')).toBe('unknown');
+    expect(formatTableCell(42, 'currency', 'en-US', 'invalid')).toBe('42');
+  });
+
+  it('includes full reminder notes and the countdown timezone', () => {
+    const notes = 'Bring the documents.\nAsk about the renewal.';
+    expect(uiBlockToText({ ...reminder('rem_notes'), notes })).toContain(notes);
+    const text = uiBlockToText({ type: 'countdown', label: 'Launch', until: instant, timezone: 'Asia/Singapore' });
+    expect(text).toContain('Oct 14, 2026, 12:30 AM');
+  });
+
+  it('includes every memory content, and the status only when it is not active', () => {
+    const text = uiBlockToText({ type: 'memory', nodes: [
+      { id: 'mem_1', kind: 'preference', label: 'Travel', content: 'The user prefers window seats.' },
+      { id: 'mem_2', kind: 'fact', label: 'Old job', content: 'The user left the old job.', status: 'forgotten' },
+      { id: 'mem_3', kind: 'goal', label: 'Fitness', content: 'Run a marathon.', status: 'archived' },
+    ] });
+    for (const value of ['Travel', 'The user prefers window seats.', 'The user left the old job.', '(forgotten)', 'Run a marathon.', '(archived)']) {
+      expect(text).toContain(value);
+    }
+    expect(text).not.toContain('active');
+  });
+
+  it('does not resolve a forget control on a stored forgotten node', () => {
+    const block: UIBlock = { type: 'memory', nodes: [{ id: 'mem_1', kind: 'fact', label: 'Forgotten', status: 'forgotten' }] };
+    expect(resolveWidgetAction(block, widgetActionId.memoryForget('mem_1'))).toBeNull();
+  });
+
+  it.each<{ block: UIBlock; includes: string[] }>([
+    { block: { type: 'progress', value: 0.42, caption: 'Waiting for upload' }, includes: ['42%', 'Waiting for upload'] },
+    { block: { type: 'gallery', images: [{ url: 'https://example.test/photo.png', alt: 'Kyoto', caption: 'At sunset' }] }, includes: ['Kyoto', 'At sunset'] },
+    { block: { type: 'code', code: 'const x = 1;', filename: 'index.ts' }, includes: ['index.ts', 'const x = 1;'] },
+    { block: { type: 'buttons', actions: [{ id: 'open', label: 'Open', kind: 'link', url: 'neo://notes/note_1' }] }, includes: ['[Open]', 'neo://notes/note_1'] },
+    { block: { type: 'list', items: [{ id: 'note_1', title: 'Note', action: { id: 'open', label: 'Open', kind: 'link', url: 'neo://notes/note_1' } }] }, includes: ['Note', 'neo://notes/note_1'] },
+    { block: { type: 'card', actions: [{ id: 'open', label: 'Open', kind: 'link', url: 'neo://notes/note_1' }] }, includes: ['neo://notes/note_1'] },
+    { block: { type: 'tasks', tasks: [{ id: 'task_1', title: 'Check records', done: false, dueAt: 0, priority: 3 }] }, includes: ['due', 'priority 3'] },
+    { block: { type: 'changes', items: [{ id: 'change_1', kind: 'reminder.create', creationKey: '6db776c6-5c30-4366-9628-f138b352c361', title: 'Renew', dueAt: instant, timezone: 'UTC', notes: 'Bring ID' }] }, includes: ['Bring ID'] },
+  ])('preserves visible details for $block.type', ({ block, includes }) => {
+    const text = uiBlockToText(block);
+    for (const value of includes) expect(text).toContain(value);
+  });
+
+  it('keeps form guidance, choices, bounds and default values', () => {
+    const text = uiBlockToText({ type: 'form', fields: [
+      { name: 'amount', label: 'Amount', kind: 'number', help: 'Monthly budget', placeholder: 'Enter amount', min: 0, max: 100, step: 5, defaultValue: 0 },
+      { name: 'choice', label: 'Choice', kind: 'select', options: [{ label: 'Travel', value: 'travel' }], defaultValue: 'travel' },
+      { name: 'tags', label: 'Tags', kind: 'multiselect', defaultValue: ['a', 'b'] },
+    ] });
+    for (const value of ['Monthly budget', 'Enter amount', 'min 0, max 100, step 5', 'Default: 0', 'Travel (travel)', 'Default: travel', 'Default: a, b']) expect(text).toContain(value);
   });
 });

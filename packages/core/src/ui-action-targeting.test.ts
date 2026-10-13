@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { formSubmitActionId, newId, widgetActionId, type FormBlock, type Message, type ReminderBlock, type ToolDefinition } from '@neo/protocol';
+import { formSubmitActionId, newId, widgetActionId, type FormBlock, type MemoryBlock, type Message, type ReminderBlock, type ToolDefinition } from '@neo/protocol';
 import { ev, harness } from './fakes.test-utils.js';
 
 function reminderFixture(permission: 'auto' | 'confirm' = 'auto') {
@@ -88,5 +88,44 @@ describe('nested UI action targeting in the runtime', () => {
     await result.turn.done;
     expect(JSON.stringify(h.model.requests.at(-1)!.messages.at(-1))).toContain('Save profile');
     expect(JSON.stringify(h.model.requests.at(-1)!.messages.at(-1))).toContain(actionId);
+  });
+
+  it('keeps forget confirmation and persists matching memory status across every stored UI part', async () => {
+    const execute = vi.fn(async ({ ids }: { ids: string[] }) => ({ output: { forgotten: ['Window seats'], ids }, summary: 'Forgot 1 memory' }));
+    const forget: ToolDefinition = {
+      name: 'forget', title: 'Forget memories', description: 'Forget memories',
+      inputSchema: z.object({ ids: z.array(z.string()) }), risk: 'dangerous', defaultPermission: 'confirm', execute,
+      describeCall: () => 'Forget “Window seats”',
+    };
+    const h = harness({ tools: [forget] });
+    const first = { id: 'mem_1', kind: 'preference', label: 'Window seats', content: 'Choose a window seat.', status: 'active' as const };
+    const second = { ...first, id: 'mem_2' };
+    const memory: MemoryBlock = { type: 'memory', nodes: [first, second] };
+    const message: Message = {
+      id: newId('msg'), conversationId: h.conv.id, turnId: newId('turn'), role: 'assistant', status: 'complete', createdAt: h.clock(),
+      parts: [
+        { type: 'ui', id: 'ui_memory', block: memory },
+        { type: 'ui', id: 'ui_copy', block: { type: 'card', children: [{ type: 'memory', nodes: [first] }] } },
+      ],
+    };
+    h.conversations.appendMessage(message);
+    const input = { conversationId: h.conv.id, messageId: message.id, uiId: 'ui_memory', actionId: widgetActionId.memoryForget(first.id) };
+    const approval = await h.runtime.handleUiAction(input);
+    expect(approval).toMatchObject({ kind: 'confirm', confirmation: { tool: 'forget', description: 'Forget “Window seats”' } });
+    expect(execute).not.toHaveBeenCalled();
+    expect(h.conversations.getMessage(message.id)).toEqual(message);
+    if (approval.kind !== 'confirm') throw new Error('Expected server confirmation');
+    await expect(h.runtime.handleUiAction({ ...input, confirmationToken: approval.confirmation.token }))
+      .resolves.toMatchObject({ kind: 'tool', result: { output: { forgotten: ['Window seats'], ids: ['mem_1'] } } });
+    expect(execute).toHaveBeenCalledOnce();
+    const forgotten = { ...first, status: 'forgotten' };
+    const reloaded = h.conversations.getMessage(message.id)!;
+    expect(reloaded.parts).toEqual([
+      { type: 'ui', id: 'ui_memory', block: { type: 'memory', nodes: [forgotten, second] } },
+      { type: 'ui', id: 'ui_copy', block: { type: 'card', children: [{ type: 'memory', nodes: [forgotten] }] } },
+    ]);
+    expect(h.events.filter((event) => event.type === 'part.added' && event.messageId === message.id)).toHaveLength(2);
+    await expect(h.runtime.handleUiAction(input)).rejects.toMatchObject({ code: 'not_found' });
+    expect(execute).toHaveBeenCalledOnce();
   });
 });
