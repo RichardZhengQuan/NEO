@@ -54,6 +54,13 @@ describe('reminder state', () => {
     expect(screen.getByRole('button', { name: 'Done' })).toBeTruthy();
     expect(screen.queryByText('Deleted')).toBeNull();
   });
+
+  it('shows deleted status without active controls when list is loaded and id is missing', () => {
+    const { container } = render(widget(reminder, { reminders: {}, remindersListLoaded: true }, vi.fn()));
+    expect(screen.getByText('Deleted')).toBeTruthy();
+    expect(container.querySelector('[data-state="deleted"]')).toBeTruthy();
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
 });
 
 describe('memory status', () => {
