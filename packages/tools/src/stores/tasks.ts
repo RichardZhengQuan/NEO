@@ -215,7 +215,7 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
     },
 
     update(id: string, patch: TaskPatch): Task {
-      return db.transaction(() => {
+      const { updated, subtasks } = db.transaction(() => {
         const data = parseInput(TaskPatchSchema, patch, 'task update');
         const existing = mustGetTask(id);
         if (data.listId !== undefined) mustGetList(data.listId);
@@ -252,10 +252,11 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
             subtasks.push(subtask);
           }
         }
-        for (const task of subtasks) emit({ type: 'upsert', task });
-        emit({ type: 'upsert', task: updated });
-        return updated;
+        return { updated, subtasks };
       });
+      for (const task of subtasks) emit({ type: 'upsert', task });
+      emit({ type: 'upsert', task: updated });
+      return updated;
     },
 
     delete(id: string): boolean {
