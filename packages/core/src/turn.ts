@@ -123,6 +123,8 @@ export interface TurnServices {
   clock: Clock;
   /** Deliver an event to the runtime's global subscribers (each isolated from the others). */
   broadcast(event: AgentEvent): void;
+  /** After a chat-turn forget, patch memory widgets in all stored messages of this conversation. */
+  patchConversationWidgets(conversationId: string, result: ToolResult): void;
 }
 
 /** A turn that holds its conversation (AgentRuntime bookkeeping). */
@@ -728,6 +730,9 @@ class TurnRunner {
     if (this.signal.aborted) return;
     if (executionController.signal.aborted) return this.refuse(call, MSG.declined, 'Declined');
     this.addToolResult(call, result, def);
+    if (call.name === 'forget' && !result.isError) {
+      this.services.patchConversationWidgets(this.conversationId, result);
+    }
   }
 
   private toolContext(call: ToolCallPart, signal = this.signal): ToolContext {

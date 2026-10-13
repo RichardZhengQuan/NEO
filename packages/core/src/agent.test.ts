@@ -843,6 +843,52 @@ describe('memory', () => {
     await until(() => h.warnings.some((w) => w.msg.includes('observe')));
     expect(t.message.status).toBe('complete');
   });
+
+  it('patches stored memory widgets after a chat-turn forget', async () => {
+    const forgotTool: ToolDefinition = {
+      name: 'forget',
+      title: 'Forget memories',
+      description: 'Forget memories.',
+      inputSchema: z.object({ ids: z.array(z.string()).optional() }),
+      risk: 'dangerous' as const,
+      defaultPermission: 'auto' as const,
+      async execute() {
+        return { output: { forgotten: ['Likes tea'], ids: ['mem_1'] }, summary: 'Forgot 1 memory' };
+      },
+    };
+    const h = harness({ tools: [...standardTools(), forgotTool] });
+
+    // Seed a prior message that contains a memory block
+    const node = { id: 'mem_1', kind: 'fact' as const, label: 'Likes tea', status: 'active' as const };
+    const prior = h.conversations.appendMessage({
+      id: 'msg_prior',
+      conversationId: h.conv.id,
+      turnId: 'turn_prior',
+      role: 'assistant' as const,
+      status: 'complete' as const,
+      createdAt: h.clock(),
+      parts: [{ type: 'ui' as const, id: 'ui_mem', block: { type: 'memory' as const, nodes: [node] } }],
+    });
+
+    // Run a turn where the model calls forget
+    h.model.script(
+      [ev.call('f1', 'forget', { ids: ['mem_1'] }), ev.done('tool_use')],
+      [ev.text('Done.'), ev.done()],
+    );
+    const { message } = await runTurn(h, 'forget that');
+
+    // The prior message's memory block must now show the node as forgotten
+    const reloaded = h.conversations.getMessage(prior.id)!;
+    const memPart = reloaded.parts.find((p): p is UIPart => p.type === 'ui' && p.id === 'ui_mem');
+    expect(memPart?.block).toMatchObject({ type: 'memory', nodes: [{ id: 'mem_1', status: 'forgotten' }] });
+
+    // part.added events must have been broadcast for the prior message
+    const patches = h.events.filter((e) => e.type === 'part.added' && e.messageId === prior.id);
+    expect(patches).toHaveLength(1);
+
+    // The current turn's assistant message is not affected
+    expect(h.conversations.getMessage(message.id)).toBeDefined();
+  });
 });
 
 // ───────────────────────────── 8. unused titles ─────────────────────────────
