@@ -187,6 +187,21 @@ describe('NetTab 3D net', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
+  it('offers retry when tool uses fail on an empty graph instead of showing onboarding', async () => {
+    mocks.graph.mockResolvedValue({ nodes: [], edges: [] });
+    mocks.toolUses.mockRejectedValueOnce(new Error('offline'));
+    await show();
+    expect(screen.queryByText(appDictionaries.en['memoryNet.empty_title']!)).toBeNull();
+    expect(screen.getByRole('status').textContent).toContain(appDictionaries.en['memoryNet.tool_uses_error']!);
+    expect(mocks.toolUses).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await act(async () => undefined);
+    expect(mocks.toolUses).toHaveBeenCalledTimes(2);
+    expect(mocks.toolUses).toHaveBeenLastCalledWith({ to: 5000, limit: 500 });
+    expect(netProps().toolUses).toEqual([event]);
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
   it('immediately hides markers whose source messages were deleted', async () => {
     await show();
     act(() => useTimeline.setState({ deletedMessageIds: { msg_1: true } }));
