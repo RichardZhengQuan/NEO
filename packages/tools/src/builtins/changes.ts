@@ -80,7 +80,14 @@ export function createChangeTools(stores: ProductivityStores) {
           if (reminder.status !== 'scheduled') throw new NeoError('conflict', 'This reminder is no longer scheduled. Use list_reminders to find an upcoming reminder.');
           const before: ReminderFields = {};
           const after: ReminderFields = {};
-          if (change.when !== undefined) { before.dueAt = reminder.dueAt; after.dueAt = parseFuture(change.when, now, ctx.timezone); }
+          if (change.when !== undefined) {
+            before.dueAt = reminder.dueAt;
+            after.dueAt = parseFuture(change.when, now, ctx.timezone);
+            if (ctx.timezone !== reminder.timezone) {
+              before.timezone = reminder.timezone;
+              after.timezone = ctx.timezone;
+            }
+          }
           if (change.title !== undefined) { before.title = reminder.title; after.title = change.title; }
           if (!sameFields(before, after)) {
             items.push({ id: newId('chg', now), status: 'pending', kind: change.kind, reminderId: reminder.id, title: clip(reminder.title, 500), before, after });

@@ -363,6 +363,7 @@ export type TaskFields = z.infer<typeof TaskFieldsSchema>;
 export const ReminderFieldsSchema = z.object({
   dueAt: z.number().optional(),
   title: z.string().min(1).max(500).optional(),
+  timezone: z.string().optional(),
 }).strict();
 export type ReminderFields = z.infer<typeof ReminderFieldsSchema>;
 
