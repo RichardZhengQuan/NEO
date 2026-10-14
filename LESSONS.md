@@ -15,14 +15,15 @@ The nightly lessons loop ([docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md)) adds entri
 
 ## Read every review comment, from people or bots, before merging, and fix each finding or say in the PR why it waits
 
-- #1 was merged 22 seconds after Codex posted three inline findings. #3 fixed the 11 findings of a separate review, which covered only one of the three. The other two were still open until #34 (`neo serve --config <file>`'s `dataDir`) and #35 (moving a parent task's subtasks) landed; #2's animation finding is still open.
-- On 2026-10-13 and 2026-10-14, five PRs merged with unaddressed Codex inline findings on their head commit and no reply in the PR: #41 (one P2 on `packages/core/src/runtime.ts:189`, posted 52 min before the Ready agent review), #43 (three P1s on `packages/memory/src/service.ts`, 8 min before the Ready review), #48 (one P2 on off-record reminder links, 1 h 31 min before the Ready review), #50 (two P2s on cross-episode patch events, 9 min before the Ready review) and #58 (two P2s on self-edge unlink UX and docs, with no agent review and merged 9 h 29 min later). The P1s on #43 and the P2s on #58 are now bugs on `main`.
+- #1 was merged 22 seconds after Codex posted three inline findings. #3 fixed the 11 findings of a separate review, which covered only one of the three. The other two were still open until #34 (`neo serve --config <file>`'s `dataDir`) and #35 (moving a parent task's subtasks) landed. #2's animation finding (see entry below) was closed by #36.
+- On 2026-10-13 and 2026-10-14, four PRs merged with unaddressed Codex inline findings on their head commit and no reply in the PR: #43 (three P1s on `packages/memory/src/service.ts`, posted 8 min before the Ready review), #48 (one P2 on off-record reminder links, 1 h 31 min before the Ready review), #50 (two P2s on cross-episode patch events, 9 min before the Ready review) and #58 (two P2s on self-edge unlink UX and docs, with no agent review on the PR at all and merged 9 h 29 min after the findings). The P1s on #43 and the P2s on #58 are now bugs on `main`.
+- Done right: #41's agent review called out Codex's P2 note about pre-migration `search_mode = NULL` episodes and accepted it as a one-time transition cost — a finding addressed in-review, not ignored.
 - Seen 2× (2026-10-11, 2026-10-14).
 
 ## Get the independent review before merging, not after
 
 - #1 put the whole codebase on `main` with CI as the only check. The independent review afterwards found 11 bugs, 8 of them P1, including a client-supplied `apiKeySecret` that let a paired device send another provider's key to any URL, and sensitive memories replayed to cloud models. #3 fixed them.
-- #56 and #58 were merged on 2026-10-14 with no `Agent review @ <sha>` comment on the PR at all; the only review on either was Codex's auto-review (empty on #56, two P2 findings on #58). Both PR bodies claimed the review was done in session, but a review that is not posted to GitHub cannot be checked before merging, so it is a review done after.
+- #56 and #58 were merged on 2026-10-14 with no `Agent review @ <sha>` comment on the PR at all; the only review on either was Codex's auto-review (empty on #56, two P2 findings on #58). Both PR bodies claimed the review was done in a Claude session, but with nothing posted there is no record of what was reviewed, when, or what verdict it reached — the merge cannot be checked against a review that is not on the PR.
 - Seen 2× (2026-10-11, 2026-10-14).
 
 ## When you fix one case of a flaky pattern, find every case and fix them all in the same PR
@@ -57,7 +58,8 @@ The nightly lessons loop ([docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md)) adds entri
 
 ## When you change an animation, check the still state too: `animated={false}` and prefers-reduced-motion
 
-- #2 moved the girl's speaking mouth onto the lip-flap frames the boy and dog already used. Those frames start at opacity 0 and only the animation shows them, so with motion off none of the three has a mouth while speaking (`packages/ui/src/avatar/styles.ts`). Codex flagged it on #2. Still open.
+- #2 moved the girl's speaking mouth onto the lip-flap frames the boy and dog already used. Those frames start at opacity 0 and only the animation shows them, so with motion off none of the three has a mouth while speaking (`packages/ui/src/avatar/styles.ts`). Codex flagged it on #2.
+- Fixed in #36: both `.neo-av--still[data-state=speaking] .neo-av-flap-half` and the `prefers-reduced-motion` media query force `opacity: 1` on the flap frame, so the half-open mouth shows while motion is off.
 - Seen 1× (2026-10-11).
 
 ## Do expensive per-connection work when the protocol first needs it, not in the constructor
