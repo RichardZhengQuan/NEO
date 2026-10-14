@@ -11,7 +11,7 @@ const TOMORROW = Date.UTC(2026, 9, 13, 1);
 const databases: ReturnType<typeof openDatabase>[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function setup() {
+function setup(timezone = TZ) {
   const db = openDatabase(':memory:');
   databases.push(db);
   migrate(db, 'tools', toolsMigrations);
@@ -20,7 +20,7 @@ function setup() {
   for (const tool of createChangeTools(stores)) registry.register(tool);
   const context: ToolContext = {
     toolCallId: 'tc_proposal', messageId: 'msg_proposal', conversationId: 'conv_proposal',
-    signal: new AbortController().signal, now: () => NOW, timezone: TZ, locale: 'en-US',
+    signal: new AbortController().signal, now: () => NOW, timezone, locale: 'en-US',
     origin: 'model', allowSensitive: false, logger: silentLogger,
   };
   const run = (name: string, input: unknown, overrides: Partial<ToolContext> = {}) =>
@@ -60,6 +60,8 @@ describe('propose_changes', () => {
       kind: 'reminder.update', title: 'Call mom', reminderId: reminder.id,
       before: { dueAt: reminder.dueAt, title: 'Call mom' }, after: { dueAt: TOMORROW, title: 'Call parents' },
     });
+    expect(proposed[1]).not.toHaveProperty('before.timezone');
+    expect(proposed[1]).not.toHaveProperty('after.timezone');
     expect(proposed[2]).toMatchObject({ kind: 'reminder.create', dueAt: TOMORROW, timezone: TZ, notes: 'Passport' });
     expect(result.ui?.[0]).toMatchObject({ type: 'changes', timezone: TZ, title: 'Tomorrow', note: 'Three concrete edits.' });
     expect(result.output).toMatchObject({ proposed: 3, changes: expect.any(Array) });
@@ -129,6 +131,35 @@ describe('propose_changes', () => {
 });
 
 describe('apply_change', () => {
+  it('keeps the stored timezone for title-only edits proposed in a different timezone', async () => {
+    const h = setup('America/New_York');
+    const reminder = h.stores.reminders.create({ title: 'Call mom', dueAt: TOMORROW, timezone: 'America/Los_Angeles' });
+    const item = items(await h.propose([{ kind: 'reminder.update', reminderId: reminder.id, title: 'Call parents' }]))[0]!;
+
+    expect(item).not.toHaveProperty('before.timezone');
+    expect(item).not.toHaveProperty('after.timezone');
+    expect((await h.apply(item)).isError).not.toBe(true);
+    expect(h.stores.reminders.get(reminder.id)).toMatchObject({ title: 'Call parents', timezone: 'America/Los_Angeles' });
+  });
+
+  it('records the proposing timezone and applies it to the stored reminder', async () => {
+    const h = setup('America/New_York');
+    const reminder = h.stores.reminders.create({ title: 'Call mom', dueAt: TOMORROW, timezone: 'America/Los_Angeles' });
+    const dueAt = Date.UTC(2026, 9, 13, 13);
+    const item = items(await h.propose([{ kind: 'reminder.update', reminderId: reminder.id, when: 'tomorrow 9am' }]))[0]!;
+
+    expect.soft(item).toMatchObject({
+      kind: 'reminder.update',
+      before: { dueAt: reminder.dueAt, timezone: 'America/Los_Angeles' },
+      after: { dueAt, timezone: 'America/New_York' },
+    });
+    expect(validateUIBlocks([{ type: 'changes', items: [item] }]).ok).toBe(true);
+    expect(h.stores.reminders.get(reminder.id)?.timezone).toBe('America/Los_Angeles');
+    expect((await h.apply(item)).isError).not.toBe(true);
+    expect(h.stores.reminders.get(reminder.id)?.dueAt).toBe(dueAt);
+    expect(h.stores.reminders.get(reminder.id)?.timezone).toBe('America/New_York');
+  });
+
   it('applies every stored task field and returns a receipt plus the normal task output', async () => {
     const h = setup();
     const task = h.stores.tasks.create({ title: 'Task', dueAt: NOW, priority: 1 });
