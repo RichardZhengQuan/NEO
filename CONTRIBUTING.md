@@ -64,7 +64,11 @@ AI agents working on NEO also follow [AGENTS.md](AGENTS.md), [LESSONS.md](LESSON
 
 ## Rules from lessons
 
-Rules that started as entries in [LESSONS.md](LESSONS.md) and were seen on three different days. Every review checks them. None yet.
+Rules that started as entries in [LESSONS.md](LESSONS.md) and were seen on three different days. Every review checks them.
+
+### Wait for CI green on the PR's head commit, and merge one PR at a time
+
+Only merge a PR after its CI run on the exact head commit has finished green (a cancelled run doesn't count), and wait for its merge-commit CI run on `main` to finish before merging the next PR. #27 stopped `main` runs from cancelling once they start, but GitHub still drops a run that is only queued when the next merge lands, so back-to-back merges leave one merge commit untested on `main` — #19's chain on 2026-10-12 and #56 on 2026-10-14 are examples. Branch protection requiring the `check` status is the belt-and-braces fix and is tracked in #33.
 
 ## Reporting security issues
 
