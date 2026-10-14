@@ -47,9 +47,39 @@ describe('reminder tool widgets', () => {
     expect(result.ui?.[10]).toEqual({ type: 'link', title: 'Show all 12 reminders', url: 'neo://reminders' });
     expect(validateUIBlocks(result.ui).ok).toBe(true);
     const limited = await run('list_reminders', { limit: 10 });
-    expect(limited.ui).toHaveLength(10);
-    expect(limited.ui?.every(block => block.type === 'reminder')).toBe(true);
+    expect(limited.output).toMatchObject({ total: 10 })
+    expect((limited.output as { reminders: unknown[] }).reminders).toHaveLength(10)
+    expect(limited.ui).toHaveLength(11)
+    expect(limited.ui?.slice(0, 10).every(block => block.type === 'reminder')).toBe(true)
+    expect(limited.ui?.[10]).toEqual({ type: 'link', title: 'Show all reminders', url: 'neo://reminders' })
+    expect(validateUIBlocks(limited.ui).ok).toBe(true)
   });
+
+  it.each([
+    { count: 2, limit: 1 },
+    { count: 25, limit: undefined },
+    { count: 101, limit: 100 },
+  ])('omits the count from the overflow link when results are truncated (%j)', async ({ count, limit }) => {
+    for (let i = 0; i < count; i++) stores.reminders.create({ title: `Reminder ${i}`, dueAt: NOW + (i + 1) * 60_000, timezone: 'UTC' })
+    const result = await run('list_reminders', { limit })
+    const userLimit = limit ?? 20
+    expect(result.output).toMatchObject({ total: userLimit })
+    expect((result.output as { reminders: unknown[] }).reminders).toHaveLength(userLimit)
+    expect(result.ui).toHaveLength(Math.min(userLimit, 10) + 1)
+    expect(result.ui?.slice(0, -1).every(block => block.type === 'reminder')).toBe(true)
+    expect(result.ui?.at(-1)).toEqual({ type: 'link', title: 'Show all reminders', url: 'neo://reminders' })
+    expect(validateUIBlocks(result.ui).ok).toBe(true)
+  })
+
+  it.each([10, 12, 20])('uses an exact count only when all %i reminders fit the requested limit', async count => {
+    for (let i = 0; i < count; i++) stores.reminders.create({ title: `Reminder ${i}`, dueAt: NOW + (i + 1) * 60_000, timezone: 'UTC' })
+    const result = await run('list_reminders', { limit: count })
+    expect(result.output).toMatchObject({ total: count })
+    expect((result.output as { reminders: unknown[] }).reminders).toHaveLength(count)
+    expect(result.ui?.slice(0, 10).every(block => block.type === 'reminder')).toBe(true)
+    expect(result.ui).toHaveLength(count > 10 ? 11 : 10)
+    if (count > 10) expect(result.ui?.[10]).toEqual({ type: 'link', title: `Show all ${count} reminders`, url: 'neo://reminders' })
+  })
 
   it('returns no widgets for an empty list', async () => {
     const result = await run('list_reminders', {});

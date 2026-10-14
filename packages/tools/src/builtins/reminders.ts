@@ -102,9 +102,13 @@ export function createReminderTools(stores: ProductivityStores, _clock?: Clock) 
     async execute(input) {
       const status = input.status ?? 'upcoming';
       const filter: Record<typeof status, ReminderStatus[] | undefined> = { upcoming: ['scheduled'], fired: ['fired'], completed: ['completed'], all: undefined };
-      const list = reminders.list({ status: filter[status], limit: input.limit ?? 20 });
-      const ui = list.slice(0, 10).map(reminderBlock);
-      if (list.length > 10) ui.push({ type: 'link', url: 'neo://reminders', title: `Show all ${list.length} reminders` });
+      const userLimit = input.limit ?? 20
+      const fetched = reminders.list({ status: filter[status], limit: userLimit + 1 })
+      const truncated = fetched.length > userLimit
+      const list = truncated ? fetched.slice(0, userLimit) : fetched
+      const ui = list.slice(0, 10).map(reminderBlock)
+      if (truncated) ui.push({ type: 'link', url: 'neo://reminders', title: 'Show all reminders' })
+      else if (list.length > 10) ui.push({ type: 'link', url: 'neo://reminders', title: `Show all ${list.length} reminders` })
       return {
         output: { reminders: list.map(reminderOutput), total: list.length },
         ui,
