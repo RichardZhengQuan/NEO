@@ -22,7 +22,7 @@ The nightly lessons loop ([docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md)) adds entri
 
 ## Get the independent review before merging, not after
 
-- #1 put the whole codebase on `main` with CI as the only pre-merge check anyone acted on; Codex's auto-review was posted 22 seconds before the merge, too late to be read. The independent review afterwards found 11 bugs, 8 of them P1, including a client-supplied `apiKeySecret` that let a paired device send another provider's key to any URL, and sensitive memories replayed to cloud models. #3 fixed them.
+- #1 put the whole codebase on `main`; Codex's auto-review landed at 2026-10-11T01:13:00Z and the merge went in 22 seconds later at 01:13:22Z. A separate independent review afterwards found 11 bugs, 8 of them P1, including a client-supplied `apiKeySecret` that let a paired device send another provider's key to any URL, and sensitive memories replayed to cloud models. #3 fixed them.
 - #56 and #58 were merged on 2026-10-14 with no `Agent review @ <sha>` comment on the PR at all; the only review on either was Codex's auto-review (empty on #56, two P2 findings on #58). Both PR bodies claimed the review was done in a Claude session, but with nothing posted there is no record of what was reviewed, when, or what verdict it reached — the merge cannot be checked against a review that is not on the PR.
 - Seen 2× (2026-10-11, 2026-10-14).
 
