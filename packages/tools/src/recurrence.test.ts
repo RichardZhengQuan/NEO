@@ -72,6 +72,7 @@ describe('nextOccurrence: daily', () => {
       return vi.mocked(zonedTimeToUtc).mock.calls.length;
     };
     const afterOneDay = candidates(anchorAt(2026, 10, 9));
+    expect(afterOneDay).toBeLessThanOrEqual(3);
     expect(candidates(anchorAt(2025, 10, 10))).toBe(afterOneDay);
     expect(candidates(anchorAt(2016, 1, 1))).toBe(afterOneDay);
   });
