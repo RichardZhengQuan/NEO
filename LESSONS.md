@@ -13,23 +13,17 @@ The nightly lessons loop ([docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md)) adds entri
 - Seen N× (YYYY-MM-DD, ...).
 ```
 
-## Merge only after CI has finished green on the PR's head commit, and merge one PR at a time
-
-- #12 was merged 22 seconds after its CI run started; the run (38218092424) finished 92 seconds after the merge. #26 was merged 32 seconds before its run on the head commit (38353710923) finished. Both runs passed, by luck: a failure wouldn't have stopped either merge.
-- #16, #17, #18 and #19 were merged within 43 seconds. Each merge cancelled the CI run of the one before, so only #19's merge commit was ever tested on `main` (#14's run was cancelled the same way). On 2026-10-13, #23 and #24 were merged 5 seconds apart and #23's run (38347786676) was cancelled.
-- Fixed in #27: CI no longer cancels runs on `main`. Requiring the `check` job before GitHub allows a merge is a branch-protection setting only the owner can turn on.
-- Seen 2× (2026-10-12, 2026-10-13).
-
 ## Read every review comment, from people or bots, before merging, and fix each finding or say in the PR why it waits
 
-- #1 was merged 22 seconds after Codex posted three inline findings. #3 fixed the 11 findings of a separate review, which covered only one of the three. The other two are still open: `neo serve --config <file>` ignores the file's `dataDir` and opens `~/.neo`, so NEO looks like it lost all its data (`packages/cli/src/commands/serve.ts`); and moving a parent task to another list hides its subtasks (`apps/web/src/screens/TasksScreen.tsx`).
-- #2 was merged with an unanswered Codex finding too (see the animation entry below).
-- Seen 1× (2026-10-11).
+- #1 was merged 22 seconds after Codex posted three inline findings. #3 fixed the 11 findings of a separate review, which covered only one of the three. The other two were still open until #34 (`neo serve --config <file>`'s `dataDir`) and #35 (moving a parent task's subtasks) landed; #2's animation finding is still open.
+- On 2026-10-13 and 2026-10-14, five PRs merged with unaddressed Codex inline findings on their head commit and no reply in the PR: #41 (one P2 on `packages/core/src/runtime.ts:189`, posted 52 min before the Ready agent review), #43 (three P1s on `packages/memory/src/service.ts`, 8 min before the Ready review), #48 (one P2 on off-record reminder links, 1 h 31 min before the Ready review), #50 (two P2s on cross-episode patch events, 9 min before the Ready review) and #58 (two P2s on self-edge unlink UX and docs, with no agent review and merged 9 h 29 min later). The P1s on #43 and the P2s on #58 are now bugs on `main`.
+- Seen 2× (2026-10-11, 2026-10-14).
 
 ## Get the independent review before merging, not after
 
 - #1 put the whole codebase on `main` with CI as the only check. The independent review afterwards found 11 bugs, 8 of them P1, including a client-supplied `apiKeySecret` that let a paired device send another provider's key to any URL, and sensitive memories replayed to cloud models. #3 fixed them.
-- Seen 1× (2026-10-11).
+- #56 and #58 were merged on 2026-10-14 with no `Agent review @ <sha>` comment on the PR at all; the only review on either was Codex's auto-review (empty on #56, two P2 findings on #58). Both PR bodies claimed the review was done in session, but a review that is not posted to GitHub cannot be checked before merging, so it is a review done after.
+- Seen 2× (2026-10-11, 2026-10-14).
 
 ## When you fix one case of a flaky pattern, find every case and fix them all in the same PR
 
