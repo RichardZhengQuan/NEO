@@ -14,11 +14,24 @@ NEO supports three deployment topologies:
 
 The **NEO desktop app** embeds the server.  No separate installation is needed.
 
-1. Download the installer for your platform from the releases page.
-2. Launch NEO.  The app starts an embedded server on a random localhost port
-   and opens the web UI in a native window.
-3. On first launch the onboarding wizard guides you through adding an AI
-   provider and configuring memory settings.
+1. Go to this repository's [GitHub Releases](https://github.com/RichardZhengQuan/NEO/releases)
+   and download `NEO-<version>-arm64.dmg` (Apple Silicon) or
+   `NEO-<version>-x64.dmg` (Intel) for the latest Mac release.
+2. Open the dmg and drag `NEO.app` into **Applications**.
+3. On first launch, right-click `NEO.app` in **Applications** → **Open** →
+   **Open** in the Gatekeeper dialog. This is required because the app is not
+   yet signed; subsequent launches don't need it. Alternatively, run this in
+   Terminal before launching:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/NEO.app
+   ```
+
+4. The app starts an embedded server on a random localhost port and opens
+   the web UI in a native window. The onboarding wizard then guides you
+   through adding an AI provider and configuring memory settings.
+
+Packaged Windows and Linux builds are planned but not shipped yet; macOS is the only platform on the Releases page today.
 
 Data is stored in the platform userData directory:
 
@@ -37,6 +50,22 @@ pnpm install && pnpm build
 node packages/cli/dist/index.js serve      # or link it once: (cd packages/cli && pnpm link --global) && neo serve
 # Open http://127.0.0.1:7777 in your browser.
 ```
+
+### Updates
+
+The desktop app checks this repository's GitHub Releases for updates on launch
+in packaged builds only. Development builds skip the automatic check.
+Pre-release GitHub Releases are skipped by default (`allowPrerelease` is `false`).
+
+When a newer release is available, NEO downloads it in the background and
+shows a system notification when the download is ready. The update installs
+when NEO next quits.
+
+**Help → Check for updates…** triggers a manual check and shows the result
+in a dialog: `Downloading NEO <version>…`, `NEO is up to date.`, or an error
+(`Could not check for updates: <detail>`).
+
+There is currently no user-facing toggle to disable the auto-updater.
 
 ---
 
