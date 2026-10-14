@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   Menu,
   MenuItem,
@@ -18,6 +19,7 @@ import {
   shell,
   Tray,
 } from 'electron';
+import electronUpdater from 'electron-updater';
 import { loadConfig, startServer } from '@neo/server';
 import { NeoClient } from '@neo/client';
 import type { ConnectionStatus, EventEnvelope } from '@neo/client';
@@ -30,8 +32,15 @@ import {
   isSameOrigin,
   resolveWebDir,
 } from './lib.js';
+import {
+  attachUpdaterErrorHandler,
+  checkForUpdatesOnReady,
+  createCheckForUpdatesHandler,
+} from './updater.js';
 import type { NeoServer } from '@neo/server';
 import type { ServerEvent } from '@neo/protocol';
+
+const { autoUpdater } = electronUpdater;
 
 // ESM polyfill for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -290,6 +299,20 @@ function buildAppMenu(): Menu {
           : ([{ role: 'close' }] as Electron.MenuItemConstructorOptions[])),
       ],
     },
+    {
+      role: 'help',
+      submenu: [
+        {
+          label: 'Check for updates…',
+          click: createCheckForUpdatesHandler({
+            autoUpdater,
+            // Narrow Electron's overloaded showMessageBox (the `(window, opts)`
+            // overload would otherwise widen DialogLike away from a one-arg call).
+            dialog: { showMessageBox: (opts) => dialog.showMessageBox(opts) },
+          }),
+        },
+      ],
+    },
   );
 
   return Menu.buildFromTemplate(template);
@@ -444,6 +467,8 @@ async function main(): Promise<void> {
 
   // Open the main window.
   createWindow(serverUrl);
+  attachUpdaterErrorHandler({ autoUpdater });
+  checkForUpdatesOnReady({ autoUpdater, isPackaged: app.isPackaged });
 
   // Start listening for server events to show OS notifications.
   startNotificationListener(serverUrl, ownerToken);
