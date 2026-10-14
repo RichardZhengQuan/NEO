@@ -1136,6 +1136,9 @@ export function unlink(ctx: MemoryContext, edgeId: string): boolean {
   return runWrite(ctx, ctx.clock(), (s) => {
     const edge = getEdge(ctx.db, edgeId);
     if (!edge) return false;
+    if (edge.from === SELF_MEMORY_ID || edge.to === SELF_MEMORY_ID) {
+      throw new NeoError('bad_request', 'Cannot unlink the self node');
+    }
     ctx.db.prepare('DELETE FROM memory_edges WHERE id = ?').run(edgeId);
     s.updated.add(edge.from);
     s.updated.add(edge.to);

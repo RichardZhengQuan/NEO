@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { ChatRequest, ChatStreamEvent, ChatModel, ObservedTurn, RememberInput, ToolDefinition } from '@neo/protocol';
-import { silentLogger, newId, DEFAULT_MEMORY_POLICY } from '@neo/protocol';
+import { silentLogger, newId, DEFAULT_MEMORY_POLICY, NeoError, SELF_MEMORY_ID } from '@neo/protocol';
 import { openNeoDatabase } from '@neo/storage';
 import {
   createMemoryService,
@@ -311,6 +311,24 @@ describe('link / unlink', () => {
     const g = await svc.graph({ centerId: a.id, depth: 1, limit: 10 });
     const edge = g.edges.find(e => (e.from === a.id && e.to === b.id) || (e.from === b.id && e.to === a.id));
     expect(edge).toBeUndefined();
+  });
+
+  it.each(['from', 'to'] as const)('refuses to unlink an edge with the self node as its %s endpoint', async (endpoint) => {
+    const { svc, db } = makeTestService();
+    try {
+      const node = await svc.remember({ kind: 'fact', label: 'Tea', content: 'The user likes tea', importance: 0.5 });
+      const edge = endpoint === 'from'
+        ? await svc.link(SELF_MEMORY_ID, node.id, 'related', 0.8)
+        : (await svc.get(node.id))!.edges.find(e => e.to === SELF_MEMORY_ID)!;
+      expect(edge[endpoint]).toBe(SELF_MEMORY_ID);
+
+      const result = svc.unlink(edge.id);
+      await expect(result).rejects.toBeInstanceOf(NeoError);
+      await expect(result).rejects.toMatchObject({ code: 'bad_request' });
+      expect((await svc.get(node.id))!.edges).toContainEqual(edge);
+    } finally {
+      db.close();
+    }
   });
 });
 
