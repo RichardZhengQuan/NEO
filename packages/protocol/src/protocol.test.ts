@@ -276,6 +276,27 @@ describe('config & settings', () => {
     expect(MemoryPolicySchema.parse({}).allowedKinds).toContain('episode');
   });
 
+  describe('NeoConfigSchema tunnel.advertise validation', () => {
+    it('bare IP without port should be rejected', () => {
+      const parse = () => NeoConfigSchema.parse({ tunnel: { advertise: ['192.168.1.1'] } });
+      expect(parse).toThrow(z.ZodError);
+      expect(parse).toThrow('host:port');
+    });
+
+    it('accepts a valid host:port address', () => {
+      const cfg = NeoConfigSchema.parse({ tunnel: { advertise: ['192.168.1.1:7779'] } });
+      expect(cfg.tunnel.advertise).toEqual(['192.168.1.1:7779']);
+    });
+
+    it('accepts an empty list', () => {
+      expect(NeoConfigSchema.parse({ tunnel: { advertise: [] } }).tunnel.advertise).toEqual([]);
+    });
+
+    it('URL with scheme should be rejected', () => {
+      expect(() => NeoConfigSchema.parse({ tunnel: { advertise: ['http://192.168.1.1:7779'] } })).toThrow('host:port');
+    });
+  });
+
   it('applies deep patches and rejects invalid ones', () => {
     const next = applySettingsPatch(DEFAULT_SETTINGS, { persona: { avatar: '🌟' }, memory: { recall: false } });
     expect(next.persona).toEqual({ avatar: '🌟' });
