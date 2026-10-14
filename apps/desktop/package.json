@@ -17,7 +17,8 @@
   "dependencies": {
     "@neo/protocol": "workspace:*",
     "@neo/server": "workspace:*",
-    "@neo/client": "workspace:*"
+    "@neo/client": "workspace:*",
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
