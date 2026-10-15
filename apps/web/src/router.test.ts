@@ -49,6 +49,19 @@ describe('parseRoute', () => {
     for (const [k, v] of Object.entries(route)) if (!(k in expected)) expect(v).toBeUndefined();
   });
 
+  it('preserves tunnel parameters in v2 pairing links', () => {
+    const route = parseRoute('#/pair?v=2&code=abc_123&id=aabbccddeeff00112233445566778899&pk=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB-&lan=192.168.1.1%3A7778&relay=wss%3A%2F%2Frelay.example.com');
+    expect(route).toMatchObject({
+      name: 'pair',
+      version: '2',
+      code: 'abc_123',
+      id: 'aabbccddeeff00112233445566778899',
+      pk: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB-',
+      lan: '192.168.1.1:7778',
+      relay: 'wss://relay.example.com',
+    });
+  });
+
   it('ignores ids with unsafe characters', () => {
     expect(parseRoute('#/timeline/<script>')).toEqual({ name: 'timeline' });
     expect(parseRoute('#/chat/conv_1?messageId=%3Cscript%3E')).toEqual({ name: 'timeline' });
@@ -73,6 +86,19 @@ describe('routeToHash', () => {
     { name: 'pair', version: '2', code: 'pairing_code', serverUrl: 'https://a.b' },
   ])('round-trips %j', (route) => {
     expect(parseRoute(routeToHash(route))).toMatchObject(route);
+  });
+
+  it('round-trips tunnel parameters in v2 pairing links', () => {
+    const route = parseRoute('#/pair?v=2&code=abc_123&id=aabbccddeeff00112233445566778899&pk=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB-&lan=192.168.1.1%3A7778&relay=wss%3A%2F%2Frelay.example.com');
+    expect(parseRoute(routeToHash(route))).toMatchObject({
+      name: 'pair',
+      version: '2',
+      code: 'abc_123',
+      id: 'aabbccddeeff00112233445566778899',
+      pk: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB-',
+      lan: '192.168.1.1:7778',
+      relay: 'wss://relay.example.com',
+    });
   });
 });
 
