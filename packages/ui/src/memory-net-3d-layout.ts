@@ -103,6 +103,11 @@ export function generateMemoryTimeTicks(scale: MemoryTimeScale): MemoryTimeTick[
   const date = new Date(dayAt(scale.oldestAt));
   if (unit === 'week') date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
   if (unit === 'month') date.setUTCDate(1);
+  // Advance to the first tick that is within the displayed range.
+  while (date.getTime() < scale.oldestAt) {
+    if (unit === 'month') date.setUTCMonth(date.getUTCMonth() + 1);
+    else date.setUTCDate(date.getUTCDate() + (unit === 'week' ? 7 : 1));
+  }
   const ticks: MemoryTimeTick[] = [];
   for (let count = 0; count < 2400 && date.getTime() <= scale.newestAt; count++) {
     const at = date.getTime();
