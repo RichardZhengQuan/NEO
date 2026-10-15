@@ -30,7 +30,7 @@ export type Route =
   | { name: 'settings'; section?: SettingsSection }
   | { name: 'connect' }
   | { name: 'onboarding' }
-  | { name: 'pair'; token?: string; serverUrl?: string; code?: string; version?: string };
+  | { name: 'pair'; token?: string; serverUrl?: string; code?: string; version?: string; id?: string; pk?: string; lan?: string; relay?: string };
 
 export type RouteName = Route['name'];
 
@@ -81,7 +81,17 @@ function routeFrom(segments: string[], query: URLSearchParams): Route {
     case 'onboarding':
       return { name: 'onboarding' };
     case 'pair':
-      return { name: 'pair', token: query.get('token') ?? undefined, serverUrl: query.get('server') ?? query.get('url') ?? undefined, code: query.get('code') ?? undefined, version: query.get('v') ?? undefined };
+      return {
+        name: 'pair',
+        token: query.get('token') ?? undefined,
+        serverUrl: query.get('server') ?? query.get('url') ?? undefined,
+        code: query.get('code') ?? undefined,
+        version: query.get('v') ?? undefined,
+        id: query.get('id') ?? undefined,
+        pk: query.get('pk') ?? undefined,
+        lan: query.get('lan') ?? undefined,
+        relay: query.get('relay') ?? undefined,
+      };
     default:
       return { name: 'timeline' };
   }
@@ -130,6 +140,10 @@ export function routeToHash(route: Route): string {
       if (route.code) q.set('code', route.code);
       if (route.token) q.set('token', route.token);
       if (route.serverUrl) q.set('server', route.serverUrl);
+      if (route.id) q.set('id', route.id);
+      if (route.pk) q.set('pk', route.pk);
+      if (route.lan) q.set('lan', route.lan);
+      if (route.relay) q.set('relay', route.relay);
       const s = q.toString();
       return s ? `#/pair?${s}` : '#/pair';
     }

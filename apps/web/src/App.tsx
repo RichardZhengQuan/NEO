@@ -180,6 +180,10 @@ function ReadyApp(): ReactElement {
         if (route.token) q.set('token', route.token);
         const server = route.serverUrl ?? (/^https?:$/.test(window.location.protocol) ? window.location.origin : undefined);
         if (server) q.set('server', server);
+        if (route.id) q.set('id', route.id);
+        if (route.pk) q.set('pk', route.pk);
+        if (route.lan) q.set('lan', route.lan);
+        if (route.relay) q.set('relay', route.relay);
         openPairLink(`neo://pair?${q.toString()}`);
       }
       navigate({ name: 'timeline' }, { replace: true });
