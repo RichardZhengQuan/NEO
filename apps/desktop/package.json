@@ -12,7 +12,10 @@
     "test": "vitest run",
     "icon:generate": "node scripts/generate-icon.mjs",
     "start": "electron .",
-    "dev": "pnpm --filter @neo/web build && pnpm -r --filter @neo/desktop... build && electron ."
+    "dev": "pnpm --filter @neo/web build && pnpm -r --filter @neo/desktop... build && electron .",
+    "pack": "electron-builder --dir",
+    "release:mac": "electron-builder --mac --publish always",
+    "release:all": "electron-builder -mwl --publish always"
   },
   "dependencies": {
     "@neo/protocol": "workspace:*",
@@ -23,6 +26,7 @@
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "electron": "^44.0.0",
+    "electron-builder": "^26.0.12",
     "png2icons": "^2.0.1"
   },
   "build": {
@@ -56,6 +60,11 @@
         { "target": "AppImage", "arch": ["x64"] }
       ],
       "icon": "build/icons"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "RichardZhengQuan",
+      "repo": "NEO"
     }
   }
 }
