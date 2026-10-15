@@ -1,0 +1,49 @@
+# Builds macOS installers and uploads them to a draft GitHub Release.
+# Builds are unsigned and un-notarized on purpose; the owner deferred signing
+# and notarization in #63.
+# See .github/workflows/README.md for how to cut a release.
+name: Release desktop
+
+'on':
+  push:
+    tags: ['desktop-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: pnpm
+      - name: Version guard
+        if: github.ref_type == 'tag'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          package_version=$(node -p "require('./apps/desktop/package.json').version")
+          tag_version="${TAG_NAME#desktop-v}"
+          if [ "$tag_version" != "$package_version" ]; then
+            echo "::error::Tag version '$tag_version' does not match apps/desktop/package.json version '$package_version'."
+            exit 1
+          fi
+      - run: pnpm install --frozen-lockfile
+      - name: Build web app
+        run: pnpm --filter @neo/web build
+      - name: Build desktop and workspace dependencies
+        run: pnpm -r --workspace-concurrency=1 --filter @neo/desktop... build
+      - name: Release macOS installers
+        run: pnpm --filter @neo/desktop release:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
