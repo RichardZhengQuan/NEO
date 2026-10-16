@@ -268,6 +268,14 @@ describe('relay registration and routing', () => {
 });
 
 describe('relay limits and lifecycle', () => {
+  it('rejects millisecond limits that exceed Node\'s setTimeout range', async () => {
+    await expect(start({ limits: { registrationTimeoutMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: registrationTimeoutMs/);
+    await expect(start({ limits: { heartbeatIntervalMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: heartbeatIntervalMs/);
+    await expect(start({ limits: { phoneIdleTimeoutMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: phoneIdleTimeoutMs/);
+    const relay = await start({ limits: { registrationTimeoutMs: 2_147_483_647 } });
+    expect(relay.port).toBeGreaterThan(0);
+  });
+
   it('caps concurrent phone connections per IP across servers and releases slots', async () => {
     const relay = await start({ limits: { perIpPhoneConnections: 1 } });
     const first = await register(relay);
