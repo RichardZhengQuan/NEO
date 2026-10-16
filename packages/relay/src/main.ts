@@ -4,10 +4,11 @@ import type { LogLevel } from '@neo/protocol';
 import { startRelay } from './relay.js';
 import type { RelayLimits } from './relay.js';
 
-function integer(name: string, value: string, allowZero = false): number {
+function integer(name: string, value: string, allowZero = false, max?: number): number {
   if (!/^\d+$/.test(value)) throw new Error(`${name} must be an integer`);
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < (allowZero ? 0 : 1)) throw new Error(`${name} is out of range`);
+  if (max !== undefined && parsed > max) throw new Error(`${name} is out of range`);
   return parsed;
 }
 
@@ -26,6 +27,12 @@ const overrides: Record<keyof RelayLimits, string> = {
   heartbeatIntervalMs: 'RELAY_HEARTBEAT_INTERVAL_MS',
 };
 
+const MS_LIMIT_FIELDS: ReadonlySet<keyof RelayLimits> = new Set([
+  'registrationTimeoutMs',
+  'phoneIdleTimeoutMs',
+  'heartbeatIntervalMs',
+]);
+
 async function main(): Promise<void> {
   const level = process.env.RELAY_LOG_LEVEL ?? 'info';
   if (!['debug', 'info', 'warn', 'error', 'silent'].includes(level)) throw new Error('Invalid RELAY_LOG_LEVEL');
@@ -36,7 +43,9 @@ async function main(): Promise<void> {
   const limits: Partial<RelayLimits> = {};
   for (const [key, name] of Object.entries(overrides)) {
     const value = process.env[name];
-    if (value !== undefined) limits[key as keyof RelayLimits] = integer(name, value);
+    if (value === undefined) continue;
+    const max = MS_LIMIT_FIELDS.has(key as keyof RelayLimits) ? 2_147_483_647 : undefined;
+    limits[key as keyof RelayLimits] = integer(name, value, false, max);
   }
   const logger = createConsoleLogger(level as LogLevel);
   const relay = await startRelay({ host: process.env.RELAY_HOST ?? '0.0.0.0', port, trustProxy: trustProxy === 'true' || trustProxy === '1', logger, limits });

@@ -503,9 +503,9 @@ limits in milliseconds.
 | `RELAY_BYTES_PER_SECOND` | `4194304` | Combined per-phone sustained traffic in both directions (4 MiB/s) |
 | `RELAY_BURST_BYTES` | `16777216` | Per-phone token-bucket burst (16 MiB) |
 | `RELAY_MAX_BUFFERED_BYTES` | `8388608` | Destination queue cap (8 MiB) |
-| `RELAY_REGISTRATION_TIMEOUT_MS` | `10000` | Time to answer the registration challenge |
-| `RELAY_PHONE_IDLE_TIMEOUT_MS` | `120000` | Maximum inactivity in both directions |
-| `RELAY_HEARTBEAT_INTERVAL_MS` | `30000` | Server ping interval; missed pong terminates the socket |
+| `RELAY_REGISTRATION_TIMEOUT_MS` | `10000` | Time to answer the registration challenge. Capped at `2147483647` (Node's `setTimeout` range); larger values fail startup |
+| `RELAY_PHONE_IDLE_TIMEOUT_MS` | `120000` | Maximum inactivity in both directions. Capped at `2147483647`; larger values fail startup |
+| `RELAY_HEARTBEAT_INTERVAL_MS` | `30000` | Server ping interval; missed pong terminates the socket. Capped at `2147483647`; larger values fail startup |
 
 Each Noise message is capped at 65,535 bytes (plus the five-byte server relay
 header). The relay disconnects phones that exceed the byte-rate bucket or

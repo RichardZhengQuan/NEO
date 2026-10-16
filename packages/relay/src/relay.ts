@@ -41,6 +41,13 @@ export const DEFAULT_RELAY_LIMITS: Readonly<RelayLimits> = Object.freeze({
   heartbeatIntervalMs: 30_000,
 });
 
+const MAX_TIMER_MS = 2_147_483_647;
+const MS_LIMIT_FIELDS: ReadonlySet<keyof RelayLimits> = new Set([
+  'registrationTimeoutMs',
+  'phoneIdleTimeoutMs',
+  'heartbeatIntervalMs',
+]);
+
 export interface RelayStats {
   servers: number;
   phones: number;
@@ -123,6 +130,9 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
   const limits = { ...DEFAULT_RELAY_LIMITS, ...options.limits };
   for (const [name, value] of Object.entries(limits)) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`Invalid relay limit: ${name}`);
+    if (MS_LIMIT_FIELDS.has(name as keyof RelayLimits) && value > MAX_TIMER_MS) {
+      throw new Error(`Invalid relay limit: ${name}`);
+    }
   }
   const http = createServer((request, response) => {
     if (request.method === 'GET' && request.url === '/healthz') {
