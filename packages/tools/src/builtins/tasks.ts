@@ -83,8 +83,8 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
     risk: 'write',
     defaultPermission: 'auto',
     async execute(input, ctx) {
-      const list = input.list ? resolveOrCreateList(input.list) : (findList(INBOX_LIST_ID) as TaskList);
       const dueAt = input.due !== undefined ? parseDateTime(input.due, ctx.now(), ctx.timezone) : null;
+      const list = input.list ? resolveOrCreateList(input.list) : (findList(INBOX_LIST_ID) as TaskList);
       const task = tasks.create({
         title: input.title,
         listId: list.id,

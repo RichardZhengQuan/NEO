@@ -236,6 +236,13 @@ describe('task tools', () => {
     expect(t.stores.tasks.lists().filter((l) => l.name.toLowerCase() === 'groceries')).toHaveLength(1);
   });
 
+  it('create_task: a bad due date leaves lists unchanged', async () => {
+    const res = await t.run('create_task', { title: 'Buy milk', list: 'Groceries', due: 'not a date' });
+    expect(res.isError).toBe(true);
+    expect(t.stores.tasks.lists()).toHaveLength(1);
+    expect(t.stores.tasks.list()).toEqual([]);
+  });
+
   it('the widget always contains the task just created, even in a long list', async () => {
     for (let i = 0; i < 120; i++) t.stores.tasks.create({ title: `old ${i}` });
     const res = await t.run('create_task', { title: 'x'.repeat(1000) });
