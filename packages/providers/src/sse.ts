@@ -75,10 +75,16 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>, signal?: Abort
         if (buf) {
           const msg = processLine(buf.endsWith('\r') ? buf.slice(0, -1) : buf);
           buf = '';
-          if (msg) yield msg;
+          if (msg) {
+            if (signal?.aborted) throw cancelledError(signal.reason);
+            yield msg;
+          }
         }
         const last = takeEvent();
-        if (last) yield last;
+        if (last) {
+          if (signal?.aborted) throw cancelledError(signal.reason);
+          yield last;
+        }
         return;
       }
       buf += decoder.decode(result.value, { stream: true });
@@ -93,7 +99,10 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>, signal?: Abort
         if (ch === '\r' && buf[i + 1] === '\n') i++;
         start = i + 1;
         const msg = processLine(line);
-        if (msg) yield msg;
+        if (msg) {
+          if (signal?.aborted) throw cancelledError(signal.reason);
+          yield msg;
+        }
       }
       buf = buf.slice(start);
     }
