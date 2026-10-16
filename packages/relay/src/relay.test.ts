@@ -305,6 +305,15 @@ describe('relay limits and lifecycle', () => {
     expect(await refused.closed).toBe(TunnelCloseCode.RateLimited);
   });
 
+  it('counts equivalent IPv6 spellings as one IP', async () => {
+    const relay = await start({ trustProxy: true, limits: { perIpPhoneConnections: 1 } });
+    const server = await register(relay);
+    await phone(relay, server, { headers: { 'x-forwarded-for': '2001:db8::1' } });
+    const refused = await connect(relay, `/v1/connect/${server.identity.serverId}`, { headers: { 'x-forwarded-for': '2001:0db8:0:0:0:0:0:1' } });
+    expect(await refused.closed).toBe(TunnelCloseCode.RateLimited);
+    expect(relay.stats().phones).toBe(1);
+  });
+
   it('caps phones per server and globally', async () => {
     const relay = await start({ trustProxy: true, limits: { perServerPhoneConnections: 1, maxPhones: 2 } });
     const first = await register(relay);

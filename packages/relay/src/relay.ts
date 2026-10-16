@@ -98,11 +98,28 @@ function bytes(data: RawData): Uint8Array {
   return data instanceof ArrayBuffer ? new Uint8Array(data) : data;
 }
 
+function canonicalizeIp(ip: string): string {
+  const kind = isIP(ip);
+  if (!kind) return ip;
+  // isIP accepts zone-id IPv6 like fe80::1%eth0, but URL rejects them; fall back to the raw string.
+  try {
+    if (kind === 6) {
+      const hostname = new URL(`http://[${ip}]/`).hostname;
+      return hostname.startsWith('[') && hostname.endsWith(']')
+        ? hostname.slice(1, -1)
+        : hostname;
+    }
+    return new URL(`http://${ip}/`).hostname;
+  } catch {
+    return ip;
+  }
+}
+
 function clientIp(request: IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
     const header = request.headers['x-forwarded-for'];
     const first = (Array.isArray(header) ? header[0] : header)?.split(',')[0]?.trim();
-    if (first && isIP(first)) return first;
+    if (first && isIP(first)) return canonicalizeIp(first);
   }
   return request.socket.remoteAddress ?? 'unknown';
 }
