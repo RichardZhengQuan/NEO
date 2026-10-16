@@ -101,13 +101,18 @@ function bytes(data: RawData): Uint8Array {
 function canonicalizeIp(ip: string): string {
   const kind = isIP(ip);
   if (!kind) return ip;
-  // isIP accepts zone-id IPv6 like fe80::1%eth0, but URL rejects them; fall back to the raw string.
+  // URL rejects zone-id IPv6 like fe80::1%eth0, so split the zone off, canonicalize the address,
+  // and re-attach the zone verbatim — the zone is a textual interface label, not part of the IP.
   try {
     if (kind === 6) {
-      const hostname = new URL(`http://[${ip}]/`).hostname;
-      return hostname.startsWith('[') && hostname.endsWith(']')
+      const zoneAt = ip.indexOf('%');
+      const addr = zoneAt === -1 ? ip : ip.slice(0, zoneAt);
+      const zone = zoneAt === -1 ? '' : ip.slice(zoneAt);
+      const hostname = new URL(`http://[${addr}]/`).hostname;
+      const inner = hostname.startsWith('[') && hostname.endsWith(']')
         ? hostname.slice(1, -1)
         : hostname;
+      return inner + zone;
     }
     return new URL(`http://${ip}/`).hostname;
   } catch {
