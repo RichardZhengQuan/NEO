@@ -70,6 +70,10 @@ Rules that started as entries in [LESSONS.md](LESSONS.md) and were seen on three
 
 Only merge a PR after its CI run on the exact head commit has finished green (a cancelled run doesn't count), and wait for its merge-commit CI run on `main` to finish before merging the next PR. #27 stopped `main` runs from cancelling once they start, but GitHub still drops a run that is only queued when the next merge lands, so back-to-back merges leave one merge commit untested on `main` — #19's chain on 2026-10-12 and #56 on 2026-10-14 are examples. Branch protection requiring the `check` status is the belt-and-braces fix and is tracked in #33.
 
+### Read every review comment, from people or bots, before merging, and fix each finding or say in the PR why it waits
+
+Codex and other automated reviewers post findings on the PR's head commit, often minutes before the Ready review goes up; if the agent review doesn't acknowledge them, the PR ships with those bugs on `main`. #1 merged 22 s after Codex posted three inline findings (2026-10-11), and a later independent review found 11 bugs including 8 P1s. On 2026-10-13/14, #43, #48, #50 and #58 merged with 8 min, 1 h 31 min, 9 min and 9 h 29 min of unaddressed Codex findings. On 2026-10-14, #66, #82 and #84 merged with Codex findings posted 3–5 min before the Ready review and never acknowledged. On 2026-10-15, #94 merged 2 min 33 s after Codex posted a P2 at `apps/web/src/App.tsx:186` ("Avoid adding the Android WebView origin to tunnel links" — on Android Capacitor shell `androidScheme: 'https'` makes `window.location.origin` `https://localhost`, which `pairingConnection` prefers over the tunnel, so tunnel-only pair links still fail) and the Ready review did not mention it. Every agent review must enumerate the automated-review findings on the head commit it saw and, for each, either address it in the PR or cite the comment and say why the owner has deferred it; silence on a bot finding means the review did not read it.
+
 ## Reporting security issues
 
 Please don't open a public issue for vulnerabilities. Use GitHub's private vulnerability reporting ("Report a vulnerability" on the Security tab).
