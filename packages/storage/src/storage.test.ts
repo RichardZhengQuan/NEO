@@ -98,6 +98,60 @@ describe('database', () => {
     expect(db.prepare('SELECT x FROM t').all()).toEqual([{ x: 1 }]);
   });
 
+  it('rolls back and stays usable when the outer COMMIT fails', () => {
+    db = openDatabase(':memory:');
+    db.exec(`
+      CREATE TABLE parent (id INTEGER PRIMARY KEY);
+      CREATE TABLE child (
+        id INTEGER PRIMARY KEY,
+        parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+      );
+    `);
+    let error: unknown;
+    try {
+      db.transaction(() => db.prepare('INSERT INTO child VALUES (?, ?)').run(1, 99));
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('FOREIGN');
+    expect(db.prepare('SELECT * FROM child').all()).toEqual([]);
+    expect(() => db.transaction(() => db.prepare('INSERT INTO parent VALUES (?)').run(99))).not.toThrow();
+    expect(db.prepare('SELECT * FROM parent').all()).toEqual([{ id: 99 }]);
+  });
+
+  it('preserves the original error when transaction cleanup also fails', () => {
+    db = openDatabase(':memory:');
+    db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY)');
+    let original: unknown;
+    let error: unknown;
+    try {
+      db.transaction(() => {
+        db.prepare('INSERT INTO t VALUES (?)').run(1);
+        try {
+          db.prepare('INSERT OR ROLLBACK INTO t VALUES (?)').run(1);
+        } catch (err) {
+          original = err;
+          throw err;
+        }
+      });
+    } catch (err) {
+      error = err;
+    }
+    expect(original).toBeInstanceOf(Error);
+    expect((original as Error).message).toContain('UNIQUE');
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).message).toContain('transaction cleanup failed');
+    expect((error as AggregateError).cause).toBe(original);
+    expect((error as AggregateError).errors).toEqual([
+      original,
+      expect.objectContaining({ message: expect.stringContaining('no transaction is active') }),
+    ]);
+    expect(db.prepare('SELECT * FROM t').all()).toEqual([]);
+    db.transaction(() => db.prepare('INSERT INTO t VALUES (?)').run(2));
+    expect(db.prepare('SELECT * FROM t').all()).toEqual([{ id: 2 }]);
+  });
+
   it('round-trips vectors and builds safe fts queries', () => {
     const v = new Float32Array([0.5, -1.25, 3]);
     expect(Array.from(blobToVector(vectorToBlob(v)))).toEqual([0.5, -1.25, 3]);

@@ -67,18 +67,24 @@ export function openDatabase(path: string): NeoDatabase {
       return stmt;
     },
     transaction<T>(fn: () => T): T {
-      const savepoint = `sp_${depth}`;
-      raw.exec(depth === 0 ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepoint}`);
+      const entryDepth = depth;
+      const outer = entryDepth === 0;
+      const savepoint = `sp_${entryDepth}`;
+      raw.exec(outer ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepoint}`);
       depth++;
       try {
         const result = fn();
-        depth--;
-        raw.exec(depth === 0 ? 'COMMIT' : `RELEASE ${savepoint}`);
+        raw.exec(outer ? 'COMMIT' : `RELEASE ${savepoint}`);
         return result;
       } catch (err) {
-        depth--;
-        raw.exec(depth === 0 ? 'ROLLBACK' : `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
+        try {
+          raw.exec(outer ? 'ROLLBACK' : `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
+        } catch (cleanupErr) {
+          throw new AggregateError([err, cleanupErr], 'transaction cleanup failed', { cause: err });
+        }
         throw err;
+      } finally {
+        depth = entryDepth;
       }
     },
     close() {
