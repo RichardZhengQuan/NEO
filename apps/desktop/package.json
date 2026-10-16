@@ -12,6 +12,9 @@
     "test": "vitest run",
     "icon:generate": "node scripts/generate-icon.mjs",
     "start": "electron .",
+    "pack": "electron-builder --dir",
+    "release:mac": "electron-builder --mac --publish always",
+    "release:all": "electron-builder -mwl --publish always",
     "dev": "pnpm --filter @neo/web build && pnpm -r --filter @neo/desktop... build && electron ."
   },
   "dependencies": {
@@ -23,6 +26,7 @@
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "electron": "^44.0.0",
+    "electron-builder": "^26.0.0",
     "png2icons": "^2.0.1"
   },
   "build": {
@@ -38,6 +42,11 @@
         "filter": ["**/*"]
       }
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "RichardZhengQuan",
+      "repo": "NEO"
+    },
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
