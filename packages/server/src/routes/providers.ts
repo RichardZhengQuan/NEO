@@ -2,6 +2,7 @@ import type { Hono } from 'hono';
 import { AI_CAPABILITIES, CreateProviderRequestSchema, NeoError, TestProviderRequestSchema, UpdateProviderRequestSchema } from '@neo/protocol';
 import type { ProviderConfig } from '@neo/protocol';
 import { createProvider } from '@neo/providers';
+import { isSecretProviderHeader } from '@neo/storage';
 import type { NeoServices } from '../index.js';
 import { validateBody } from './helpers.js';
 import { connectSimpleProvider, deriveProviderId, providerView, saveProvider } from '../provider-connections.js';
@@ -81,7 +82,19 @@ export function registerProviders(app: Hono, services: NeoServices): void {
     // If a new apiKey is provided, move it to SecretStore
     const { apiKey, ...rest } = body;
     const patch: Partial<ProviderConfig> = { ...rest, ...(apiKey !== undefined ? { apiKey: undefined, apiKeySecret: apiKey ? `provider:${id}` : undefined } : {}) };
-    const updated = saveProvider(services, { ...existing, ...patch }, apiKey, existing);
+    const merged: ProviderConfig = { ...existing, ...patch };
+    const sameEndpoint = existing.baseUrl === merged.baseUrl;
+    const clearApiKey = !sameEndpoint && apiKey === undefined;
+    // Stored credentials must not follow an endpoint change without replacements.
+    if (clearApiKey) merged.apiKeySecret = undefined;
+    if (!sameEndpoint && merged.headers) {
+      const suppliedHeaders = rest.headers ?? {};
+      merged.headers = Object.fromEntries(Object.entries(merged.headers).filter(([name, value]) =>
+        !isSecretProviderHeader(name) || (Object.hasOwn(suppliedHeaders, name) && value !== `neo-secret:provider:${id}:header:${name.toLowerCase()}`),
+      ));
+    }
+    // Let the save transaction delete cleared keys and unused headers so failures can roll back.
+    const updated = saveProvider(services, merged, clearApiKey ? '' : apiKey, existing);
     services.refreshEmbeddingProvider?.(id);
 
     return c.json(providerView(updated, secrets));

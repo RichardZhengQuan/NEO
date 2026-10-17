@@ -63,7 +63,7 @@ Provider creation, draft tests, updates that enable or use `kind: mock`, and set
 | **Providers & models** | | |
 | `GET /api/providers` | | `ProvidersResponse` (config-file + app-added providers, `ai` capability settings and legacy `defaultModel`; secrets redacted to `hasApiKey`) |
 | `POST /api/providers` | `CreateProviderRequestSchema` | `201 ProviderView`. `apiKey` is stored in the SecretStore as `provider:<id>` and replaced by `apiKeySecret`. A missing `id` is derived from the kind (`openai`, `openai-2`, …). With `simple: true`, the server verifies the live model list before saving and assigns capability defaults in Simple mode. Otherwise a provider `defaultModel` becomes Text when no Text assignment exists |
-| `PATCH /api/providers/:id` | `UpdateProviderRequestSchema` | `ProviderView` (config-file providers: 409) |
+| `PATCH /api/providers/:id` | `UpdateProviderRequestSchema` | `ProviderView` (config-file providers: 409). Changing `baseUrl` clears the stored API key and credential headers unless a replacement `apiKey` is supplied. |
 | `DELETE /api/providers/:id` | | `204` (config-file providers: 409; deletes encrypted credentials and clears all capability assignments that pointed at it) |
 | `GET /api/providers/:id/models` | | `ListResponse<ModelInfo>` |
 | `POST /api/providers/:id/test` | | `ProviderTestResult` |
