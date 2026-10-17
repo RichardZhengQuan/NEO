@@ -139,6 +139,9 @@ export function createChangeTools(stores: ProductivityStores) {
         if (reminder.status !== 'scheduled' || !sameFields(reminder, item.before)) {
           throw new NeoError('conflict', 'This reminder changed after NEO proposed this. Ask NEO for a fresh plan.');
         }
+        if (item.after.dueAt !== undefined) {
+          parseFuture(item.after.dueAt, ctx.now(), item.after.timezone ?? reminder.timezone);
+        }
         const updated = stores.reminders.update(reminder.id, item.after);
         return { output: { change: { id: item.id, status: 'applied' }, reminder: reminderOutput(updated) }, summary: `Updated “${clip(updated.title, 60)}”` };
       }

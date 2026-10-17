@@ -220,6 +220,16 @@ describe('apply_change', () => {
     expect((await h.apply(item, { now: () => TOMORROW + 60_000 })).isError).not.toBe(true);
   });
 
+  it('rechecks reminder update time at application using the shared tolerance', async () => {
+    const h = setup();
+    const reminder = h.stores.reminders.create({ title: 'Call mom', dueAt: TOMORROW + 86_400_000 });
+    const item = items(await h.propose([{ kind: 'reminder.update', reminderId: reminder.id, when: TOMORROW }]))[0]!;
+    expect.soft(await h.apply(item, { now: () => TOMORROW + 60_001 })).toMatchObject({ isError: true, output: { code: 'bad_request', error: expect.stringMatching(/past/) } });
+    expect.soft(h.stores.reminders.get(reminder.id)?.dueAt).toBe(TOMORROW + 86_400_000);
+    expect((await h.apply(item, { now: () => TOMORROW + 60_000 })).isError).not.toBe(true);
+    expect(h.stores.reminders.get(reminder.id)?.dueAt).toBe(TOMORROW);
+  });
+
   it('applies reminder snapshots and rejects changed, unscheduled or deleted reminders', async () => {
     const h = setup();
     const reminder = h.stores.reminders.create({ title: 'Reminder', dueAt: TOMORROW });
