@@ -168,6 +168,7 @@ export function blobToVector(blob: Uint8Array): Float32Array {
 /** Escape user text for an FTS5 MATCH: every token quoted, OR-ed. Returns null for empty input. */
 export function ftsQuery(text: string): string | null {
   const tokens = text
+    .normalize('NFC')
     .toLowerCase()
     .split(/[^\p{L}\p{N}_]+/u)
     .filter((t) => t.length > 1)

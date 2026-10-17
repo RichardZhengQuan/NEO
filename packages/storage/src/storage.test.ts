@@ -156,6 +156,8 @@ describe('database', () => {
     const v = new Float32Array([0.5, -1.25, 3]);
     expect(Array.from(blobToVector(vectorToBlob(v)))).toEqual([0.5, -1.25, 3]);
     expect(ftsQuery('Hello "world" a')).toBe('"hello" OR "world"');
+    expect(ftsQuery('école')).toBe('"école"');
+    expect(ftsQuery('école'.normalize('NFD'))).toBe('"école"');
     expect(ftsQuery('!!')).toBeNull();
   });
 });
