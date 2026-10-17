@@ -4,7 +4,7 @@
  * readEventStream parses a text/event-stream response body into AgentEvents,
  * handling chunk boundaries, CRLF, multi-line data fields, and comment lines.
  */
-import type { AgentEvent } from '@neo/protocol';
+import { NeoError, type AgentEvent } from '@neo/protocol';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -63,7 +63,7 @@ export async function* readEventStream(
         ({ done, value } = await reader.read());
       } catch (err) {
         if (signal?.aborted) break;
-        throw err;
+        throw new NeoError('stream_read_failed', 'The response body failed mid-stream.', { retryable: true, cause: err });
       }
 
       if (done) break;

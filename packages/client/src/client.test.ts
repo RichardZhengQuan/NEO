@@ -821,7 +821,36 @@ describe('readEventStream SSE parsing', () => {
 
     const failure = new TypeError('network drop');
     controller.error(failure);
-    await expect(iterator.next()).rejects.toBe(failure);
+    const next = iterator.next();
+    await expect(next).rejects.toMatchObject({ name: 'NeoError', code: 'stream_read_failed' });
+    const err = await next.catch((e: unknown) => e);
+    expect((err as Error).cause).toBe(failure);
+  });
+
+  it('wraps reader.read() errors as NeoError(stream_read_failed)', async () => {
+    const failure = new TypeError('network drop');
+    const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'a' };
+    let sent = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) {
+          sent = true;
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+        } else {
+          controller.error(failure);
+        }
+      },
+    }, { highWaterMark: 0 });
+    const response = new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    const collected = collectEvents(response);
+
+    await expect(collected).rejects.toMatchObject({
+      name: 'NeoError',
+      code: 'stream_read_failed',
+      retryable: true,
+    });
+    const err = await collected.catch((e: unknown) => e);
+    expect((err as Error).cause).toBe(failure);
   });
 
   it('handles CRLF line endings', async () => {
