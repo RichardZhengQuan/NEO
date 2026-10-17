@@ -337,8 +337,8 @@ interface Cluster {
 
 /**
  * Abstract clusters of unconsolidated episodes into summaries and facts.
- * `fadedNow` are episodes the fade step archived in this same run: like sleep,
- * consolidation still learns from the day's experiences before they are gone.
+ * Like sleep, consolidation learns from active and newly faded episodes,
+ * and retries unconsolidated episodes archived in previous runs.
  */
 async function abstractEpisodes(
   ctx: MemoryContext,
@@ -361,9 +361,7 @@ async function abstractEpisodes(
          ${allowSensitive ? '' : `AND sensitivity = 'normal'`} ORDER BY created_at ASC, rowid ASC`,
       )
       .all() as unknown as NodeRow[]
-  )
-    .map(rowToNode)
-    .filter((e) => e.status === 'active' || fadedNow.has(e.id));
+  ).map(rowToNode);
   if (!episodes.length) return;
 
   // Greedy clustering in time order: centroid similarity or a shared entity. Every episode
