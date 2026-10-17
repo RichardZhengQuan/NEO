@@ -61,8 +61,9 @@ export async function* readEventStream(
       let value: Uint8Array | undefined;
       try {
         ({ done, value } = await reader.read());
-      } catch {
-        break;
+      } catch (err) {
+        if (signal?.aborted) break;
+        throw err;
       }
 
       if (done) break;

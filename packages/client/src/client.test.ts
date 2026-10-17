@@ -804,6 +804,26 @@ describe('readEventStream SSE parsing', () => {
     expect(events[0]).toEqual(event);
   });
 
+  it('propagates reader.read() errors as iterator rejections', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        controller = streamController;
+      },
+    });
+    const response = new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    const iterator = readEventStream(response)[Symbol.asyncIterator]();
+    const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'a' };
+
+    controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+
+    const failure = new TypeError('network drop');
+    controller.error(failure);
+    await expect(iterator.next()).rejects.toBe(failure);
+  });
+
   it('handles CRLF line endings', async () => {
     const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'world' };
     const response = makeStreamResponse(
