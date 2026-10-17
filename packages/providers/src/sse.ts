@@ -10,6 +10,7 @@
  * the body itself does not observe the signal; leaving the loop early cancels
  * the body so the connection is released.
  */
+import { NeoError } from '@neo/protocol';
 import { cancelledError } from './shared.js';
 import type { SSEMessage } from './index.js';
 
@@ -66,7 +67,7 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>, signal?: Abort
         result = await (signal ? Promise.race([reader.read(), abortPromise]) : reader.read());
       } catch (err) {
         if (signal?.aborted) throw cancelledError(err);
-        throw err;
+        throw new NeoError('stream_read_failed', 'The response body failed mid-stream.', { retryable: true, cause: err });
       }
       if (result.done) {
         done = true;
