@@ -332,10 +332,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
           next.sensitive ? 1 : null,
           id,
         );
-        if (patch.parts) {
-          const preview = previewOf(next.parts);
-          if (preview) db.prepare('UPDATE conversations SET preview = ?, updated_at = ? WHERE id = ?').run(preview, clock(), next.conversationId);
-        }
+        if (patch.parts) refreshEpisodePreview(next.conversationId);
       });
       return next;
     },

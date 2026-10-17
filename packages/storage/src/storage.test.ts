@@ -335,6 +335,25 @@ describe('conversation store', () => {
     expect(store.messages(c.id)).toHaveLength(0);
   });
 
+  it('updating an older message preserves the episode preview', () => {
+    db = openNeoDatabase(':memory:');
+    let t = 1000;
+    const store = createConversationStore(db, { clock: () => t++ });
+    const c = store.create();
+    const a: Message = {
+      id: newId('msg'), conversationId: c.id, role: 'assistant', parts: [{ type: 'text', text: 'First answer' }], createdAt: 1000, status: 'complete',
+    };
+    const b: Message = {
+      id: newId('msg'), conversationId: c.id, role: 'assistant', parts: [{ type: 'text', text: 'Latest answer' }], createdAt: 2000, status: 'complete',
+    };
+    store.appendMessage(a);
+    store.appendMessage(b);
+    expect(store.get(c.id)?.preview).toBe('Latest answer');
+    store.updateMessage(a.id, { parts: [{ type: 'text', text: 'First answer (edited)' }] });
+    expect(store.get(c.id)?.preview).toBe('Latest answer');
+    expect(store.get(c.id)?.lastMessageAt).toBe(2000);
+  });
+
   it('deleting the latest message restores the previous episode preview and timestamp', () => {
     db = openNeoDatabase(':memory:');
     let t = 3000;
