@@ -219,6 +219,27 @@ describe('heuristicExtract', () => {
   });
 });
 
+describe('observe: duplicate-label heuristic candidates keep sensitivity (regression for #112)', () => {
+  it('keeps the allergy local and recalls it only when sensitive memories are allowed', async () => {
+    const db = openNeoDatabase(':memory:');
+    const hashing = new HashingEmbedder(256);
+    const cloudCalls: string[] = [];
+    const cloud = {
+      id: hashing.id, dimensions: hashing.dimensions, isLocal: false as const,
+      async embed(texts: string[]) { cloudCalls.push(...texts); return hashing.embed(texts); },
+    };
+    const { clock } = makeClock();
+    const svc = createMemoryService({ db, embedder: cloud, llm: () => null, clock, logger: silentLogger });
+
+    await svc.observe(makeTurn("Remember that I'm allergic to penicillin.", 'Noted.'));
+
+    expect(cloudCalls.every((t) => !t.includes('allergic to penicillin'))).toBe(true);
+    expect((await svc.recall({ text: 'allergic to penicillin', limit: 10, reinforce: false, allowSensitive: false })).items.every((r) => r.node.sensitivity !== 'sensitive')).toBe(true);
+    expect((await svc.recall({ text: 'allergic to penicillin', limit: 10, reinforce: false, allowSensitive: true })).items.some((r) => r.node.sensitivity === 'sensitive' && /allergic/.test(r.node.content))).toBe(true);
+    db.close();
+  });
+});
+
 // ─── parseLenientJson ────────────────────────────────────────────────────────
 
 describe('parseLenientJson', () => {

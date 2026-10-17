@@ -136,7 +136,21 @@ export function heuristicExtract(userText: string): RememberInput[] {
   const out: Candidate[] = [];
   const add = (c: Candidate) => {
     const label = cleanLabel(c.label).slice(0, 300);
-    if (label && !out.some((o) => o.label === label)) out.push({ ...c, label, tags: c.kind === 'preference' ? assistantStyleTags(`${label} ${c.content}`, c.tags) : (c.tags ?? []), content: c.content.replace(/["“”「」]/g, '').slice(0, 1000) });
+    if (!label) return;
+    const existing = out.find((o) => o.label === label);
+    const tags = [...new Set([...(existing?.tags ?? []), ...(c.tags ?? [])])];
+    if (existing) {
+      existing.sensitivity = existing.sensitivity === 'sensitive' || c.sensitivity === 'sensitive' ? 'sensitive' : undefined;
+      existing.importance = existing.importance === undefined ? c.importance : c.importance === undefined ? existing.importance : Math.max(existing.importance, c.importance);
+      existing.entities = [...new Set([...(existing.entities ?? []), ...(c.entities ?? [])])];
+      existing.entityType ??= c.entityType;
+      existing.tags = existing.kind === 'preference' ? assistantStyleTags(`${label} ${c.content}`, tags) : tags;
+      existing.pinned ??= c.pinned;
+      if (existing.validUntil === undefined) existing.validUntil = c.validUntil;
+      existing.source ??= c.source;
+      return;
+    }
+    out.push({ ...c, label, tags: c.kind === 'preference' ? assistantStyleTags(`${label} ${c.content}`, tags) : tags, content: c.content.replace(/["“”「」]/g, '').slice(0, 1000) });
   };
 
   // Assistant behaviour is a preference, including names used in conversation.
