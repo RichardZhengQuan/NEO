@@ -264,6 +264,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
       let done = false;
       let hasHead = false;
       let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+      let bodyReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
       const signal = request.signal;
       const cleanup = () => {
         done = true;
@@ -282,7 +283,15 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         if (!hasHead) reject(error);
         else { try { controller?.error(error); } catch { /* The reader may have cancelled. */ } }
       };
-      const abort = () => { reset(); fail(signal.reason ?? new DOMException('Aborted', 'AbortError')); };
+      const abort = () => {
+        reset();
+        const reason = signal.reason ?? new DOMException('Aborted', 'AbortError');
+        if (bodyReader) {
+          void bodyReader.cancel(reason).catch(() => {});
+          bodyReader = null;
+        }
+        fail(reason);
+      };
       signal.addEventListener('abort', abort, { once: true });
       if (signal.aborted) { abort(); return; }
       void (async () => {
@@ -320,7 +329,29 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
             }
           },
         });
-        const body = new Uint8Array(await request.arrayBuffer());
+        let body = EMPTY;
+        if (request.body) {
+          const reader = bodyReader = request.body.getReader();
+          const chunks: Uint8Array[] = [];
+          let total = 0;
+          try {
+            while (!done) {
+              const chunk = await reader.read();
+              if (chunk.done || done) break;
+              chunks.push(chunk.value);
+              total += chunk.value.length;
+            }
+          } finally {
+            reader.releaseLock();
+            bodyReader = null;
+          }
+          body = new Uint8Array(total);
+          let offset = 0;
+          for (const chunk of chunks) {
+            body.set(chunk, offset);
+            offset += chunk.length;
+          }
+        }
         if (done) return;
         const url = new URL(request.url);
         const excluded = new Set(HOP_HEADERS);
