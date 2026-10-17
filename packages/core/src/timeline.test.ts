@@ -190,6 +190,45 @@ describe('episode continuity', () => {
 });
 
 describe('off-record lifecycle', () => {
+  it('carries the sensitive flag onto the public prefix when going off-record mid-stream', async () => {
+    const local = new ScriptedAdapter({ id: 'local', isLocal: true });
+    const cloud = new ScriptedAdapter({ id: 'cloud' });
+    const h = harness({ adapters: [local, cloud] });
+    stored(h, h.conv.id, 'orchid memory', h.clock() - HOUR, true);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    local.script(async function* () {
+      yield ev.text('The code is orchid-729');
+      await gate;
+      yield ev.done();
+    });
+
+    let seenDelta!: () => void;
+    const sawDelta = new Promise<void>((r) => { seenDelta = r; });
+    const off = h.runtime.subscribe((e) => { if (e.type === 'text.delta') seenDelta(); });
+    const handle = await h.runtime.sendTimeline({ parts: userText('what is the code?') });
+    const originalEpisodeId = handle.episodeId;
+    const originalMessageId = handle.assistantMessageId;
+    await sawDelta;
+    off();
+
+    await h.runtime.startOffRecord();
+    release();
+    await handle.done;
+
+    const persisted = h.conversations.getMessage(originalMessageId);
+    expect(persisted).not.toBeNull();
+    expect(persisted!.conversationId).toBe(originalEpisodeId);
+    expect.soft(persisted!.sensitive).toBe(true);
+
+    await h.runtime.endOffRecord();
+    h.advance(HOUR + 2);
+    h.settings.update({ ai: { capabilities: { text: { provider: 'cloud', model: 'cloud-model' } } } });
+    await send(h, 'now what did I say earlier?');
+    expect(JSON.stringify(cloud.requests.at(-1)!.messages)).not.toContain('orchid-729');
+  });
+
   it('breaks on each toggle, allows recall without reinforcement, skips observation and deletes ephemeral history on exit', async () => {
     const h = harness();
     const normal = await send(h, 'normal context');

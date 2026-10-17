@@ -403,7 +403,13 @@ class TurnRunner {
       }];
     });
     const publicParts: ContentPart[] = [...this.parts, ...closedCalls];
-    const previous = store.updateMessage(this.messageId, { parts: publicParts, status: 'complete', usage: this.usage });
+    const publicSensitive = this.sawSensitive || publicParts.some((p) => p.type === 'tool_result' && p.sensitive === true);
+    const previous = store.updateMessage(this.messageId, {
+      parts: publicParts,
+      status: 'complete',
+      usage: this.usage,
+      ...(publicSensitive ? { sensitive: true } : {}),
+    });
     this.emit({ type: 'message.completed', conversationId: this.conversationId, turnId: this.turnId, message: previous });
     const now = this.services.clock();
     const continuation = store.appendMessage({ ...this.snapshot('streaming', null), id: newId('msg', now), conversationId: episode.id, episodeId: episode.id, createdAt: now });
