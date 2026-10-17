@@ -383,6 +383,18 @@ describe('phone transport over an in-memory outer WebSocket', () => {
     await vi.waitFor(() => expect(cancelled).toHaveBeenCalledOnce());
   });
 
+  it('rejects a request body that yields a non-Uint8Array chunk', async () => {
+    const { transport } = environment();
+    await transport.connect();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue('not bytes' as unknown as Uint8Array); controller.close(); },
+    });
+    const request = new Request(`${transport.baseUrl}/api/upload`, {
+      method: 'POST', body, duplex: 'half',
+    } as RequestInit);
+    await expect(transport.fetch(request)).rejects.toBeInstanceOf(TypeError);
+  });
+
   it('keeps a responsive channel alive and closes after two unanswered pings', async () => {
     vi.useFakeTimers();
     const { transport, peers } = environment();

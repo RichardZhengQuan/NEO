@@ -338,6 +338,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
             while (!done) {
               const chunk = await reader.read();
               if (chunk.done || done) break;
+              if (!(chunk.value instanceof Uint8Array)) throw new TypeError('Body chunk must be a Uint8Array');
               chunks.push(chunk.value);
               total += chunk.value.length;
             }
