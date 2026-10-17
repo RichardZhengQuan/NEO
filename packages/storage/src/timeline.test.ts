@@ -132,6 +132,19 @@ describe('timeline storage', () => {
     expect(db.prepare('SELECT COUNT(*) AS n FROM message_fts').get()).toEqual({ n: 0 });
   });
 
+  it('finds messages regardless of whether the query is NFC- or NFD-normalized', () => {
+    db = openNeoDatabase(':memory:');
+    const store = createConversationStore(db);
+    const episode = store.createEpisode();
+    store.appendMessage(message('accented', episode.id, 1, 'école'));
+    const expected = [{
+      messageId: 'accented', episodeId: episode.id, createdAt: 1,
+      snippet: { text: 'école', highlights: [[0, 5]] },
+    }];
+    expect(store.searchMessages('école')).toEqual(expected);
+    expect(store.searchMessages('école'.normalize('NFD'))).toEqual(expected);
+  });
+
   it('returns match ranges without consuming literal brackets or changing Unicode text', () => {
     db = openNeoDatabase(':memory:');
     const store = createConversationStore(db);

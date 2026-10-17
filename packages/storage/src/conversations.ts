@@ -401,7 +401,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
     timeline,
 
     searchMessages(query: string, limit = 50) {
-      const tokens = query.toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(Boolean).slice(0, 32);
+      const tokens = query.normalize('NFC').toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(Boolean).slice(0, 32);
       if (!tokens.length) return [];
       const match = tokens.map((token) => `"${token}"`).join(' OR ');
       return (db.prepare(
