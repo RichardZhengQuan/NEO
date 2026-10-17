@@ -32,12 +32,6 @@ The nightly lessons loop ([docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md)) adds entri
 - Done right: register the promise on the event source before triggering the work, then prove it with a stall injection: the old wait fails and the new one passes (#9, #11).
 - Seen 2× (2026-10-11, 2026-10-12).
 
-## When a PR lists a real-use check as not run, open a `needs-owner` issue for it before merging, so it isn't forgotten
-
-- PRs said honestly what they hadn't tried, but nothing tracked it, and more was built on top. #4 never ran phone pairing on a phone. #13's Sign in with ChatGPT and OpenRouter only met local fakes. #18 then added native web search for five providers without calling any of them. As of 2026-10-13 no PR shows NEO talking to a live AI provider at all.
-- #16's 3D memory net was never seen rendering: the browser pane was hidden, and the scene doesn't draw while hidden.
-- Seen 2× (2026-10-11, 2026-10-12).
-
 ## Serve and cache assets so a failure can't stick
 
 - Since #1 the server answered every missing path with `index.html` and 200, and the service worker cached `/assets/*` by URL without checking the response type. When a figure image went missing during a rebuild, its HTML stand-in was cached as the image, and the figure image (from #13) never retried, so the onboarding figure stayed broken after the file came back.
