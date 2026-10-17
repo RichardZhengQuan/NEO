@@ -361,6 +361,40 @@ describe('phone transport over an in-memory outer WebSocket', () => {
     await failed;
   });
 
+  it('cancels the upload source when the caller aborts', async () => {
+    const { transport } = environment();
+    await transport.connect();
+    let pulled = false;
+    const cancelled = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      pull() { pulled = true; },
+      cancel: cancelled,
+    });
+    const abort = new AbortController();
+    const request = new Request(`${transport.baseUrl}/api/slow-upload`, {
+      method: 'POST', body, duplex: 'half', signal: abort.signal,
+    } as RequestInit);
+    const fetching = transport.fetch(request);
+    const failed = expect(fetching).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(pulled).toBe(true));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    abort.abort();
+    await failed;
+    await vi.waitFor(() => expect(cancelled).toHaveBeenCalledOnce());
+  });
+
+  it('rejects a request body that yields a non-Uint8Array chunk', async () => {
+    const { transport } = environment();
+    await transport.connect();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue('not bytes' as unknown as Uint8Array); controller.close(); },
+    });
+    const request = new Request(`${transport.baseUrl}/api/upload`, {
+      method: 'POST', body, duplex: 'half',
+    } as RequestInit);
+    await expect(transport.fetch(request)).rejects.toBeInstanceOf(TypeError);
+  });
+
   it('keeps a responsive channel alive and closes after two unanswered pings', async () => {
     vi.useFakeTimers();
     const { transport, peers } = environment();
