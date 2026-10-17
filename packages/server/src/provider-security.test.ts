@@ -33,11 +33,15 @@ async function liveProviderFixture() {
     method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
+  const ownerRequest = (path: string, method = 'POST', body?: unknown) => app.request(path, {
+    method, headers: { Authorization: `Bearer ${services.ownerToken}`, 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
   const sent = () => fetch.mock.calls.map(([url, init]) => ({
     url: String(url), headers: Object.fromEntries(new Headers(init?.headers)), body: init?.body,
   }));
   expect(services.secrets.get('provider:configured:header:x-api-key')).toBe('protected-fixture-credential');
-  return { services, request, fetch, sent };
+  return { services, request, ownerRequest, fetch, sent };
 }
 
 describe('provider credential header security', () => {
@@ -252,5 +256,42 @@ describe('provider credential header security', () => {
     expect(raw.config).not.toContain('persisted-google-credential');
     const listed = await createApp(restarted).app.request('/api/providers', { headers: { Authorization: `Bearer ${restarted.ownerToken}` } });
     expect(await listed.text()).not.toContain('persisted-google-credential');
+  });
+
+  it('clears stored provider credentials when a non-owner PATCH changes baseUrl', async () => {
+    const live = await liveProviderFixture();
+    const create = await live.ownerRequest('/api/providers', 'POST', {
+      id: 'work', kind: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'owner-secret',
+    });
+    expect(create.status).toBe(201);
+
+    // Paired non-owner device moves only the baseUrl.
+    const patched = await live.request('/api/providers/work', 'PATCH', { baseUrl: 'https://attacker.example/v1' });
+    expect(patched.status).toBe(200);
+
+    // The retained apiKeySecret must be cleared; no outbound request may carry owner-secret.
+    expect(live.services.providerConfigs.get('work')?.apiKeySecret).toBeUndefined();
+    const tested = await live.request('/api/providers/work/test');
+    expect(await tested.json()).toMatchObject({ ok: false });
+    expect(JSON.stringify(live.sent())).not.toContain('owner-secret');
+  });
+
+  it('clears stored credential header when a non-owner PATCH changes baseUrl', async () => {
+    const live = await liveProviderFixture();
+    const create = await live.ownerRequest('/api/providers', 'POST', {
+      id: 'work', kind: 'openai', baseUrl: 'https://api.openai.com/v1', headers: { 'x-api-key': 'owner-secret' },
+    });
+    expect(create.status).toBe(201);
+    expect(live.services.secrets.get('provider:work:header:x-api-key')).toBe('owner-secret');
+
+    // Paired non-owner device moves only the baseUrl.
+    const patched = await live.request('/api/providers/work', 'PATCH', { baseUrl: 'https://attacker.example/v1' });
+    expect(patched.status).toBe(200);
+
+    // The stored credential header secret must be cleared.
+    expect(live.services.secrets.get('provider:work:header:x-api-key')).toBeUndefined();
+    const tested = await live.request('/api/providers/work/test');
+    expect(await tested.json()).toMatchObject({ ok: false });
+    expect(JSON.stringify(live.sent())).not.toContain('owner-secret');
   });
 });
