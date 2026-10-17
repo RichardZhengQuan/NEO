@@ -335,6 +335,28 @@ describe('conversation store', () => {
     expect(store.messages(c.id)).toHaveLength(0);
   });
 
+  it('updating an older message preserves the episode preview and the completion-time last-message bump', () => {
+    db = openNeoDatabase(':memory:');
+    let t = 1000;
+    const store = createConversationStore(db, { clock: () => t++ });
+    const c = store.create();
+    const a: Message = {
+      id: newId('msg'), conversationId: c.id, role: 'assistant', parts: [{ type: 'text', text: 'First answer' }], createdAt: 1000, status: 'complete',
+    };
+    const b: Message = {
+      id: newId('msg'), conversationId: c.id, role: 'assistant', parts: [{ type: 'text', text: 'Latest answer' }], createdAt: 2000, status: 'complete',
+    };
+    store.appendMessage(a);
+    store.appendMessage(b);
+    // Simulate TurnRunner.finish bumping last_message_at to the completion clock, which can be well after any message's createdAt.
+    store.update(c.id, { lastMessageAt: 9_000 });
+    expect(store.get(c.id)?.preview).toBe('Latest answer');
+    expect(store.get(c.id)?.lastMessageAt).toBe(9_000);
+    store.updateMessage(a.id, { parts: [{ type: 'text', text: 'First answer (edited)' }] });
+    expect(store.get(c.id)?.preview).toBe('Latest answer');
+    expect(store.get(c.id)?.lastMessageAt).toBe(9_000);
+  });
+
   it('deleting the latest message restores the previous episode preview and timestamp', () => {
     db = openNeoDatabase(':memory:');
     let t = 3000;

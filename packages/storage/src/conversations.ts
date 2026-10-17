@@ -119,19 +119,26 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
     }
     return mustGet(id);
   };
-  const refreshEpisodePreview = (episodeId: string): void => {
+  const latestPreview = (episodeId: string): string | null => {
     const rows = db.prepare(
-      'SELECT parts, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC',
+      'SELECT parts FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC',
     ).iterate(episodeId);
-    let preview: string | null = null;
-    let lastMessageAt: number | null = null;
     for (const row of rows) {
-      if (lastMessageAt === null) lastMessageAt = toNum(row.created_at);
-      preview = previewOf(fromJson(row.parts, [])) || null;
-      if (preview) break;
+      const preview = previewOf(fromJson(row.parts, [])) || null;
+      if (preview) return preview;
     }
+    return null;
+  };
+  const refreshEpisodePreview = (episodeId: string): void => {
+    const row = db.prepare(
+      'SELECT created_at FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+    ).get(episodeId) as Row | undefined;
     db.prepare('UPDATE conversations SET preview = ?, last_message_at = ?, updated_at = ? WHERE id = ?')
-      .run(preview, lastMessageAt, clock(), episodeId);
+      .run(latestPreview(episodeId), row ? toNum(row.created_at) : null, clock(), episodeId);
+  };
+  const refreshEpisodePreviewOnly = (episodeId: string): void => {
+    db.prepare('UPDATE conversations SET preview = ?, updated_at = ? WHERE id = ?')
+      .run(latestPreview(episodeId), clock(), episodeId);
   };
   const create = (input: NewConversation = {}): Conversation => {
     const now = clock();
@@ -332,10 +339,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
           next.sensitive ? 1 : null,
           id,
         );
-        if (patch.parts) {
-          const preview = previewOf(next.parts);
-          if (preview) db.prepare('UPDATE conversations SET preview = ?, updated_at = ? WHERE id = ?').run(preview, clock(), next.conversationId);
-        }
+        if (patch.parts) refreshEpisodePreviewOnly(next.conversationId);
       });
       return next;
     },
