@@ -132,35 +132,50 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
       message: err instanceof Error ? err.message : 'Network error',
       retryable: true,
     });
+  }
+
+  try {
+    if (response.status === 204) {
+      return undefined as unknown as T;
+    }
+
+    if (!response.ok) {
+      // Try to parse the error body as ErrorShape.
+      let shape: ErrorShape;
+      try {
+        shape = (await response.json()) as ErrorShape;
+        // Validate that shape has the required fields.
+        if (typeof shape.code !== 'string' || typeof shape.message !== 'string') {
+          throw new Error('invalid shape');
+        }
+      } catch (bodyErr) {
+        // Let abort/timeout errors propagate to the outer catch for proper mapping.
+        if (
+          bodyErr instanceof Error &&
+          (bodyErr.name === 'AbortError' || bodyErr.name === 'TimeoutError')
+        ) {
+          throw bodyErr;
+        }
+        shape = {
+          code: 'internal',
+          message: `HTTP ${response.status}`,
+          retryable: response.status >= 500,
+        };
+      }
+      throw new NeoApiError(response.status, shape);
+    }
+
+    // 202 or other 2xx with a body.
+    const text = await response.text();
+    if (!text) return undefined as unknown as T;
+    return JSON.parse(text) as T;
+  } catch (err) {
+    // Map a body-read timeout to the same NeoApiError shape as a headers-phase timeout.
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      throw new NeoApiError(504, { code: 'timeout', message: 'Request timed out.', retryable: true });
+    }
+    throw err;
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
-
-  if (response.status === 204) {
-    return undefined as unknown as T;
-  }
-
-  if (!response.ok) {
-    // Try to parse the error body as ErrorShape.
-    let shape: ErrorShape;
-    try {
-      shape = (await response.json()) as ErrorShape;
-      // Validate that shape has the required fields.
-      if (typeof shape.code !== 'string' || typeof shape.message !== 'string') {
-        throw new Error('invalid shape');
-      }
-    } catch {
-      shape = {
-        code: 'internal',
-        message: `HTTP ${response.status}`,
-        retryable: response.status >= 500,
-      };
-    }
-    throw new NeoApiError(response.status, shape);
-  }
-
-  // 202 or other 2xx with a body.
-  const text = await response.text();
-  if (!text) return undefined as unknown as T;
-  return JSON.parse(text) as T;
 }

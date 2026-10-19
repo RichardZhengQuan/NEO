@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet, type ToolUseEvent, type Task } from './index.js';
+import { apiRequest } from './http.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fake fetch helpers
@@ -200,6 +201,149 @@ describe('NeoApiError mapping', () => {
     expect(err).toBeInstanceOf(NeoApiError);
     const apiErr = err as NeoApiError;
     expect(apiErr.code).toBe('timeout');
+  });
+
+  it('maps body-stall timeout to timeout code', async () => {
+    vi.useFakeTimers();
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const stallingFetch = async (_: unknown, init?: RequestInit): Promise<Response> => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller;
+          controller.enqueue(new TextEncoder().encode('{"ok":'));
+          // Body left open — never closes on its own.
+        },
+      });
+      // When the signal fires, cancel the stream so the body read rejects.
+      const signal = (init as RequestInit | undefined)?.signal;
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          streamController.error(signal.reason);
+        }, { once: true });
+      }
+      return new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    const client = new NeoClient({
+      baseUrl: 'http://localhost:7777',
+      token: 'tok',
+      fetch: stallingFetch as typeof fetch,
+      timeoutMs: 10,
+    });
+
+    let outcome: 'pending' | 'resolved' | NeoApiError = 'pending';
+    client.health().then(
+      () => { outcome = 'resolved'; },
+      (e: unknown) => { outcome = e as NeoApiError; },
+    );
+
+    // Headers arrived; body is stalled. Timer has NOT fired yet.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outcome).toBe('pending');
+
+    // Advance past the 10 ms deadline.
+    await vi.advanceTimersByTimeAsync(11);
+
+    expect(outcome).toBeInstanceOf(NeoApiError);
+    const apiErr = outcome as unknown as NeoApiError;
+    expect(apiErr.code).toBe('timeout');
+    expect(apiErr.httpStatus).toBe(504);
+    expect(apiErr.retryable).toBe(true);
+
+    // Tear-down: close the stream to prevent dangling handles.
+    try { streamController.close(); } catch { /* already errored */ }
+    vi.useRealTimers();
+  });
+
+  it('maps error-body stall timeout to timeout code', async () => {
+    vi.useFakeTimers();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    try {
+      const stallingFetch = async (_: unknown, init?: RequestInit): Promise<Response> => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+            controller.enqueue(new TextEncoder().encode('{"code":'));
+          },
+        });
+        const signal = init?.signal;
+        signal?.addEventListener('abort', () => {
+          streamController?.error(signal.reason);
+        }, { once: true });
+        return new Response(stream, { status: 503 });
+      };
+      const client = new NeoClient({
+        baseUrl: 'http://localhost:7777',
+        token: 'tok',
+        fetch: stallingFetch as typeof fetch,
+        timeoutMs: 10,
+      });
+      let outcome: unknown = 'pending';
+      const result = client.health().then(
+        (value) => { outcome = value; },
+        (err: unknown) => { outcome = err; },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBe('pending');
+      await vi.advanceTimersByTimeAsync(11);
+
+      expect(outcome).toBeInstanceOf(NeoApiError);
+      expect(outcome).toMatchObject({
+        code: 'timeout',
+        message: 'Request timed out.',
+        httpStatus: 504,
+        retryable: true,
+      });
+      await result;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      streamController?.error(new DOMException('Cleanup', 'AbortError'));
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([200, 503])('preserves caller AbortError during a %i body read', async (status) => {
+    vi.useFakeTimers();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    try {
+      const stallingFetch = async (_: unknown, init?: RequestInit): Promise<Response> => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+            controller.enqueue(new TextEncoder().encode('{"ok":'));
+          },
+        });
+        const signal = init?.signal;
+        signal?.addEventListener('abort', () => {
+          streamController?.error(signal.reason);
+        }, { once: true });
+        return new Response(stream, { status });
+      };
+      const controller = new AbortController();
+      const result = apiRequest({
+        baseUrl: 'http://localhost:7777',
+        token: 'tok',
+        fetch: stallingFetch as typeof fetch,
+        timeoutMs: 10,
+      }, { path: '/health', signal: controller.signal }).catch((err: unknown) => err);
+
+      // Deliver headers and start the body read before the caller aborts.
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      const err = await result;
+
+      expect(err).toBe(controller.signal.reason);
+      expect(err).toMatchObject({ name: 'AbortError' });
+      expect(err).not.toBeInstanceOf(NeoApiError);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      streamController?.error(new DOMException('Cleanup', 'AbortError'));
+      vi.useRealTimers();
+    }
   });
 });
 
