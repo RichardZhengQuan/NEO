@@ -40,6 +40,49 @@ describe('doctor without an AI provider', () => {
     expect(client.providers.test).not.toHaveBeenCalled();
   });
 
+  it('reports a provider-list failure as a failed check', async () => {
+    client.providers.list.mockRejectedValue(new Error('401 Unauthorized'));
+    vi.mocked(process.exit).mockImplementation(() => { throw new Error('exit(1) called'); });
+    await expect(runDoctor({ dataDir, server: 'http://fixture.test', token: 'bad-token' }))
+      .rejects.toThrow('exit(1) called');
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('✗ Providers');
+    expect(output).toContain('provider list failed — 401 Unauthorized');
+    expect(output).toContain('Some checks failed.');
+    expect(output).not.toContain('All checks passed.');
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it.each([
+    new Error('403 Forbidden'),
+    new Error('500 Internal Server Error'),
+    new TypeError('fetch failed'),
+    'connection reset',
+  ])('reports other provider-list errors as failed checks: %s', async (error) => {
+    client.providers.list.mockRejectedValue(error);
+    vi.mocked(process.exit).mockImplementation(() => { throw new Error('exit(1) called'); });
+    await expect(runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' }))
+      .rejects.toThrow('exit(1) called');
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    const message = error instanceof Error ? error.message : error;
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('✗ Providers');
+    expect(output).toContain(`provider list failed — ${message}`);
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('treats a 404 from the provider list as a warning, not a failure', async () => {
+    client.providers.list.mockRejectedValue(new Error('404 Not Found'));
+    await runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' });
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('! Providers');
+    expect(output).toContain('provider list unavailable (older server?)');
+    expect(output).toContain('All checks passed.');
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
   it('checks enabled supported providers normally', async () => {
     client.providers.list.mockResolvedValue({ items: [{ id: 'local', kind: 'ollama', enabled: true }] });
     client.providers.test.mockResolvedValue({ ok: true });

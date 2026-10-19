@@ -123,8 +123,16 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
           }
         }
       }
-    } catch {
-      // skip provider checks if listing fails
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const is404 = /\b404\b/.test(msg);
+      checks.push({
+        name: 'Providers',
+        status: is404 ? 'warn' : 'fail',
+        message: is404
+          ? 'provider list unavailable (older server?)'
+          : `provider list failed — ${msg}`,
+      });
     }
   } else if (!configuredProviders.some(p => p.enabled && p.kind !== 'mock')) {
     checks.push({ name: 'Providers', status: 'warn', message: 'no AI provider configured (connect an AI in Settings → AI or run `neo init`)' });
