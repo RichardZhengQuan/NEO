@@ -278,8 +278,15 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
           catch { current.channel.close('Reset failed'); }
         }
       };
+      const cancelBodyReader = (reason: unknown) => {
+        if (bodyReader !== null) {
+          void bodyReader.cancel(reason).catch(() => {});
+          bodyReader = null;
+        }
+      };
       const fail = (error: unknown) => {
         if (done) return;
+        cancelBodyReader(error);
         cleanup();
         if (!hasHead) reject(error);
         else { try { controller?.error(error); } catch { /* The reader may have cancelled. */ } }
@@ -287,10 +294,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
       const abort = () => {
         reset();
         const reason = signal.reason ?? new DOMException('Aborted', 'AbortError');
-        if (bodyReader) {
-          void bodyReader.cancel(reason).catch(() => {});
-          bodyReader = null;
-        }
+        cancelBodyReader(reason);
         fail(reason);
       };
       signal.addEventListener('abort', abort, { once: true });
