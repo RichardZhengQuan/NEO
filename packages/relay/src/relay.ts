@@ -194,11 +194,11 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
   }
 
   function closeSocket(socket: WebSocket, code: number, reason: string): void {
-    if (socket.readyState === WebSocket.CLOSED) return;
+    if (socket.readyState !== WebSocket.OPEN) return;
     const timeout = setTimeout(() => socket.terminate(), 250);
     timeout.unref();
     socket.once('close', () => clearTimeout(timeout));
-    if (socket.readyState === WebSocket.OPEN) socket.close(code, reason);
+    socket.close(code, reason);
   }
 
   function send(socket: WebSocket, data: string | Uint8Array): boolean {
