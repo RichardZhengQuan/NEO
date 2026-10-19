@@ -348,14 +348,15 @@ describe('phone transport over an in-memory outer WebSocket', () => {
   it('fails a request even when its upload is still being buffered', async () => {
     const { transport, peers } = environment();
     await transport.connect();
-    let pulled = false;
-    const body = new ReadableStream<Uint8Array>({ pull() { pulled = true; } });
+    let resolvePulled!: () => void;
+    const pulledPromise = new Promise<void>(resolve => { resolvePulled = resolve; });
+    const body = new ReadableStream<Uint8Array>({ pull() { resolvePulled(); } });
     const request = new Request(`${transport.baseUrl}/api/slow-upload`, {
       method: 'POST', body, duplex: 'half',
     } as RequestInit);
     const fetching = transport.fetch(request);
     const failed = expect(fetching).rejects.toThrow('Failed to fetch');
-    await vi.waitFor(() => expect(pulled).toBe(true));
+    await pulledPromise;
     await new Promise(resolve => setTimeout(resolve, 0));
     peers[0]!.link.close(1006, 'lost');
     await failed;
