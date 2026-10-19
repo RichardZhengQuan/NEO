@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage, ChatRequest, ProviderAdapter, ProviderConfig } from '@neo/protocol';
-import { collectChat } from '@neo/protocol';
+import { collectChat, NeoError } from '@neo/protocol';
 import { AnthropicAdapter } from './anthropic.js';
 import type { ProviderOptions } from './index.js';
 import {
@@ -572,6 +572,20 @@ describe('Anthropic retries and errors', () => {
     const { a } = adapter(apiError(400, `bad key ${KEY} in request`));
     const err = (await collect(a.chat(req())).catch((e: unknown) => e)) as Error;
     expect(err.message).not.toContain(KEY);
+  });
+
+  it('redacts credential-bearing custom headers from error messages', async () => {
+    const { a, f } = adapter(apiError(400, 'bad authorization Bearer HEADER_SECRET (token HEADER_SECRET) in request'), {
+      headers: { authorization: 'Bearer HEADER_SECRET' },
+    });
+    const err = (await collect(a.chat(req())).catch((e: unknown) => e)) as NeoError;
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.headers.get('authorization')).toBe('Bearer HEADER_SECRET');
+    expect(err).toBeInstanceOf(NeoError);
+    expect(err).toMatchObject({ code: 'provider_error', retryable: false });
+    expect(err.message).toContain('Anthropic error: bad authorization');
+    expect(err.message).not.toContain('HEADER_SECRET');
+    expect(err.message).not.toContain('Bearer HEADER_SECRET');
   });
 
   it('network failures are retried, then reported as retryable provider_error', async () => {
