@@ -1,5 +1,6 @@
 /** Updater helpers use injected handles so they can run without Electron. */
 export type UpdateCheckResultLike = {
+  isUpdateAvailable?: boolean;
   updateInfo?: { version?: string } | null;
 };
 
@@ -65,8 +66,9 @@ export function createCheckForUpdatesHandler(opts: {
       let type: DialogMessageType = 'info';
       try {
         const result = await opts.autoUpdater.checkForUpdates();
-        const version = result?.updateInfo?.version;
-        message = version ? `Downloading NEO ${version}…` : 'NEO is up to date.';
+        message = result?.isUpdateAvailable === true
+          ? `Downloading NEO ${result.updateInfo?.version ?? ''}…`
+          : 'NEO is up to date.';
       } catch (err) {
         logUpdaterError(console, err);
         const detail = err instanceof Error ? err.message : String(err);
