@@ -358,12 +358,14 @@ export function MessageView(props: MessageViewProps): ReactElement {
   const t = useT();
   const [copied, setCopied] = useState(false);
 
-  const onAction: OnUIAction = (action, ctx) => {
-    if (!onUiAction || !ctx.uiId) return;
-    const input: { messageId: string; uiId: string; action: UIAction; values?: Record<string, unknown> } = { messageId: message.id, uiId: ctx.uiId, action };
-    if (ctx.values) input.values = ctx.values;
-    return onUiAction(input);
-  };
+  const onAction: OnUIAction | undefined = onUiAction
+    ? (action, ctx) => {
+        if (!ctx.uiId) return;
+        const input: { messageId: string; uiId: string; action: UIAction; values?: Record<string, unknown> } = { messageId: message.id, uiId: ctx.uiId, action };
+        if (ctx.values) input.values = ctx.values;
+        return onUiAction(input);
+      }
+    : undefined;
 
   const parts: ContentPart[] = useMemo(() => message.parts.filter((p) => p.type !== 'context'), [message.parts]);
   const plainText = useMemo(() => parts.filter((p) => p.type === 'text').map((p) => (p as { text: string }).text).join('\n\n').trim(), [parts]);
