@@ -260,8 +260,9 @@ export async function prepareTurnContext(
   history: readonly Message[],
   allowSensitive: boolean,
   reinforce?: boolean,
+  signal?: AbortSignal,
 ): Promise<{ context: ContentPart; recalled: RecalledMemory[] }> {
-  const recalled = await recallMemories(services, conversation, settings, parts, history, allowSensitive, reinforce);
+  const recalled = await recallMemories(services, conversation, settings, parts, history, allowSensitive, reinforce, signal);
   const sensitive = recalled.some(({ node }) => node.sensitivity === 'sensitive');
   return {
     recalled,
@@ -293,6 +294,7 @@ async function recallMemories(
   history: readonly Message[],
   allowSensitive: boolean,
   reinforce?: boolean,
+  signal?: AbortSignal,
 ): Promise<RecalledMemory[]> {
   const policy = settings.memory;
   if (!policy.recall) return [];
@@ -304,7 +306,7 @@ async function recallMemories(
   const previousReply = previousMessage && !(containsSensitive(previousMessage) && !allowSensitive) ? textOf(previousMessage.parts).trim() : '';
   const context = previousReply.slice(-RECALL_PREVIOUS_REPLY_CHARS).trim();
   try {
-    const result = await services.memory.recall({
+    const pending = services.memory.recall({
       text,
       ...(context ? { context } : {}),
       conversationId: conv.id,
@@ -313,9 +315,12 @@ async function recallMemories(
       allowSensitive,
       ...((conv.offRecord ?? conv.incognito) || reinforce === false ? { reinforce: false } : {}),
       now: services.clock(),
+      signal,
     });
+    const result = await (signal ? raceAbort(pending, signal) : pending);
     return result.items;
   } catch (err) {
+    if (err instanceof NeoError && err.code === 'cancelled') throw err;
     services.logger.warn('memory recall failed; continuing without memories', { conversationId: conv.id, error: String(err) });
     return [];
   }

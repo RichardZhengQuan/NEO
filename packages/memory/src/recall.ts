@@ -7,7 +7,7 @@
  * Pure read: reinforcement is applied by the caller (write.ts).
  */
 import type { EdgeType, Embedder, MemoryKind, MemoryNode, RecallQuery, RecallResult, RecalledMemory } from '@neo/protocol';
-import { SELF_MEMORY_ID } from '@neo/protocol';
+import { NeoError, SELF_MEMORY_ID } from '@neo/protocol';
 import { fromJson, toNum, type SqlValue } from '@neo/storage';
 import { MEMORY_CONSTANTS } from './constants.js';
 import { ASSISTANT_STYLE_TAG } from './assistant-style.js';
@@ -195,6 +195,7 @@ function seedReason(source: SeedSource, node: MemoryNode): string {
 }
 
 export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<RecallOutcome> {
+  if (query.signal?.aborted) throw new NeoError('cancelled', 'Memory recall was cancelled.');
   const started = performance.now();
   const { db } = ctx;
   const policy = ctx.policy();
@@ -231,6 +232,7 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
 
   // Vector: top seedTopK with sim ≥ floor, a₀ = (sim − floor) / (1 − floor).
   const spaces = text ? await querySpaces(ctx, query, text, (query.context ?? '').trim()) : new Map<string, QuerySpace>();
+  if (query.signal?.aborted) throw new NeoError('cancelled', 'Memory recall was cancelled.');
   if (spaces.size) {
     const main = ctx.vectors.all(ctx.embedder.id);
     const onDevice = ctx.localEmbedder !== ctx.embedder ? ctx.vectors.all(ctx.localEmbedder.id) : null;

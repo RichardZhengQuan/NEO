@@ -98,7 +98,7 @@ export class AgentRuntime implements AgentRuntimeApi {
   private readonly turns = new Map<string, TurnRecord>();
   private readonly turnDone = new Map<string, Promise<Message>>();
   private readonly uiTools = new Map<AbortController, { done: Promise<void>; enterOffRecord(): void; tool: string }>();
-  private pendingTimeline: { done: Promise<void>; resolve(): void; cancelled: boolean; offRecord: boolean } | undefined;
+  private pendingTimeline: { done: Promise<void>; resolve(): void; cancelled: boolean; offRecord: boolean; controller: AbortController } | undefined;
   private mutatingTimeline = false;
   private privateEpoch = 0;
   /** conversationId → turnId of the turn holding it (reserved synchronously in send()). */
@@ -169,7 +169,7 @@ export class AgentRuntime implements AgentRuntimeApi {
     if (input.offRecord === true && !this.offRecordState().active) this.enterOffRecord();
     const settings = this.settingsStore.get();
     let resolve!: () => void;
-    const pending = { done: new Promise<void>((done) => { resolve = done; }), resolve: () => resolve(), cancelled: false, offRecord: this.offRecordState().active };
+    const pending = { done: new Promise<void>((done) => { resolve = done; }), resolve: () => resolve(), cancelled: false, offRecord: this.offRecordState().active, controller: new AbortController() };
     this.pendingTimeline = pending;
     let created: Conversation | undefined;
     try {
@@ -214,7 +214,7 @@ export class AgentRuntime implements AgentRuntimeApi {
       };
       const recalledHistory = history.length ? history : previous && !(previous.offRecord ?? previous.incognito) ? this.conversations.messages(previous.id) : [];
       const preview = history.length > 0;
-      let prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive, preview ? false : undefined);
+      let prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive, preview ? false : undefined, pending.controller.signal);
       if (pending.cancelled) throw new NeoError('cancelled', 'The turn was cancelled.');
       const incoming = (): Message => ({
         id: '', conversationId: current!.id, role: 'user', status: 'complete', createdAt: now,
@@ -227,14 +227,14 @@ export class AgentRuntime implements AgentRuntimeApi {
         current = created;
         if (offRecord) this.conversations.setOffRecordState({ ...this.offRecordState(), episodeId: current.id });
         history = [];
-        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive);
+        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive, undefined, pending.controller.signal);
       };
       if (exceedsBudget()) {
         await breakForBudget();
       } else if (preview && !offRecord) {
         // The budget preview cannot strengthen memories. Recall once against the final
         // episode, so its own summary exclusion and reinforcement have the right source.
-        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive);
+        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive, undefined, pending.controller.signal);
         if (exceedsBudget()) await breakForBudget();
       }
       if (pending.cancelled) throw new NeoError('cancelled', 'The turn was cancelled.');
@@ -349,6 +349,7 @@ export class AgentRuntime implements AgentRuntimeApi {
     let cancelled = false;
     if (this.pendingTimeline) {
       this.pendingTimeline.cancelled = true;
+      this.pendingTimeline.controller.abort();
       cancelled = true;
     }
     for (const id of this.turns.keys()) cancelled = this.cancel(id) || cancelled;
@@ -376,7 +377,10 @@ export class AgentRuntime implements AgentRuntimeApi {
     this.mutatingTimeline = true;
     try {
       if (this.pendingTimeline) {
-        if (cancelNormalPreflight || this.pendingTimeline.offRecord) this.pendingTimeline.cancelled = true;
+        if (cancelNormalPreflight || this.pendingTimeline.offRecord) {
+          this.pendingTimeline.cancelled = true;
+          this.pendingTimeline.controller.abort();
+        }
         await this.pendingTimeline.done;
       }
       return await mutation();
