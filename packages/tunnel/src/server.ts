@@ -466,6 +466,8 @@ export function serveTunnel(link: MessageLink, options: {
       if (request.dispatched || (type !== TunnelFrameType.RequestBody && type !== TunnelFrameType.RequestEnd)) {
         close('Invalid request frame sequence', TunnelCloseCode.ProtocolError);
       } else if (type === TunnelFrameType.RequestBody) {
+        // Empty chunks consume no byte budget, so do not retain them.
+        if (payload.byteLength === 0) return;
         request.size += payload.byteLength;
         buffered += payload.byteLength;
         if (request.size > limits.maxRequestBodyBytes) reset(stream, 'too_large');

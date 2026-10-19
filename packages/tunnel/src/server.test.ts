@@ -138,6 +138,46 @@ describe('tunnel server validation and ownership', () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it('does not retain zero-length RequestBody frames or alter the request body', async () => {
+    const fetch = vi.fn(async (_request: Request) => new Response('ok'));
+    const { client, frames, request, end } = await session({
+      handler: { fetch, openWebSocket: () => null },
+      limits: { maxRequestBodyBytes: 4, maxBufferedBodyBytes: 1024 },
+    });
+    // Observe the private buffer without adding a production inspection API.
+    const registrations = vi.spyOn(Map.prototype, 'set');
+    let state: { chunks: Uint8Array[] } | undefined;
+    try {
+      const opened = frames.next(TunnelFrameType.Pong, 0);
+      request(1, { method: 'POST', path: '/api/test', headers: [] });
+      client.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+      await opened;
+      state = registrations.mock.calls.find(([stream, value]) =>
+        stream === 1 && value?.head?.path === '/api/test' && Array.isArray(value.chunks))?.[1];
+    } finally {
+      registrations.mockRestore();
+    }
+    expect(state).toBeDefined();
+
+    const drained = frames.next(TunnelFrameType.Pong, 0);
+    for (let i = 0; i < 10_000; i++) {
+      client.send({ type: TunnelFrameType.RequestBody, stream: 1, payload: EMPTY });
+    }
+    // The pong arrives after all preceding body frames have been handled.
+    client.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await drained;
+    expect(state!.chunks).toHaveLength(0);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.closed).toBe(false);
+
+    const completed = frames.next(TunnelFrameType.ResponseEnd, 1);
+    client.send({ type: TunnelFrameType.RequestBody, stream: 1, payload: new TextEncoder().encode('body') });
+    end(1);
+    await completed;
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(await fetch.mock.calls[0]![0].text()).toBe('body');
+  });
+
   it('caps request bodies buffered across streams and frees the budget on dispatch or reset', async () => {
     const fetch = vi.fn(async () => new Response('ok'));
     const { client, frames, request, end } = await session({
