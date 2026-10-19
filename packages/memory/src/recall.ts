@@ -12,7 +12,7 @@ import { fromJson, toNum, type SqlValue } from '@neo/storage';
 import { MEMORY_CONSTANTS } from './constants.js';
 import { ASSISTANT_STYLE_TAG } from './assistant-style.js';
 import type { MemoryContext } from './context.js';
-import { getNodes } from './db-helpers.js';
+import { chunked, getNodes } from './db-helpers.js';
 import { containsTerm, estimateTokens, hasCJK, isBroadSelfQuery, normalizeText, recallTerms, wordMatchExpression } from './text.js';
 import { dot, effectiveEdgeWeight, normalized, retention } from './utils.js';
 import { sameSpace } from './vectors.js';
@@ -368,14 +368,29 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   const reachable = [...A.entries()].filter(([id, a]) => styleIds.has(id) || (a * C.pinnedBoost >= minScore && !allStyleIds.has(id))).map(([id]) => id);
   const nodes = new Map(getNodes(db, reachable).map((n) => [n.id, n]));
   // Writes may have changed eligibility while the query embedding was in flight.
+  // Drop ineligible nodes from `nodes`, `A` and `best`, and sever any back-pointer
+  // whose `from` is now ineligible so `viaOf` never falls back to the DB label of
+  // an ineligible node (its sensitive label would otherwise leak into `reason`).
   const nonStyleIds = reachable.filter((id) => !styleIds.has(id));
   if (nonStyleIds.length) {
     const freshWhere = candidateWhere(query, now);
-    const eligibleIds = new Set((db
-      .prepare(`SELECT id FROM memory_nodes WHERE id IN (${nonStyleIds.map(() => '?').join(',')}) AND ${freshWhere.sql}`)
-      .all(...nonStyleIds, ...freshWhere.params) as { id: string }[]).map((row) => row.id));
+    const eligibleRows = chunked(nonStyleIds, (ph, chunk) =>
+      db
+        .prepare(`SELECT id FROM memory_nodes WHERE id IN (${ph}) AND ${freshWhere.sql}`)
+        .all(...chunk, ...freshWhere.params) as { id: string }[],
+    );
+    const eligibleIds = new Set(eligibleRows.map((row) => row.id));
+    const ineligibleIds = new Set<string>();
     for (const id of nonStyleIds) {
-      if (!eligibleIds.has(id)) nodes.delete(id);
+      if (!eligibleIds.has(id)) {
+        ineligibleIds.add(id);
+        nodes.delete(id);
+        A.delete(id);
+        best.delete(id);
+      }
+    }
+    if (ineligibleIds.size) {
+      for (const [id, entry] of best) if (ineligibleIds.has(entry.from)) best.delete(id);
     }
   }
   const scored: { node: MemoryNode; score: number; R: number }[] = [];
