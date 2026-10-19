@@ -161,3 +161,98 @@ describe('provider embedder settings fingerprint', () => {
     expect(embed).not.toHaveBeenCalled();
   });
 });
+
+describe('recall privacy under concurrent writes', () => {
+  it('does not admit a memory that flipped to sensitive during the embedding gap', async () => {
+    const gate = deferred();
+    let gated = false;
+    let gateCalled = false;
+    const { memory: svc } = setup({
+      id: 'recall-privacy-local', dimensions: 2, isLocal: true,
+      embed: async texts => {
+        if (gated && texts.includes('Kyoto')) {
+          gated = false;
+          gateCalled = true;
+          await gate.promise;
+        }
+        return texts.map(() => new Float32Array([0, 0]));
+      },
+    });
+    const E = await svc.remember({
+      kind: 'entity', label: 'Kyoto', content: 'A city in Japan', importance: 1,
+      sensitivity: 'normal', source: { by: 'user' },
+    });
+    const M = await svc.remember({
+      kind: 'fact', label: 'Tuesday meeting', content: 'Online planning meeting.', importance: 1,
+      sensitivity: 'normal', source: { by: 'user' },
+    });
+    await svc.link(M.id, E.id, 'about', 1);
+
+    gated = true;
+    const pending = svc.recall({ text: 'Kyoto', allowSensitive: false, reinforce: false, limit: 10, tokenBudget: 1500 });
+    await vi.waitFor(() => expect(gateCalled).toBe(true));
+    const flipped = await svc.update(M.id, { sensitivity: 'sensitive', content: 'Confidential: room Juniper.' });
+    expect(flipped.sensitivity).toBe('sensitive');
+    gate.release();
+    const result = await pending;
+
+    expect(result.items.map(it => it.node.id)).toContain(E.id);
+    expect(result.items.map(it => it.node.id)).not.toContain(M.id);
+  });
+
+  it('does not leak a flipped-to-sensitive label via a two-hop via chain', async () => {
+    const gate = deferred();
+    let gated = false;
+    let gateCalled = false;
+    const { memory: svc } = setup({
+      id: 'recall-privacy-local-twohop', dimensions: 2, isLocal: true,
+      embed: async texts => {
+        if (gated && texts.includes('Osaka')) {
+          gated = false;
+          gateCalled = true;
+          await gate.promise;
+        }
+        return texts.map(() => new Float32Array([0, 0]));
+      },
+    });
+    const E = await svc.remember({
+      kind: 'entity', label: 'Osaka', content: 'A city in Japan', importance: 1,
+      sensitivity: 'normal', source: { by: 'user' },
+    });
+    const M = await svc.remember({
+      kind: 'fact', label: 'Lunch with Alex', content: 'Lunch plan.', importance: 1,
+      sensitivity: 'normal', source: { by: 'user' },
+    });
+    const N = await svc.remember({
+      kind: 'fact', label: 'Open venue list', content: 'Public venues to try.', importance: 1,
+      sensitivity: 'normal', source: { by: 'user' },
+    });
+    await svc.link(M.id, E.id, 'about', 1);
+    await svc.link(N.id, M.id, 'about', 1);
+
+    gated = true;
+    const pending = svc.recall({ text: 'Osaka', allowSensitive: false, reinforce: false, limit: 10, tokenBudget: 1500 });
+    await vi.waitFor(() => expect(gateCalled).toBe(true));
+    const sensitiveLabel = 'Confidential: Project Juniper roster';
+    const flipped = await svc.update(M.id, { sensitivity: 'sensitive', label: sensitiveLabel, content: 'Confidential: redacted.' });
+    expect(flipped.sensitivity).toBe('sensitive');
+    expect(flipped.label).toBe(sensitiveLabel);
+    gate.release();
+    const result = await pending;
+
+    const ids = result.items.map(it => it.node.id);
+    expect(ids).not.toContain(M.id);
+    // N was only reachable through M; keeping it would still signal M's content
+    // (its sensitivity, and the fact that M was a relevant hop) to a cloud caller.
+    expect(ids).not.toContain(N.id);
+    for (const item of result.items) {
+      expect(item.node.label).not.toBe(sensitiveLabel);
+      expect(item.node.content).not.toContain('Confidential');
+      for (const hop of item.via) {
+        expect(hop.nodeId).not.toBe(M.id);
+        expect(hop.label).not.toBe(sensitiveLabel);
+      }
+      expect(item.reason).not.toContain(sensitiveLabel);
+    }
+  });
+});
