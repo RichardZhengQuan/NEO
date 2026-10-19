@@ -265,7 +265,6 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
       let done = false;
       let hasHead = false;
       let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
-      let bodyBytesQueued = 0;
       let bodyReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
       const signal = request.signal;
       const cleanup = () => {
@@ -311,7 +310,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
                 const bodyStream = noBody ? null : new ReadableStream<Uint8Array>({
                   start(value) { controller = value; },
                   cancel() { reset(); cleanup(); },
-                });
+                }, new ByteLengthQueuingStrategy({ highWaterMark: BODY_QUEUE_BUDGET }));
                 const response = new Response(bodyStream, { status: head.status, headers: head.headers });
                 hasHead = true;
                 resolve(response);
@@ -320,9 +319,11 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
               case TunnelFrameType.ResponseBody:
                 if (!hasHead) throw new TunnelProtocolError('Body before response head');
                 controller?.enqueue(frame.payload);
-                // Bound total enqueued bytes, including when the caller never reads the body.
-                bodyBytesQueued += frame.payload.length;
-                if (bodyBytesQueued > BODY_QUEUE_BUDGET) {
+                // Bound current queue occupancy, including when the caller never reads the body.
+                // ByteLengthQueuingStrategy tracks actual bytes in the queue; desiredSize goes
+                // negative only when the consumer is slow and the queue exceeds the budget,
+                // so a fast reader that drains chunks as they arrive is never incorrectly reset.
+                if ((controller?.desiredSize ?? 0) < 0) {
                   reset('limit');
                   fail(new TypeError('Response body too large'));
                 }

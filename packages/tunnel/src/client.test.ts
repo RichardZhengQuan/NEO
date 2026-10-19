@@ -108,7 +108,11 @@ describe('tunnel client response body budget', () => {
       expect((await first).value).toEqual(payload);
     }
     const received = nextControl();
-    for (let index = 0; index <= BODY_QUEUE_BUDGET / payload.length; index++) {
+    // For the slow-reader case one extra chunk is needed: the pending read absorbs
+    // the first flood chunk directly (bypassing the queue), so the queue fills from
+    // the second chunk onward and needs one more to exceed the budget.
+    const flood = Math.floor(BODY_QUEUE_BUDGET / payload.length) + 1 + (kind === 'slow' ? 1 : 0);
+    for (let index = 0; index < flood; index++) {
       channel.send({ type: TunnelFrameType.ResponseBody, stream, payload });
     }
     // Pong proves the flood was delivered if the client fails to send Reset.
@@ -140,5 +144,29 @@ describe('tunnel client response body budget', () => {
     channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
     expect((await received).type).toBe(TunnelFrameType.Pong);
     expect((await response.arrayBuffer()).byteLength).toBe(BODY_QUEUE_BUDGET);
+  });
+
+  it('allows a fast reader to receive more than the budget in total', async () => {
+    // A reader that consumes each chunk before the next arrives keeps the queue
+    // empty throughout; the total bytes received may far exceed the budget without
+    // triggering a reset.  This covers legitimate large responses such as memory
+    // exports with embeddings and long SSE streams.
+    const { response, channel, stream } = await streamingResponse();
+    const payload = new Uint8Array(TUNNEL_BODY_CHUNK);
+    const reader = response.body!.getReader();
+    const count = Math.floor(BODY_QUEUE_BUDGET / payload.length) * 2; // 2× budget
+    let totalReceived = 0;
+    for (let index = 0; index < count; index++) {
+      // Read is pending before the send so the chunk bypasses the queue and the
+      // budget check never fires regardless of how many chunks are delivered.
+      const pending = reader.read();
+      channel.send({ type: TunnelFrameType.ResponseBody, stream, payload });
+      const { value } = await pending;
+      totalReceived += value!.byteLength;
+    }
+    channel.send({ type: TunnelFrameType.ResponseEnd, stream, payload: EMPTY });
+    const { done } = await reader.read();
+    expect(done).toBe(true);
+    expect(totalReceived).toBe(count * payload.length);
   });
 });
