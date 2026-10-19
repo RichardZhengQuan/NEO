@@ -176,9 +176,32 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
 
   // 2. Recall.
   const allowSensitive = adapter.isLocal || settings.memory.sendSensitiveToCloud;
-  const prepared = plan.context && plan.recalled
-    ? { context: plan.context, recalled: plan.recalled }
-    : await prepareTurnContext(services, conv, settings, plan.parts, history, allowSensitive);
+  let prepared: { context: ContentPart; recalled: RecalledMemory[] };
+  if (plan.context && plan.recalled) {
+    prepared = { context: plan.context, recalled: plan.recalled };
+  } else {
+    try {
+      prepared = await prepareTurnContext(services, conv, settings, plan.parts, history, allowSensitive, undefined, record.controller.signal);
+    } catch (err) {
+      if (!(err instanceof NeoError && err.code === 'cancelled' && record.controller.signal.aborted)) throw err;
+      // Recall was interrupted by cancellation before the TurnRunner existed.
+      // Build a minimal context so the TurnRunner can run its cancelled-signal
+      // fast-path and emit the terminal event cleanly.
+      prepared = {
+        recalled: [],
+        context: {
+          type: 'context',
+          text: buildContextBlock({
+            now: clock(),
+            timezone: settings.timezone,
+            locale: settings.locale,
+            memories: [],
+            offRecord: conv.offRecord ?? conv.incognito,
+          }),
+        },
+      };
+    }
+  }
   const { context, recalled } = prepared;
 
   // 3. Persist the user message (with its context part) and the streaming assistant message.

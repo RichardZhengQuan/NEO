@@ -95,7 +95,7 @@ async function querySpaces(ctx: MemoryContext, query: RecallQuery, text: string,
   const embedIn = async (embedder: Embedder, withContext: boolean) => {
     try {
       const ctxText = withContext ? context : '';
-      const vectors = await embedder.embed(ctxText ? [text, ctxText] : [text]);
+      const vectors = await embedder.embed(ctxText ? [text, ctxText] : [text], query.signal);
       const t = vectors[0] ? normalized(vectors[0]) : null;
       if (!t) return;
       const c = ctxText && vectors[1] ? normalized(vectors[1]) : null;
