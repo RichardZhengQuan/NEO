@@ -38,6 +38,7 @@ const RETRY_MS = [1000, 3000, 10000, 30000];
 const FIGURE_CSS = `
 .neo-avfig{position:relative;display:inline-flex;align-items:center;justify-content:center;width:100%;height:100%;min-width:0;line-height:0;vertical-align:middle}
 .neo-avfig>img{display:block;width:100%;height:100%;object-fit:contain}
+.neo-avfig>img[hidden]{display:none}
 .neo-avfig>.neo-avfig__ink{position:absolute;inset:0;opacity:0;pointer-events:none}
 .neo-avfig>.neo-av{width:min(100%,22rem)!important;height:auto!important;aspect-ratio:1}
 .neo-avfig[data-glitch]{animation:neo-avfig-shake ${BURST_MS}ms steps(1,end)}

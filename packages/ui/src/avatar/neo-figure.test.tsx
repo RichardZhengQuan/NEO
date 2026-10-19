@@ -84,6 +84,22 @@ describe('NeoFigure', () => {
     }
   });
 
+  it('background retry does not show the probing image', () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = render(<NeoFigure kind="dog" />);
+      fireEvent.error(screen.getByRole('img', { name: 'Dog' }));
+
+      act(() => { vi.advanceTimersByTime(1000); });
+      const probe = container.querySelector('.neo-avfig > img[hidden]')!;
+      expect(getComputedStyle(probe).display).toBe('none');
+      expect(screen.getAllByRole('img')).toHaveLength(1);
+      expect(screen.getByRole('img', { name: 'Dog' }).classList.contains('neo-av')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders the artwork without a rim-light filter', () => {
     const { container } = render(<NeoFigure kind="girl" />);
     const root = container.querySelector('.neo-avfig') as HTMLElement;
