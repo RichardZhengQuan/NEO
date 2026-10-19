@@ -252,6 +252,12 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
     return id;
   }
 
+  async function waitForClientBuffer(ch: SecureChannel, active: () => boolean): Promise<void> {
+    while (active() && !ch.closed && ch.bufferedAmount > 1024 * 1024) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   const tunnelFetch: typeof fetch = (input, init) => {
     return new Promise<Response>((resolve, reject) => {
       let request: Request;
@@ -377,10 +383,16 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         current.channel.send({ type: TunnelFrameType.Request, stream: id, payload: encodeJson({
           method: request.method, path: url.pathname + url.search, headers,
         }) });
-        for (let offset = 0; offset < body.length && !done; offset += TUNNEL_BODY_CHUNK) {
+        const active = () => !done && !signal.aborted;
+        for (let offset = 0; offset < body.length && active(); offset += TUNNEL_BODY_CHUNK) {
+          await waitForClientBuffer(current.channel, active);
+          if (!active()) return;
           current.channel.send({ type: TunnelFrameType.RequestBody, stream: id, payload: body.subarray(offset, offset + TUNNEL_BODY_CHUNK) });
         }
-        if (!done) current.channel.send({ type: TunnelFrameType.RequestEnd, stream: id, payload: EMPTY });
+        if (active()) {
+          await waitForClientBuffer(current.channel, active);
+          if (active()) current.channel.send({ type: TunnelFrameType.RequestEnd, stream: id, payload: EMPTY });
+        }
       })().catch(() => { reset(); fail(signal.aborted ? signal.reason : networkError()); });
     });
   };
