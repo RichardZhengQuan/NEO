@@ -245,11 +245,18 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
         );
         const subtasks: Task[] = [];
         if (movedList) {
-          const rows = db.prepare('SELECT * FROM tasks WHERE parent_id = ?').all(id) as Row[];
-          for (const row of rows) {
-            const subtask: Task = { ...toTask(row), listId: updated.listId, updatedAt: now };
-            db.prepare('UPDATE tasks SET list_id = ?, updated_at = ? WHERE id = ?').run(subtask.listId, now, subtask.id);
-            subtasks.push(subtask);
+          const visited = new Set<string>([id]);
+          const queue = [id];
+          for (const parentId of queue) {
+            const rows = db.prepare('SELECT * FROM tasks WHERE parent_id = ?').all(parentId) as Row[];
+            for (const row of rows) {
+              const subtask: Task = { ...toTask(row), listId: updated.listId, updatedAt: now };
+              if (visited.has(subtask.id)) continue;
+              visited.add(subtask.id);
+              db.prepare('UPDATE tasks SET list_id = ?, updated_at = ? WHERE id = ?').run(subtask.listId, now, subtask.id);
+              subtasks.push(subtask);
+              queue.push(subtask.id);
+            }
           }
         }
         return { updated, subtasks };

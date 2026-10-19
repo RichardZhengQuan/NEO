@@ -266,6 +266,52 @@ describe('TaskStore', () => {
     expect(upserts.every((e) => e.listId === INBOX_LIST_ID)).toBe(true);
   });
 
+  it('moving a parent task into another list moves grandchildren too', () => {
+    const list = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Epic' });
+    const child = stores.tasks.create({ title: 'Step', parentId: parent.id });
+    const grandchild = stores.tasks.create({ title: 'Detail', parentId: child.id });
+    t.setNow(t.now + 1000);
+    const events: unknown[] = [];
+    stores.tasks.onChange((e) => events.push(e));
+
+    stores.tasks.update(parent.id, { listId: list.id });
+
+    expect(stores.tasks.get(grandchild.id)?.listId).toBe(list.id);
+    expect(stores.tasks.get(grandchild.id)?.parentId).toBe(child.id);
+    expect(stores.tasks.get(grandchild.id)?.updatedAt).toBe(t.now);
+    expect(stores.tasks.get(child.id)?.parentId).toBe(parent.id);
+    for (const task of [parent, child, grandchild]) {
+      expect(stores.tasks.get(task.id)).toMatchObject({ listId: list.id, updatedAt: t.now });
+    }
+    expect(events).toHaveLength(3);
+    expect(events).toEqual(expect.arrayContaining(
+      [parent, child, grandchild].map((task) => ({ type: 'upsert', task: stores.tasks.get(task.id) })),
+    ));
+  });
+
+  it('moving a parent task with a corrupt descendant cycle moves each task once', () => {
+    const list = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Epic' });
+    const child = stores.tasks.create({ title: 'Step', parentId: parent.id });
+    const grandchild = stores.tasks.create({ title: 'Detail', parentId: child.id });
+    t.db.prepare('UPDATE tasks SET parent_id = ? WHERE id = ?').run(grandchild.id, parent.id);
+    t.setNow(t.now + 1000);
+    const events: unknown[] = [];
+    stores.tasks.onChange((e) => events.push(e));
+
+    stores.tasks.update(parent.id, { listId: list.id });
+
+    for (const task of [parent, child, grandchild]) {
+      expect(stores.tasks.get(task.id)).toMatchObject({ listId: list.id, updatedAt: t.now });
+    }
+    expect(stores.tasks.get(parent.id)?.parentId).toBe(grandchild.id);
+    expect(events).toHaveLength(3);
+    expect(events).toEqual(expect.arrayContaining(
+      [parent, child, grandchild].map((task) => ({ type: 'upsert', task: stores.tasks.get(task.id) })),
+    ));
+  });
+
   it('moving a parent task rolls back all changes when a subtask move fails', () => {
     const list = stores.tasks.createList({ name: 'Work' });
     const parent = stores.tasks.create({ title: 'Epic', listId: list.id });
