@@ -364,10 +364,13 @@ describe('phone transport over an in-memory outer WebSocket', () => {
   it('cancels the upload source on channel loss while a read is pending', async () => {
     const { transport, peers } = environment();
     await transport.connect();
-    let pulled = false;
-    const cancelled = vi.fn();
+    let resolvePulled!: () => void;
+    const pulledPromise = new Promise<void>(resolve => { resolvePulled = resolve; });
+    let resolveCancelled!: () => void;
+    const cancelledPromise = new Promise<void>(resolve => { resolveCancelled = resolve; });
+    const cancelled = vi.fn(() => { resolveCancelled(); });
     const body = new ReadableStream<Uint8Array>({
-      pull() { pulled = true; return new Promise<void>(() => {}); },
+      pull() { resolvePulled(); return new Promise<void>(() => {}); },
       cancel: cancelled,
     });
     const request = new Request(`${transport.baseUrl}/api/slow-upload`, {
@@ -375,19 +378,23 @@ describe('phone transport over an in-memory outer WebSocket', () => {
     } as RequestInit);
     const fetching = transport.fetch(request);
     const failed = expect(fetching).rejects.toThrow('Failed to fetch');
-    await vi.waitFor(() => expect(pulled).toBe(true));
+    await pulledPromise;
     peers[0]!.link.close(1006, 'lost');
     await failed;
-    await vi.waitFor(() => expect(cancelled).toHaveBeenCalledOnce());
+    await cancelledPromise;
+    expect(cancelled).toHaveBeenCalledOnce();
   });
 
   it('cancels the upload source when the caller aborts', async () => {
     const { transport } = environment();
     await transport.connect();
-    let pulled = false;
-    const cancelled = vi.fn();
+    let resolvePulled!: () => void;
+    const pulledPromise = new Promise<void>(resolve => { resolvePulled = resolve; });
+    let resolveCancelled!: () => void;
+    const cancelledPromise = new Promise<void>(resolve => { resolveCancelled = resolve; });
+    const cancelled = vi.fn(() => { resolveCancelled(); });
     const body = new ReadableStream<Uint8Array>({
-      pull() { pulled = true; },
+      pull() { resolvePulled(); },
       cancel: cancelled,
     });
     const abort = new AbortController();
@@ -396,11 +403,12 @@ describe('phone transport over an in-memory outer WebSocket', () => {
     } as RequestInit);
     const fetching = transport.fetch(request);
     const failed = expect(fetching).rejects.toMatchObject({ name: 'AbortError' });
-    await vi.waitFor(() => expect(pulled).toBe(true));
+    await pulledPromise;
     await new Promise(resolve => setTimeout(resolve, 0));
     abort.abort();
     await failed;
-    await vi.waitFor(() => expect(cancelled).toHaveBeenCalledOnce());
+    await cancelledPromise;
+    expect(cancelled).toHaveBeenCalledOnce();
   });
 
   it('rejects a request body that yields a non-Uint8Array chunk', async () => {
