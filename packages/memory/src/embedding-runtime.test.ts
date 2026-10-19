@@ -161,3 +161,42 @@ describe('provider embedder settings fingerprint', () => {
     expect(embed).not.toHaveBeenCalled();
   });
 });
+
+describe('recall privacy under concurrent writes', () => {
+  it('does not admit a memory that flipped to sensitive during the embedding gap', async () => {
+    const gate = deferred();
+    let gated = false;
+    let gateCalled = false;
+    const { memory: svc } = setup({
+      id: 'recall-privacy-local', dimensions: 2, isLocal: true,
+      embed: async texts => {
+        if (gated && texts.includes('Kyoto')) {
+          gated = false;
+          gateCalled = true;
+          await gate.promise;
+        }
+        return texts.map(() => new Float32Array([0, 0]));
+      },
+    });
+    const E = await svc.remember({
+      kind: 'entity', label: 'Kyoto', content: 'A city in Japan', importance: 1,
+      sensitivity: 'normal', source: { by: 'user' },
+    });
+    const M = await svc.remember({
+      kind: 'fact', label: 'Tuesday meeting', content: 'Online planning meeting.', importance: 1,
+      sensitivity: 'normal', source: { by: 'user' },
+    });
+    await svc.link(M.id, E.id, 'about', 1);
+
+    gated = true;
+    const pending = svc.recall({ text: 'Kyoto', allowSensitive: false, reinforce: false, limit: 10, tokenBudget: 1500 });
+    await vi.waitFor(() => expect(gateCalled).toBe(true));
+    const flipped = await svc.update(M.id, { sensitivity: 'sensitive', content: 'Confidential: room Juniper.' });
+    expect(flipped.sensitivity).toBe('sensitive');
+    gate.release();
+    const result = await pending;
+
+    expect(result.items.map(it => it.node.id)).toContain(E.id);
+    expect(result.items.map(it => it.node.id)).not.toContain(M.id);
+  });
+});

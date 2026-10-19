@@ -367,6 +367,17 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   const minScore = policy.minScore;
   const reachable = [...A.entries()].filter(([id, a]) => styleIds.has(id) || (a * C.pinnedBoost >= minScore && !allStyleIds.has(id))).map(([id]) => id);
   const nodes = new Map(getNodes(db, reachable).map((n) => [n.id, n]));
+  // Writes may have changed eligibility while the query embedding was in flight.
+  const nonStyleIds = reachable.filter((id) => !styleIds.has(id));
+  if (nonStyleIds.length) {
+    const freshWhere = candidateWhere(query, now);
+    const eligibleIds = new Set((db
+      .prepare(`SELECT id FROM memory_nodes WHERE id IN (${nonStyleIds.map(() => '?').join(',')}) AND ${freshWhere.sql}`)
+      .all(...nonStyleIds, ...freshWhere.params) as { id: string }[]).map((row) => row.id));
+    for (const id of nonStyleIds) {
+      if (!eligibleIds.has(id)) nodes.delete(id);
+    }
+  }
   const scored: { node: MemoryNode; score: number; R: number }[] = [];
   for (const node of nodes.values()) {
     const R = retention(node, now);
