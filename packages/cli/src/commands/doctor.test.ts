@@ -2,13 +2,17 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NeoApiError } from '@neo/client';
 import { runDoctor } from './doctor.js';
 
 const client = vi.hoisted(() => ({
   health: vi.fn(),
   providers: { list: vi.fn(), test: vi.fn() },
 }));
-vi.mock('@neo/client', () => ({ NeoClient: vi.fn(function () { return client; }) }));
+vi.mock('@neo/client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@neo/client')>(),
+  NeoClient: vi.fn(function () { return client; }),
+}));
 
 let dataDir: string;
 beforeEach(() => {
@@ -74,6 +78,19 @@ describe('doctor without an AI provider', () => {
 
   it('treats a 404 from the provider list as a warning, not a failure', async () => {
     client.providers.list.mockRejectedValue(new Error('404 Not Found'));
+    await runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' });
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('! Providers');
+    expect(output).toContain('provider list unavailable (older server?)');
+    expect(output).toContain('All checks passed.');
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
+  it('treats a server-shape NeoApiError 404 as an older-server warning', async () => {
+    client.providers.list.mockRejectedValue(
+      new NeoApiError(404, { code: 'not_found', message: 'Route not found' }),
+    );
     await runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' });
     const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
     expect(client.providers.list).toHaveBeenCalledOnce();

@@ -1,7 +1,7 @@
 /**
  * `neo doctor` — system health check.
  */
-import { NeoClient } from '@neo/client';
+import { NeoApiError, NeoClient } from '@neo/client';
 import { bold, cyan, dim, green, red, yellow } from '../ansi.js';
 import { resolveDataDir, readToken } from '../config-file.js';
 import type { NeoConfig } from '@neo/protocol';
@@ -125,7 +125,7 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      const is404 = /\b404\b/.test(msg);
+      const is404 = (e instanceof NeoApiError && e.httpStatus === 404) || /\b404\b/.test(msg);
       checks.push({
         name: 'Providers',
         status: is404 ? 'warn' : 'fail',
