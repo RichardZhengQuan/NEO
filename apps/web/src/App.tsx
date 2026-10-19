@@ -165,6 +165,34 @@ function Screen({ route }: { route: Route }): ReactElement {
   }
 }
 
+/** Exported for testing. Builds the neo://pair?… URL from a pair route.
+ *  @param origin   window.location.origin
+ *  @param protocol window.location.protocol
+ */
+export function buildPairNeoUrl(
+  route: Extract<Route, { name: 'pair' }>,
+  origin: string,
+  protocol: string,
+): string {
+  const q = new URLSearchParams();
+  if (route.version) q.set('v', route.version);
+  if (route.code) q.set('code', route.code);
+  if (route.token) q.set('token', route.token);
+
+  // On Android Capacitor, androidScheme: 'https' makes the origin https://localhost.
+  // That synthetic origin is not a reachable NEO server; never inject it for tunnel-only links.
+  const isCapacitorShellOrigin =
+    protocol === 'https:' && (origin === 'https://localhost' || origin === 'capacitor://localhost');
+  const server = route.serverUrl ?? (!isCapacitorShellOrigin && /^https?:$/.test(protocol) ? origin : undefined);
+  if (server) q.set('server', server);
+
+  if (route.id) q.set('id', route.id);
+  if (route.pk) q.set('pk', route.pk);
+  if (route.lan) q.set('lan', route.lan);
+  if (route.relay) q.set('relay', route.relay);
+  return `neo://pair?${q.toString()}`;
+}
+
 function ReadyApp(): ReactElement {
   const route = useRoute();
   const onboarded = useSession((s) => s.settings?.onboarded ?? false);
@@ -174,17 +202,7 @@ function ReadyApp(): ReactElement {
   useEffect(() => {
     if (route.name === 'pair') {
       if (route.token || route.code) {
-        const q = new URLSearchParams();
-        if (route.version) q.set('v', route.version);
-        if (route.code) q.set('code', route.code);
-        if (route.token) q.set('token', route.token);
-        const server = route.serverUrl ?? (/^https?:$/.test(window.location.protocol) ? window.location.origin : undefined);
-        if (server) q.set('server', server);
-        if (route.id) q.set('id', route.id);
-        if (route.pk) q.set('pk', route.pk);
-        if (route.lan) q.set('lan', route.lan);
-        if (route.relay) q.set('relay', route.relay);
-        openPairLink(`neo://pair?${q.toString()}`);
+        openPairLink(buildPairNeoUrl(route, window.location.origin, window.location.protocol));
       }
       navigate({ name: 'timeline' }, { replace: true });
     } else if (route.name === 'connect') {
