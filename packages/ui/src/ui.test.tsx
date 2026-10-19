@@ -583,6 +583,21 @@ describe('ConfirmationCard', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('MessageView', () => {
+  it('widget controls are disabled when MessageView has no onUiAction', async () => {
+    wrap(
+      <MessageView
+        message={msg({ role: 'assistant', parts: [{ type: 'ui', id: 'ui_tasks', block: { type: 'tasks', tasks: [{ id: 'task_1', title: 'Water plants', done: false }] } }] })}
+      />,
+      'zh-CN',
+    );
+    const checkbox = screen.getByRole('checkbox', { name: 'Water plants' }) as HTMLInputElement;
+    expect(checkbox.disabled).toBe(true);
+    expect(checkbox.checked).toBe(false);
+    await act(async () => { checkbox.click(); });
+    expect(checkbox.checked).toBe(false);
+    expect(screen.getByText('已完成 0/1')).toBeTruthy();
+  });
+
   it('renders optional sensitivity metadata without changing visible local history', () => {
     const { container } = wrap(<MessageView message={msg({
       role: 'assistant', sensitive: true,

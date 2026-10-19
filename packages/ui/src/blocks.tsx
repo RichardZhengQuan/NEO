@@ -153,7 +153,7 @@ function useActionRunner(onAction: OnUIAction | undefined, uiId: string | undefi
       setBusy(null);
     }
   };
-  return { run, busy };
+  return { run, busy, hasAction: !!onAction };
 }
 
 const STYLE_VARIANT: Record<NonNullable<UIAction['style']>, ButtonVariant> = {
@@ -171,7 +171,7 @@ function ActionButton({ action, runner, size = 'md' }: { action: UIAction; runne
       size={size}
       icon={icon}
       loading={runner.busy === action.id}
-      disabled={runner.busy !== null && runner.busy !== action.id}
+      disabled={!runner.hasAction || (runner.busy !== null && runner.busy !== action.id)}
       onClick={() => void runner.run(action)}
     >
       {action.label}
@@ -312,7 +312,7 @@ function ListRenderer({ block, uiId, onAction }: BlockRendererProps & { block: L
           return (
             <li key={item.id}>
               {item.action ? (
-                <button type="button" className="neo-list-item" data-tone={item.tone} onClick={() => void runner.run(item.action!)}>
+                <button type="button" className="neo-list-item" data-tone={item.tone} disabled={!onAction} onClick={() => void runner.run(item.action!)}>
                   {content}
                 </button>
               ) : (
@@ -628,7 +628,7 @@ function FormRenderer({ block, uiId, onAction, blockPath = [] }: BlockRendererPr
         />
       ))}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-        <Button type="submit" variant="primary" loading={state === 'sending'}>
+        <Button type="submit" variant="primary" loading={state === 'sending'} disabled={!onAction}>
           {block.submitLabel ?? t('common.submit')}
         </Button>
         {state === 'sent' && (
