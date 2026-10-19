@@ -164,6 +164,18 @@ export function writeInitConfig(dataDir: string, answers: InitAnswers, configPat
   }
 
   const json = JSON.stringify(config, null, 2);
-  fs.writeFileSync(cfgPath, json, { encoding: 'utf8', mode: 0o600 });
-  fs.chmodSync(cfgPath, 0o600);
+  // Write to a temp file at 0o600 then rename atomically so the secret is
+  // never visible at a permissive mode — even briefly.  A plain writeFileSync
+  // + chmodSync leaves two windows: (1) an open fd held before our write
+  // retains access after the chmod, and (2) a crash between the two calls
+  // leaves the file at the world-readable mode.  renameSync is atomic on
+  // POSIX: the target either has the old content or the new 0o600 content.
+  const tmpPath = path.join(path.dirname(cfgPath), `.neo-config-tmp-${process.pid}`);
+  try {
+    fs.writeFileSync(tmpPath, json, { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tmpPath, cfgPath);
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore cleanup error */ }
+    throw err;
+  }
 }
