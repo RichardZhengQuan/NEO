@@ -180,9 +180,10 @@ export function buildPairNeoUrl(
   if (route.token) q.set('token', route.token);
 
   // On Android Capacitor, androidScheme: 'https' makes the origin https://localhost.
-  // That synthetic origin is not a reachable NEO server; never inject it for tunnel-only links.
+  // On other Capacitor configurations the origin is capacitor://localhost.
+  // Neither is a reachable NEO server; never inject it for tunnel-only links.
   const isCapacitorShellOrigin =
-    protocol === 'https:' && (origin === 'https://localhost' || origin === 'capacitor://localhost');
+    origin === 'https://localhost' || origin === 'capacitor://localhost';
   const server = route.serverUrl ?? (!isCapacitorShellOrigin && /^https?:$/.test(protocol) ? origin : undefined);
   if (server) q.set('server', server);
 
