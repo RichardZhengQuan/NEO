@@ -235,6 +235,30 @@ describe('tunnel server validation and ownership', () => {
     expect(canceled).toHaveBeenCalledTimes(2);
   });
 
+  it('cancels the response body when sending the response head fails', async () => {
+    const canceled = vi.fn();
+    const response = new Response(new ReadableStream<Uint8Array>({ cancel: canceled }));
+    let sends = 0;
+    const { client, request, end } = await session({
+      prepareLink(link) {
+        const send = link.send.bind(link);
+        link.send = (data) => {
+          // The first send completes the handshake; the second sends the response head.
+          if (++sends === 2) throw new Error('Response head send failed');
+          send(data);
+        };
+      },
+      handler: { fetch: async () => response, openWebSocket: () => null },
+    });
+    const closed = new Promise<void>((resolve) => { client.onClose = () => resolve(); });
+    expect(canceled).not.toHaveBeenCalled();
+    request(1);
+    end(1);
+    await closed;
+    expect(sends).toBe(2);
+    expect(canceled).toHaveBeenCalledOnce();
+  });
+
   it('waits for backpressure before reading and splits large response chunks', async () => {
     let buffered = 2 * 1024 * 1024;
     let pulls = 0;

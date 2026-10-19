@@ -258,7 +258,10 @@ export function serveTunnel(link: MessageLink, options: {
       type: TunnelFrameType.Response,
       stream,
       payload: encodeJson({ status: response.status, headers }),
-    })) return;
+    })) {
+      await response.body?.cancel().catch(() => {});
+      return;
+    }
     state.headSent = true;
     if (response.body && state.head.method !== 'HEAD' && !NULL_BODY_STATUSES.has(response.status)) {
       const reader = response.body.getReader();
