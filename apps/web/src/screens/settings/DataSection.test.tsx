@@ -146,3 +146,19 @@ describe('Settings Data timeline range deletion', () => {
     expect(useToasts.getState().toasts).toHaveLength(0);
   });
 });
+
+describe('Settings Data About section copy', () => {
+  it('does not use "you choose" framing in English', () => {
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><DataSection /></ConfirmProvider></I18nProvider>);
+    const about = screen.getByText((content) => content.includes('MIT licensed'));
+    expect(about.textContent).not.toMatch(/you choose/i);
+    expect(about.textContent).not.toMatch(/what it remembers/i);
+  });
+
+  it('does not use "由你决定" framing in zh-CN', () => {
+    render(<I18nProvider locale="zh-CN" messages={appDictionaries}><ConfirmProvider><DataSection /></ConfirmProvider></I18nProvider>);
+    const about = screen.getByText((content) => content.includes('MIT 许可证'));
+    expect(about.textContent).not.toContain('由你决定');
+    expect(about.textContent).not.toContain('记住什么');
+  });
+});
