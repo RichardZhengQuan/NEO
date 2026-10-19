@@ -387,6 +387,15 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     expect((await f.request('/api/providers/ollama', 'DELETE')).status).toBe(404);
   });
 
+  it('keeps a disabled provider disabled after a label-only PATCH', async () => {
+    f.services.providerConfigs.upsert({ id: 'work-ai', kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:1234/v1', enabled: false });
+    const res = await f.request('/api/providers/work-ai', 'PATCH', { label: 'Renamed' });
+    expect(res.status).toBe(200);
+    const view = await json<ProviderView>(res);
+    expect(view.enabled).toBe(false);
+    expect(f.services.providerConfigs.get('work-ai')!.enabled).toBe(false);
+  });
+
   it('keeps config-file providers immutable and draft tests isolated from all stores', async () => {
     f.services.config.providers.push({ id: 'configured', kind: 'ollama', enabled: true, apiKey: 'config-secret' });
     expect((await f.request('/api/providers/configured', 'PATCH', { label: 'Rename' })).status).toBe(409);
