@@ -17,6 +17,16 @@ export type Command =
 
 export type ParseArgsError = { error: string };
 
+/** Parse a decimal port in the range 0–65535. */
+export function parsePort(input: string): number | ParseArgsError {
+  const trimmed = input.trim();
+  const port = Number(trimmed);
+  if (!/^\d+$/.test(trimmed) || port < 0 || port > 65535) {
+    return { error: `Invalid port: ${input}` };
+  }
+  return port;
+}
+
 /** Parse process.argv (or a provided array). Returns a Command or an error. */
 export function parseCliArgs(argv: string[] = process.argv.slice(2)): Command | ParseArgsError {
   if (argv.length === 0) return { cmd: 'help' };
@@ -61,10 +71,8 @@ function parseServe(args: string[]): Command | ParseArgsError {
       allowPositionals: false,
     });
     if (values.help) return { cmd: 'help', topic: 'serve' };
-    const port = values.port ? parseInt(values.port, 10) : undefined;
-    if (port !== undefined && (isNaN(port) || port < 0 || port > 65535)) {
-      return { error: `Invalid port: ${values.port}` };
-    }
+    const port = values.port === undefined ? undefined : parsePort(values.port);
+    if (typeof port === 'object') return port;
     if (values.mode && values.mode !== 'local' && values.mode !== 'server') {
       return { error: `--mode must be local or server` };
     }

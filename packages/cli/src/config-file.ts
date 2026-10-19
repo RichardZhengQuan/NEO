@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { NeoError, PROVIDER_PRESETS, type ProviderKind, type NeoConfig } from '@neo/protocol';
+import { parsePort } from './args.js';
 
 export type PromptFn = (question: string, options?: { secret?: boolean; choices?: string[] }) => Promise<string>;
 
@@ -115,7 +116,11 @@ export async function runInitWizard(prompt: PromptFn): Promise<InitAnswers> {
     const hostInput = await prompt(`\nBind host [0.0.0.0]`);
     host = hostInput.trim() || '0.0.0.0';
     const portInput = await prompt(`\nPort [7777]`);
-    port = parseInt(portInput.trim() || '7777', 10);
+    const parsedPort = parsePort(portInput.trim() || '7777');
+    if (typeof parsedPort !== 'number') {
+      throw new NeoError('bad_request', parsedPort.error);
+    }
+    port = parsedPort;
   }
 
   return { providerKind, apiKey, baseUrl, defaultModel, mode, host, port };

@@ -49,8 +49,36 @@ describe('parseCliArgs', () => {
 
     it('rejects bad port', () => {
       const r = parseCliArgs(['serve', '--port', 'abc']);
-      expect(r).toHaveProperty('error');
+      expect(r).toEqual({ error: 'Invalid port: abc' });
     });
+
+    it('--port 7777junk → Invalid port', () => {
+      expect(parseCliArgs(['serve', '--port', '7777junk'])).toEqual({ error: 'Invalid port: 7777junk' });
+    });
+
+    it('--port 1e4 → Invalid port', () => {
+      expect(parseCliArgs(['serve', '--port', '1e4'])).toEqual({ error: 'Invalid port: 1e4' });
+    });
+
+    it('existing valid cases keep passing', () => {
+      expect(parseCliArgs(['serve', '--port', '8080'])).toMatchObject({ cmd: 'serve', port: 8080 });
+    });
+
+    it.each(['', '   ', '-1', '65536', '8080.5', '+8080', '0x1f90', '8080 90'])(
+      'rejects invalid decimal port %j', (input) => {
+        expect(parseCliArgs(['serve', '--port', input])).toHaveProperty('error');
+      },
+    );
+
+    it('rejects a negative port with equals syntax', () => {
+      expect(parseCliArgs(['serve', '--port=-1'])).toEqual({ error: 'Invalid port: -1' });
+    });
+
+    it.each([['0', 0], ['65535', 65535], [' 8080 ', 8080], ['008080', 8080]] as const)(
+      'accepts decimal port %j', (input, port) => {
+        expect(parseCliArgs(['serve', '--port', input])).toMatchObject({ cmd: 'serve', port });
+      },
+    );
 
     it('rejects bad mode', () => {
       const r = parseCliArgs(['serve', '--mode', 'invalid']);

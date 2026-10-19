@@ -247,6 +247,58 @@ describe('runInitWizard', () => {
     expect(answers.port).toBe(9000);
   });
 
+  it('throws on non-numeric port in server mode', async () => {
+    const responses = ['0', 'server', '', 'abc'];
+    await expect(runInitWizard(async () => responses.shift() ?? '')).rejects.toMatchObject({
+      code: 'bad_request', message: 'Invalid port: abc',
+    });
+  });
+
+  it('throws on out-of-range port in server mode', async () => {
+    const responses = ['0', 'server', '', '99999'];
+    await expect(runInitWizard(async () => responses.shift() ?? '')).rejects.toMatchObject({
+      code: 'bad_request', message: 'Invalid port: 99999',
+    });
+  });
+
+  it.each(['7777junk', '1e4', '-1', '65536', '8080.5', '+8080', '0x1f90', '8080 90'])(
+    'throws on invalid decimal port %j in server mode', async (input) => {
+      const responses = ['0', 'server', '', input];
+      await expect(runInitWizard(async () => responses.shift() ?? '')).rejects.toMatchObject({
+        code: 'bad_request', message: `Invalid port: ${input}`,
+      });
+    },
+  );
+
+  it('never writes port: null to config', async () => {
+    const tmpDir = makeTempDir();
+    try {
+      const responses = ['0', 'server', '', 'abc'];
+      const init = async () => {
+        const answers = await runInitWizard(async () => responses.shift() ?? '');
+        writeInitConfig(tmpDir, answers);
+      };
+      await expect(init()).rejects.toMatchObject({ code: 'bad_request' });
+      expect(fs.existsSync(path.join(tmpDir, 'config.json'))).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([['0', 0], ['65535', 65535], [' 8080 ', 8080], ['008080', 8080]] as const)(
+    'accepts decimal port %j in server mode', async (input, port) => {
+      const responses = ['0', 'server', '', input];
+      const answers = await runInitWizard(async () => responses.shift() ?? '');
+      expect(answers.port).toBe(port);
+    },
+  );
+
+  it.each(['', '   '])('uses the default port for blank input %j in server mode', async (input) => {
+    const responses = ['0', 'server', '', input];
+    const answers = await runInitWizard(async () => responses.shift() ?? '');
+    expect(answers.port).toBe(7777);
+  });
+
   it('uses default model when empty string entered', async () => {
     const responses = ['1', 'sk-ant-test', '', '', 'local'];
     let callIndex = 0;
