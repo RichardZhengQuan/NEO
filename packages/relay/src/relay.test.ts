@@ -447,6 +447,41 @@ describe('relay limits and lifecycle', () => {
     }
   });
 
+  it('does not add another terminate timer or close listener for a CLOSING phone socket', async () => {
+    const relay = await start();
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    const originalClose = WebSocket.prototype.close;
+    const closing = new Promise<WebSocket>(resolve => {
+      vi.spyOn(WebSocket.prototype, 'close').mockImplementation(function (this: WebSocket, code, data) {
+        originalClose.call(this, code, data);
+        if (this !== server.socket && this !== mobile.socket) resolve(this);
+      });
+    });
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    // Hold the close handshake open until shutdown revisits the same relay-side socket.
+    mobile.socket.pause();
+    mobile.socket.send('invalid phone frame');
+    const socket = await closing;
+    const stateBeforeShutdown = socket.readyState;
+    const closeListeners = socket.listenerCount('close');
+    const closed = once(socket, 'close');
+    timeouts.mockClear();
+    const stopped = relay.close();
+    try {
+      expect(stateBeforeShutdown).toBe(WebSocket.CLOSING);
+      // ws has its own close-handshake timer; count only the relay's terminate timer.
+      // relay.close() closes the server socket (OPEN → 1 timer); phone is CLOSING → no extra timer.
+      expect(timeouts.mock.calls.filter(([, delay]) => delay === 250)).toHaveLength(1);
+      // The event promise adds one listener; shutdown must not add another.
+      expect(socket.listenerCount('close')).toBe(closeListeners + 1);
+    } finally {
+      mobile.socket.resume();
+      await closed;
+      await stopped;
+    }
+  });
+
   it('expires idle phones using the clock, but traffic in either direction keeps them active', async () => {
     let now = 1000;
     const relay = await start({ clock: () => now, limits: { phoneIdleTimeoutMs: 20 } });
