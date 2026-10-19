@@ -1,7 +1,7 @@
 import {
   RELAY_CONNECT_PATH, TUNNEL_BODY_CHUNK, TUNNEL_LAN_PATH, TunnelFrameType,
 } from '@neo/protocol';
-import type { TunnelRoute, TunnelResponseHead, TunnelWsClose } from '@neo/protocol';
+import type { TunnelRoute, TunnelResponseHead, TunnelReset, TunnelWsClose } from '@neo/protocol';
 import { equalBytes, fromBase64Url, fromUtf8, utf8 } from './bytes.js';
 import { openChannel } from './channel.js';
 import type { SecureChannel } from './channel.js';
@@ -46,6 +46,7 @@ interface Session {
 }
 
 const EMPTY = new Uint8Array();
+const BODY_QUEUE_BUDGET = 4 * 1024 * 1024;
 const NULL_BODY = new Set([101, 103, 204, 205, 304]);
 const HOP_HEADERS = new Set([
   'host', 'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -271,9 +272,9 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         signal.removeEventListener('abort', abort);
         if (id !== null) current?.streams.delete(id);
       };
-      const reset = () => {
+      const reset = (code: TunnelReset['code'] = 'aborted') => {
         if (id !== null && current && !current.channel.closed) {
-          try { current.channel.send({ type: TunnelFrameType.Reset, stream: id, payload: encodeJson({ code: 'aborted' }) }); }
+          try { current.channel.send({ type: TunnelFrameType.Reset, stream: id, payload: encodeJson({ code }) }); }
           catch { current.channel.close('Reset failed'); }
         }
       };
@@ -309,7 +310,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
                 const bodyStream = noBody ? null : new ReadableStream<Uint8Array>({
                   start(value) { controller = value; },
                   cancel() { reset(); cleanup(); },
-                });
+                }, new ByteLengthQueuingStrategy({ highWaterMark: BODY_QUEUE_BUDGET }));
                 const response = new Response(bodyStream, { status: head.status, headers: head.headers });
                 hasHead = true;
                 resolve(response);
@@ -318,6 +319,14 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
               case TunnelFrameType.ResponseBody:
                 if (!hasHead) throw new TunnelProtocolError('Body before response head');
                 controller?.enqueue(frame.payload);
+                // Bound current queue occupancy, including when the caller never reads the body.
+                // ByteLengthQueuingStrategy tracks actual bytes in the queue; desiredSize goes
+                // negative only when the consumer is slow and the queue exceeds the budget,
+                // so a fast reader that drains chunks as they arrive is never incorrectly reset.
+                if ((controller?.desiredSize ?? 0) < 0) {
+                  reset('limit');
+                  fail(new TypeError('Response body too large'));
+                }
                 break;
               case TunnelFrameType.ResponseEnd:
                 if (!hasHead) { fail(networkError()); break; }
