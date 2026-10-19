@@ -415,6 +415,26 @@ describe('relay limits and lifecycle', () => {
     expect(relay.stats().messages).toBe(0);
   });
 
+  it('closes a phone that sends a PING when its outgoing buffer is over maxBufferedBytes', async () => {
+    const relay = await start({ limits: { maxBufferedBytes: 8 } });
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    const original = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!;
+    vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
+      return peers.some(peer => peer.socket === this) ? original.get!.call(this) : 9;
+    });
+    let pongFired = false;
+    const pong = new Promise<never>((_, reject) => {
+      mobile.socket.once('pong', () => {
+        pongFired = true;
+        reject(new Error('pong written while buffer over limit'));
+      });
+    });
+    mobile.socket.ping(Uint8Array.of(1, 2, 3));
+    expect(await Promise.race([mobile.closed, pong])).toBe(TunnelCloseCode.RateLimited);
+    expect(pongFired).toBe(false);
+  });
+
   it('expires idle phones using the clock, but traffic in either direction keeps them active', async () => {
     let now = 1000;
     const relay = await start({ clock: () => now, limits: { phoneIdleTimeoutMs: 20 } });

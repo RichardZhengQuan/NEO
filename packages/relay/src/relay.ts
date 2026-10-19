@@ -165,7 +165,7 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       response.end();
     }
   });
-  const sockets = new WebSocketServer({ noServer: true, maxPayload: NOISE_MAX_MESSAGE + RELAY_HEADER, perMessageDeflate: false });
+  const sockets = new WebSocketServer({ noServer: true, maxPayload: NOISE_MAX_MESSAGE + RELAY_HEADER, perMessageDeflate: false, autoPong: false });
   const servers = new Map<string, RegisteredServer>();
   const phones = new Map<number, Phone>();
   const perIpPhones = new Map<string, number>();
@@ -297,6 +297,11 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       }
     });
     socket.on('pong', () => { if (registered) registered.alive = true; });
+    socket.on('ping', (data: Buffer) => {
+      if (socket.bufferedAmount > limits.maxBufferedBytes) {
+        closeSocket(socket, TunnelCloseCode.RateLimited, 'Destination is busy');
+      } else socket.pong(data);
+    });
     socket.on('message', (data: RawData, binary: boolean) => {
       if (closing || socket.readyState !== WebSocket.OPEN) return;
       if (!registered) {
@@ -369,6 +374,11 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     server.phones.set(phone.connection, phone);
     perIpPhones.set(ip, (perIpPhones.get(ip) ?? 0) + 1);
     socket.once('close', () => closePhone(phone, 1000, 'Phone disconnected'));
+    socket.on('ping', (data: Buffer) => {
+      if (phone.socket.bufferedAmount > limits.maxBufferedBytes) {
+        closePhone(phone, TunnelCloseCode.RateLimited, 'Destination is busy');
+      } else socket.pong(data);
+    });
     socket.on('message', (data: RawData, binary: boolean) => {
       if (!phone.active || socket.readyState !== WebSocket.OPEN) return;
       if (!binary) { closePhone(phone, TunnelCloseCode.ProtocolError, 'Expected a binary message'); return; }
