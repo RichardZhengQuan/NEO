@@ -368,9 +368,10 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   const reachable = [...A.entries()].filter(([id, a]) => styleIds.has(id) || (a * C.pinnedBoost >= minScore && !allStyleIds.has(id))).map(([id]) => id);
   const nodes = new Map(getNodes(db, reachable).map((n) => [n.id, n]));
   // Writes may have changed eligibility while the query embedding was in flight.
-  // Drop ineligible nodes from `nodes`, `A` and `best`, and sever any back-pointer
-  // whose `from` is now ineligible so `viaOf` never falls back to the DB label of
-  // an ineligible node (its sensitive label would otherwise leak into `reason`).
+  // Drop ineligible nodes and cascade taint through `best`: any node whose
+  // single strongest contribution came from an ineligible one is also removed,
+  // so a cloud caller never sees a memory that was only recalled because
+  // spreading traversed a now-disallowed memory.
   const nonStyleIds = reachable.filter((id) => !styleIds.has(id));
   if (nonStyleIds.length) {
     const freshWhere = candidateWhere(query, now);
@@ -380,17 +381,23 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
         .all(...chunk, ...freshWhere.params) as { id: string }[],
     );
     const eligibleIds = new Set(eligibleRows.map((row) => row.id));
-    const ineligibleIds = new Set<string>();
-    for (const id of nonStyleIds) {
-      if (!eligibleIds.has(id)) {
-        ineligibleIds.add(id);
-        nodes.delete(id);
-        A.delete(id);
-        best.delete(id);
+    const tainted = new Set<string>();
+    for (const id of nonStyleIds) if (!eligibleIds.has(id)) tainted.add(id);
+    let frontier: Set<string> = tainted;
+    while (frontier.size) {
+      const next = new Set<string>();
+      for (const [id, entry] of best) {
+        if (!tainted.has(id) && frontier.has(entry.from)) {
+          tainted.add(id);
+          next.add(id);
+        }
       }
+      frontier = next;
     }
-    if (ineligibleIds.size) {
-      for (const [id, entry] of best) if (ineligibleIds.has(entry.from)) best.delete(id);
+    for (const id of tainted) {
+      nodes.delete(id);
+      A.delete(id);
+      best.delete(id);
     }
   }
   const scored: { node: MemoryNode; score: number; R: number }[] = [];

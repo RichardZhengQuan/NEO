@@ -240,7 +240,11 @@ describe('recall privacy under concurrent writes', () => {
     gate.release();
     const result = await pending;
 
-    expect(result.items.map(it => it.node.id)).not.toContain(M.id);
+    const ids = result.items.map(it => it.node.id);
+    expect(ids).not.toContain(M.id);
+    // N was only reachable through M; keeping it would still signal M's content
+    // (its sensitivity, and the fact that M was a relevant hop) to a cloud caller.
+    expect(ids).not.toContain(N.id);
     for (const item of result.items) {
       expect(item.node.label).not.toBe(sensitiveLabel);
       expect(item.node.content).not.toContain('Confidential');
