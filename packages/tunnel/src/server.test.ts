@@ -497,4 +497,34 @@ describe('tunnel server validation and ownership', () => {
     expect(code).toBe(TunnelCloseCode.ProtocolError);
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it('resets the WebSocket stream and keeps the tunnel open when the outbound buffer limit is exceeded', async () => {
+    let serverSocket: TunnelSocket | undefined;
+    const handlerClosed = vi.fn();
+    const onClose = vi.fn();
+    const { client, frames, serverLink } = await session({ onClose,
+      prepareLink: (link) => Object.defineProperty(link, 'bufferedAmount', { get: () => 2 * 1024 * 1024 }),
+      handler: {
+        fetch: async () => new Response(),
+        openWebSocket: (_path, _peer, socket) => {
+          serverSocket = socket;
+          return { message() {}, close: handlerClosed };
+        },
+      },
+    });
+    const opened = frames.next(TunnelFrameType.WsOpened, 1);
+    client.send({ type: TunnelFrameType.WsOpen, stream: 1, payload: encodeJson({ path: '/api/ws' }) });
+    await opened;
+    const sent = vi.spyOn(serverLink, 'send');
+
+    const maxPayload = TUNNEL_MAX_FRAME - TUNNEL_FRAME_HEADER;
+    const text = 'x'.repeat(maxPayload);
+    const reset = frames.next(TunnelFrameType.Reset, 1);
+    for (let i = 0; i < 1000; i++) serverSocket!.send(text);
+    expect(decodeJson<TunnelReset>((await reset).payload).code).toBe('limit');
+    expect(sent.mock.calls.length).toBeLessThan(1000);
+    expect(handlerClosed).toHaveBeenCalledExactlyOnceWith(1013, expect.stringMatching(/\S/));
+    expect(client.closed).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

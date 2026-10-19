@@ -348,8 +348,16 @@ export function serveTunnel(link: MessageLink, options: {
     sockets.set(stream, state);
     function outgoing(frame: Frame) {
       if (closed || state.closed) return;
-      if (state.ready) send(frame);
-      else state.pending.push(frame);
+      if (state.ready) {
+        if (channel!.bufferedAmount > 1024 * 1024) {
+          finishSocket(stream, 1013, 'WebSocket outbound buffer limit exceeded');
+          reset(stream, 'limit');
+          return;
+        }
+        send(frame);
+      } else {
+        state.pending.push(frame);
+      }
     }
     const socket: TunnelSocket = {
       send(text) {
