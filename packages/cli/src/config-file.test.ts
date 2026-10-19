@@ -171,6 +171,29 @@ describe('writeInitConfig', () => {
     expect(cfg['customField']).toBe('preserved');
   });
 
+  it('writeInitConfig forces mode 0o600 on an existing config file', () => {
+    if (process.platform === 'win32') return;
+    fs.chmodSync(tmpDir, 0o755);
+    const cfgPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(cfgPath, '{}', { mode: 0o644 });
+    fs.chmodSync(cfgPath, 0o644);
+    writeInitConfig(tmpDir, baseAnswers);
+    // This test must fail before the fix
+    expect(fs.statSync(cfgPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('writeInitConfig forces mode 0o700 on an existing data directory', () => {
+    if (process.platform === 'win32') return;
+    fs.chmodSync(tmpDir, 0o755);
+    const dataDir = path.join(tmpDir, 'data');
+    const resolvedDataDir = expandHome(dataDir);
+    fs.mkdirSync(resolvedDataDir, { mode: 0o755 });
+    fs.chmodSync(resolvedDataDir, 0o755);
+    writeInitConfig(dataDir, baseAnswers);
+    // This test must fail before the fix
+    expect(fs.statSync(resolvedDataDir).mode & 0o777).toBe(0o700);
+  });
+
   it('writes to custom configPath when provided', () => {
     const customPath = path.join(tmpDir, 'custom-config.json');
     writeInitConfig(tmpDir, baseAnswers, customPath);

@@ -128,6 +128,7 @@ export async function runInitWizard(prompt: PromptFn): Promise<InitAnswers> {
 export function writeInitConfig(dataDir: string, answers: InitAnswers, configPath?: string): void {
   const resolvedDir = expandHome(dataDir);
   fs.mkdirSync(resolvedDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(resolvedDir, 0o700);
 
   const cfgPath = configPath ?? path.join(resolvedDir, 'config.json');
 
@@ -164,4 +165,5 @@ export function writeInitConfig(dataDir: string, answers: InitAnswers, configPat
 
   const json = JSON.stringify(config, null, 2);
   fs.writeFileSync(cfgPath, json, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(cfgPath, 0o600);
 }
