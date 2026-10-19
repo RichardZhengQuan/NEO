@@ -166,6 +166,8 @@ describe('createCheckForUpdatesHandler', () => {
     ['null updateInfo', { updateInfo: null }],
     ['undefined updateInfo', {}],
     ['updateInfo without a version', { updateInfo: {} }],
+    ['undefined isUpdateAvailable with a version', { updateInfo: { version: '0.1.0' } }],
+    ['isUpdateAvailable false with a version', { isUpdateAvailable: false, updateInfo: { version: '0.1.0' } }],
   ] as const)('says NEO is up to date for %s', async (_name, result) => {
     const autoUpdater = makeAutoUpdater(result);
     const dialog = makeDialog();
@@ -179,8 +181,20 @@ describe('createCheckForUpdatesHandler', () => {
     }));
   });
 
-  it('says Downloading NEO 1.2.3… when updateInfo contains the version', async () => {
-    const autoUpdater = makeAutoUpdater({ updateInfo: { version: '1.2.3' } });
+  it('says NEO is up to date when isUpdateAvailable is false even if updateInfo has a version', async () => {
+    const autoUpdater = makeAutoUpdater({ isUpdateAvailable: false, updateInfo: { version: '0.1.0' } });
+    const dialog = makeDialog();
+
+    await expect(createCheckForUpdatesHandler({ autoUpdater, dialog })()).resolves.toBeUndefined();
+
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(1);
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'NEO is up to date.',
+    }));
+  });
+
+  it('says Downloading NEO 1.2.3… when isUpdateAvailable is true', async () => {
+    const autoUpdater = makeAutoUpdater({ isUpdateAvailable: true, updateInfo: { version: '1.2.3' } });
     const dialog = makeDialog();
 
     await expect(createCheckForUpdatesHandler({ autoUpdater, dialog })()).resolves.toBeUndefined();

@@ -258,7 +258,10 @@ export function serveTunnel(link: MessageLink, options: {
       type: TunnelFrameType.Response,
       stream,
       payload: encodeJson({ status: response.status, headers }),
-    })) return;
+    })) {
+      await response.body?.cancel().catch(() => {});
+      return;
+    }
     state.headSent = true;
     if (response.body && state.head.method !== 'HEAD' && !NULL_BODY_STATUSES.has(response.status)) {
       const reader = response.body.getReader();
@@ -345,8 +348,16 @@ export function serveTunnel(link: MessageLink, options: {
     sockets.set(stream, state);
     function outgoing(frame: Frame) {
       if (closed || state.closed) return;
-      if (state.ready) send(frame);
-      else state.pending.push(frame);
+      if (state.ready) {
+        if (channel!.bufferedAmount > 1024 * 1024) {
+          finishSocket(stream, 1013, 'WebSocket outbound buffer limit exceeded');
+          reset(stream, 'limit');
+          return;
+        }
+        send(frame);
+      } else {
+        state.pending.push(frame);
+      }
     }
     const socket: TunnelSocket = {
       send(text) {
@@ -466,6 +477,8 @@ export function serveTunnel(link: MessageLink, options: {
       if (request.dispatched || (type !== TunnelFrameType.RequestBody && type !== TunnelFrameType.RequestEnd)) {
         close('Invalid request frame sequence', TunnelCloseCode.ProtocolError);
       } else if (type === TunnelFrameType.RequestBody) {
+        // Empty chunks consume no byte budget, so do not retain them.
+        if (payload.byteLength === 0) return;
         request.size += payload.byteLength;
         buffered += payload.byteLength;
         if (request.size > limits.maxRequestBodyBytes) reset(stream, 'too_large');

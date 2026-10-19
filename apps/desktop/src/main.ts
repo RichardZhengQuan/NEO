@@ -102,6 +102,7 @@ function showMissingWebBuildWindow(): void {
 
   win.loadURL(`data:text/html,${encodeURIComponent(html)}`);
   win.once('ready-to-show', () => win.show());
+  win.on('close', () => app.quit());
 }
 
 // ───────────────────────────── browser window ─────────────────────────────

@@ -1,7 +1,7 @@
 import {
   RELAY_CONNECT_PATH, TUNNEL_BODY_CHUNK, TUNNEL_LAN_PATH, TunnelFrameType,
 } from '@neo/protocol';
-import type { TunnelRoute, TunnelResponseHead, TunnelWsClose } from '@neo/protocol';
+import type { TunnelRoute, TunnelResponseHead, TunnelReset, TunnelWsClose } from '@neo/protocol';
 import { equalBytes, fromBase64Url, fromUtf8, utf8 } from './bytes.js';
 import { openChannel } from './channel.js';
 import type { SecureChannel } from './channel.js';
@@ -46,6 +46,7 @@ interface Session {
 }
 
 const EMPTY = new Uint8Array();
+const BODY_QUEUE_BUDGET = 4 * 1024 * 1024;
 const NULL_BODY = new Set([101, 103, 204, 205, 304]);
 const HOP_HEADERS = new Set([
   'host', 'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -251,6 +252,12 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
     return id;
   }
 
+  async function waitForClientBuffer(ch: SecureChannel, active: () => boolean): Promise<void> {
+    while (active() && !ch.closed && ch.bufferedAmount > 1024 * 1024) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   const tunnelFetch: typeof fetch = (input, init) => {
     return new Promise<Response>((resolve, reject) => {
       let request: Request;
@@ -271,14 +278,21 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         signal.removeEventListener('abort', abort);
         if (id !== null) current?.streams.delete(id);
       };
-      const reset = () => {
+      const reset = (code: TunnelReset['code'] = 'aborted') => {
         if (id !== null && current && !current.channel.closed) {
-          try { current.channel.send({ type: TunnelFrameType.Reset, stream: id, payload: encodeJson({ code: 'aborted' }) }); }
+          try { current.channel.send({ type: TunnelFrameType.Reset, stream: id, payload: encodeJson({ code }) }); }
           catch { current.channel.close('Reset failed'); }
+        }
+      };
+      const cancelBodyReader = (reason: unknown) => {
+        if (bodyReader !== null) {
+          void bodyReader.cancel(reason).catch(() => {});
+          bodyReader = null;
         }
       };
       const fail = (error: unknown) => {
         if (done) return;
+        cancelBodyReader(error);
         cleanup();
         if (!hasHead) reject(error);
         else { try { controller?.error(error); } catch { /* The reader may have cancelled. */ } }
@@ -286,10 +300,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
       const abort = () => {
         reset();
         const reason = signal.reason ?? new DOMException('Aborted', 'AbortError');
-        if (bodyReader) {
-          void bodyReader.cancel(reason).catch(() => {});
-          bodyReader = null;
-        }
+        cancelBodyReader(reason);
         fail(reason);
       };
       signal.addEventListener('abort', abort, { once: true });
@@ -309,7 +320,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
                 const bodyStream = noBody ? null : new ReadableStream<Uint8Array>({
                   start(value) { controller = value; },
                   cancel() { reset(); cleanup(); },
-                });
+                }, new ByteLengthQueuingStrategy({ highWaterMark: BODY_QUEUE_BUDGET }));
                 const response = new Response(bodyStream, { status: head.status, headers: head.headers });
                 hasHead = true;
                 resolve(response);
@@ -318,6 +329,14 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
               case TunnelFrameType.ResponseBody:
                 if (!hasHead) throw new TunnelProtocolError('Body before response head');
                 controller?.enqueue(frame.payload);
+                // Bound current queue occupancy, including when the caller never reads the body.
+                // ByteLengthQueuingStrategy tracks actual bytes in the queue; desiredSize goes
+                // negative only when the consumer is slow and the queue exceeds the budget,
+                // so a fast reader that drains chunks as they arrive is never incorrectly reset.
+                if ((controller?.desiredSize ?? 0) < 0) {
+                  reset('limit');
+                  fail(new TypeError('Response body too large'));
+                }
                 break;
               case TunnelFrameType.ResponseEnd:
                 if (!hasHead) { fail(networkError()); break; }
@@ -364,10 +383,16 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         current.channel.send({ type: TunnelFrameType.Request, stream: id, payload: encodeJson({
           method: request.method, path: url.pathname + url.search, headers,
         }) });
-        for (let offset = 0; offset < body.length && !done; offset += TUNNEL_BODY_CHUNK) {
+        const active = () => !done && !signal.aborted;
+        for (let offset = 0; offset < body.length && active(); offset += TUNNEL_BODY_CHUNK) {
+          await waitForClientBuffer(current.channel, active);
+          if (!active()) return;
           current.channel.send({ type: TunnelFrameType.RequestBody, stream: id, payload: body.subarray(offset, offset + TUNNEL_BODY_CHUNK) });
         }
-        if (!done) current.channel.send({ type: TunnelFrameType.RequestEnd, stream: id, payload: EMPTY });
+        if (active()) {
+          await waitForClientBuffer(current.channel, active);
+          if (active()) current.channel.send({ type: TunnelFrameType.RequestEnd, stream: id, payload: EMPTY });
+        }
       })().catch(() => { reset(); fail(signal.aborted ? signal.reason : networkError()); });
     });
   };

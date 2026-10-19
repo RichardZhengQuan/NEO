@@ -138,6 +138,46 @@ describe('tunnel server validation and ownership', () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it('does not retain zero-length RequestBody frames or alter the request body', async () => {
+    const fetch = vi.fn(async (_request: Request) => new Response('ok'));
+    const { client, frames, request, end } = await session({
+      handler: { fetch, openWebSocket: () => null },
+      limits: { maxRequestBodyBytes: 4, maxBufferedBodyBytes: 1024 },
+    });
+    // Observe the private buffer without adding a production inspection API.
+    const registrations = vi.spyOn(Map.prototype, 'set');
+    let state: { chunks: Uint8Array[] } | undefined;
+    try {
+      const opened = frames.next(TunnelFrameType.Pong, 0);
+      request(1, { method: 'POST', path: '/api/test', headers: [] });
+      client.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+      await opened;
+      state = registrations.mock.calls.find(([stream, value]) =>
+        stream === 1 && value?.head?.path === '/api/test' && Array.isArray(value.chunks))?.[1];
+    } finally {
+      registrations.mockRestore();
+    }
+    expect(state).toBeDefined();
+
+    const drained = frames.next(TunnelFrameType.Pong, 0);
+    for (let i = 0; i < 10_000; i++) {
+      client.send({ type: TunnelFrameType.RequestBody, stream: 1, payload: EMPTY });
+    }
+    // The pong arrives after all preceding body frames have been handled.
+    client.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await drained;
+    expect(state!.chunks).toHaveLength(0);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.closed).toBe(false);
+
+    const completed = frames.next(TunnelFrameType.ResponseEnd, 1);
+    client.send({ type: TunnelFrameType.RequestBody, stream: 1, payload: new TextEncoder().encode('body') });
+    end(1);
+    await completed;
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(await fetch.mock.calls[0]![0].text()).toBe('body');
+  });
+
   it('caps request bodies buffered across streams and frees the budget on dispatch or reset', async () => {
     const fetch = vi.fn(async () => new Response('ok'));
     const { client, frames, request, end } = await session({
@@ -233,6 +273,30 @@ describe('tunnel server validation and ownership', () => {
     server.close();
     expect(signals[1]!.aborted).toBe(true);
     expect(canceled).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels the response body when sending the response head fails', async () => {
+    const canceled = vi.fn();
+    const response = new Response(new ReadableStream<Uint8Array>({ cancel: canceled }));
+    let sends = 0;
+    const { client, request, end } = await session({
+      prepareLink(link) {
+        const send = link.send.bind(link);
+        link.send = (data) => {
+          // The first send completes the handshake; the second sends the response head.
+          if (++sends === 2) throw new Error('Response head send failed');
+          send(data);
+        };
+      },
+      handler: { fetch: async () => response, openWebSocket: () => null },
+    });
+    const closed = new Promise<void>((resolve) => { client.onClose = () => resolve(); });
+    expect(canceled).not.toHaveBeenCalled();
+    request(1);
+    end(1);
+    await closed;
+    expect(sends).toBe(2);
+    expect(canceled).toHaveBeenCalledOnce();
   });
 
   it('waits for backpressure before reading and splits large response chunks', async () => {
@@ -432,5 +496,35 @@ describe('tunnel server validation and ownership', () => {
     await Promise.resolve();
     expect(code).toBe(TunnelCloseCode.ProtocolError);
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('resets the WebSocket stream and keeps the tunnel open when the outbound buffer limit is exceeded', async () => {
+    let serverSocket: TunnelSocket | undefined;
+    const handlerClosed = vi.fn();
+    const onClose = vi.fn();
+    const { client, frames, serverLink } = await session({ onClose,
+      prepareLink: (link) => Object.defineProperty(link, 'bufferedAmount', { get: () => 2 * 1024 * 1024 }),
+      handler: {
+        fetch: async () => new Response(),
+        openWebSocket: (_path, _peer, socket) => {
+          serverSocket = socket;
+          return { message() {}, close: handlerClosed };
+        },
+      },
+    });
+    const opened = frames.next(TunnelFrameType.WsOpened, 1);
+    client.send({ type: TunnelFrameType.WsOpen, stream: 1, payload: encodeJson({ path: '/api/ws' }) });
+    await opened;
+    const sent = vi.spyOn(serverLink, 'send');
+
+    const maxPayload = TUNNEL_MAX_FRAME - TUNNEL_FRAME_HEADER;
+    const text = 'x'.repeat(maxPayload);
+    const reset = frames.next(TunnelFrameType.Reset, 1);
+    for (let i = 0; i < 1000; i++) serverSocket!.send(text);
+    expect(decodeJson<TunnelReset>((await reset).payload).code).toBe('limit');
+    expect(sent.mock.calls.length).toBeLessThan(1000);
+    expect(handlerClosed).toHaveBeenCalledExactlyOnceWith(1013, expect.stringMatching(/\S/));
+    expect(client.closed).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
