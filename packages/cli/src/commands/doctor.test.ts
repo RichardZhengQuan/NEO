@@ -2,13 +2,17 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NeoApiError } from '@neo/client';
 import { runDoctor } from './doctor.js';
 
 const client = vi.hoisted(() => ({
   health: vi.fn(),
   providers: { list: vi.fn(), test: vi.fn() },
 }));
-vi.mock('@neo/client', () => ({ NeoClient: vi.fn(function () { return client; }) }));
+vi.mock('@neo/client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@neo/client')>(),
+  NeoClient: vi.fn(function () { return client; }),
+}));
 
 let dataDir: string;
 beforeEach(() => {
@@ -38,6 +42,62 @@ describe('doctor without an AI provider', () => {
     expect(output).toContain('All checks passed.');
     expect(process.exit).not.toHaveBeenCalled();
     expect(client.providers.test).not.toHaveBeenCalled();
+  });
+
+  it('reports a provider-list failure as a failed check', async () => {
+    client.providers.list.mockRejectedValue(new Error('401 Unauthorized'));
+    vi.mocked(process.exit).mockImplementation(() => { throw new Error('exit(1) called'); });
+    await expect(runDoctor({ dataDir, server: 'http://fixture.test', token: 'bad-token' }))
+      .rejects.toThrow('exit(1) called');
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('✗ Providers');
+    expect(output).toContain('provider list failed — 401 Unauthorized');
+    expect(output).toContain('Some checks failed.');
+    expect(output).not.toContain('All checks passed.');
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it.each([
+    new Error('403 Forbidden'),
+    new Error('500 Internal Server Error'),
+    new TypeError('fetch failed'),
+    'connection reset',
+  ])('reports other provider-list errors as failed checks: %s', async (error) => {
+    client.providers.list.mockRejectedValue(error);
+    vi.mocked(process.exit).mockImplementation(() => { throw new Error('exit(1) called'); });
+    await expect(runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' }))
+      .rejects.toThrow('exit(1) called');
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    const message = error instanceof Error ? error.message : error;
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('✗ Providers');
+    expect(output).toContain(`provider list failed — ${message}`);
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('treats a 404 from the provider list as a warning, not a failure', async () => {
+    client.providers.list.mockRejectedValue(new Error('404 Not Found'));
+    await runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' });
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('! Providers');
+    expect(output).toContain('provider list unavailable (older server?)');
+    expect(output).toContain('All checks passed.');
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
+  it('treats a server-shape NeoApiError 404 as an older-server warning', async () => {
+    client.providers.list.mockRejectedValue(
+      new NeoApiError(404, { code: 'not_found', message: 'Route not found' }),
+    );
+    await runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' });
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('! Providers');
+    expect(output).toContain('provider list unavailable (older server?)');
+    expect(output).toContain('All checks passed.');
+    expect(process.exit).not.toHaveBeenCalled();
   });
 
   it('checks enabled supported providers normally', async () => {
