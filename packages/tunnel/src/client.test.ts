@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TUNNEL_BODY_CHUNK, TunnelFrameType } from '@neo/protocol';
 import type { TunnelReset } from '@neo/protocol';
 import { toBase64Url } from './bytes.js';
 import { acceptChannel } from './channel.js';
+import * as channels from './channel.js';
 import type { SecureChannel } from './channel.js';
 import { createTunnelTransport } from './client.js';
 import { decodeJson, encodeJson } from './frames.js';
@@ -11,11 +12,22 @@ import { generateServerIdentity } from './identity.js';
 import type { ServerIdentity } from './identity.js';
 import { linkPair } from './link.js';
 import type { MessageLink, WebSocketLike } from './link.js';
+import { generateKeyPair } from './noise.js';
+import { serveTunnel } from './server.js';
 
 const cleanup: (() => void)[] = [];
 const EMPTY = new Uint8Array();
 const BODY_QUEUE_BUDGET = 4 * 1024 * 1024;
 afterEach(() => { for (const close of cleanup.splice(0)) close(); });
+
+const cleanups: (() => void)[] = [];
+
+afterEach(async () => {
+  for (const close of cleanups.splice(0)) close();
+  await Promise.resolve();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 function environment(input: {
   accept: (link: MessageLink, identity: ServerIdentity) => { close(): void };
@@ -96,6 +108,79 @@ async function streamingResponse() {
   };
 }
 
+const uploadServerId = '0123456789abcdef0123456789abcdef';
+
+async function session() {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+  const [phone, serverLink] = linkPair();
+  const dh = generateKeyPair();
+  const handler = vi.fn(async (request: Request) => new Response(await request.arrayBuffer()));
+  const server = serveTunnel(serverLink, {
+    identity: { serverId: uploadServerId, dh },
+    handler: { fetch: handler, openWebSocket: () => null },
+    peer: { ip: '192.0.2.1', via: 'lan' },
+  });
+  cleanups.push(server.close);
+
+  let client!: SecureChannel;
+  const openChannel = channels.openChannel;
+  vi.spyOn(channels, 'openChannel').mockImplementation(async (link, options) => {
+    client = await openChannel(link, options);
+    return client;
+  });
+
+  class FakeSocket implements WebSocketLike {
+    readyState = 1;
+    binaryType = 'blob';
+    onmessage: WebSocketLike['onmessage'] = null;
+    onclose: WebSocketLike['onclose'] = null;
+    onerror: WebSocketLike['onerror'] = null;
+    get bufferedAmount() { return phone.bufferedAmount; }
+    constructor(_url: string) {
+      phone.onMessage = (data) => this.onmessage?.({ data });
+      phone.onClose = (code, reason) => {
+        this.readyState = 3;
+        this.onclose?.({ code, reason });
+      };
+    }
+    send(data: Uint8Array) { phone.send(data); }
+    close(code?: number, reason?: string) {
+      this.readyState = 3;
+      phone.close(code, reason);
+    }
+  }
+
+  const transport = createTunnelTransport({
+    route: { serverId: uploadServerId, publicKey: toBase64Url(dh.publicKey), lan: ['lan:7778'], relay: null },
+    WebSocket: FakeSocket,
+  });
+  cleanups.push(() => transport.close());
+  await transport.connect();
+  return { transport, client, handler };
+}
+
+function stallUpload(client: SecureChannel, after: number) {
+  let buffered = 0;
+  const bufferedAmount = vi.spyOn(client, 'bufferedAmount', 'get').mockImplementation(() => buffered);
+  const frames: Frame[] = [];
+  let bodyCount = 0;
+  let bodySent!: () => void;
+  const stalled = new Promise<void>((resolve) => { bodySent = resolve; });
+  let release!: () => void;
+  const drained = new Promise<void>((resolve) => { release = resolve; }).then(() => { buffered = 0; });
+  const send = client.send.bind(client);
+  vi.spyOn(client, 'send').mockImplementation((frame) => {
+    send(frame);
+    if (frame.type !== TunnelFrameType.RequestBody && frame.type !== TunnelFrameType.RequestEnd) return;
+    frames.push(frame);
+    if (frame.type === TunnelFrameType.RequestBody && ++bodyCount === after) {
+      buffered = 2 * 1024 * 1024;
+      bodySent();
+    }
+  });
+  return { frames, stalled, release, drained, bufferedAmount };
+}
+
 describe('tunnel client response body budget', () => {
   it.each(['never', 'slow'] as const)('resets an over-budget response for a %s reader and errors its body', async kind => {
     const { transport, response, channel, stream, nextControl } = await streamingResponse();
@@ -168,5 +253,54 @@ describe('tunnel client response body budget', () => {
     const { done } = await reader.read();
     expect(done).toBe(true);
     expect(totalReceived).toBe(count * payload.length);
+  });
+});
+
+describe('tunnel client upload backpressure', () => {
+  it.each([1, 4])('waits for the queue to drain after body chunk %i before sending more body or RequestEnd', async (after) => {
+    const { transport, client, handler } = await session();
+    const { frames, stalled, release, drained } = stallUpload(client, after);
+    const body = new Uint8Array(TUNNEL_BODY_CHUNK * 4);
+    for (let i = 0; i < body.length; i++) body[i] = i % 251;
+
+    const response = transport.fetch(`${transport.baseUrl}/api/echo`, { method: 'POST', body });
+    // Cleanup can reject this promise if the regression assertion fails first.
+    void response.catch(() => {});
+    await stalled;
+    // The old synchronous loop sends all four chunks and RequestEnd before this resumes.
+    expect(frames.map(frame => frame.type)).toEqual(Array(after).fill(TunnelFrameType.RequestBody));
+    await vi.advanceTimersByTimeAsync(30);
+    expect(frames.map(frame => frame.type)).toEqual(Array(after).fill(TunnelFrameType.RequestBody));
+    expect(handler).not.toHaveBeenCalled();
+
+    release();
+    await drained;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(new Uint8Array(await (await response).arrayBuffer())).toEqual(body);
+    expect(frames.map(frame => frame.type)).toEqual([
+      ...Array(4).fill(TunnelFrameType.RequestBody), TunnelFrameType.RequestEnd,
+    ]);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('stops draining and sends no further upload frames when aborted while the queue is full', async () => {
+    const { transport, client, handler } = await session();
+    const { frames, stalled, bufferedAmount } = stallUpload(client, 1);
+    const abort = new AbortController();
+    const response = transport.fetch(`${transport.baseUrl}/api/echo`, {
+      method: 'POST', body: new Uint8Array(TUNNEL_BODY_CHUNK * 4), signal: abort.signal,
+    });
+    void response.catch(() => {});
+    await stalled;
+    expect(frames.map(frame => frame.type)).toEqual([TunnelFrameType.RequestBody]);
+    const rejected = expect(response).rejects.toMatchObject({ name: 'AbortError' });
+    abort.abort();
+    await rejected;
+
+    const reads = bufferedAmount.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(30);
+    expect(bufferedAmount).toHaveBeenCalledTimes(reads);
+    expect(frames.map(frame => frame.type)).toEqual([TunnelFrameType.RequestBody]);
+    expect(handler).not.toHaveBeenCalled();
   });
 });
