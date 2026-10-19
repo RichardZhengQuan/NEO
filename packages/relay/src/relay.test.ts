@@ -447,6 +447,42 @@ describe('relay limits and lifecycle', () => {
     }
   });
 
+  it('installs the terminate timer when a socket is already CLOSING without a prior closeSocket call', async () => {
+    // Reproduces the Codex P2 on #191: if `ws` moves a socket to CLOSING without the relay
+    // having called closeSocket first (e.g. a peer that initiated the close handshake), the
+    // relay.close() visit must still install the 250 ms terminate timer so shutdown does not
+    // stall until `ws`'s much longer close-handshake timeout fires.
+    const relay = await start();
+    const server = await register(relay);
+    // Keep the relay-side close frame from being acknowledged by pausing the test-side TCP.
+    server.socket.pause();
+    // Peer-initiated close: moves the relay-side socket to CLOSING via `ws` itself, with no
+    // prior relay-side closeSocket() call, so no terminate timer has been installed yet.
+    const originalClose = WebSocket.prototype.close;
+    const closing = new Promise<WebSocket>(resolve => {
+      vi.spyOn(WebSocket.prototype, 'close').mockImplementation(function (this: WebSocket, code, data) {
+        originalClose.call(this, code, data);
+        if (this !== server.socket) resolve(this);
+      });
+    });
+    server.socket.close();
+    const socket = await closing;
+    expect(socket.readyState).toBe(WebSocket.CLOSING);
+    const closed = once(socket, 'close');
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    const stopped = relay.close();
+    try {
+      // relay.close() iterates sockets.clients and calls closeSocket on this CLOSING socket.
+      // Pre-fix (readyState !== OPEN return): no terminate timer, shutdown stalls on ws's own
+      // close-handshake timeout. Post-fix: the 250 ms timer is installed.
+      expect(timeouts.mock.calls.filter(([, delay]) => delay === 250)).toHaveLength(1);
+    } finally {
+      server.socket.resume();
+      await closed;
+      await stopped;
+    }
+  });
+
   it('does not add another terminate timer or close listener for a CLOSING phone socket', async () => {
     const relay = await start();
     const server = await register(relay);

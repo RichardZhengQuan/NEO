@@ -193,12 +193,16 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     return true;
   }
 
+  const terminateTimers = new WeakMap<WebSocket, ReturnType<typeof setTimeout>>();
+
   function closeSocket(socket: WebSocket, code: number, reason: string): void {
-    if (socket.readyState !== WebSocket.OPEN) return;
+    if (socket.readyState === WebSocket.CLOSED) return;
+    if (terminateTimers.has(socket)) return;
     const timeout = setTimeout(() => socket.terminate(), 250);
     timeout.unref();
-    socket.once('close', () => clearTimeout(timeout));
-    socket.close(code, reason);
+    terminateTimers.set(socket, timeout);
+    socket.once('close', () => { clearTimeout(timeout); terminateTimers.delete(socket); });
+    if (socket.readyState === WebSocket.OPEN) socket.close(code, reason);
   }
 
   function send(socket: WebSocket, data: string | Uint8Array): boolean {
