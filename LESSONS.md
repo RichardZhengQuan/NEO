@@ -65,3 +65,19 @@ The nightly lessons loop ([docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md)) adds entri
 
 - #15 named `feat/memory-net-3d` as the owner of `NetTab.tsx` and said the later merge would fold in the other's change. #16 did exactly that, with no conflict and no regression.
 - Seen 1× (2026-10-12).
+
+## When you fix one case of a bug, find every input shape or spelling that reaches the same code path
+
+- #110's first commit `350dd4c` canonicalized plain IPv6 for the per-IP cap but left scoped IPv6 (`fe80::1%eth0`) returning its raw spelling, so `fe80::1%eth0` and the uncompressed `fe80:0:0:0:0:0:0:1%eth0` still keyed two separate per-IP buckets — the exact bypass #109 was filed to stop. Codex's auto-review flagged it as P2 on the same head; `6bce0fc` extended the fix to split the zone id, canonicalize the address part through `URL`, then re-append the zone, and added the regression test.
+- Same shape on #120 the same day: `3b75054` added abort-cancel for the upload body but kept trusting `chunk.value.length` and `Uint8Array#set` for every chunk; Codex's P2 pointed out that a string or `DataView` chunk would silently coerce to zero bytes or NaN-length data, and `119e26f` added the `instanceof Uint8Array` guard. Both PRs were two commits long because the brief named one case and the implementer did only that case; neither bug was flaky — the second input shape failed deterministically on any machine.
+- Seen 1× (2026-10-17).
+
+## A test that doesn't exercise the code under test is not a check: assert path execution, not just the output
+
+- On 2026-10-17, #115's first commit `9fa6638` cleared stored credentials when `PATCH /api/providers/:id` changed `baseUrl`, but its embedding-refresh test ran against a fixture whose adapter never made an embedding request, so the assertion that "the refresh does not send the old key" held with zero calls — a vacuous pass, not an incorrect oracle. Codex flagged it as P2 on the same head; `b263852` switched the fixture to `kind: 'openai-compatible'` and asserted `live.fetch.mock.calls.length > 0`, turning the test back into a real check that the fix was exercised.
+- Seen 1× (2026-10-17).
+
+## When your fix reuses a shared "refresh" helper, check every field that helper writes
+
+- #118's first commit `8f0d200` reused `refreshEpisodePreview` from the delete paths to refresh the preview on parts-only updates. That helper also writes `last_message_at` from the newest message's `created_at`, so an edited-widget update would stomp the completion-clock value `TurnRunner.finish` had just set (`turn.ts:956–964`). `sendTimeline` reads `last_message_at` for episode gap and 24-hour continuity (`runtime.ts:189–212`), so the preview fix could rotate episodes early or lose context carry-over. Codex flagged it as P2 on the same head; `39b042e` split out `refreshEpisodePreviewOnly` that writes only `preview` and `updated_at`, left the delete paths on the full helper, and added a regression test asserting `last_message_at` stays at the completion-clock value after a parts patch. The pattern: a helper named "refresh X" writes more than X, and reusing it on a path that doesn't own those extra fields clobbers whatever another writer put there.
+- Seen 1× (2026-10-17).
