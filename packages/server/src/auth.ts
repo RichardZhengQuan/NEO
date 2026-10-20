@@ -10,6 +10,9 @@ import './types.js';
 export class IpFailureLimiter {
   private readonly _windowMs = 60_000;
   private readonly _maxFailures = 10;
+  private readonly _maxBuckets = 10_000;
+  private readonly _sweepInterval = 100;
+  private _failuresSinceSweep = 0;
   /** ip → array of failure timestamps */
   private readonly _failures = new Map<string, number[]>();
 
@@ -26,9 +29,23 @@ export class IpFailureLimiter {
 
   recordFailure(ip: string): void {
     const now = this.clock();
+    // Sweep before the first failure in each batch, even when old IPs never return.
+    if (this._failuresSinceSweep === 0) {
+      for (const [key, times] of this._failures) {
+        const recent = times.filter((t) => now - t < this._windowMs);
+        if (recent.length) this._failures.set(key, recent);
+        else this._failures.delete(key);
+      }
+    }
+    this._failuresSinceSweep = (this._failuresSinceSweep + 1) % this._sweepInterval;
+
     const times = this._failures.get(ip) ?? [];
     const recent = times.filter((t) => now - t < this._windowMs);
     if (recent.length < this._maxFailures) recent.push(now);
+    if (!this._failures.has(ip) && this._failures.size >= this._maxBuckets) {
+      const oldest = this._failures.keys().next().value;
+      if (oldest !== undefined) this._failures.delete(oldest);
+    }
     this._failures.set(ip, recent);
   }
 }
