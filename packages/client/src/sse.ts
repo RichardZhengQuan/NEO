@@ -44,16 +44,13 @@ export async function* readEventStream(
     }
   };
 
-  // If the caller provides an AbortSignal, cancel the reader when it fires.
-  if (signal) {
-    if (signal.aborted) {
-      cleanup();
-      return;
-    }
-    signal.addEventListener('abort', cleanup, { once: true });
-  }
-
   try {
+    // If the caller provides an AbortSignal, cancel the reader when it fires.
+    if (signal) {
+      if (signal.aborted) return;
+      signal.addEventListener('abort', cleanup, { once: true });
+    }
+
     while (true) {
       if (signal?.aborted) break;
 
@@ -100,6 +97,7 @@ export async function* readEventStream(
             if (trimmed) {
               try {
                 const event = JSON.parse(trimmed) as AgentEvent;
+                if (signal?.aborted) break;
                 yield event;
               } catch {
                 // Ignore malformed JSON events.
@@ -140,7 +138,9 @@ export async function* readEventStream(
     if (signal) {
       signal.removeEventListener('abort', cleanup);
     }
+    cleanup();
+    reader.releaseLock();
     // Flush decoder.
-    decoder.decode(new Uint8Array(0));
+    if (!signal?.aborted) decoder.decode(new Uint8Array(0));
   }
 }
