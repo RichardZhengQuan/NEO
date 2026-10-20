@@ -12,7 +12,7 @@ import { Shell } from './components/Shell.js';
 import { AppErrorBoundary, lazyScreen } from './components/ErrorBoundary.js';
 import { Toaster } from './components/Toaster.js';
 import { STORAGE_KEYS, readString } from './lib/storage.js';
-import { getPlatform } from './platform/index.js';
+import { currentEnvironment, getPlatform } from './platform/index.js';
 import { navigate, useRoute, type Route } from './router.js';
 import { TimelineScreen } from './screens/TimelineScreen.js';
 import { ConnectScreen, OfflineScreen } from './screens/ConnectScreen.js';
@@ -165,6 +165,37 @@ function Screen({ route }: { route: Route }): ReactElement {
   }
 }
 
+/** Exported for testing. Builds the neo://pair?… URL from a pair route.
+ *  @param origin      window.location.origin
+ *  @param protocol    window.location.protocol
+ *  @param isCapacitor Whether the runtime is a native Capacitor shell.
+ */
+export function buildPairNeoUrl(
+  route: Extract<Route, { name: 'pair' }>,
+  origin: string,
+  protocol: string,
+  isCapacitor: boolean,
+): string {
+  const q = new URLSearchParams();
+  if (route.version) q.set('v', route.version);
+  if (route.code) q.set('code', route.code);
+  if (route.token) q.set('token', route.token);
+
+  // On Android Capacitor, androidScheme: 'https' makes the origin https://localhost.
+  // On other Capacitor configurations the origin is capacitor://localhost.
+  // These shell origins are not reachable NEO servers; only exclude them in Capacitor.
+  const isCapacitorShellOrigin =
+    isCapacitor && (origin === 'https://localhost' || origin === 'capacitor://localhost');
+  const server = route.serverUrl ?? (!isCapacitorShellOrigin && /^https?:$/.test(protocol) ? origin : undefined);
+  if (server) q.set('server', server);
+
+  if (route.id) q.set('id', route.id);
+  if (route.pk) q.set('pk', route.pk);
+  if (route.lan) q.set('lan', route.lan);
+  if (route.relay) q.set('relay', route.relay);
+  return `neo://pair?${q.toString()}`;
+}
+
 function ReadyApp(): ReactElement {
   const route = useRoute();
   const onboarded = useSession((s) => s.settings?.onboarded ?? false);
@@ -174,17 +205,7 @@ function ReadyApp(): ReactElement {
   useEffect(() => {
     if (route.name === 'pair') {
       if (route.token || route.code) {
-        const q = new URLSearchParams();
-        if (route.version) q.set('v', route.version);
-        if (route.code) q.set('code', route.code);
-        if (route.token) q.set('token', route.token);
-        const server = route.serverUrl ?? (/^https?:$/.test(window.location.protocol) ? window.location.origin : undefined);
-        if (server) q.set('server', server);
-        if (route.id) q.set('id', route.id);
-        if (route.pk) q.set('pk', route.pk);
-        if (route.lan) q.set('lan', route.lan);
-        if (route.relay) q.set('relay', route.relay);
-        openPairLink(`neo://pair?${q.toString()}`);
+        openPairLink(buildPairNeoUrl(route, window.location.origin, window.location.protocol, currentEnvironment().native));
       }
       navigate({ name: 'timeline' }, { replace: true });
     } else if (route.name === 'connect') {
