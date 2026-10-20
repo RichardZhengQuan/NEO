@@ -504,6 +504,29 @@ describe('timeline routes', () => {
 });
 
 describe('timeline.stream', () => {
+  it('cancels response body when content-type is not text/event-stream', async () => {
+    const cancelFn = vi.fn().mockResolvedValue(undefined);
+    const stream = new ReadableStream({ start(c) { c.close(); } });
+    Object.defineProperty(stream, 'cancel', { value: cancelFn, writable: true });
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    let err: unknown;
+    try {
+      for await (const _ of client.timeline.stream({ text: 'hi' })) { /* drain */ }
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NeoApiError);
+    expect((err as NeoApiError).code).toBe('bad_upstream');
+    expect(cancelFn).toHaveBeenCalledOnce();
+  });
+
   it('throws bad_upstream when response content-type is text/html', async () => {
     const { fetchFn, requests } = makeFetch([{
       status: 200,

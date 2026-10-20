@@ -452,6 +452,7 @@ async function* streamTimeline(
   const contentType = response.headers.get('content-type') ?? '';
   const mediaType = contentType.split(';', 1)[0]!.trim().toLowerCase();
   if (mediaType !== 'text/event-stream') {
+    try { await response.body?.cancel(); } catch { /* ignore cancel error */ }
     throw new NeoApiError(502, {
       code: 'bad_upstream',
       message: `Expected text/event-stream, got ${contentType || '(none)'}`,
