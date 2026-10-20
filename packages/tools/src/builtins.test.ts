@@ -69,7 +69,7 @@ function fakeMemory(opts: { recall?: boolean } = {}) {
     },
     async findForForget(query: string, limit?: number) {
       calls.push({ method: 'findForForget', args: { query, limit } });
-      return [...nodes.values()].filter((m) => m.content.toLowerCase().includes(query.toLowerCase()));
+      return [...nodes.values()].filter((m) => m.content.toLowerCase().includes(query.toLowerCase())).slice(0, limit ?? 20);
     },
     async get(id: string) {
       const m = nodes.get(id);
@@ -417,6 +417,19 @@ describe('memory tools', () => {
     expect((await t.run('forget', { ids: [id] }, { origin: 'ui' })).output).toMatchObject({ forgotten: ['Tea'] });
   });
 
+  it('forget by query honours "everything matching" when more than 20 memories match', async () => {
+    const t = setup();
+    for (let i = 0; i < 21; i++) {
+      await t.run('remember', { content: `old job meeting ${i}`, label: `old job ${i}` });
+    }
+    expect(t.registry.get('forget')!.describeCall!({ query: 'old job' })).toBe('Forget everything matching “old job”');
+    const res = await t.run('forget', { query: 'old job' });
+    expect(res.isError).toBeFalsy();
+    expect((res.output as { forgotten: string[] }).forgotten).toHaveLength(21);
+    expect((res.output as { ids: string[] }).ids).toHaveLength(21);
+    expect(res.summary).toBe('Forgot 21 memories');
+    expect(t.mem.nodes.size).toBe(0);
+  });
 
 });
 

@@ -149,7 +149,7 @@ export function createMemoryTools(memory: MemoryService) {
           return n ? shown(n, ctx.allowSensitive) : id;
         });
       } else {
-        const found = await memory.findForForget(input.query as string, 20);
+        const found = await memory.findForForget(input.query as string, 10_000);
         if (!found.length) return { output: { forgotten: [], note: `No memories match “${input.query}”.` }, summary: 'Nothing to forget' };
         ids = found.map((n) => n.id);
         forgotten = found.map((n) => shown(n, ctx.allowSensitive));
