@@ -4,7 +4,7 @@
  */
 import type { AgentEvent } from '@neo/protocol';
 import { uiBlockToText, uiBlocksToText } from '@neo/protocol';
-import { bold, cyan, dim, green, magenta, red, yellow } from './ansi.js';
+import { bold, cyan, dim, green, magenta, red, stripModelText, yellow } from './ansi.js';
 
 export interface RenderOptions {
   showReasoning?: boolean;
@@ -27,7 +27,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
 
     case 'text.delta':
       // Caller is responsible for accumulating and printing incrementally.
-      return [{ text: event.text, delta: true }];
+      return [{ text: stripModelText(event.text), delta: true }];
 
     case 'reasoning.delta':
       if (!opts.showReasoning) return [];

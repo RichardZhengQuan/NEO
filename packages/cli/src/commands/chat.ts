@@ -9,7 +9,7 @@ import { NeoClient } from '@neo/client';
 import type { EventConnection } from '@neo/client';
 import { loadConfig, startServer } from '@neo/server';
 import { NeoError, textOf, uiBlocksToText } from '@neo/protocol';
-import { bold, cyan, dim, green, magenta, red, yellow } from '../ansi.js';
+import { bold, cyan, dim, green, magenta, red, stripModelText, yellow } from '../ansi.js';
 import { resolveDataDir, readToken } from '../config-file.js';
 import { renderEvent } from '../render.js';
 import type { NeoServer } from '@neo/server';
@@ -144,8 +144,8 @@ export async function runChat(opts: ChatOptions): Promise<void> {
         const lines = renderEvent(event, { showReasoning: opts.showReasoning });
 
         if (event.type === 'text.delta') {
-          // Accumulate and print inline
-          process.stdout.write(event.text);
+          // Accumulate and print inline; strip control sequences from model text.
+          process.stdout.write(stripModelText(event.text));
           onSameLine = true;
         } else if (event.type === 'tool.confirmation') {
           // Prompt for confirmation
