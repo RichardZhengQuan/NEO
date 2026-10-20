@@ -199,7 +199,11 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
         return;
       }
 
-      // Unexpected close — reconnect with backoff.
+      // Unexpected close — close if reconnect is disabled, otherwise reconnect with backoff.
+      if (!reconnect) {
+        setStatus('closed');
+        return;
+      }
       scheduleReconnect();
     };
 

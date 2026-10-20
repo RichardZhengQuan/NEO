@@ -1495,6 +1495,28 @@ describe('connect() WebSocket', () => {
     conn.close();
   });
 
+  it('status becomes closed and onStatus is called when reconnect:false and unexpected close', () => {
+    vi.useFakeTimers();
+    const statuses: string[] = [];
+    const client = makeWsClient();
+    const conn = client.connect({
+      onEvent: () => {},
+      onStatus: (s) => statuses.push(s),
+      reconnect: false,
+    });
+    const ws = instances[0]!;
+
+    ws.simulateOpen();
+    ws.simulateMessage({ type: 'ready', serverVersion: '0.1.0', seq: 0 });
+    expect(conn.status).toBe('open');
+
+    ws.simulateClose(1006, 'network error');
+
+    expect(conn.status).toBe('closed');
+    expect(statuses).toContain('closed');
+    expect(instances).toHaveLength(1); // Still no reconnect.
+  });
+
   it('resubscribes after reconnect', () => {
     vi.useFakeTimers();
     const client = makeWsClient();
