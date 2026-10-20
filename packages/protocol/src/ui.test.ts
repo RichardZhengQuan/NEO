@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   FORM_SUBMIT_ACTION_ID,
+  MAX_UI_BLOCKS,
   NeoError,
   UI_ACTION_ID_PREFIX,
   UIBlockSchema,
   childBlocks,
+  extractInlineUI,
   formSubmitActionId,
   formatTableCell,
   resolveWidgetAction,
@@ -272,5 +274,51 @@ describe('meaningful text fallback', () => {
       { name: 'tags', label: 'Tags', kind: 'multiselect', defaultValue: ['a', 'b'] },
     ] });
     for (const value of ['Monthly budget', 'Enter amount', 'min 0, max 100, step 5', 'Default: 0', 'Travel (travel)', 'Default: travel', 'Default: a, b']) expect(text).toContain(value);
+  });
+});
+
+describe('extractInlineUI aggregate limits', () => {
+  // Build a fence with one stack containing `childCount` text children.
+  const makeFence = (childCount: number): string => {
+    const children = Array.from({ length: childCount }, (_, i) => ({ type: 'text', text: `item ${i}` }));
+    const block = { type: 'stack', children };
+    return '```neo-ui\n' + JSON.stringify([block]) + '\n```';
+  };
+
+  it('reports a per-message limit error and drops blocks when 6 fences of 51 blocks each exceed MAX_UI_BLOCKS', () => {
+    // 6 fences × (1 stack + 50 text children) = 6 × 51 = 306 total blocks, exceeds 300.
+    const text = Array.from({ length: 6 }, () => makeFence(50)).join('\n');
+    const result = extractInlineUI(text);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors.some((e) => e.includes(`${MAX_UI_BLOCKS}`))).toBe(true);
+    expect(result.blocks.length).toBeLessThanOrEqual(MAX_UI_BLOCKS);
+    expect(result.blocks.length).toBe(0);
+  });
+
+  it('reports a duplicate action-id error and drops blocks when two fences repeat the same action id', () => {
+    const fence = (actionId: string) =>
+      '```neo-ui\n' +
+      JSON.stringify([{ type: 'buttons', actions: [{ id: actionId, label: 'Click', kind: 'event' }] }]) +
+      '\n```';
+    const text = fence('shared-action') + '\n' + fence('shared-action');
+    const result = extractInlineUI(text);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors.some((e) => e.includes('shared-action'))).toBe(true);
+    expect(result.blocks.length).toBe(0);
+  });
+
+  it('enforces aggregate limit even when a prior fence produced a per-fence error', () => {
+    // First fence has invalid JSON → per-fence parse error (errors.length becomes 1).
+    // Subsequent 6 fences each have 51 blocks — together they exceed MAX_UI_BLOCKS.
+    // The aggregate check must still fire despite errors.length > 0 after the first fence.
+    const invalidFence = '```neo-ui\nnot-valid-json\n```';
+    const bigFences = Array.from({ length: 6 }, () => makeFence(50)).join('\n');
+    const result = extractInlineUI(invalidFence + '\n' + bigFences);
+    // Per-fence parse error from the invalid fence.
+    expect(result.errors.some((e) => e.includes('Invalid neo-ui JSON'))).toBe(true);
+    // Aggregate error from exceeding MAX_UI_BLOCKS.
+    expect(result.errors.some((e) => e.includes(`${MAX_UI_BLOCKS}`))).toBe(true);
+    // All blocks dropped.
+    expect(result.blocks.length).toBe(0);
   });
 });
