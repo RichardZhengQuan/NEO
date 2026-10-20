@@ -426,7 +426,7 @@ async function* streamTimeline(
     if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
       throw err;
     }
-    throw new NeoApiError(0, { code: 'internal', message: err instanceof Error ? err.message : 'Network error', retryable: true });
+    throw new NeoApiError(0, { code: 'internal', message: err instanceof Error ? err.message : 'Network error', retryable: true }, { cause: err });
   }
 
   if (!response.ok) {
