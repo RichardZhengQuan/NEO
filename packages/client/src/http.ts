@@ -134,7 +134,7 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
       code: 'internal',
       message: err instanceof Error ? err.message : 'Network error',
       retryable: true,
-    });
+    }, { cause: err });
   }
 
   try {
