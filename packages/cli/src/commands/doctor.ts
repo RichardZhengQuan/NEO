@@ -5,6 +5,7 @@ import { NeoApiError, NeoClient } from '@neo/client';
 import { bold, cyan, dim, green, red, yellow } from '../ansi.js';
 import { resolveDataDir, readToken } from '../config-file.js';
 import type { NeoConfig } from '@neo/protocol';
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loadConfig } from '@neo/server';
@@ -55,11 +56,15 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
   let dataDirMsg = '';
   try {
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    const testFile = path.join(dataDir, '.neo-doctor-test');
-    fs.writeFileSync(testFile, 'test');
-    fs.unlinkSync(testFile);
+    const testFile = path.join(dataDir, `.neo-doctor-test-${crypto.randomBytes(8).toString('hex')}`);
+    let testCreated = false;
+    fs.writeFileSync(testFile, 'test', { flag: 'wx' });
+    testCreated = true;
     dataDirOk = true;
     dataDirMsg = dataDir;
+    if (testCreated) {
+      try { fs.unlinkSync(testFile); } catch { /* ignore */ }
+    }
   } catch (e) {
     dataDirMsg = `${dataDir} — ${String(e)}`;
   }
