@@ -660,7 +660,11 @@ export function MemoryGraphView({ graph: input, selectedId = null, highlightIds 
       g.node.x = pt.x;
       g.node.y = pt.y;
       g.node.fixed = true;
-      kick(0.3);
+      if (prefersReducedMotion()) {
+        draw();
+      } else {
+        kick(0.3);
+      }
     } else if (g.mode === 'pan') {
       interacted.current = true;
       const v = view.current;
@@ -678,7 +682,10 @@ export function MemoryGraphView({ graph: input, selectedId = null, highlightIds 
       if (pointers.current.size === 0) g.mode = 'none';
       return;
     }
-    if (g.node) g.node.fixed = false;
+    if (g.node) {
+      g.node.fixed = false;
+      if (prefersReducedMotion()) draw();
+    }
     if (!cancelled && !g.moved) {
       if (g.mode === 'node' && g.node) onSelectRef.current?.(g.node.id === selectedRef.current ? null : g.node.id);
       else if (g.mode === 'pan') onSelectRef.current?.(null);
