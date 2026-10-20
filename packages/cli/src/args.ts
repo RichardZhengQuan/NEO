@@ -223,6 +223,9 @@ function parseMemory(args: string[]): Command | ParseArgsError {
         allowPositionals: true,
       });
       if (values.help) return { cmd: 'help', topic: 'memory' };
+      if (positionals.length > 1) {
+        return { error: `memory export takes at most one file path, got: ${positionals.slice(1).join(', ')}` };
+      }
       return { cmd: 'memory', sub: 'export', file: positionals[0], dataDir: values['data-dir'], server: values.server, token: values.token };
     } catch (e) {
       return { error: String(e) };
@@ -244,6 +247,9 @@ function parseMemory(args: string[]): Command | ParseArgsError {
         allowPositionals: true,
       });
       if (values.help) return { cmd: 'help', topic: 'memory' };
+      if (positionals.length > 1) {
+        return { error: `memory import takes exactly one file path, got extra: ${positionals.slice(1).join(', ')}` };
+      }
       if (!positionals[0]) return { error: 'memory import requires a file path' };
       return { cmd: 'memory', sub: 'import', file: positionals[0], replace: values.replace, dataDir: values['data-dir'], server: values.server, token: values.token };
     } catch (e) {
