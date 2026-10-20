@@ -54,6 +54,26 @@ export function asCancelled(err: unknown, signal: AbortSignal | undefined): NeoE
   return null;
 }
 
+/** Race `promise` against `signal`; rejects with NeoError('cancelled') if signal fires first. */
+export function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(cancelledError(signal.reason));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(cancelledError(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 export type SleepFn = (ms: number, signal?: AbortSignal) => Promise<void>;
 
 /** A timer that rejects with NeoError('cancelled') as soon as `signal` aborts. */

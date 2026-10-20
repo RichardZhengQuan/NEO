@@ -9,6 +9,33 @@ const request: ChatRequest = { model: 'gpt-5.2', messages: [{ role: 'user', part
 const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
 const completed = (extra: Record<string, unknown> = {}) => ({ type: 'response.completed', response: { status: 'completed', ...extra } });
 
+it('cancels while the access token is still pending', async () => {
+  const controller = new AbortController();
+  const aborted = new Promise<void>(resolve => {
+    controller.signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+  let started!: () => void;
+  const tokenRequested = new Promise<void>(resolve => { started = resolve; });
+  const token = new Promise<string>(() => {});
+  const getChatGPTAccessToken = vi.fn(() => { started(); return token; });
+  const fetch = vi.fn<typeof globalThis.fetch>();
+  const unauthorized = vi.fn();
+  const waiting = new ChatGPTAdapter(config, { getChatGPTAccessToken, fetch, onChatGPTUnauthorized: unauthorized });
+  const iterator = waiting.chat({ ...request, signal: controller.signal })[Symbol.asyncIterator]();
+  const next = expect(iterator.next()).rejects.toMatchObject({ code: 'cancelled' });
+
+  await tokenRequested;
+  await Promise.resolve();
+  expect(getChatGPTAccessToken).toHaveBeenCalledTimes(1);
+  expect(controller.signal.aborted).toBe(false);
+  controller.abort();
+  await aborted;
+  await next;
+  expect(getChatGPTAccessToken).toHaveBeenCalledExactlyOnceWith('chatgpt');
+  expect(fetch).not.toHaveBeenCalled();
+  expect(unauthorized).not.toHaveBeenCalled();
+});
+
 describe('ChatGPT Responses API with a loopback fake', () => {
   let server: Server;
   let base: string;
