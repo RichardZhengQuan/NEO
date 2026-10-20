@@ -202,6 +202,26 @@ export const toolsMigrations: Migration[] = [
     name: 'reminder_snoozed_due_at',
     up: `ALTER TABLE reminders ADD COLUMN snoozed_due_at INTEGER;`,
   },
+  {
+    version: 10,
+    name: 'pending_firings',
+    up: `
+      CREATE TABLE pending_firings (
+        id TEXT PRIMARY KEY,
+        reminder_id TEXT NOT NULL,
+        occurrence_at INTEGER NOT NULL,
+        fired_at INTEGER NOT NULL,
+        missed INTEGER NOT NULL DEFAULT 0,
+        next_due_at INTEGER,
+        created_at INTEGER NOT NULL
+      );
+    `,
+  },
+  {
+    version: 11,
+    name: 'pending_firings_fired_count',
+    up: `ALTER TABLE pending_firings ADD COLUMN fired_count INTEGER;`,
+  },
 ];
 
 export function createProductivityStores(

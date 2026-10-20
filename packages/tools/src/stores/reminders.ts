@@ -243,7 +243,7 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       return r ? toReminder(r) : null;
     },
 
-    markFired(id: string, firedAt: number): ReminderFiring {
+    markFired(id: string, firedAt: number, missed = false): ReminderFiring {
       finite(firedAt, 'firing time');
       const firing = db.transaction((): ReminderFiring => {
         const r = row(id);
@@ -255,6 +255,7 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
         const now = clock();
         const snoozedDueAt = toNumOrNull(r.snoozed_due_at);
         const isSnoozedRedelivery = snoozedDueAt !== null;
+        let result: ReminderFiring;
         // A snoozed redelivery re-delivers the current occurrence without
         // consuming a new one from the series.  Restore the already-scheduled
         // next dueAt and leave firedCount unchanged.  Non-recurring reminders
@@ -272,29 +273,82 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
           db.prepare('UPDATE reminders SET status = ?, due_at = ?, snoozed_due_at = NULL, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
             'scheduled', snoozedDueAt, firedAt, now, id,
           );
-          return { reminder, occurrenceAt: existing.dueAt, firedAt, missed: false, nextDueAt: snoozedDueAt };
+          result = { reminder, occurrenceAt: existing.dueAt, firedAt, missed, nextDueAt: snoozedDueAt };
+        } else {
+          const firedCount = existing.firedCount + 1;
+          // Advance past both the occurrence and the firing time, so a long downtime
+          // collapses every missed occurrence into this one firing.
+          const nextDueAt = existing.recurrence
+            ? nextOccurrence(existing.recurrence, toNum(r.anchor_at), Math.max(firedAt, existing.dueAt), existing.timezone, firedCount)
+            : null;
+          const reminder: Reminder = {
+            ...existing,
+            status: nextDueAt === null ? 'fired' : 'scheduled',
+            dueAt: nextDueAt ?? existing.dueAt,
+            firedCount,
+            lastFiredAt: firedAt,
+            updatedAt: now,
+          };
+          db.prepare('UPDATE reminders SET status = ?, due_at = ?, snoozed_due_at = NULL, fired_count = ?, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
+            reminder.status, reminder.dueAt, firedCount, firedAt, now, id,
+          );
+          result = { reminder, occurrenceAt: existing.dueAt, firedAt, missed, nextDueAt };
         }
-        const firedCount = existing.firedCount + 1;
-        // Advance past both the occurrence and the firing time, so a long downtime
-        // collapses every missed occurrence into this one firing.
-        const nextDueAt = existing.recurrence
-          ? nextOccurrence(existing.recurrence, toNum(r.anchor_at), Math.max(firedAt, existing.dueAt), existing.timezone, firedCount)
-          : null;
-        const reminder: Reminder = {
-          ...existing,
-          status: nextDueAt === null ? 'fired' : 'scheduled',
-          dueAt: nextDueAt ?? existing.dueAt,
-          firedCount,
-          lastFiredAt: firedAt,
-          updatedAt: now,
-        };
-        db.prepare('UPDATE reminders SET status = ?, due_at = ?, snoozed_due_at = NULL, fired_count = ?, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
-          reminder.status, reminder.dueAt, firedCount, firedAt, now, id,
-        );
-        return { reminder, occurrenceAt: existing.dueAt, firedAt, missed: false, nextDueAt };
+        // Atomically record the pending firing for crash-safe re-delivery.
+        const pendingFiringId = newId('pfr', firedAt);
+        db.prepare(
+          `INSERT INTO pending_firings (id, reminder_id, occurrence_at, fired_at, missed, next_due_at, fired_count, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(pendingFiringId, id, result.occurrenceAt, firedAt, missed ? 1 : 0, result.nextDueAt ?? null, result.reminder.firedCount, now);
+        return { ...result, pendingFiringId };
       });
       emit({ type: 'upsert', reminder: firing.reminder });
       return firing;
+    },
+
+    pendingFirings(): ReminderFiring[] {
+      type PRow = Record<string, unknown>;
+      const rows = db.prepare('SELECT * FROM pending_firings ORDER BY created_at ASC').all() as PRow[];
+      const result: ReminderFiring[] = [];
+      const staleIds: string[] = [];
+      for (const pRow of rows) {
+        const reminderId = pRow.reminder_id as string;
+        const current = get(reminderId);
+        if (!current || current.status === 'completed' || current.status === 'cancelled') {
+          staleIds.push(pRow.id as string);
+          continue;
+        }
+        // Reconstruct the reminder state at the time of this specific firing so that
+        // replayed firings carry the correct firedCount, lastFiredAt and dueAt for
+        // their occurrence rather than the current (post-all-firings) state.
+        const nextDueAt = toNumOrNull(pRow.next_due_at);
+        const storedFiredCount = pRow.fired_count as number | null;
+        const reminder: Reminder = {
+          ...current,
+          firedCount: storedFiredCount ?? current.firedCount,
+          lastFiredAt: toNum(pRow.fired_at),
+          dueAt: nextDueAt ?? current.dueAt,
+          // status reflects the reminder state immediately after this firing
+          status: nextDueAt !== null ? 'scheduled' : 'fired',
+          updatedAt: toNum(pRow.created_at),
+        };
+        result.push({
+          reminder,
+          occurrenceAt: toNum(pRow.occurrence_at),
+          firedAt: toNum(pRow.fired_at),
+          missed: Boolean(pRow.missed),
+          nextDueAt,
+          pendingFiringId: pRow.id as string,
+        });
+      }
+      for (const staleId of staleIds) {
+        db.prepare('DELETE FROM pending_firings WHERE id = ?').run(staleId);
+      }
+      return result;
+    },
+
+    clearPendingFiring(id: string): void {
+      db.prepare('DELETE FROM pending_firings WHERE id = ?').run(id);
     },
 
     onChange(listener: (event: ChangeEvent) => void): () => void {

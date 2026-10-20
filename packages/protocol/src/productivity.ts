@@ -75,6 +75,8 @@ export interface ReminderFiring {
   /** Fired later than the grace period (e.g. the device was asleep / server was down). */
   missed: boolean;
   nextDueAt: number | null;
+  /** ID of the pending_firings durability row written atomically with the status advance. */
+  pendingFiringId?: string;
 }
 
 // ───────────────────────────── tasks ─────────────────────────────
