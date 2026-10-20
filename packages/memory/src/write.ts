@@ -399,6 +399,7 @@ export function createOrMerge(s: WriteSession, spec: CreateSpec, opts: { episode
       kind: 'preference', label: spec.label, content: spec.content, tags: spec.tags, source: spec.source,
       reason: 'The user changed this assistant-style preference', vector: spec.vector, episodeId: opts.episodeId,
       sensitivity: previous.some((old) => old.sensitivity === 'sensitive') ? 'sensitive' : spec.sensitivity,
+      validUntil: spec.validUntil,
     });
     const superseded: MemoryNode[] = [];
     for (const old of previous) {
@@ -467,6 +468,7 @@ function createRevision(
     episodeId?: string;
     /** Raised (never lowered) from the old node's. */
     sensitivity?: Sensitivity;
+    validUntil?: number;
   },
 ): MemoryNode {
   const metadata: Record<string, unknown> = {};
@@ -490,6 +492,7 @@ function createRevision(
     pinned: old.pinned,
     sensitivity: stricter(old.sensitivity, r.sensitivity),
     source: r.source,
+    validUntil: r.validUntil,
     metadata: Object.keys(metadata).length ? metadata : undefined,
   };
   insertNode(s.ctx.db, node);

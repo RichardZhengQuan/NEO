@@ -36,7 +36,7 @@ function setup(llm?: ChatModel, policy: Partial<MemoryPolicy> = {}) {
     policy: { ...DEFAULT_MEMORY_POLICY, storeEpisodes: false, ...policy },
     llm: () => llm ? { model: llm, name: 'style-test', isLocal: true } : null,
   });
-  return { db, svc, tick: () => now += 1000 };
+  return { db, svc, tick: (ms = 1000) => now += ms };
 }
 
 function extracting(content: string): ChatModel {
@@ -162,6 +162,21 @@ describe('assistant-style recall', () => {
 });
 
 describe('assistant-style belief revision', () => {
+  it('stops recalling a revised preference after its incoming expiry', async () => {
+    const { db, svc, tick } = setup();
+    try {
+      const old = await svc.remember({ kind: 'preference', content: 'The user wants NEO to be playful.' });
+      const now = tick();
+      const current = await svc.remember({ kind: 'preference', content: 'The user wants NEO to be more serious.', validUntil: now + 3_600_000 });
+      expect((await svc.get(old.id))?.node.status).toBe('superseded');
+      expect((await svc.get(current.id))?.history.map((node) => node.id)).toEqual([old.id]);
+      const query = { text: 'What is the capital of Norway?', reinforce: false };
+      expect((await svc.recall(query)).items.map((item) => item.node.id)).toEqual([current.id]);
+      tick(3_600_001);
+      expect((await svc.recall(query)).items).toEqual([]);
+    } finally { db.close(); }
+  });
+
   it('revises a conflicting migrated trait while preserving compatible traits and tone', async () => {
     const { db, svc, tick } = setup();
     try {
