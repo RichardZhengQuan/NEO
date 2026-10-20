@@ -205,6 +205,39 @@ describe('ReminderStore', () => {
     expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
   });
 
+  it('timezone-only patch on a snoozed count-bounded reminder does not corrupt recurrence state', () => {
+    // Regression: when timezoneMoved and the reminder is snoozed, the previous
+    // code set anchor_at = snoozed dueAt (delivery epoch) AND cleared snoozed_due_at.
+    // markFired then treated the snoozed redelivery as a true occurrence, incremented
+    // firedCount, and exhausted a count:2 series after only one real firing.
+    const r = stores.reminders;
+    const rem = r.create({
+      title: 'medication',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', interval: 1, count: 2 },
+      timezone: 'America/New_York',
+    });
+    // Day 1 fires
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now); // firedCount=1, dueAt → Day 2 09:00
+    // User snoozes 10 min while Day 2 is the live dueAt
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 10); // snoozed_due_at = Day2 09:00, dueAt = Day2 09:11
+    // User patches only the timezone (dueAt does not move)
+    r.update(rem.id, { timezone: 'UTC' });
+    // Snoozed redelivery fires — must NOT count as a true occurrence
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    r.markFired(rem.id, t.now);
+    // Day 2 must still be scheduled (firedCount should still be 1)
+    const after = r.get(rem.id)!;
+    expect(after.status).toBe('scheduled');
+    expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
+    // Day 2 fires — series is now exhausted after 2 real occurrences
+    t.setNow(after.dueAt);
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('fired');
+  });
+
   it('markFired refuses reminders that are not scheduled (no resurrection of a completed series)', () => {
     const r = stores.reminders;
     const series = r.create({ title: 'daily', dueAt: utc(2026, 10, 10, 8), recurrence: { freq: 'daily' } });
