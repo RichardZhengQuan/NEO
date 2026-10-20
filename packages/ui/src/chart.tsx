@@ -265,14 +265,18 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
   // Lines / areas
   const lines: ReactElement[] = [];
   if (kind === 'line' || kind === 'area') {
-    const cumulative = categories.map(() => 0);
+    const cumulativePos = categories.map(() => 0);
+    const cumulativeNeg = categories.map(() => 0);
     values.forEach((row, si) => {
       const pts: { x: number; y: number; base: number }[] = [];
       row.forEach((v, ci) => {
         if (v === null) return;
-        const base = stacked ? cumulative[ci]! : 0;
+        const base = stacked ? (v >= 0 ? cumulativePos[ci]! : cumulativeNeg[ci]!) : 0;
         const top = base + v;
-        if (stacked) cumulative[ci] = top;
+        if (stacked) {
+          if (v >= 0) cumulativePos[ci] = top;
+          else cumulativeNeg[ci] = top;
+        }
         pts.push({ x: xCenter(ci), y: y(top), base: y(Math.max(yMin, Math.min(yMax, base))) });
       });
       if (pts.length === 0) return;
