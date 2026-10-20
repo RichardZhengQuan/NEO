@@ -12,7 +12,7 @@ import { Shell } from './components/Shell.js';
 import { AppErrorBoundary, lazyScreen } from './components/ErrorBoundary.js';
 import { Toaster } from './components/Toaster.js';
 import { STORAGE_KEYS, readString } from './lib/storage.js';
-import { getPlatform } from './platform/index.js';
+import { currentEnvironment, getPlatform } from './platform/index.js';
 import { navigate, useRoute, type Route } from './router.js';
 import { TimelineScreen } from './screens/TimelineScreen.js';
 import { ConnectScreen, OfflineScreen } from './screens/ConnectScreen.js';
@@ -166,13 +166,15 @@ function Screen({ route }: { route: Route }): ReactElement {
 }
 
 /** Exported for testing. Builds the neo://pair?… URL from a pair route.
- *  @param origin   window.location.origin
- *  @param protocol window.location.protocol
+ *  @param origin      window.location.origin
+ *  @param protocol    window.location.protocol
+ *  @param isCapacitor Whether the runtime is a native Capacitor shell.
  */
 export function buildPairNeoUrl(
   route: Extract<Route, { name: 'pair' }>,
   origin: string,
   protocol: string,
+  isCapacitor: boolean,
 ): string {
   const q = new URLSearchParams();
   if (route.version) q.set('v', route.version);
@@ -181,9 +183,9 @@ export function buildPairNeoUrl(
 
   // On Android Capacitor, androidScheme: 'https' makes the origin https://localhost.
   // On other Capacitor configurations the origin is capacitor://localhost.
-  // Neither is a reachable NEO server; never inject it for tunnel-only links.
+  // These shell origins are not reachable NEO servers; only exclude them in Capacitor.
   const isCapacitorShellOrigin =
-    origin === 'https://localhost' || origin === 'capacitor://localhost';
+    isCapacitor && (origin === 'https://localhost' || origin === 'capacitor://localhost');
   const server = route.serverUrl ?? (!isCapacitorShellOrigin && /^https?:$/.test(protocol) ? origin : undefined);
   if (server) q.set('server', server);
 
@@ -203,7 +205,7 @@ function ReadyApp(): ReactElement {
   useEffect(() => {
     if (route.name === 'pair') {
       if (route.token || route.code) {
-        openPairLink(buildPairNeoUrl(route, window.location.origin, window.location.protocol));
+        openPairLink(buildPairNeoUrl(route, window.location.origin, window.location.protocol, currentEnvironment().native));
       }
       navigate({ name: 'timeline' }, { replace: true });
     } else if (route.name === 'connect') {

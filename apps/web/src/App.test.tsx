@@ -11,7 +11,7 @@ describe('buildPairNeoUrl', () => {
   it('tunnel-only link on Android Capacitor does not inject https://localhost as server', () => {
     const route: PairRoute = { name: 'pair', token: TOKEN, relay: RELAY };
     // Simulate Android Capacitor WebView (androidScheme: 'https')
-    const url = buildPairNeoUrl(route, 'https://localhost', 'https:');
+    const url = buildPairNeoUrl(route, 'https://localhost', 'https:', true);
     expect(url).not.toContain('localhost');
     expect(url).not.toContain('server=');
     expect(url).toContain(`relay=${encodeURIComponent(RELAY)}`);
@@ -20,27 +20,39 @@ describe('buildPairNeoUrl', () => {
 
   it('tunnel-only link on Android Capacitor (capacitor:// scheme) does not inject server', () => {
     const route: PairRoute = { name: 'pair', token: TOKEN, relay: RELAY };
-    const url = buildPairNeoUrl(route, 'capacitor://localhost', 'capacitor:');
+    const url = buildPairNeoUrl(route, 'capacitor://localhost', 'capacitor:', true);
     expect(url).not.toContain('localhost');
     expect(url).not.toContain('server=');
   });
 
   it('browser with real HTTPS origin injects the origin as server', () => {
     const route: PairRoute = { name: 'pair', token: TOKEN, relay: RELAY };
-    const url = buildPairNeoUrl(route, 'https://neo.example.com', 'https:');
+    const url = buildPairNeoUrl(route, 'https://neo.example.com', 'https:', false);
     expect(url).toContain('server=https%3A%2F%2Fneo.example.com');
   });
 
   it('explicit serverUrl in route is always used', () => {
     const route: PairRoute = { name: 'pair', token: TOKEN, serverUrl: 'https://home.example.com' };
-    const url = buildPairNeoUrl(route, 'https://localhost', 'https:');
+    const url = buildPairNeoUrl(route, 'https://localhost', 'https:', false);
     expect(url).toContain('server=https%3A%2F%2Fhome.example.com');
     expect(url).not.toContain('localhost');
   });
 
   it('file:// / Electron origin does not inject server', () => {
     const route: PairRoute = { name: 'pair', token: TOKEN };
-    const url = buildPairNeoUrl(route, 'null', 'file:');
+    const url = buildPairNeoUrl(route, 'null', 'file:', false);
+    expect(url).not.toContain('server=');
+  });
+
+  it('browser at https://localhost injects the origin as server', () => {
+    const route: PairRoute = { name: 'pair', token: TOKEN };
+    const url = buildPairNeoUrl(route, 'https://localhost', 'https:', false);
+    expect(url).toContain('server=https%3A%2F%2Flocalhost');
+  });
+
+  it('Capacitor at https://localhost does not inject server', () => {
+    const route: PairRoute = { name: 'pair', token: TOKEN };
+    const url = buildPairNeoUrl(route, 'https://localhost', 'https:', true);
     expect(url).not.toContain('server=');
   });
 });
