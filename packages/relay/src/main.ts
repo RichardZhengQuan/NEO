@@ -25,12 +25,14 @@ const overrides: Record<keyof RelayLimits, string> = {
   registrationTimeoutMs: 'RELAY_REGISTRATION_TIMEOUT_MS',
   phoneIdleTimeoutMs: 'RELAY_PHONE_IDLE_TIMEOUT_MS',
   heartbeatIntervalMs: 'RELAY_HEARTBEAT_INTERVAL_MS',
+  closeTimeoutMs: 'RELAY_CLOSE_TIMEOUT_MS',
 };
 
 const MS_LIMIT_FIELDS: ReadonlySet<keyof RelayLimits> = new Set([
   'registrationTimeoutMs',
   'phoneIdleTimeoutMs',
   'heartbeatIntervalMs',
+  'closeTimeoutMs',
 ]);
 
 async function main(): Promise<void> {

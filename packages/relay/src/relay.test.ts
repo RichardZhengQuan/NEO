@@ -272,6 +272,7 @@ describe('relay limits and lifecycle', () => {
     await expect(start({ limits: { registrationTimeoutMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: registrationTimeoutMs/);
     await expect(start({ limits: { heartbeatIntervalMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: heartbeatIntervalMs/);
     await expect(start({ limits: { phoneIdleTimeoutMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: phoneIdleTimeoutMs/);
+    await expect(start({ limits: { closeTimeoutMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: closeTimeoutMs/);
     const relay = await start({ limits: { registrationTimeoutMs: 2_147_483_647 } });
     expect(relay.port).toBeGreaterThan(0);
   });
@@ -536,6 +537,41 @@ describe('relay limits and lifecycle', () => {
       await closed;
       await stopped;
     }
+  });
+
+  it('terminates a phone whose underlying socket emits error with a half-open TCP write within closeTimeoutMs', async () => {
+    // Regression: the upgrade handler's error listener was empty, so a half-open TCP write side
+    // (allowHalfOpen: true) could hold a phone slot indefinitely after a ws protocol error.
+    const relay = await start({ limits: { perIpPhoneConnections: 1, closeTimeoutMs: 50 } });
+    const server = await register(relay);
+    const raw = createConnection({ host: '127.0.0.1', port: relay.port, allowHalfOpen: true });
+    raw.on('error', () => {});
+    try {
+      await once(raw, 'connect');
+      const key = Buffer.alloc(16).toString('base64');
+      const upgradeData = once(raw, 'data');
+      raw.write(
+        `GET /v1/connect/${server.identity.serverId} HTTP/1.1\r\n` +
+        `Host: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+        `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\n\r\n`,
+      );
+      await upgradeData; // 101 Switching Protocols
+      await server.inbox.frame(); // RelayOp.Open — phone is now admitted
+      expect(relay.stats().phones).toBe(1);
+      // Send a malformed masked frame: RSV2 bit set, invalid per RFC 6455 without an extension.
+      // ws emits 'error' and begins the close handshake; the raw socket keeps its write side open.
+      const rawClosed = new Promise<void>(resolve => raw.once('close', () => resolve()));
+      raw.write(Buffer.from([0xa0, 0x80, 0x00, 0x00, 0x00, 0x00]));
+      // Without the fix the terminate timer is never installed, rawClosed never resolves within
+      // closeTimeoutMs, and this await hangs until the test runner times out.
+      await rawClosed;
+      expect(relay.stats().phones).toBe(0);
+      // Drain the Close frame the relay sends to the server when the phone disconnects.
+      await server.inbox.frame();
+      // The admission slot is released; a second phone from the same IP is now accepted.
+      const second = await phone(relay, server);
+      expect(second).toBeDefined();
+    } finally { raw.destroy(); }
   });
 
   it('expires idle phones using the clock, but traffic in either direction keeps them active', async () => {
