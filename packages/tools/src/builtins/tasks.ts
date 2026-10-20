@@ -140,7 +140,7 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
     title: 'Update task',
     description:
       'Change a task by id: mark it done or not done, rename it, set or clear (`due: null`) the due date, change priority ' +
-      'or notes, or move it to another list (by name or id; an unknown name creates the list). Used by the checklist checkboxes.',
+      'or notes, or move it to another list (by name or id; an unknown name creates the list). Moving a subtask to a different list automatically detaches it from its parent task (parentId is cleared). Used by the checklist checkboxes.',
     inputSchema: z.object({
       id: z.string().min(1).max(64),
       title: z.string().min(1).max(1000).optional(),

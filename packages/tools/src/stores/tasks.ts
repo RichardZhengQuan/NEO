@@ -190,6 +190,8 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
       const listId = data.listId ?? INBOX_LIST_ID;
       mustGetList(listId);
       requireParent(data.parentId);
+      let parentId = data.parentId ?? null;
+      if (parentId !== null && get(parentId)?.listId !== listId) parentId = null;
       const now = clock();
       const task: Task = {
         id: newId('task', now),
@@ -202,7 +204,7 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
         priority: data.priority ?? 0,
         tags: data.tags ?? [],
         order: nextOrder('tasks', listId),
-        parentId: data.parentId ?? null,
+        parentId,
         createdAt: now,
         updatedAt: now,
       };
@@ -223,6 +225,7 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
         const now = clock();
         const done = data.done ?? existing.done;
         const movedList = data.listId !== undefined && data.listId !== existing.listId;
+        const movedAwayFromParent = movedList && existing.parentId !== null;
         const updated: Task = {
           ...existing,
           title: data.title !== undefined ? requireText(data.title, 'title') : existing.title,
@@ -234,7 +237,12 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
           tags: data.tags ?? existing.tags,
           listId: data.listId ?? existing.listId,
           order: data.order ?? (movedList ? nextOrder('tasks', data.listId) : existing.order),
-          parentId: data.parentId !== undefined ? data.parentId : existing.parentId,
+          parentId: (() => {
+            let pid = data.parentId !== undefined ? data.parentId : (movedAwayFromParent ? null : existing.parentId);
+            const effectiveListId = data.listId ?? existing.listId;
+            if (pid !== null && pid !== undefined && get(pid)?.listId !== effectiveListId) pid = null;
+            return pid;
+          })(),
           updatedAt: now,
         };
         db.prepare(

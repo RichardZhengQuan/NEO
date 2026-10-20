@@ -231,6 +231,30 @@ describe('TaskStore', () => {
     expect(stores.tasks.update(task.id, { done: false }).doneAt).toBeNull();
   });
 
+  it('moving a subtask to a different list detaches it from its parent', () => {
+    const work = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Project' });
+    const child = stores.tasks.create({ title: 'Step', parentId: parent.id });
+    expect(stores.tasks.update(child.id, { listId: INBOX_LIST_ID }).parentId).toBe(parent.id);
+
+    const result = stores.tasks.update(child.id, { listId: work.id });
+    const updated = stores.tasks.get(child.id)!;
+    expect(updated.listId === work.id && updated.parentId === parent.id).toBe(false);
+    expect(updated.listId).toBe(work.id);
+    expect(updated.parentId).toBeNull();
+    expect(result).toEqual(updated);
+    expect(stores.tasks.get(parent.id)).toEqual(parent);
+  });
+
+  it('creating a subtask in a different list than its parent silently detaches it', () => {
+    const work = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Project' });
+    const task = stores.tasks.create({ title: 'Step', listId: work.id, parentId: parent.id });
+    expect(task.listId).toBe(work.id);
+    expect(task.parentId).toBeNull();
+    expect(stores.tasks.get(task.id)).toEqual(task);
+  });
+
   it('moving a parent task to another list moves its subtasks and emits upsert for each', () => {
     const list = stores.tasks.createList({ name: 'Work' });
     const parent = stores.tasks.create({ title: 'Epic', listId: list.id });
@@ -305,7 +329,7 @@ describe('TaskStore', () => {
     for (const task of [parent, child, grandchild]) {
       expect(stores.tasks.get(task.id)).toMatchObject({ listId: list.id, updatedAt: t.now });
     }
-    expect(stores.tasks.get(parent.id)?.parentId).toBe(grandchild.id);
+    expect(stores.tasks.get(parent.id)?.parentId).toBeNull();
     expect(events).toHaveLength(3);
     expect(events).toEqual(expect.arrayContaining(
       [parent, child, grandchild].map((task) => ({ type: 'upsert', task: stores.tasks.get(task.id) })),
