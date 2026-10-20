@@ -361,7 +361,11 @@ export class ChatGPTAdapter implements ProviderAdapter {
     }
     if (!response.ok) {
       let value: unknown;
-      try { value = await response.json(); } catch { /* upstream body is never reflected */ }
+      try { value = await response.json(); } catch (err) {
+        const cancelled = asCancelled(err, signal);
+        if (cancelled) throw cancelled;
+        /* upstream body is never reflected */
+      }
       if (nativeSearch && isPlainObject(value) && isSearchRejection(value['error'], sentTools, response.status)) throw this.disableSearch();
       throw this.error(isPlainObject(value) ? value['error'] : undefined, response.status, token);
     }

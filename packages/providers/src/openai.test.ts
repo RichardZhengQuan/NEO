@@ -383,6 +383,21 @@ describe('OpenAI errors and retries', () => {
   const err = (status: number, message: string, headers: Record<string, string> = {}): FakeResponder => () =>
     jsonResponse({ error: { message, type: 'x' } }, status, headers);
 
+  it('abort while reading error body throws cancelled, not provider_error', async () => {
+    const controller = new AbortController();
+    const f = fakeFetch(() => {
+      const body = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          ctrl.error(new DOMException('aborted', 'AbortError'));
+        },
+      });
+      controller.abort();
+      return new Response(body, { status: 400 });
+    });
+    const a = new OpenAIAdapter(cfg(), { fetch: f, sleep: recordingSleep() });
+    await expect(collect(a.chat(req({ signal: controller.signal })))).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
   it('retries 429 (honoring retry-after) and 5xx, then succeeds', async () => {
     const { a, f, sleep } = make([err(429, 'slow', { 'retry-after': '1' }), err(503, 'busy'), okReply]);
     expect(textOfEvents(await collect(a.chat(req())))).toBe('Hi');

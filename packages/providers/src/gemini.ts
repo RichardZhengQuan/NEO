@@ -313,14 +313,14 @@ export class GeminiAdapter implements ProviderAdapter {
           if (!outcome.ok) return { retry: true };
           const { status } = outcome.value;
           if (status !== 429 && status < 500) return { retry: false };
-          return { retry: true, retryAfterMs: await retryDelayOf(outcome.value) };
+          return { retry: true, retryAfterMs: await retryDelayOf(outcome.value, request.signal) };
         },
         { signal: request.signal, sleep: this.options.sleep, discard: (r) => void r.body?.cancel().catch(() => {}) },
       );
     } catch (err) {
       throw asCancelled(err, request.signal) ?? this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, request.signal);
     if (!response.body) throw new NeoError('provider_error', 'Gemini returned an empty response.', { retryable: true });
 
     let thought = '';
@@ -504,7 +504,7 @@ export class GeminiAdapter implements ProviderAdapter {
     } catch (err) {
       throw asCancelled(err, request.signal) ?? this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, request.signal);
     const vectors = (((await response.json()) as { embeddings?: { values?: number[] }[] }).embeddings ?? []).map((e) => e.values ?? []);
     if (vectors.length !== request.texts.length) {
       throw new NeoError('provider_error', `Gemini returned ${vectors.length} embeddings for ${request.texts.length} texts.`);
@@ -534,7 +534,7 @@ export class GeminiAdapter implements ProviderAdapter {
     } catch (err) {
       throw asCancelled(err, signal) ?? this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, signal);
     return response;
   }
 
@@ -550,8 +550,12 @@ export class GeminiAdapter implements ProviderAdapter {
     return new NeoError('provider_error', this.clean(`Can't reach Gemini at ${hostOf(this.baseUrl)}: ${describeNetworkError(err)}`), { retryable: true, cause: err });
   }
 
-  private async httpError(response: Response): Promise<NeoError> {
-    const text = await response.text().catch(() => '');
+  private async httpError(response: Response, signal?: AbortSignal): Promise<NeoError> {
+    const text = await response.text().catch((err: unknown) => {
+      const cancelled = asCancelled(err, signal);
+      if (cancelled) throw cancelled;
+      return '';
+    });
     const { message, reason, retryDelayMs } = parseErrorBody(text);
     const status = response.status;
     const detail = this.clean(`Gemini error (HTTP ${status})${message ? `: ${message}` : ''}`);
@@ -616,10 +620,15 @@ function parseErrorBody(text: string): { message: string; reason?: string; retry
 }
 
 /** Server back-off for a 429/5xx: the `retry-after` header, else the body's RetryInfo. */
-async function retryDelayOf(response: Response): Promise<number | undefined> {
+async function retryDelayOf(response: Response, signal?: AbortSignal): Promise<number | undefined> {
   const header = parseRetryAfter(response.headers.get('retry-after'));
   if (header !== undefined) return header;
-  return parseErrorBody(await response.clone().text().catch(() => '')).retryDelayMs;
+  const text = await response.clone().text().catch((err: unknown) => {
+    const cancelled = asCancelled(err, signal);
+    if (cancelled) throw cancelled;
+    return '';
+  });
+  return parseErrorBody(text).retryDelayMs;
 }
 
 function toUsage(u: Record<string, unknown>): Usage {
