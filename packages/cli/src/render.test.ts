@@ -92,6 +92,26 @@ describe('renderEvent', () => {
     expect(renderEvent(ev)).toHaveLength(0);
   });
 
+  it('memory.recalled strips control sequences from model-authored labels', () => {
+    const ev: AgentEvent = {
+      type: 'memory.recalled', episodeId: 'c', conversationId: 'c', turnId: 't',
+      items: [
+        { id: 'mem1', kind: 'fact', label: 'safe\x1b[2J\x1b[Hpoisoned', score: 0.9, reason: 'query' },
+        { id: 'mem2', kind: 'fact', label: 'also\x1b[31mred\x1b[0m label', score: 0.8, reason: 'query' },
+      ],
+    };
+    const lines = renderEvent(ev);
+    expect(lines).toHaveLength(1);
+    const text = lines[0]!.text;
+    expect(text).not.toContain('\x1b');
+    // Visible characters must survive
+    expect(text).toContain('safe');
+    expect(text).toContain('poisoned');
+    expect(text).toContain('also');
+    expect(text).toContain('red');
+    expect(text).toContain('label');
+  });
+
   it('turn.finished emits usage line', () => {
     const ev: AgentEvent = {
       type: 'turn.finished', episodeId: 'c', conversationId: 'c', turnId: 't',

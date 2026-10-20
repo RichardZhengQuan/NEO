@@ -82,7 +82,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
 
     case 'memory.recalled': {
       if (!event.items.length) return [];
-      const labels = event.items.slice(0, 5).map((m) => m.label).join(', ');
+      const labels = stripModelText(event.items.slice(0, 5).map((m) => m.label).join(', '));
       const more = event.items.length > 5 ? ` +${event.items.length - 5} more` : '';
       return [{ text: dim(`  🧠 remembered: ${labels}${more}`) }];
     }
