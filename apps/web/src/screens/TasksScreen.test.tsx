@@ -45,6 +45,38 @@ describe('TaskDetails store updates', () => {
     expect(useData.getState().tasks[task.id]!.title).toBe('New');
   });
 
+  it('preserves a notes draft when only task.title is updated remotely', async () => {
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const notesInput = screen.getByRole('textbox', { name: 'Notes' }) as HTMLTextAreaElement;
+
+    // user types in the notes field
+    fireEvent.change(notesInput, { target: { value: 'User draft notes' } });
+    expect(notesInput.value).toBe('User draft notes');
+
+    // remote updates only task.title — notes unchanged remotely
+    act(() => { useData.setState({ tasks: { [task.id]: { ...task, title: 'New title', updatedAt: 1 } } }); });
+
+    // notes draft must be preserved
+    expect(notesInput.value).toBe('User draft notes');
+  });
+
+  it('preserves a title draft when only task.notes is updated remotely', async () => {
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const titleInput = screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement;
+
+    // user types in the title field
+    fireEvent.change(titleInput, { target: { value: 'User draft title' } });
+    expect(titleInput.value).toBe('User draft title');
+
+    // remote updates only task.notes — title unchanged remotely
+    act(() => { useData.setState({ tasks: { [task.id]: { ...task, notes: 'New notes', updatedAt: 1 } } }); });
+
+    // title draft must be preserved
+    expect(titleInput.value).toBe('User draft title');
+  });
+
   it('resyncs untouched notes before blur so they cannot overwrite a remote update', async () => {
     render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
     fireEvent.click(screen.getByRole('button', { name: 'Details' }));

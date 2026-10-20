@@ -61,8 +61,10 @@ function TaskDetails({ task, lists, onClose }: { task: Task; lists: TaskList[]; 
   const [notes, setNotes] = useState(task.notes ?? '');
   useEffect(() => {
     setTitle(task.title);
+  }, [task.title]);
+  useEffect(() => {
     setNotes(task.notes ?? '');
-  }, [task.title, task.notes]);
+  }, [task.notes]);
   const save = (patch: Parameters<typeof patchTask>[1]) => void patchTask(task, patch, t);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', padding: '0.25rem 0 0.5rem 2rem' }}>
