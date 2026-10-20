@@ -313,7 +313,7 @@ export class GeminiAdapter implements ProviderAdapter {
           if (!outcome.ok) return { retry: true };
           const { status } = outcome.value;
           if (status !== 429 && status < 500) return { retry: false };
-          return { retry: true, retryAfterMs: await retryDelayOf(outcome.value) };
+          return { retry: true, retryAfterMs: await retryDelayOf(outcome.value, request.signal) };
         },
         { signal: request.signal, sleep: this.options.sleep, discard: (r) => void r.body?.cancel().catch(() => {}) },
       );
@@ -620,10 +620,15 @@ function parseErrorBody(text: string): { message: string; reason?: string; retry
 }
 
 /** Server back-off for a 429/5xx: the `retry-after` header, else the body's RetryInfo. */
-async function retryDelayOf(response: Response): Promise<number | undefined> {
+async function retryDelayOf(response: Response, signal?: AbortSignal): Promise<number | undefined> {
   const header = parseRetryAfter(response.headers.get('retry-after'));
   if (header !== undefined) return header;
-  return parseErrorBody(await response.clone().text().catch(() => '')).retryDelayMs;
+  const text = await response.clone().text().catch((err: unknown) => {
+    const cancelled = asCancelled(err, signal);
+    if (cancelled) throw cancelled;
+    return '';
+  });
+  return parseErrorBody(text).retryDelayMs;
 }
 
 function toUsage(u: Record<string, unknown>): Usage {

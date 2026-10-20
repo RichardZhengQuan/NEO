@@ -363,6 +363,24 @@ describe('Gemini errors, keys, models, embeddings', () => {
     await expect(collect(a.chat(req({ signal: controller.signal })))).rejects.toMatchObject({ code: 'cancelled' });
   });
 
+  it('abort while reading retry-info body throws cancelled instead of retrying through to a later success', async () => {
+    const f = fakeFetch([
+      () => {
+        const body = new ReadableStream<Uint8Array>({
+          start(ctrl) {
+            ctrl.error(new DOMException('aborted', 'AbortError'));
+          },
+        });
+        return new Response(body, { status: 429 });
+      },
+      stream(cand([{ text: 'Hi' }], 'STOP')),
+    ]);
+    const { sleep } = make([] as FakeResponder[]);
+    const a = new GeminiAdapter(cfg(), { fetch: f, sleep });
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'cancelled' });
+    expect(f.calls.length).toBe(1);
+  });
+
   it('does not expose malformed model-response text in errors or connection tests', async () => {
     const { a } = make(() => new Response(KEY, { headers: { 'Content-Type': 'application/json' } }));
     const error = await a.listModels().catch((err: unknown) => err);
