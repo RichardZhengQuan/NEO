@@ -95,7 +95,9 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
       reconnectTimer = null;
       if (!closed) {
         setStatus('reconnecting');
-        openSocket();
+        if (!closed) {
+          openSocket();
+        }
       }
     }, delay);
   }
