@@ -514,14 +514,28 @@ export class AnthropicAdapter implements ProviderAdapter {
       throw new NeoError('provider_error', 'The connection to Anthropic closed before the response finished.', { retryable: true });
     }
 
-    if (stopReason !== 'refusal') yield* toolCalls;
+    if (stopReason !== 'refusal') {
+      for (const ev of toolCalls) {
+        throwIfAborted(request.signal);
+        yield ev;
+      }
+    }
     if (nativeSearch && replayBlocks.size) {
       const content = [...replayBlocks].sort(([a], [b]) => a - b).map(([, block]) => block).filter(block => stopReason !== 'refusal' || block['type'] !== 'tool_use');
+      throwIfAborted(request.signal);
       yield { type: 'provider_part', part: { type: 'provider_part', provider: 'anthropic', model: request.model, data: { type: 'native_search_message', content } } };
     }
-    if (stopReason === 'refusal' && !sawText) yield { type: 'text', text: REFUSAL_NOTE };
-    if (sources.length) yield { type: 'sources', items: sources };
+    if (stopReason === 'refusal' && !sawText) {
+      throwIfAborted(request.signal);
+      yield { type: 'text', text: REFUSAL_NOTE };
+    }
+    if (sources.length) {
+      throwIfAborted(request.signal);
+      yield { type: 'sources', items: sources };
+    }
+    throwIfAborted(request.signal);
     yield { type: 'usage', usage: makeUsage(input, output, { cacheRead, cacheWrite, reasoning: thinkingTokens }) };
+    throwIfAborted(request.signal);
     yield { type: 'done', stopReason };
   }
 

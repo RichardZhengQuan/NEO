@@ -287,6 +287,55 @@ describe('Gemini streaming', () => {
     });
   });
 
+  it('abort after first tool_call in a multi-call chunk is honoured', async () => {
+    const ac = new AbortController();
+    const { a } = make(stream(
+      cand([
+        { functionCall: { name: 'get_weather', args: { city: 'Paris' } } },
+        { functionCall: { name: 'get_weather', args: { city: 'Rome' } } },
+      ], 'STOP'),
+    ));
+    const it = a.chat(req({ signal: ac.signal, tools: TOOLS }))[Symbol.asyncIterator]();
+    expect((await it.next()).value).toMatchObject({ type: 'tool_call', name: 'get_weather', input: { city: 'Paris' } });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it.each([
+    ['text', [{ text: 'First' }, { text: 'Second' }], 'text'],
+    ['reasoning', [{ text: 'First', thought: true }, { text: 'Second', thought: true }], 'reasoning'],
+    ['reasoning_part', [{ text: 'First', thought: true, thoughtSignature: 'signature' }], 'reasoning'],
+  ] as const)('abort before %s in a multi-event chunk is honoured', async (_nextType, parts, firstType) => {
+    const ac = new AbortController();
+    const { a } = make(stream(cand([...parts], 'STOP')));
+    const it = a.chat(req({ signal: ac.signal }))[Symbol.asyncIterator]();
+    expect((await it.next()).value).toMatchObject({ type: firstType });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it.each([
+    ['sources', 'text'],
+    ['usage', 'sources'],
+    ['done', 'usage'],
+  ] as const)('abort before post-stream %s is honoured', async (_nextType, firstType) => {
+    const ac = new AbortController();
+    const { a } = make(stream({
+      candidates: [{
+        content: { parts: [] },
+        finishReason: 'SAFETY',
+        groundingMetadata: { groundingChunks: [{ web: { uri: 'https://example.com', title: 'Example' } }] },
+      }],
+      usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1 },
+    }));
+    const it = a.chat(req({ signal: ac.signal, webSearch: {} }))[Symbol.asyncIterator]();
+    let first = await it.next();
+    while (!first.done && first.value.type !== firstType) first = await it.next();
+    expect(first.value).toMatchObject({ type: firstType });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
   it('abort mid-stream → cancelled', async () => {
     const ac = new AbortController();
     const { a } = make(() => sseResponse(dataFrames([cand([{ text: 'Hi' }])]), { hang: true }));

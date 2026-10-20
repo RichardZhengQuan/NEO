@@ -261,15 +261,24 @@ export class ChatGPTAdapter implements ProviderAdapter {
             for (const item of result['output'].filter(isPlainObject)) {
               if (item['type'] === 'function_call') {
                 const complete = finishCall(remember(item, String(calls.size)));
-                if (complete) yield complete;
+                if (complete) {
+                  throwIfAborted(request.signal);
+                  yield complete;
+                }
               }
               const replay = rememberItem(item);
-              if (replay) yield replay;
+              if (replay) {
+                throwIfAborted(request.signal);
+                yield replay;
+              }
             }
           }
           for (const call of calls.values()) {
             const complete = finishCall(call);
-            if (complete) yield complete;
+            if (complete) {
+              throwIfAborted(request.signal);
+              yield complete;
+            }
           }
           const details = isPlainObject(result['incomplete_details']) ? result['incomplete_details'] : {};
           if (type === 'response.incomplete' && details['reason'] !== 'max_output_tokens' && details['reason'] !== 'content_filter') {
@@ -280,6 +289,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
           if (nativeSearch && Array.isArray(result['output']) && result['output'].length) {
             // Item completion events can be interleaved. The final output array
             // is the authoritative order for the next stateless Responses call.
+            throwIfAborted(request.signal);
             yield { type: 'provider_part', part: { type: 'provider_part', provider: this.kind, model: request.model,
               data: { type: 'native_search_response', output: result['output'] } } };
           }
@@ -294,8 +304,15 @@ export class ChatGPTAdapter implements ProviderAdapter {
     }
     throwIfAborted(request.signal);
     if (!stopReason) throw new NeoError('provider_error', 'The connection to ChatGPT closed before the response finished.', { retryable: true });
-    if (sources.length) yield { type: 'sources', items: sources };
-    if (usage) yield { type: 'usage', usage };
+    if (sources.length) {
+      throwIfAborted(request.signal);
+      yield { type: 'sources', items: sources };
+    }
+    if (usage) {
+      throwIfAborted(request.signal);
+      yield { type: 'usage', usage };
+    }
+    throwIfAborted(request.signal);
     yield { type: 'done', stopReason };
   }
 

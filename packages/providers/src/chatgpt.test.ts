@@ -170,6 +170,20 @@ describe('ChatGPT Responses API with a loopback fake', () => {
     expect((await collectChat(adapter.chat(request))).toolCalls).toHaveLength(1);
   });
 
+  it('abort after first tool_call in completion batch is honoured', async () => {
+    const ac = new AbortController();
+    stream(completed({ output: [
+      { type: 'function_call', id: 'fc_1', call_id: 'c1', name: 'get_weather', arguments: '{"city":"Paris"}' },
+      { type: 'function_call', id: 'fc_2', call_id: 'c2', name: 'get_weather', arguments: '{"city":"Rome"}' },
+    ] }));
+    const iterator = adapter.chat({ ...request, signal: ac.signal, tools: [{ name: 'get_weather', description: 'Weather', inputSchema: { type: 'object' } }] })[Symbol.asyncIterator]();
+    let event = await iterator.next();
+    while (!event.done && event.value.type !== 'tool_call') event = await iterator.next();
+    expect(event.value).toMatchObject({ type: 'tool_call', id: 'c1', input: { city: 'Paris' } });
+    ac.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
   it('finishes fragmented calls from accumulated arguments on completion', async () => {
     stream({ type: 'response.output_item.added', item: { type: 'function_call', id: 'fc_1', call_id: 'c1', name: 'go', arguments: '' } },
       { type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '{"x":' },
@@ -328,5 +342,37 @@ describe('ChatGPT Responses API with a loopback fake', () => {
 
   it('rejects non-public production endpoints including backend-api', () => {
     expect(() => new ChatGPTAdapter({ ...config, baseUrl: 'https://chatgpt.com/backend-api' })).toThrow('public OpenAI API');
+  });
+});
+
+describe('ChatGPT per-yield batch cancellation', () => {
+  const first = { type: 'function_call', id: 'fc_1', call_id: 'c1', name: 'get_weather', arguments: '{"city":"Paris"}' };
+  const second = { type: 'function_call', id: 'fc_2', call_id: 'c2', name: 'get_weather', arguments: '{"city":"Rome"}' };
+  const search = { type: 'web_search_call', id: 'search_1' };
+  const usage = { input_tokens: 10, output_tokens: 5 };
+
+  it.each([
+    { name: 'completed output tool-call batch', events: [completed({ output: [first, second] })], after: { type: 'tool_call', id: 'c1' }, nativeSearch: false },
+    { name: 'accumulated tool-call batch', events: [
+      { type: 'response.output_item.added', item: first },
+      { type: 'response.output_item.added', item: second },
+      completed(),
+    ], after: { type: 'tool_call', id: 'c1' }, nativeSearch: false },
+    { name: 'completed output replay batch', events: [completed({ output: [search, { ...search, id: 'search_2' }] })], after: { type: 'provider_part', part: { data: { id: 'search_1' } } }, nativeSearch: true },
+    { name: 'native-search replay before the final aggregate', events: [completed({ output: [search] })], after: { type: 'provider_part', part: { data: { id: 'search_1' } } }, nativeSearch: true },
+    { name: 'sources before usage', events: [completed({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'Answer', annotations: [{ type: 'url_citation', url: 'https://example.com', title: 'Example' }] }] }], usage })], after: { type: 'sources' }, nativeSearch: false },
+    { name: 'usage before done', events: [completed({ usage })], after: { type: 'usage' }, nativeSearch: false },
+  ])('abort after $name is honoured', async ({ events, after, nativeSearch }) => {
+    const ac = new AbortController();
+    const adapter = new ChatGPTAdapter(config, {
+      fetch: async () => new Response(events.map(frame).join(''), { headers: { 'content-type': 'text/event-stream' } }),
+      getChatGPTAccessToken: async () => TOKEN,
+    });
+    const iterator = adapter.chat({ ...request, signal: ac.signal, ...(nativeSearch ? { webSearch: {} } : {}), tools: [{ name: 'get_weather', description: 'Weather', inputSchema: { type: 'object' } }] })[Symbol.asyncIterator]();
+    let event = await iterator.next();
+    while (!event.done && event.value.type !== after.type) event = await iterator.next();
+    expect(event.value).toMatchObject(after);
+    ac.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'cancelled' });
   });
 });
