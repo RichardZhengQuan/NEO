@@ -131,6 +131,19 @@ describe('writeInitConfig', () => {
     expect(fs.existsSync(cfgPath)).toBe(true);
   });
 
+  it('writeInitConfig does not follow a symlink at the old predictable tmp path', () => {
+    if (process.platform === 'win32') return;
+    const sentinelPath = path.join(tmpDir, 'sentinel.txt');
+    const sentinelContent = 'sentinel-content';
+    fs.writeFileSync(sentinelPath, sentinelContent, { mode: 0o644 });
+    const symlinkPath = path.join(tmpDir, `.neo-config-tmp-${process.pid}`);
+    fs.symlinkSync(sentinelPath, symlinkPath);
+
+    writeInitConfig(tmpDir, baseAnswers);
+
+    expect(fs.readFileSync(sentinelPath, 'utf8')).toBe(sentinelContent);
+  });
+
   it('config.json contains expected fields', () => {
     writeInitConfig(tmpDir, baseAnswers);
     const cfgPath = path.join(tmpDir, 'config.json');

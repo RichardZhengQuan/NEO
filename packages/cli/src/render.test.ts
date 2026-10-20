@@ -33,6 +33,23 @@ describe('renderEvent', () => {
     expect(lines[0]?.text).toContain('thinking…');
   });
 
+  it('reasoning.delta strips control sequences from model reasoning text', () => {
+    const ev: AgentEvent = { type: 'reasoning.delta', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm', text: 'clean\x1b[31mred\x1b[0m' };
+    const lines = renderEvent(ev, { showReasoning: true });
+    expect(lines[0]?.text).toContain('cleanred');
+    expect(lines[0]?.text).not.toContain('\x1b');
+  });
+
+  it('part.added reasoning strips control sequences from model reasoning text', () => {
+    const ev: Extract<AgentEvent, { type: 'part.added' }> = {
+      type: 'part.added', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm', index: 0,
+      part: { type: 'reasoning', text: 'think\x1b[31mred\x1b[0m' },
+    };
+    const lines = renderEvent(ev, { showReasoning: true });
+    expect(lines[0]?.text).toContain('thinkred');
+    expect(lines[0]?.text).not.toContain('\x1b');
+  });
+
   it('tool.started returns chip line', () => {
     const ev: AgentEvent = {
       type: 'tool.started', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
@@ -73,6 +90,26 @@ describe('renderEvent', () => {
   it('memory.recalled is empty when no items', () => {
     const ev: AgentEvent = { type: 'memory.recalled', episodeId: 'c', conversationId: 'c', turnId: 't', items: [] };
     expect(renderEvent(ev)).toHaveLength(0);
+  });
+
+  it('memory.recalled strips control sequences from model-authored labels', () => {
+    const ev: AgentEvent = {
+      type: 'memory.recalled', episodeId: 'c', conversationId: 'c', turnId: 't',
+      items: [
+        { id: 'mem1', kind: 'fact', label: 'safe\x1b[2J\x1b[Hpoisoned', score: 0.9, reason: 'query' },
+        { id: 'mem2', kind: 'fact', label: 'also\x1b[31mred\x1b[0m label', score: 0.8, reason: 'query' },
+      ],
+    };
+    const lines = renderEvent(ev);
+    expect(lines).toHaveLength(1);
+    const text = lines[0]!.text;
+    expect(text).not.toContain('\x1b');
+    // Visible characters must survive
+    expect(text).toContain('safe');
+    expect(text).toContain('poisoned');
+    expect(text).toContain('also');
+    expect(text).toContain('red');
+    expect(text).toContain('label');
   });
 
   it('turn.finished emits usage line', () => {

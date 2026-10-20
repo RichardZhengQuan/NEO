@@ -2,6 +2,7 @@
  * Config file reading and writing for `neo init`.
  * Injectable prompt functions so the logic can be unit-tested without stdin.
  */
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -175,12 +176,23 @@ export function writeInitConfig(dataDir: string, answers: InitAnswers, configPat
   // retains access after the chmod, and (2) a crash between the two calls
   // leaves the file at the world-readable mode.  renameSync is atomic on
   // POSIX: the target either has the old content or the new 0o600 content.
-  const tmpPath = path.join(path.dirname(cfgPath), `.neo-config-tmp-${process.pid}`);
+  const tmpPath = path.join(path.dirname(cfgPath), `.neo-config-tmp-${crypto.randomBytes(8).toString('hex')}`);
+  let tmpFd: number | null = null;
+  let tmpCreated = false;
   try {
-    fs.writeFileSync(tmpPath, json, { encoding: 'utf8', mode: 0o600 });
+    tmpFd = fs.openSync(tmpPath, 'wx', 0o600);
+    tmpCreated = true;
+    fs.writeSync(tmpFd, json, 0, 'utf8');
+    fs.closeSync(tmpFd);
+    tmpFd = null;
     fs.renameSync(tmpPath, cfgPath);
   } catch (err) {
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore cleanup error */ }
+    if (tmpFd !== null) {
+      try { fs.closeSync(tmpFd); } catch { /* ignore */ }
+    }
+    if (tmpCreated) {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore cleanup error */ }
+    }
     throw err;
   }
 }
