@@ -96,3 +96,25 @@ export function recurrenceFor(preset: RepeatPreset, opts: { interval?: number; w
       return { freq: 'yearly', interval };
   }
 }
+
+/**
+ * Overlay editable recurrence fields while preserving the original frequency,
+ * end conditions, daily weekday filters, monthly days and the interval hidden
+ * by the weekdays preset. Call only while the preset is unchanged.
+ * Pass `generated = null` when the user set the preset to 'none'.
+ */
+export function preserveRecurrence(original: RecurrenceInput | null | undefined, generated: RecurrenceInput | null): RecurrenceInput | null {
+  if (!generated) return null;
+  if (!original) return generated;
+  const r: RecurrenceInput = { ...generated };
+  // Restore original freq when presetOf was lossy (e.g. hourly→daily).
+  if (original.freq !== generated.freq) r.freq = original.freq;
+  // Restore unexposed end conditions.
+  if (original.count !== undefined) r.count = original.count;
+  if (original.until !== undefined) r.until = original.until;
+  // Restore filters and intervals the current preset cannot expose.
+  if (original.byWeekday?.length && r.freq === 'daily') r.byWeekday = [...original.byWeekday];
+  if (presetOf(original) === 'weekdays') r.interval = original.interval ?? 1;
+  if (original.byMonthDay?.length && r.freq === 'monthly') r.byMonthDay = [...original.byMonthDay];
+  return r;
+}
