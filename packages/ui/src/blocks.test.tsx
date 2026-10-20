@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import type { Reminder, ReminderBlock, UIBlock } from '@neo/protocol';
+import type { ChangesBlock, Reminder, ReminderBlock, UIBlock } from '@neo/protocol';
 import { BlockRenderer, formatCell, type LiveData, type OnUIAction } from './blocks.js';
 import { I18nProvider } from './i18n.js';
 
@@ -15,6 +15,30 @@ const fresh: Reminder = { id: 'rem_1', title: 'Stretch', notes: null, dueAt: rem
 function widget(block: UIBlock, live?: LiveData, onAction?: OnUIAction, locale = 'en') {
   return <I18nProvider locale={locale}><BlockRenderer block={block} live={live} onAction={onAction} /></I18nProvider>;
 }
+
+describe('ChangeDetails: reminder.update timezone', () => {
+  it('renders a timezone-only reminder update with the from and to zones in the approval card', () => {
+    const block: ChangesBlock = {
+      type: 'changes',
+      timezone: 'UTC',
+      items: [{
+        id: 'c1',
+        kind: 'reminder.update',
+        status: 'pending',
+        reminderId: 'rem_1',
+        title: 'Stretch',
+        before: { timezone: 'America/New_York' },
+        after: { timezone: 'America/Los_Angeles' },
+      }],
+    };
+    const { container } = render(widget(block));
+    const details = container.querySelector('.neo-change__details');
+    expect(details).toBeTruthy();
+    expect(details?.textContent).toContain('America/New_York');
+    expect(details?.textContent).toContain('America/Los_Angeles');
+    expect(details?.textContent).toBe('Timezone: America/New_York → America/Los_Angeles');
+  });
+});
 
 describe('reminder state', () => {
   it('shows notes as a muted caption with the full text available', () => {
