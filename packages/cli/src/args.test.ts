@@ -148,6 +148,11 @@ describe('parseCliArgs', () => {
 
   // ── memory ──
   describe('memory', () => {
+    it('returns help for --help', () => {
+      expect(parseCliArgs(['memory', '--help'])).toEqual({ cmd: 'help', topic: 'memory' });
+      expect(parseCliArgs(['memory', '-h'])).toEqual({ cmd: 'help', topic: 'memory' });
+    });
+
     it('rejects missing subcommand', () => {
       const r = parseCliArgs(['memory']);
       expect(r).toHaveProperty('error');
