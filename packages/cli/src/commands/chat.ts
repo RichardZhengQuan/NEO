@@ -63,7 +63,8 @@ export async function runChat(opts: ChatOptions): Promise<void> {
 
   for (const message of recent.items) {
     const text = textOf(message.parts) || message.parts.filter((part) => part.type === 'ui').map((part) => uiBlocksToText([part.block])).join('\n');
-    if (text.trim()) process.stdout.write(`${dim(`  ${new Date(message.createdAt).toLocaleString()} ${message.role}:`)} ${text}\n`);
+    const safeText = message.role === 'assistant' ? stripModelText(text) : text;
+    if (safeText.trim()) process.stdout.write(`${dim(`  ${new Date(message.createdAt).toLocaleString()} ${message.role}:`)} ${safeText}\n`);
   }
   if (recent.items.length) process.stdout.write('\n');
 

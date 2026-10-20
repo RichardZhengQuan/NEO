@@ -31,7 +31,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
 
     case 'reasoning.delta':
       if (!opts.showReasoning) return [];
-      return [{ text: dim(`[thinking] ${event.text}`), delta: true }];
+      return [{ text: dim(`[thinking] ${stripModelText(event.text)}`), delta: true }];
 
     case 'tool.started': {
       const chip = `  ⚙ ${event.title || event.name}…`;
@@ -69,7 +69,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
         return lines;
       }
       if (part.type === 'reasoning' && opts.showReasoning) {
-        return [{ text: dim(`[reasoning] ${part.text}`) }];
+        return [{ text: dim(`[reasoning] ${stripModelText(part.text)}`) }];
       }
       if (part.type === 'sources' && part.items.length) {
         return [

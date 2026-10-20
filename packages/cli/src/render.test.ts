@@ -33,6 +33,23 @@ describe('renderEvent', () => {
     expect(lines[0]?.text).toContain('thinking…');
   });
 
+  it('reasoning.delta strips control sequences from model reasoning text', () => {
+    const ev: AgentEvent = { type: 'reasoning.delta', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm', text: 'clean\x1b[31mred\x1b[0m' };
+    const lines = renderEvent(ev, { showReasoning: true });
+    expect(lines[0]?.text).toContain('cleanred');
+    expect(lines[0]?.text).not.toContain('\x1b');
+  });
+
+  it('part.added reasoning strips control sequences from model reasoning text', () => {
+    const ev: Extract<AgentEvent, { type: 'part.added' }> = {
+      type: 'part.added', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm', index: 0,
+      part: { type: 'reasoning', text: 'think\x1b[31mred\x1b[0m' },
+    };
+    const lines = renderEvent(ev, { showReasoning: true });
+    expect(lines[0]?.text).toContain('thinkred');
+    expect(lines[0]?.text).not.toContain('\x1b');
+  });
+
   it('tool.started returns chip line', () => {
     const ev: AgentEvent = {
       type: 'tool.started', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
