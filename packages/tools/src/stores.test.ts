@@ -546,6 +546,61 @@ describe('TaskStore', () => {
     expect(stores.tasks.list({ query: 'trip' }).map((x) => x.title)).toEqual(['Call mom']);
     expect(stores.tasks.list({ query: '50%_' })).toEqual([]);
   });
+
+  // ── cycle-detection tests ───────────────────────────────────────────────
+
+  it('update rejects a 2-level cycle (A→B, then B→A)', () => {
+    const a = stores.tasks.create({ title: 'A' });
+    const b = stores.tasks.create({ title: 'B', parentId: a.id });
+    expectNeoError(() => stores.tasks.update(a.id, { parentId: b.id }), 'bad_request', /ancestor/i);
+    // task A must be unchanged
+    expect(stores.tasks.get(a.id)!.parentId).toBeNull();
+    // task B must still point at A
+    expect(stores.tasks.get(b.id)!.parentId).toBe(a.id);
+  });
+
+  it('update rejects a 3-level cycle (A→B→C, then C→A)', () => {
+    const a = stores.tasks.create({ title: 'A' });
+    const b = stores.tasks.create({ title: 'B', parentId: a.id });
+    const c = stores.tasks.create({ title: 'C', parentId: b.id });
+    expectNeoError(() => stores.tasks.update(a.id, { parentId: c.id }), 'bad_request', /ancestor/i);
+    expect(stores.tasks.get(a.id)!.parentId).toBeNull();
+    expect(stores.tasks.get(b.id)!.parentId).toBe(a.id);
+    expect(stores.tasks.get(c.id)!.parentId).toBe(b.id);
+  });
+
+  it('update rejects a 4-level cycle (A→B→C→D, then D→A)', () => {
+    const a = stores.tasks.create({ title: 'A' });
+    const b = stores.tasks.create({ title: 'B', parentId: a.id });
+    const c = stores.tasks.create({ title: 'C', parentId: b.id });
+    const d = stores.tasks.create({ title: 'D', parentId: c.id });
+    expectNeoError(() => stores.tasks.update(a.id, { parentId: d.id }), 'bad_request', /ancestor/i);
+    expect(stores.tasks.get(a.id)!.parentId).toBeNull();
+    expect(stores.tasks.get(d.id)!.parentId).toBe(c.id);
+  });
+
+  it('create rejects a self-referential parentId (symmetric guard on create)', () => {
+    // A task cannot name itself as parent on creation; the ID is known by the
+    // caller only via the return value, so this is only reachable by a
+    // crafted API call.  requireParent catches it via the self-equality check.
+    const a = stores.tasks.create({ title: 'A' });
+    expectNeoError(() => stores.tasks.update(a.id, { parentId: a.id }), 'bad_request');
+    expect(stores.tasks.get(a.id)!.parentId).toBeNull();
+  });
+
+  it('valid re-parenting is still allowed after the cycle-detection fix', () => {
+    const a = stores.tasks.create({ title: 'A' });
+    const b = stores.tasks.create({ title: 'B', parentId: a.id });
+    const c = stores.tasks.create({ title: 'C', parentId: b.id });
+    const d = stores.tasks.create({ title: 'D' });
+    // Moving C under D (no cycle) must succeed
+    const updated = stores.tasks.update(c.id, { parentId: d.id });
+    expect(updated.parentId).toBe(d.id);
+    expect(stores.tasks.get(c.id)!.parentId).toBe(d.id);
+    // Now A can become a child of C's original position (B) — still no cycle
+    const updated2 = stores.tasks.update(d.id, { parentId: a.id });
+    expect(updated2.parentId).toBe(a.id);
+  });
 });
 
 // ───────────────────────────── notes ─────────────────────────────

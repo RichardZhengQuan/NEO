@@ -92,6 +92,19 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
     if (parentId == null) return;
     if (parentId === self) throw new NeoError('bad_request', 'A task cannot be its own parent.');
     if (!get(parentId)) throw new NeoError('not_found', `Unknown parent task "${parentId}".`);
+    if (self !== undefined) {
+      // Walk the ancestor chain to reject N-level cycles.  The walk runs
+      // inside the caller's db.transaction so a concurrent reparent cannot
+      // sneak a cycle past this check.
+      let cur: string | null = parentId;
+      const visited = new Set<string>();
+      while (cur !== null) {
+        if (cur === self) throw new NeoError('bad_request', 'A task cannot be an ancestor of itself.');
+        if (visited.has(cur)) break; // pre-existing corrupt cycle in storage — stop to avoid looping forever
+        visited.add(cur);
+        cur = get(cur)?.parentId ?? null;
+      }
+    }
   };
   const nextOrder = (table: 'tasks' | 'task_lists', listId?: string): number => {
     const r = (listId === undefined
