@@ -423,6 +423,7 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
         // Use a timer deadline instead: if ws has not closed on its own within
         // closeTimeoutMs, force-terminate it — OS-independent and sufficient.
         const t = setTimeout(() => ws.terminate(), limits.closeTimeoutMs);
+        t.unref();
         ws.once('close', () => clearTimeout(t));
       });
       if (closing) { closeSocket(ws, 1001, 'Relay stopped'); return; }

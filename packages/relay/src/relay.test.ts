@@ -561,11 +561,10 @@ describe('relay limits and lifecycle', () => {
       // Send a malformed masked frame: RSV2 bit set, invalid per RFC 6455 without an extension.
       // ws emits 'error'; the timer handler calls ws.terminate() after closeTimeoutMs.
       raw.write(Buffer.from([0xa0, 0x80, 0x00, 0x00, 0x00, 0x00]));
-      // Poll until the admission slot is released (OS-independent: does not rely on rawClosed,
-      // which is unreliable on Linux when the peer holds its write side open with allowHalfOpen).
-      await vi.waitFor(() => expect(relay.stats().phones).toBe(0), { timeout: 200 });
-      // Drain the Close frame the relay sends to the server when the phone disconnects.
+      // closePhone() sends the Close frame and removes the phone in the same synchronous call,
+      // so awaiting the Close frame is an event-based wait — no polling needed.
       await server.inbox.frame();
+      expect(relay.stats().phones).toBe(0);
       // The admission slot is released; a second phone from the same IP is now accepted.
       const second = await phone(relay, server);
       expect(second).toBeDefined();
