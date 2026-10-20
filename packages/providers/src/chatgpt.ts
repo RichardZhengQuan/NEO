@@ -15,7 +15,7 @@ import {
 } from '@neo/protocol';
 import type { ProviderOptions } from './index.js';
 import { parseSSE } from './sse.js';
-import { addSource, asCancelled, effortFor, isPlainObject, makeUsage, parseToolInput, readModelData, systemWithJsonInstruction, testByListingModels, throwIfAborted } from './shared.js';
+import { addSource, asCancelled, effortFor, isPlainObject, makeUsage, parseToolInput, raceAbort, readModelData, systemWithJsonInstruction, testByListingModels, throwIfAborted } from './shared.js';
 
 interface FunctionCall {
   id: string;
@@ -320,7 +320,9 @@ export class ChatGPTAdapter implements ProviderAdapter {
     throwIfAborted(signal);
     if (!this.options.getChatGPTAccessToken) throw chatgptSubscriptionError('subscription_sharing_invalid_user');
     let token: string;
-    try { token = await this.options.getChatGPTAccessToken(this.id); } catch (error) {
+    try { token = await raceAbort(this.options.getChatGPTAccessToken(this.id, signal), signal); } catch (error) {
+      const cancelled = asCancelled(error, signal);
+      if (cancelled) throw cancelled;
       if (error instanceof NeoError) throw error;
       throw chatgptSubscriptionError('subscription_sharing_invalid_user');
     }
