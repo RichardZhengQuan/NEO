@@ -2,7 +2,6 @@ import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
 import { isIP } from 'node:net';
-import type { Socket as NetSocket } from 'node:net';
 import WebSocket, { WebSocketServer } from 'ws';
 import type { RawData } from 'ws';
 import {
@@ -418,10 +417,13 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       // Install a terminate deadline so a half-open TCP write side cannot hold an
       // admission slot past closeTimeoutMs (same hardening as the refused-upgrade handler).
       ws.on('error', () => {
-        // resetAndDestroy() forces TCP RST while socket is still ESTABLISHED.
-        // Must be synchronous: ws calls socket.end() (FIN) after this handler returns,
-        // and destroy() after a FIN cannot send RST, leaving a half-open peer alive.
-        try { (socket as unknown as NetSocket).resetAndDestroy(); } catch { ws.terminate(); }
+        // resetAndDestroy() does not reliably force TCP RST on Linux when the socket
+        // receive buffer has already been drained before the error fires (the kernel
+        // sends FIN instead of RST, leaving a half-open peer alive indefinitely).
+        // Use a timer deadline instead: if ws has not closed on its own within
+        // closeTimeoutMs, force-terminate it — OS-independent and sufficient.
+        const t = setTimeout(() => ws.terminate(), limits.closeTimeoutMs);
+        ws.once('close', () => clearTimeout(t));
       });
       if (closing) { closeSocket(ws, 1001, 'Relay stopped'); return; }
       if (path === RELAY_SERVER_PATH) serverSocket(ws, ip);
