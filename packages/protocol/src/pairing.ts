@@ -83,7 +83,9 @@ export function isLanAddress(value: string): boolean {
   const host = match[1]!;
   if (host.startsWith('[')) {
     try {
-      return new URL(`http://${host}/`).hostname === host.toLowerCase();
+      const parsed = new URL(`http://${host}/`).hostname;
+      // Accept any valid IPv6 regardless of canonical spelling difference.
+      return parsed.startsWith('[') && parsed.endsWith(']');
     } catch {
       return false;
     }
