@@ -824,7 +824,7 @@ const en: Messages = {
   'dataSettings.shortcut_focus': 'Focus the message box',
   'dataSettings.shortcut_close': 'Close menus and dialogs',
   'dataSettings.about': 'About NEO',
-  'dataSettings.about_text': 'NEO is an open-source personal AI assistant you can make your own: you choose the AI, what it remembers and where it runs. MIT licensed.',
+  'dataSettings.about_text': 'NEO is an open-source personal AI assistant that builds its own memory over time and works with the AI you connect. MIT licensed.',
   'dataSettings.source_code': 'Source code',
 };
 
@@ -1594,7 +1594,7 @@ const zhCN: Messages = {
   'dataSettings.shortcut_focus': '聚焦到输入框',
   'dataSettings.shortcut_close': '关闭菜单和对话框',
   'dataSettings.about': '关于 NEO',
-  'dataSettings.about_text': 'NEO 是一个开源的私人 AI 助手，可以完全按你的方式定制：用哪个 AI、记住什么、在哪里运行，都由你决定。采用 MIT 许可证。',
+  'dataSettings.about_text': 'NEO 是一个开源的私人 AI 助手，会随着对话自动积累记忆，配合你连接的 AI 一起工作。采用 MIT 许可证。',
   'dataSettings.source_code': '源代码',
 };
 
