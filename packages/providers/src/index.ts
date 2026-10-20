@@ -23,7 +23,7 @@ export interface ProviderOptions {
   /** Resolves ProviderConfig.apiKeySecret names to values (encrypted SecretStore). */
   resolveSecret?: (name: string) => string | undefined;
   /** ChatGPT credentials are managed server-side and never copied into ProviderConfig. */
-  getChatGPTAccessToken?: (providerId: string, signal?: AbortSignal) => Promise<string>;
+  getChatGPTAccessToken?: (providerId: string) => Promise<string>;
   onChatGPTUnauthorized?: (providerId: string, accessToken?: string) => void;
   logger?: Logger;
   /** Required explicit script for internal `mock` test providers. */

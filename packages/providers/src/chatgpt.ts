@@ -320,7 +320,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
     throwIfAborted(signal);
     if (!this.options.getChatGPTAccessToken) throw chatgptSubscriptionError('subscription_sharing_invalid_user');
     let token: string;
-    try { token = await raceAbort(this.options.getChatGPTAccessToken(this.id, signal), signal); } catch (error) {
+    try { token = await raceAbort(this.options.getChatGPTAccessToken(this.id), signal); } catch (error) {
       const cancelled = asCancelled(error, signal);
       if (cancelled) throw cancelled;
       if (error instanceof NeoError) throw error;

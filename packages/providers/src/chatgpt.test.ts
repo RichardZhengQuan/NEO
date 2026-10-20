@@ -31,7 +31,7 @@ it('cancels while the access token is still pending', async () => {
   controller.abort();
   await aborted;
   await next;
-  expect(getChatGPTAccessToken).toHaveBeenCalledExactlyOnceWith('chatgpt', controller.signal);
+  expect(getChatGPTAccessToken).toHaveBeenCalledExactlyOnceWith('chatgpt');
   expect(fetch).not.toHaveBeenCalled();
   expect(unauthorized).not.toHaveBeenCalled();
 });
