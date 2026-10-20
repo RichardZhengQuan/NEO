@@ -506,6 +506,7 @@ limits in milliseconds.
 | `RELAY_REGISTRATION_TIMEOUT_MS` | `10000` | Time to answer the registration challenge. Capped at `2147483647` (Node's `setTimeout` range); larger values fail startup |
 | `RELAY_PHONE_IDLE_TIMEOUT_MS` | `120000` | Maximum inactivity in both directions. Capped at `2147483647`; larger values fail startup |
 | `RELAY_HEARTBEAT_INTERVAL_MS` | `30000` | Server ping interval; missed pong terminates the socket. Capped at `2147483647`; larger values fail startup |
+| `RELAY_CLOSE_TIMEOUT_MS` | `250` | Deadline for a half-open peer to finish closing before `ws.terminate()` is called (also the refused-upgrade raw-socket destroy deadline). Capped at `2147483647`; larger values fail startup |
 
 Each Noise message is capped at 65,535 bytes (plus the five-byte server relay
 header). The relay disconnects phones that exceed the byte-rate bucket or
