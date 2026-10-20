@@ -58,13 +58,18 @@ export class MockProvider implements ProviderAdapter {
     }
     throwIfAborted(request.signal);
     const toolCalls = reply.toolCalls ?? [];
-    for (const tc of toolCalls) yield { type: 'tool_call', id: tc.id ?? newCallId('call_mock'), name: tc.name, input: tc.input };
+    for (const tc of toolCalls) {
+      throwIfAborted(request.signal);
+      yield { type: 'tool_call', id: tc.id ?? newCallId('call_mock'), name: tc.name, input: tc.input };
+    }
 
     const inputText = [request.system ?? '', ...request.messages.flatMap((m) => m.parts.map((p) => (p.type === 'text' ? p.text : '')))].join('\n');
+    throwIfAborted(request.signal);
     yield {
       type: 'usage',
       usage: reply.usage ?? { inputTokens: estimateTokens(inputText), outputTokens: estimateTokens(`${reply.reasoning ?? ''}${reply.text ?? ''}`) },
     };
+    throwIfAborted(request.signal);
     yield { type: 'done', stopReason: reply.stopReason ?? (toolCalls.length ? 'tool_use' : 'end') };
   }
 
