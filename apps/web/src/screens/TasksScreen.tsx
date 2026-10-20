@@ -59,6 +59,20 @@ function TaskDetails({ task, lists, onClose }: { task: Task; lists: TaskList[]; 
   const tz = useSession((s) => s.settings?.timezone);
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? '');
+  const serverTitleRef = useRef(task.title);
+  const serverNotesRef = useRef(task.notes ?? '');
+  useEffect(() => {
+    const prev = serverTitleRef.current;
+    serverTitleRef.current = task.title;
+    // Only resync if the user hasn't edited this field since last server sync.
+    // Functional setter reads current state; avoids stale-closure without deps.
+    setTitle((curr) => (curr === prev ? task.title : curr));
+  }, [task.title]);
+  useEffect(() => {
+    const prev = serverNotesRef.current;
+    serverNotesRef.current = task.notes ?? '';
+    setNotes((curr) => (curr === prev ? task.notes ?? '' : curr));
+  }, [task.notes]);
   const save = (patch: Parameters<typeof patchTask>[1]) => void patchTask(task, patch, t);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', padding: '0.25rem 0 0.5rem 2rem' }}>
