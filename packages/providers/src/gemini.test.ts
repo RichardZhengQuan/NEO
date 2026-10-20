@@ -409,6 +409,11 @@ describe('Gemini errors, keys, models, embeddings', () => {
     [{ code: 400 }, 'provider_error', false],
     [{ code: 404 }, 'provider_error', false],
     [{}, 'provider_error', false],
+    [{ status: 'INTERNAL' }, 'provider_error', true],
+    [{ status: 'UNAVAILABLE' }, 'provider_error', true],
+    [{ status: 'DEADLINE_EXCEEDED' }, 'provider_error', true],
+    [{ status: 'DATA_LOSS' }, 'provider_error', true],
+    [{ status: 'UNKNOWN' }, 'provider_error', true],
   ])('classifies in-stream Gemini errors without retrying: %j', async (error, code, retryable) => {
     const { a, f, sleep } = make(stream({ error: { message: 'Request failed', ...error } }));
     await expect(collect(a.chat(req()))).rejects.toMatchObject({ code, retryable });

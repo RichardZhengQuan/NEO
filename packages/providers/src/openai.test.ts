@@ -343,6 +343,18 @@ describe('OpenAI streaming', () => {
     expect(sleep.delays).toEqual([]);
   });
 
+  it.each([
+    ['rate_limit_exceeded', 'rate_limited', true],
+    ['insufficient_quota', 'rate_limited', true],
+    ['invalid_api_key', 'provider_auth', false],
+    ['invalid_organization', 'provider_auth', false],
+    ['account_deactivated', 'provider_auth', false],
+    ['server_error', 'provider_error', true],
+  ] as const)('classifies in-stream string code %s as %s (retryable: %s)', async (codeStr, expected, retryable) => {
+    const { a } = make(stream({ error: { code: codeStr, message: 'OpenAI string error' } }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: expected, retryable });
+  });
+
   it.each([{ message: 'Unknown failure' }, 'Unknown failure'])('does not retry an unclassified in-stream error %j', async (error) => {
     const { a } = make(stream({ error }));
     await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'provider_error', retryable: false });

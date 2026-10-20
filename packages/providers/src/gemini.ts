@@ -581,7 +581,8 @@ export class GeminiAdapter implements ProviderAdapter {
       const retryAfterMs = delayMs(retryAfter) ?? delayMs(retryDelay) ?? retryDelayMs;
       return new NeoError('rate_limited', detail, { retryable: true, details: { status: code, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) } });
     }
-    return new NeoError('provider_error', detail, { retryable: code >= 500, details: code ? { status: code } : {} });
+    const RETRYABLE_STATUS = new Set(['INTERNAL', 'UNAVAILABLE', 'DEADLINE_EXCEEDED', 'DATA_LOSS', 'UNKNOWN']);
+    return new NeoError('provider_error', detail, { retryable: code >= 500 || RETRYABLE_STATUS.has(status), details: code ? { status: code } : {} });
   }
 }
 

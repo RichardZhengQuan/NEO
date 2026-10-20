@@ -526,14 +526,17 @@ export class OpenAIAdapter implements ProviderAdapter {
     const message = isPlainObject(error) && typeof error['message'] === 'string' ? error['message'] : typeof error === 'string' ? error : JSON.stringify(error);
     const e = isPlainObject(error) ? error : {};
     const code = typeof e['code'] === 'number' ? e['code'] : 0;
+    const codeStr = typeof e['code'] === 'string' ? e['code'] : '';
     const detail = this.clean(`${this.label()} error: ${message}`);
-    if (code === 401 || code === 403) return new NeoError('provider_auth', detail, { details: { status: code } });
-    if (code === 429) {
+    if (code === 401 || code === 403 || codeStr === 'invalid_api_key' || codeStr === 'invalid_organization' || codeStr === 'account_deactivated') {
+      return new NeoError('provider_auth', detail, { details: code ? { status: code } : {} });
+    }
+    if (code === 429 || codeStr === 'rate_limit_exceeded' || codeStr === 'insufficient_quota') {
       const delay = e['retryAfter'] ?? e['retryDelay'];
       const retryAfterMs = typeof delay === 'number' ? delay * 1000 : typeof delay === 'string' ? parseRetryAfter(delay.replace(/s$/, '')) : undefined;
-      return new NeoError('rate_limited', detail, { retryable: true, details: { status: code, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) } });
+      return new NeoError('rate_limited', detail, { retryable: true, details: { ...(code ? { status: code } : {}), ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) } });
     }
-    return new NeoError('provider_error', detail, { retryable: code >= 500, details: code ? { status: code } : {} });
+    return new NeoError('provider_error', detail, { retryable: code >= 500 || codeStr === 'server_error', details: code ? { status: code } : {} });
   }
 }
 
