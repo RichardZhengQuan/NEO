@@ -61,6 +61,8 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let neoServer: NeoServer | null = null;
 let isQuitting = false;
+let shutdownPromise: Promise<void> | null = null;
+let shutdownDone = false;
 
 // ───────────────────────────── web directory ─────────────────────────────
 
@@ -475,8 +477,21 @@ async function main(): Promise<void> {
   startNotificationListener(serverUrl, ownerToken);
 
   // Graceful shutdown: stop the server when the app quits.
-  app.on('before-quit', () => {
-    void neoServer?.stop();
+  app.on('before-quit', (event) => {
+    if (shutdownDone) return;
+    event.preventDefault();
+    if (!shutdownPromise) {
+      shutdownPromise = (neoServer?.stop() ?? Promise.resolve())
+        .then(() => {
+          shutdownDone = true;
+          app.quit();
+        })
+        .catch((err: unknown) => {
+          console.error('[NEO desktop] Error stopping server during quit:', err);
+          shutdownDone = true;
+          app.quit();
+        });
+    }
   });
 }
 
