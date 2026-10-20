@@ -51,6 +51,18 @@ function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder; open:
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const zones = useMemo(() => listTimeZones(), []);
+
+  // Remote edits (another device) resync all fields when the server version advances.
+  useEffect(() => {
+    setTitle(reminder.title);
+    setNotes(reminder.notes ?? '');
+    setTimezone(reminder.timezone);
+    setDue(toLocalInputValue(reminder.dueAt, reminder.timezone));
+    setPreset(presetOf(reminder.recurrence));
+    setInterval(reminder.recurrence?.interval ?? 1);
+    setWeekdays(reminder.recurrence?.byWeekday ?? []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reminder.updatedAt]);
   const dueAt = fromLocalInputValue(due, timezone);
   const weekday = dueAt ? wallTimeOf(dueAt, timezone).weekday : 1;
   const recurrence: RecurrenceInput | null = recurrenceFor(preset, { interval, weekdays, weekday });
@@ -358,7 +370,7 @@ export function RemindersScreen({ highlightId }: { highlightId?: string }): Reac
           )}
         </div>
       </div>
-      {editing && <ReminderEditor key={editing.id} reminder={editing} open onClose={() => setEditing(null)} />}
+      {editing && <ReminderEditor key={editing.id} reminder={reminders[editing.id] ?? editing} open onClose={() => setEditing(null)} />}
     </div>
   );
 }
