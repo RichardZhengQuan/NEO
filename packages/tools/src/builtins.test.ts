@@ -431,6 +431,48 @@ describe('memory tools', () => {
     expect(t.mem.nodes.size).toBe(0);
   });
 
+  it('forget by query bounds the transcript sample while deleting all 150 matches', async () => {
+    const t = setup();
+    for (let i = 0; i < 150; i++) {
+      await t.run('remember', { content: `old job meeting ${i}`, label: `old-${i}` });
+    }
+    expect(t.mem.nodes.size).toBe(150);
+    const found = [...t.mem.nodes.values()];
+    const res = await t.run('forget', { query: 'old job' });
+    expect(res.isError).toBeFalsy();
+    const output = res.output as { forgotten: string[]; ids: string[]; totalForgotten: number; truncated: boolean };
+    expect(output.forgotten).toHaveLength(100);
+    expect(output.ids).toHaveLength(100);
+    expect(output.forgotten).toEqual(found.slice(0, 100).map(n => n.label));
+    expect(output.ids).toEqual(found.slice(0, 100).map(n => n.id));
+    expect(output.totalForgotten).toBe(150);
+    expect(output.truncated).toBe(true);
+    expect(res.summary).toBe('Forgot 150 memories');
+    expect(t.mem.calls.filter(c => c.method === 'findForForget')).toEqual([
+      { method: 'findForForget', args: { query: 'old job', limit: 10_000 } },
+    ]);
+    expect(t.mem.calls.filter(c => c.method === 'forget')).toEqual([
+      { method: 'forget', args: found.map(n => n.id) },
+    ]);
+    expect(t.mem.nodes.size).toBe(0);
+  });
+
+  it('forget by query keeps the existing output shape at 100 matches and for no matches', async () => {
+    const t = setup();
+    for (let i = 0; i < 100; i++) {
+      await t.run('remember', { content: `old job meeting ${i}`, label: `old-${i}` });
+    }
+    const found = [...t.mem.nodes.values()];
+    const res = await t.run('forget', { query: 'old job' });
+    expect(res.isError).toBeFalsy();
+    expect(res.output).toEqual({ forgotten: found.map(n => n.label), ids: found.map(n => n.id) });
+    expect(res.summary).toBe('Forgot 100 memories');
+    expect(t.mem.nodes.size).toBe(0);
+    const empty = await t.run('forget', { query: 'old job' });
+    expect(empty.output).toEqual({ forgotten: [], note: 'No memories match “old job”.' });
+    expect(empty.summary).toBe('Nothing to forget');
+  });
+
 });
 
 describe('render_ui', () => {
