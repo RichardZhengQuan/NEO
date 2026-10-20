@@ -98,6 +98,55 @@ describe('ReminderStore', () => {
     expect(collapsed.reminder.firedCount).toBe(1);
   });
 
+  it('snoozing a count-bounded recurring reminder does not consume an occurrence', () => {
+    const r = stores.reminders;
+    const rem = r.create({
+      title: 'medication',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', interval: 1, count: 2 },
+    });
+    // Day 1 fires
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    // User snoozes 10 min
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 10);
+    // Snoozed redelivery fires
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    r.markFired(rem.id, t.now);
+    // Day 2 must still be scheduled
+    const after = r.get(rem.id)!;
+    expect(after.status).toBe('scheduled');
+    expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
+    // Day 2 fires
+    t.setNow(after.dueAt);
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('fired');
+  });
+
+  it('snoozing an until-bounded recurring reminder does not consume an occurrence', () => {
+    const r = stores.reminders;
+    const day3 = utc(2026, 10, 12, 9);
+    const rem = r.create({
+      title: 'standup',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', interval: 1, until: day3 },
+    });
+    // Day 1 fires
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    // User snoozes 10 min
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 10);
+    // Snoozed redelivery fires
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    r.markFired(rem.id, t.now);
+    // Day 2 must still be scheduled (not consumed)
+    const after = r.get(rem.id)!;
+    expect(after.status).toBe('scheduled');
+    expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
+  });
+
   it('markFired refuses reminders that are not scheduled (no resurrection of a completed series)', () => {
     const r = stores.reminders;
     const series = r.create({ title: 'daily', dueAt: utc(2026, 10, 10, 8), recurrence: { freq: 'daily' } });

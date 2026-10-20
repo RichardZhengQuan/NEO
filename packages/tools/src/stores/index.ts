@@ -197,6 +197,11 @@ export const toolsMigrations: Migration[] = [
       );
     `,
   },
+  {
+    version: 9,
+    name: 'reminder_snoozed_due_at',
+    up: `ALTER TABLE reminders ADD COLUMN snoozed_due_at INTEGER;`,
+  },
 ];
 
 export function createProductivityStores(
