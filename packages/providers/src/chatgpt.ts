@@ -113,7 +113,7 @@ function isSearchRejection(value: unknown, tools: unknown[] | undefined, status?
   const param = typeof value['param'] === 'string' ? value['param'] : '';
   if (/^subscription_|invalid_grant/.test(code)) return false;
   // Identify the rejected tool from the structured param index and the request tool list.
-  const toolIndex = /^tools\[(\d+)\]$/.exec(param);
+  const toolIndex = /^tools\[(\d+)\]/.exec(param);
   if (toolIndex) {
     const tool = tools?.[Number(toolIndex[1])];
     return isPlainObject(tool) && tool['type'] === 'web_search';

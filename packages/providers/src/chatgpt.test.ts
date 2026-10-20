@@ -367,6 +367,37 @@ describe('ChatGPT Responses API with a loopback fake', () => {
 });
 
 describe('ChatGPT structured search rejection with injected fetch', () => {
+  it.each(['http', 'stream'] as const)('disables search when web_search tool is rejected with a field-level param like tools[1].type (%s)', async transport => {
+    const error = { code: 'unsupported_value', param: 'tools[1].type', message: 'The value "web_search" is not supported.' };
+    const calls: Record<string, unknown>[] = [];
+    const adapter = new ChatGPTAdapter(config, {
+      fetch: async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (calls.length === 1) {
+          return transport === 'http'
+            ? new Response(JSON.stringify({ error }), { status: 400, headers: { 'content-type': 'application/json' } })
+            : new Response(frame({ type: 'response.failed', response: { error } }), { headers: { 'content-type': 'text/event-stream' } });
+        }
+        return new Response(frame(completed()), { headers: { 'content-type': 'text/event-stream' } });
+      },
+      getChatGPTAccessToken: async () => TOKEN,
+    });
+    const funcTool: ToolSpec = { name: 'my_func', description: 'A helper', inputSchema: { type: 'object' } };
+    // tools array sent: [funcTool, web_search]; web_search is at index 1.
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    const rejected = await collectChat(adapter.chat(searchRequest)).catch((value: unknown) => value);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.['tools']).toMatchObject([{ type: 'function', name: 'my_func' }, { type: 'web_search' }]);
+    // The rejection param tools[1].type refers to the web_search tool at index 1; search must be disabled.
+    expect(adapter.capabilities(request.model).nativeWebSearch).toBe(false);
+    expect(rejected).toMatchObject({ code: 'search_unavailable' });
+
+    // Follow-up must not re-send the rejected web_search tool.
+    await expect(collectChat(adapter.chat(searchRequest))).resolves.toBeDefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.['tools']).not.toContainEqual(expect.objectContaining({ type: 'web_search' }));
+  });
+
   it.each(['http', 'stream'] as const)('keeps hosted search after an indexed function-tool name rejection (%s)', async transport => {
     const error = { code: 'unsupported_tool', param: 'tools[0]', message: 'The tool "my_web_search_assistant" is not supported.' };
     const calls: Record<string, unknown>[] = [];
