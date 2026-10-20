@@ -196,6 +196,37 @@ describe('OpenAI streaming', () => {
     expect(events.at(-1)).toEqual({ type: 'done', stopReason: 'tool_use' });
   });
 
+  it('abort after first tool_call in post-stream batch is honoured', async () => {
+    const ac = new AbortController();
+    const { a } = make(stream(
+      chunk({ tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'get_weather', arguments: '{}' } }] }),
+      chunk({ tool_calls: [{ index: 1, id: 'c2', type: 'function', function: { name: 'get_weather', arguments: '{}' } }] }),
+      chunk({}, 'tool_calls'),
+    ));
+    const it = a.chat(req({ signal: ac.signal, tools: TOOLS }))[Symbol.asyncIterator]();
+    let next = await it.next();
+    while (!next.done && next.value.type !== 'tool_call') next = await it.next();
+    expect(next.value).toMatchObject({ type: 'tool_call', id: 'c1' });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it.each([
+    ['reasoning', 'content', stream(chunk({ reasoning_content: 'think', content: 'answer' }), chunk({}, 'stop'))],
+    ['text', 'refusal delta', stream(chunk({ content: 'answer', refusal: 'refused' }), chunk({}, 'stop'))],
+    ['tool_call', 'refusal note', stream(chunk({ tool_calls: [{ index: 0, id: 'c1', function: { name: 'get_weather', arguments: '{}' } }] }), chunk({}, 'content_filter'))],
+    ['text', 'sources', stream(chunk({ annotations: [{ type: 'url_citation', url: 'https://example.com', title: 'Source' }] }, 'content_filter'))],
+    ['sources', 'usage', stream(chunk({ annotations: [{ type: 'url_citation', url: 'https://example.com', title: 'Source' }] }, 'stop', { usage: { prompt_tokens: 5, completion_tokens: 1 } }))],
+    ['usage', 'done', stream(chunk({}, 'stop', { usage: { prompt_tokens: 5, completion_tokens: 1 } }))],
+  ] as const)('abort after %s before %s in a yield batch is honoured', async (first, _next, reply) => {
+    const ac = new AbortController();
+    const { a } = make(reply);
+    const it = a.chat(req({ signal: ac.signal, tools: TOOLS }))[Symbol.asyncIterator]();
+    expect(await it.next()).toMatchObject({ done: false, value: { type: first } });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
   it('handles servers that omit the tool-call index and ids, and flags invalid JSON', async () => {
     const { a } = make(
       stream(

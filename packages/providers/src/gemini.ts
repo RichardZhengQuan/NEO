@@ -357,9 +357,11 @@ export class GeminiAdapter implements ProviderAdapter {
             const text = typeof raw['text'] === 'string' ? raw['text'] : '';
             if (text) {
               thought += text;
+              throwIfAborted(request.signal);
               yield { type: 'reasoning', text };
             }
             if (signature) {
+              throwIfAborted(request.signal);
               yield { type: 'reasoning_part', part: { type: 'reasoning', text: thought, provider: 'gemini', model: request.model, data: { thoughtSignature: signature } } };
               thought = '';
             }
@@ -367,6 +369,7 @@ export class GeminiAdapter implements ProviderAdapter {
           }
           if (typeof raw['text'] === 'string' && raw['text']) {
             sawText = true;
+            throwIfAborted(request.signal);
             yield { type: 'text', text: raw['text'] };
           }
           if (isPlainObject(raw['functionCall'])) {
@@ -379,6 +382,7 @@ export class GeminiAdapter implements ProviderAdapter {
             };
             if (signature) call.data = { thoughtSignature: signature, model: request.model };
             calls.push(call);
+            throwIfAborted(request.signal);
             yield call;
           }
         }
@@ -400,9 +404,19 @@ export class GeminiAdapter implements ProviderAdapter {
     else if (finish === 'MAX_TOKENS') stopReason = 'max_tokens';
     else stopReason = calls.length ? 'tool_use' : 'end';
 
-    if (stopReason === 'refusal' && !sawText) yield { type: 'text', text: REFUSAL_NOTE };
-    if (sources.length) yield { type: 'sources', items: sources };
-    if (usage) yield { type: 'usage', usage };
+    if (stopReason === 'refusal' && !sawText) {
+      throwIfAborted(request.signal);
+      yield { type: 'text', text: REFUSAL_NOTE };
+    }
+    if (sources.length) {
+      throwIfAborted(request.signal);
+      yield { type: 'sources', items: sources };
+    }
+    if (usage) {
+      throwIfAborted(request.signal);
+      yield { type: 'usage', usage };
+    }
+    throwIfAborted(request.signal);
     yield { type: 'done', stopReason };
   }
 
