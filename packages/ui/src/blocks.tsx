@@ -663,18 +663,38 @@ function ButtonsRenderer({ block, uiId, onAction }: BlockRendererProps & { block
 function Lightbox({ images, index, onClose, onIndex }: { images: { url: string; alt: string; caption?: string | undefined }[]; index: number; onClose: () => void; onIndex: (i: number) => void }): ReactElement | null {
   const t = useT();
   const img = images[index];
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => opener?.focus();
+  }, []);
+  useEffect(() => {
+    dialogRef.current?.querySelector<HTMLElement>('button')?.focus();
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
       if (e.key === 'ArrowRight' && images.length > 1) onIndex((index + 1) % images.length);
       if (e.key === 'ArrowLeft' && images.length > 1) onIndex((index - 1 + images.length) % images.length);
+      if (e.key === 'Tab') {
+        const buttons = dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])');
+        const first = buttons?.[0];
+        const last = buttons?.[buttons.length - 1];
+        if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first?.focus();
+        } else if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last?.focus();
+        }
+      }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [index, images.length, onClose, onIndex]);
   if (!img) return null;
   return (
-    <div className="neo-lightbox" role="dialog" aria-modal="true" aria-label={img.alt} onClick={onClose}>
+    <div ref={dialogRef} className="neo-lightbox" role="dialog" aria-modal="true" aria-label={img.alt} onClick={onClose}>
       <span className="neo-lightbox__close">
         <IconButton icon="x" label={t('common.close')} onClick={onClose} />
       </span>
