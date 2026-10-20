@@ -187,6 +187,7 @@ function parseToken(args: string[]): Command | ParseArgsError {
 function parseMemory(args: string[]): Command | ParseArgsError {
   const sub = args[0];
   if (!sub) return { error: 'memory requires a subcommand: export, import, stats, consolidate' };
+  if (sub === '--help' || sub === '-h') return { cmd: 'help', topic: 'memory' };
   const rest = args.slice(1);
 
   if (sub === 'stats' || sub === 'consolidate') {
