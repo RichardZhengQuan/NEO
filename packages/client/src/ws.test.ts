@@ -65,6 +65,57 @@ describe('connect() WebSocket', () => {
     instances.length = 0;
   });
 
+  it('subscribes and pings with the injected constructor when global WebSocket is absent', async () => {
+    vi.useFakeTimers();
+    const globalWebSocket = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
+    let conn: ReturnType<typeof createConnection> | undefined;
+
+    try {
+      delete (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
+      const ctx = {
+        baseUrl: 'http://localhost:7777',
+        getToken: () => 'ws-token',
+        WebSocketCtor: FakeWebSocket as unknown as typeof WebSocket,
+      };
+      let resolveOpen!: () => void;
+      const opened = new Promise<void>((resolve) => {
+        resolveOpen = resolve;
+      });
+      conn = createConnection(ctx, {
+        onEvent: () => {},
+        onStatus: (s) => {
+          if (s === 'open') {
+            resolveOpen();
+          }
+        },
+      });
+      const ws = instances[0]!;
+
+      expect(() => ws.simulateOpen()).not.toThrow();
+      expect(ws['sentMessages'].map((message) => JSON.parse(message))).toContainEqual({
+        type: 'auth', token: 'ws-token',
+      });
+      expect(() => {
+        ws.simulateMessage({ type: 'ready', serverVersion: '0.1.0', seq: 0 });
+      }).not.toThrow();
+      await opened;
+      expect(conn.status).toBe('open');
+      expect(ws['sentMessages'].map((message) => JSON.parse(message))).toContainEqual({
+        type: 'subscribe', conversations: 'all',
+      });
+
+      expect(() => vi.advanceTimersByTime(25_000)).not.toThrow();
+      expect(ws['sentMessages'].map((message) => JSON.parse(message))).toContainEqual({
+        type: 'ping', id: expect.any(String),
+      });
+    } finally {
+      conn?.close();
+      if (globalWebSocket) {
+        Object.defineProperty(globalThis, 'WebSocket', globalWebSocket);
+      }
+    }
+  });
+
   it('closing from inside the open listener leaves no ping timer', () => {
     vi.useFakeTimers();
     const ctx = {
