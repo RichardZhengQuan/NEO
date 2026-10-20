@@ -107,13 +107,19 @@ function collectItemSources(sources: Source[], item: Record<string, unknown>): v
 }
 
 /** Only search-specific rejections disable search; limits/auth/transient failures keep their normal guidance. */
-function isSearchRejection(value: unknown, status?: number): boolean {
+function isSearchRejection(value: unknown, tools: unknown[] | undefined, status?: number): boolean {
   if (!isPlainObject(value) || (status !== undefined && ![400, 403, 422].includes(status))) return false;
   const code = typeof value['code'] === 'string' ? value['code'] : '';
   const param = typeof value['param'] === 'string' ? value['param'] : '';
-  const message = typeof value['message'] === 'string' ? value['message'] : '';
   if (/^subscription_|invalid_grant/.test(code)) return false;
-  return /web_search|web search/i.test(`${code} ${param} ${message}`);
+  // Identify the rejected tool from the structured param index and the request tool list.
+  const toolIndex = /^tools\[(\d+)\]$/.exec(param);
+  if (toolIndex) {
+    const tool = tools?.[Number(toolIndex[1])];
+    return isPlainObject(tool) && tool['type'] === 'web_search';
+  }
+  // For non-indexed params, check code and param (not message) for search-specific API errors.
+  return /web_search|web search/i.test(`${code} ${param}`);
 }
 
 export class ChatGPTAdapter implements ProviderAdapter {
@@ -173,8 +179,9 @@ export class ChatGPTAdapter implements ProviderAdapter {
     }
     const nativeSearch = !!request.webSearch && !this.searchDisabled;
     if (nativeSearch) body['tools'] = [...(Array.isArray(body['tools']) ? body['tools'] : []), { type: 'web_search' }];
+    const sentTools = Array.isArray(body['tools']) ? (body['tools'] as unknown[]) : undefined;
     // Plan tokens reject temperature and max_output_tokens, so neither is sent.
-    const { response, token } = await this.request('/responses', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', accept: 'text/event-stream' } }, request.signal, nativeSearch);
+    const { response, token } = await this.request('/responses', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', accept: 'text/event-stream' } }, request.signal, nativeSearch, sentTools);
     if (!response.body) throw new NeoError('provider_error', 'ChatGPT returned an empty response.', { retryable: true });
 
     const calls = new Map<string, FunctionCall>();
@@ -221,7 +228,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
         if (type === 'response.failed' || type === 'error') {
           const result = isPlainObject(event['response']) ? event['response'] : event;
           const error = result['error'] ?? result;
-          if (nativeSearch && isSearchRejection(error)) throw this.disableSearch();
+          if (nativeSearch && isSearchRejection(error, sentTools)) throw this.disableSearch();
           throw this.error(error, undefined, token);
         }
         if (type === 'response.output_text.delta' || type === 'response.refusal.delta') {
@@ -332,7 +339,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
     return testByListingModels(() => this.listModels(signal));
   }
 
-  private async request(path: string, init: RequestInit, signal?: AbortSignal, nativeSearch = false): Promise<{ response: Response; token: string }> {
+  private async request(path: string, init: RequestInit, signal?: AbortSignal, nativeSearch = false, sentTools?: unknown[]): Promise<{ response: Response; token: string }> {
     throwIfAborted(signal);
     if (!this.options.getChatGPTAccessToken) throw chatgptSubscriptionError('subscription_sharing_invalid_user');
     let token: string;
@@ -355,7 +362,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
     if (!response.ok) {
       let value: unknown;
       try { value = await response.json(); } catch { /* upstream body is never reflected */ }
-      if (nativeSearch && isPlainObject(value) && isSearchRejection(value['error'], response.status)) throw this.disableSearch();
+      if (nativeSearch && isPlainObject(value) && isSearchRejection(value['error'], sentTools, response.status)) throw this.disableSearch();
       throw this.error(isPlainObject(value) ? value['error'] : undefined, response.status, token);
     }
     return { response, token };
