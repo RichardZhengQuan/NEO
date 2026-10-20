@@ -217,6 +217,11 @@ export const toolsMigrations: Migration[] = [
       );
     `,
   },
+  {
+    version: 11,
+    name: 'pending_firings_fired_count',
+    up: `ALTER TABLE pending_firings ADD COLUMN fired_count INTEGER;`,
+  },
 ];
 
 export function createProductivityStores(

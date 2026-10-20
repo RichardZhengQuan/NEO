@@ -150,6 +150,12 @@ describe('ReminderScheduler', () => {
     });
     scheduler.start();
     expect(replayed.map(f => f.occurrenceAt)).toEqual([START, START + 24 * 60 * MIN]);
+    // Each replayed firing carries the firedCount at the time it was recorded, not the
+    // current (post-all-firings) count — this is what allows the handler to deduplicate.
+    expect(replayed[0]!.reminder.firedCount).toBe(1);
+    expect(replayed[0]!.reminder.lastFiredAt).toBe(START);
+    expect(replayed[1]!.reminder.firedCount).toBe(2);
+    expect(replayed[1]!.reminder.lastFiredAt).toBe(START + 24 * 60 * MIN);
     expect(store.get(r.id)).toEqual(state);
     expect(store.get(r.id)?.firedCount).toBe(2);
     expect(store.pendingFirings?.()).toEqual([]);
@@ -196,6 +202,56 @@ describe('ReminderScheduler', () => {
     expect(change).not.toHaveBeenCalled();
     expect(store.pendingFirings?.()).toEqual([]);
     db.close();
+  });
+
+  it('markFired with missed=true returns a firing with missed set to true', () => {
+    const store = makeStore();
+    const r = store.create({ title: 'late', dueAt: START - 60 * MIN });
+    const firing = store.markFired(r.id, START, true);
+    expect(firing.missed).toBe(true);
+    const notMissed = store.create({ title: 'on-time', dueAt: START });
+    const firing2 = store.markFired(notMissed.id, START, false);
+    expect(firing2.missed).toBe(false);
+  });
+
+  it('retries pending firing replay on the next tick after backoff when the store was initially broken', async () => {
+    const store = makeStore();
+    // Fire a one-time reminder but do not clear the pending firing so it waits for replay.
+    const r = store.create({ title: 'ping', dueAt: START - MIN });
+    const seeder = createReminderScheduler({ reminders: store, clock: () => Date.now() });
+    seeder.onFire(() => {}); // don't clear — leave firing pending
+    seeder.tick();
+    seeder.stop();
+    expect(store.pendingFirings?.()).toHaveLength(1);
+
+    // Wrap the store so pendingFirings() fails on the first call only.
+    let pendingCallCount = 0;
+    const flaky: ReminderStore = {
+      ...store,
+      pendingFirings: () => {
+        pendingCallCount++;
+        if (pendingCallCount === 1) throw new Error('database is locked');
+        return store.pendingFirings!();
+      },
+    };
+    const { logger, errors } = recordingLogger();
+    const scheduler = createReminderScheduler({ reminders: flaky, clock: () => Date.now(), failureBackoffMs: MIN, logger });
+    const replayed: ReminderFiring[] = [];
+    scheduler.onFire(firing => {
+      replayed.push(firing);
+      store.clearPendingFiring?.(firing.pendingFiringId!);
+    });
+
+    scheduler.start();
+    expect(replayed).toHaveLength(0); // not yet — pendingFirings() failed
+    expect(errors).toContain('reminder pending firing re-delivery failed');
+
+    // Advance past the backoff; the next tick retries pendingFirings() which now succeeds.
+    await vi.advanceTimersByTimeAsync(MIN + 1);
+    expect(replayed).toHaveLength(1);
+    expect(replayed[0]!.reminder.id).toBe(r.id);
+    expect(store.pendingFirings?.()).toHaveLength(0);
+    scheduler.stop();
   });
 
   it('logs a pending read failure and still fires due reminders on start', () => {

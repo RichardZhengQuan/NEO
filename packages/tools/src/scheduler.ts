@@ -47,6 +47,10 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
   const retryAfter = new Map<string, number>();
   /** Set when the store itself failed; arm() waits at least this long. */
   let storeFailedUntil = 0;
+  /** True once pending firings from before the last crash have been re-delivered. */
+  let pendingFiringsReplayed = false;
+  /** Earliest time tick() may retry pendingFirings() after a failure. */
+  let pendingFiringsRetryAt = 0;
 
   const clearTimer = () => {
     if (timer !== null) {
@@ -77,6 +81,27 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
     const now = at ?? clock();
     const firings: ReminderFiring[] = [];
     try {
+      // Retry pending firings replay if the startup attempt failed.
+      // pendingFiringsRetryAt ensures we respect the backoff and do not re-attempt
+      // in the same synchronous tick that start() triggers immediately after the failure.
+      if (!pendingFiringsReplayed && reminders.pendingFirings && now >= pendingFiringsRetryAt) {
+        try {
+          const pending = reminders.pendingFirings();
+          pendingFiringsReplayed = true;
+          for (const firing of pending) {
+            try {
+              emit(firing);
+            } catch (err) {
+              logger.error('reminder pending firing re-delivery failed', { reminderId: firing.reminder.id, error: String(err) });
+            }
+          }
+        } catch (err) {
+          pendingFiringsRetryAt = clock() + failureBackoffMs;
+          storeFailedUntil = clock() + failureBackoffMs;
+          logger.error('reminder pending firing re-delivery failed', { error: String(err) });
+          // Fall through to due() — a different query may still work.
+        }
+      }
       let due;
       try {
         due = reminders.due(now);
@@ -160,18 +185,26 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
       started = true;
       unsubscribe = reminders.onChange(() => reschedule());
       // Re-deliver any firings committed before the last crash but not yet acknowledged.
-      let pending: ReminderFiring[] = [];
-      try {
-        pending = reminders.pendingFirings?.() ?? [];
-      } catch (err) {
-        logger.error('reminder pending firing re-delivery failed', { error: String(err) });
-      }
-      for (const firing of pending) {
+      pendingFiringsReplayed = false;
+      pendingFiringsRetryAt = 0;
+      if (reminders.pendingFirings) {
         try {
-          emit(firing);
+          const pending = reminders.pendingFirings();
+          pendingFiringsReplayed = true;
+          for (const firing of pending) {
+            try {
+              emit(firing);
+            } catch (err) {
+              logger.error('reminder pending firing re-delivery failed', { reminderId: firing.reminder.id, error: String(err) });
+            }
+          }
         } catch (err) {
-          logger.error('reminder pending firing re-delivery failed', { reminderId: firing.reminder.id, error: String(err) });
+          logger.error('reminder pending firing re-delivery failed', { error: String(err) });
+          pendingFiringsRetryAt = clock() + failureBackoffMs;
+          storeFailedUntil = clock() + failureBackoffMs; // arm() delays until retry is due
         }
+      } else {
+        pendingFiringsReplayed = true;
       }
       tick(clock()); // catch-up; re-arms when done
     },

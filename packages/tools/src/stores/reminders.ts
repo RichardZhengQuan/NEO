@@ -253,7 +253,7 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
           db.prepare('UPDATE reminders SET status = ?, due_at = ?, snoozed_due_at = NULL, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
             'scheduled', snoozedDueAt, firedAt, now, id,
           );
-          result = { reminder, occurrenceAt: existing.dueAt, firedAt, missed: false, nextDueAt: snoozedDueAt };
+          result = { reminder, occurrenceAt: existing.dueAt, firedAt, missed, nextDueAt: snoozedDueAt };
         } else {
           const firedCount = existing.firedCount + 1;
           // Advance past both the occurrence and the firing time, so a long downtime
@@ -272,14 +272,14 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
           db.prepare('UPDATE reminders SET status = ?, due_at = ?, snoozed_due_at = NULL, fired_count = ?, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
             reminder.status, reminder.dueAt, firedCount, firedAt, now, id,
           );
-          result = { reminder, occurrenceAt: existing.dueAt, firedAt, missed: false, nextDueAt };
+          result = { reminder, occurrenceAt: existing.dueAt, firedAt, missed, nextDueAt };
         }
         // Atomically record the pending firing for crash-safe re-delivery.
         const pendingFiringId = newId('pfr', firedAt);
         db.prepare(
-          `INSERT INTO pending_firings (id, reminder_id, occurrence_at, fired_at, missed, next_due_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        ).run(pendingFiringId, id, result.occurrenceAt, firedAt, missed ? 1 : 0, result.nextDueAt ?? null, now);
+          `INSERT INTO pending_firings (id, reminder_id, occurrence_at, fired_at, missed, next_due_at, fired_count, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(pendingFiringId, id, result.occurrenceAt, firedAt, missed ? 1 : 0, result.nextDueAt ?? null, result.reminder.firedCount, now);
         return { ...result, pendingFiringId };
       });
       emit({ type: 'upsert', reminder: firing.reminder });
@@ -293,17 +293,31 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       const staleIds: string[] = [];
       for (const pRow of rows) {
         const reminderId = pRow.reminder_id as string;
-        const reminder = get(reminderId);
-        if (!reminder || reminder.status === 'completed' || reminder.status === 'cancelled') {
+        const current = get(reminderId);
+        if (!current || current.status === 'completed' || current.status === 'cancelled') {
           staleIds.push(pRow.id as string);
           continue;
         }
+        // Reconstruct the reminder state at the time of this specific firing so that
+        // replayed firings carry the correct firedCount, lastFiredAt and dueAt for
+        // their occurrence rather than the current (post-all-firings) state.
+        const nextDueAt = toNumOrNull(pRow.next_due_at);
+        const storedFiredCount = pRow.fired_count as number | null;
+        const reminder: Reminder = {
+          ...current,
+          firedCount: storedFiredCount ?? current.firedCount,
+          lastFiredAt: toNum(pRow.fired_at),
+          dueAt: nextDueAt ?? current.dueAt,
+          // status reflects the reminder state immediately after this firing
+          status: nextDueAt !== null ? 'scheduled' : 'fired',
+          updatedAt: toNum(pRow.created_at),
+        };
         result.push({
           reminder,
           occurrenceAt: toNum(pRow.occurrence_at),
           firedAt: toNum(pRow.fired_at),
           missed: Boolean(pRow.missed),
-          nextDueAt: toNumOrNull(pRow.next_due_at),
+          nextDueAt,
           pendingFiringId: pRow.id as string,
         });
       }
