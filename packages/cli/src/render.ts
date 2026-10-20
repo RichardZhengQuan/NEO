@@ -4,7 +4,7 @@
  */
 import type { AgentEvent } from '@neo/protocol';
 import { uiBlockToText, uiBlocksToText } from '@neo/protocol';
-import { bold, cyan, dim, green, magenta, red, yellow } from './ansi.js';
+import { bold, cyan, dim, green, magenta, red, stripModelText, yellow } from './ansi.js';
 
 export interface RenderOptions {
   showReasoning?: boolean;
@@ -27,11 +27,11 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
 
     case 'text.delta':
       // Caller is responsible for accumulating and printing incrementally.
-      return [{ text: event.text, delta: true }];
+      return [{ text: stripModelText(event.text), delta: true }];
 
     case 'reasoning.delta':
       if (!opts.showReasoning) return [];
-      return [{ text: dim(`[thinking] ${event.text}`), delta: true }];
+      return [{ text: dim(`[thinking] ${stripModelText(event.text)}`), delta: true }];
 
     case 'tool.started': {
       const chip = `  ⚙ ${event.title || event.name}…`;
@@ -69,7 +69,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
         return lines;
       }
       if (part.type === 'reasoning' && opts.showReasoning) {
-        return [{ text: dim(`[reasoning] ${part.text}`) }];
+        return [{ text: dim(`[reasoning] ${stripModelText(part.text)}`) }];
       }
       if (part.type === 'sources' && part.items.length) {
         return [
@@ -82,7 +82,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
 
     case 'memory.recalled': {
       if (!event.items.length) return [];
-      const labels = event.items.slice(0, 5).map((m) => m.label).join(', ');
+      const labels = stripModelText(event.items.slice(0, 5).map((m) => m.label).join(', '));
       const more = event.items.length > 5 ? ` +${event.items.length - 5} more` : '';
       return [{ text: dim(`  🧠 remembered: ${labels}${more}`) }];
     }

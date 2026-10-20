@@ -79,6 +79,24 @@ describe('timeline REPL', () => {
     } finally { output.mockRestore(); }
   });
 
+  it('strips control sequences from assistant history messages but not user messages', async () => {
+    repl.client.timeline.list.mockResolvedValue({ items: [
+      { id: 'u1', episodeId: 'ep', conversationId: 'ep', role: 'user', createdAt: 1,
+        parts: [{ type: 'text', text: 'user says \x1b[31mred\x1b[0m' }] },
+      { id: 'a1', episodeId: 'ep', conversationId: 'ep', role: 'assistant', createdAt: 2,
+        parts: [{ type: 'text', text: 'assistant says \x1b[31mred\x1b[0m' }] },
+    ], episodes: [], nextCursor: null });
+    const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    try {
+      await runChat({ server: 'http://fixture.test' });
+      const text = output.mock.calls.map(([value]) => String(value)).join('');
+      // assistant message: control sequences stripped
+      expect(text).toContain('assistant says red');
+      const assistantIdx = text.indexOf('assistant says red');
+      expect(text.slice(assistantIdx, assistantIdx + 60)).not.toContain('\x1b');
+    } finally { output.mockRestore(); }
+  });
+
   it('sends into the timeline in off-record mode and ends it explicitly', async () => {
     const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
     try {
