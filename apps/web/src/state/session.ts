@@ -149,7 +149,17 @@ export async function updateSettings(patch: NeoSettingsPatch): Promise<NeoSettin
     if (isCurrentSession(sessionEpoch, client)) setSettings(next);
     return next;
   } catch (err) {
-    if (isCurrentSession(sessionEpoch, client)) setSettings(settings);
+    if (isCurrentSession(sessionEpoch, client)) {
+      // Revert only the top-level patch keys this call wrote, not the entire snapshot.
+      // Reads the current live settings so concurrent successful saves on other keys are preserved.
+      const current = useSession.getState().settings;
+      if (current) {
+        const revertPatch = Object.fromEntries(
+          Object.keys(patch).map((k) => [k, (settings as Record<string, unknown>)[k]])
+        ) as NeoSettingsPatch;
+        setSettings(applySettingsPatch(current, revertPatch));
+      }
+    }
     throw err;
   }
 }

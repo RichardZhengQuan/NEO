@@ -172,6 +172,28 @@ function deferred<T>() {
 
 const providers: ProvidersResponse = { items: [], defaultModel: null };
 
+describe('updateSettings partial revert on failure', () => {
+  it('preserves a newer successful save when an older save of another field fails', async () => {
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
+    useSession.setState({ settings: DEFAULT_SETTINGS });
+    const response = deferred<typeof DEFAULT_SETTINGS>();
+    vi.mocked(a.settings.update).mockReturnValueOnce(response.promise);
+    const olderSave = updateSettings({ theme: 'dark' });
+
+    vi.mocked(a.settings.update).mockReturnValueOnce(Promise.resolve<typeof DEFAULT_SETTINGS>({
+      ...DEFAULT_SETTINGS, theme: 'dark', timezone: 'Asia/Singapore',
+    }));
+    const newerSave = updateSettings({ timezone: 'Asia/Singapore' });
+    await newerSave;
+    expect(useSession.getState().settings).toMatchObject({ theme: 'dark', timezone: 'Asia/Singapore' });
+
+    const error = new Error('Theme save failed');
+    response.reject(error);
+    await expect(olderSave).rejects.toBe(error);
+    expect(useSession.getState().settings).toMatchObject({ theme: 'system', timezone: 'Asia/Singapore' });
+  });
+});
+
 describe('session-scoped async work', () => {
   it('resets provider/settings/model caches, drawer and server toasts', () => {
     startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
