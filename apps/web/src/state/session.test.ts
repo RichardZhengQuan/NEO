@@ -192,6 +192,30 @@ describe('updateSettings partial revert on failure', () => {
     await expect(olderSave).rejects.toBe(error);
     expect(useSession.getState().settings).toMatchObject({ theme: 'system', timezone: 'Asia/Singapore' });
   });
+
+  it('reverts only the nested leaf that failed, not the entire nested object', async () => {
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
+    useSession.setState({ settings: DEFAULT_SETTINGS });
+    // Default: memory.recall=true, memory.recallLimit=12
+
+    // Older in-flight save: turns recall off
+    const recallResponse = deferred<typeof DEFAULT_SETTINGS>();
+    vi.mocked(a.settings.update).mockReturnValueOnce(recallResponse.promise);
+    const olderSave = updateSettings({ memory: { recall: false } });
+
+    // Newer save succeeds immediately: changes recallLimit to 5
+    vi.mocked(a.settings.update).mockReturnValueOnce(Promise.resolve<typeof DEFAULT_SETTINGS>({
+      ...DEFAULT_SETTINGS, memory: { ...DEFAULT_SETTINGS.memory, recall: false, recallLimit: 5 },
+    }));
+    await updateSettings({ memory: { recallLimit: 5 } });
+    expect(useSession.getState().settings).toMatchObject({ memory: { recall: false, recallLimit: 5 } });
+
+    // Now the older recall save fails: only recall should revert, not recallLimit
+    const error = new Error('Recall save failed');
+    recallResponse.reject(error);
+    await expect(olderSave).rejects.toBe(error);
+    expect(useSession.getState().settings).toMatchObject({ memory: { recall: true, recallLimit: 5 } });
+  });
 });
 
 describe('session-scoped async work', () => {
