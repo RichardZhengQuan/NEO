@@ -166,7 +166,7 @@ export class NeoClientImpl {
   readonly confirmations = {
     list: () => this.req<ListResponse<ToolConfirmation>>('GET', '/confirmations'),
     respond: (toolCallId: string, body: ConfirmToolRequest) =>
-      this.req<{ ok: boolean }>('POST', `/confirmations/${toolCallId}`, { body }),
+      this.req<{ ok: boolean }>('POST', `/confirmations/${encodeURIComponent(toolCallId)}`, { body }),
   };
 
   // ─── Memory ───────────────────────────────────────────────────────────────
@@ -175,14 +175,14 @@ export class NeoClientImpl {
     search: (q?: MemorySearchQuery) =>
       this.req<ListResponse<MemoryNode>>('GET', '/memory', { query: q as Record<string, unknown> }),
 
-    get: (id: string) => this.req<MemoryNodeDetail>('GET', `/memory/${id}`),
+    get: (id: string) => this.req<MemoryNodeDetail>('GET', `/memory/${encodeURIComponent(id)}`),
 
     create: (body: RememberInput) => this.req<MemoryNode>('POST', '/memory', { body }),
 
     update: (id: string, body: MemoryNodePatch) =>
-      this.req<MemoryNode>('PATCH', `/memory/${id}`, { body }),
+      this.req<MemoryNode>('PATCH', `/memory/${encodeURIComponent(id)}`, { body }),
 
-    delete: (id: string) => this.req<{ deleted: number }>('DELETE', `/memory/${id}`),
+    delete: (id: string) => this.req<{ deleted: number }>('DELETE', `/memory/${encodeURIComponent(id)}`),
 
     forget: (ids: string[]) => this.req<{ deleted: number }>('POST', '/memory/forget', { body: { ids } }),
 
@@ -197,7 +197,7 @@ export class NeoClientImpl {
     link: (body: { from: string; to: string; type: string; weight?: number }) =>
       this.req<unknown>('POST', '/memory/links', { body }),
 
-    unlink: (edgeId: string) => this.req<{ ok: boolean }>('DELETE', `/memory/links/${edgeId}`),
+    unlink: (edgeId: string) => this.req<{ ok: boolean }>('DELETE', `/memory/links/${encodeURIComponent(edgeId)}`),
 
     graph: (q?: GraphQuery) =>
       this.req<MemoryGraph>('GET', '/memory/graph', { query: q as Record<string, unknown> }),
@@ -231,19 +231,19 @@ export class NeoClientImpl {
     list: (q?: { status?: ReminderStatus[]; from?: number; to?: number; limit?: number }) =>
       this.req<ListResponse<Reminder>>('GET', '/reminders', { query: q as Record<string, unknown> }),
 
-    get: (id: string) => this.req<Reminder>('GET', `/reminders/${id}`),
+    get: (id: string) => this.req<Reminder>('GET', `/reminders/${encodeURIComponent(id)}`),
 
     create: (body: ReminderInput) => this.req<Reminder>('POST', '/reminders', { body }),
 
     update: (id: string, body: ReminderPatch) =>
-      this.req<Reminder>('PATCH', `/reminders/${id}`, { body }),
+      this.req<Reminder>('PATCH', `/reminders/${encodeURIComponent(id)}`, { body }),
 
-    delete: (id: string) => this.req<void>('DELETE', `/reminders/${id}`),
+    delete: (id: string) => this.req<void>('DELETE', `/reminders/${encodeURIComponent(id)}`),
 
     snooze: (id: string, minutes: number) =>
-      this.req<Reminder>('POST', `/reminders/${id}/snooze`, { body: { minutes } }),
+      this.req<Reminder>('POST', `/reminders/${encodeURIComponent(id)}/snooze`, { body: { minutes } }),
 
-    complete: (id: string) => this.req<Reminder>('POST', `/reminders/${id}/complete`),
+    complete: (id: string) => this.req<Reminder>('POST', `/reminders/${encodeURIComponent(id)}/complete`),
   };
 
   // ─── Tasks ────────────────────────────────────────────────────────────────
@@ -254,9 +254,9 @@ export class NeoClientImpl {
     createList: (body: TaskListInput) => this.req<TaskList>('POST', '/task-lists', { body }),
 
     updateList: (id: string, body: Partial<TaskListInput>) =>
-      this.req<TaskList>('PATCH', `/task-lists/${id}`, { body }),
+      this.req<TaskList>('PATCH', `/task-lists/${encodeURIComponent(id)}`, { body }),
 
-    deleteList: (id: string) => this.req<void>('DELETE', `/task-lists/${id}`),
+    deleteList: (id: string) => this.req<void>('DELETE', `/task-lists/${encodeURIComponent(id)}`),
 
     list: (q?: { listId?: string; done?: boolean; query?: string; limit?: number }) =>
       this.req<ListResponse<Task>>('GET', '/tasks', { query: q as Record<string, unknown> }),
@@ -266,9 +266,9 @@ export class NeoClientImpl {
     create: (body: TaskInput) => this.req<Task>('POST', '/tasks', { body }),
 
     update: (id: string, body: TaskPatch) =>
-      this.req<Task>('PATCH', `/tasks/${id}`, { body }),
+      this.req<Task>('PATCH', `/tasks/${encodeURIComponent(id)}`, { body }),
 
-    delete: (id: string) => this.req<void>('DELETE', `/tasks/${id}`),
+    delete: (id: string) => this.req<void>('DELETE', `/tasks/${encodeURIComponent(id)}`),
   };
 
   // ─── Notes ────────────────────────────────────────────────────────────────
@@ -277,13 +277,13 @@ export class NeoClientImpl {
     list: (q?: { query?: string; tag?: string; limit?: number }) =>
       this.req<ListResponse<Note>>('GET', '/notes', { query: q as Record<string, unknown> }),
 
-    get: (id: string) => this.req<Note>('GET', `/notes/${id}`),
+    get: (id: string) => this.req<Note>('GET', `/notes/${encodeURIComponent(id)}`),
 
     create: (body: NoteInput) => this.req<Note>('POST', '/notes', { body }),
 
-    update: (id: string, body: NotePatch) => this.req<Note>('PATCH', `/notes/${id}`, { body }),
+    update: (id: string, body: NotePatch) => this.req<Note>('PATCH', `/notes/${encodeURIComponent(id)}`, { body }),
 
-    delete: (id: string) => this.req<void>('DELETE', `/notes/${id}`),
+    delete: (id: string) => this.req<void>('DELETE', `/notes/${encodeURIComponent(id)}`),
   };
 
   // ─── Notifications ────────────────────────────────────────────────────────
@@ -315,13 +315,13 @@ export class NeoClientImpl {
       this.req<ProviderView>('POST', '/providers', { body }),
 
     update: (id: string, body: UpdateProviderRequest) =>
-      this.req<ProviderView>('PATCH', `/providers/${id}`, { body }),
+      this.req<ProviderView>('PATCH', `/providers/${encodeURIComponent(id)}`, { body }),
 
-    delete: (id: string) => this.req<void>('DELETE', `/providers/${id}`),
+    delete: (id: string) => this.req<void>('DELETE', `/providers/${encodeURIComponent(id)}`),
 
-    models: (id: string) => this.req<ListResponse<ModelInfo>>('GET', `/providers/${id}/models`),
+    models: (id: string) => this.req<ListResponse<ModelInfo>>('GET', `/providers/${encodeURIComponent(id)}/models`),
 
-    test: (id: string) => this.req<ProviderTestResult>('POST', `/providers/${id}/test`),
+    test: (id: string) => this.req<ProviderTestResult>('POST', `/providers/${encodeURIComponent(id)}/test`),
 
     testDraft: (body: { kind: ProviderKind; baseUrl?: string; apiKey?: string }) =>
       this.req<ProviderTestResult>('POST', '/providers/test', { body }),
@@ -340,7 +340,7 @@ export class NeoClientImpl {
   readonly tools = {
     list: () => this.req<ListResponse<ToolInfo>>('GET', '/tools'),
     setPermission: (name: string, permission: PermissionLevel) =>
-      this.req<ToolInfo>('PUT', `/tools/${name}/permission`, { body: { permission } }),
+      this.req<ToolInfo>('PUT', `/tools/${encodeURIComponent(name)}/permission`, { body: { permission } }),
   };
 
   // ─── Devices ──────────────────────────────────────────────────────────────
@@ -351,7 +351,7 @@ export class NeoClientImpl {
       this.req<CreateDeviceResponse>('POST', '/devices', {
         body: { name, platform: platform ?? 'other' },
       }),
-    revoke: (id: string) => this.req<void>('DELETE', `/devices/${id}`),
+    revoke: (id: string) => this.req<void>('DELETE', `/devices/${encodeURIComponent(id)}`),
   };
 
   // ─── Pairing ──────────────────────────────────────────────────────────────
@@ -364,7 +364,7 @@ export class NeoClientImpl {
 
   readonly pairing = {
     create: () => this.req<PairingSession>('POST', '/pairing'),
-    cancel: (id: string) => this.req<void>('DELETE', `/pairing/${id}`),
+    cancel: (id: string) => this.req<void>('DELETE', `/pairing/${encodeURIComponent(id)}`),
     claim: (body: ClaimPairingRequest) =>
       this.req<ClaimPairingResponse>('POST', '/pairing/claim', { body }),
   };

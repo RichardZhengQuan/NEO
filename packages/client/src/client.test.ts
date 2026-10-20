@@ -9,7 +9,7 @@
  *   no reconnect after close() or 4401
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet, type ToolUseEvent, type Task } from './index.js';
+import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet, type ToolUseEvent, type Task, type Reminder, type Note, type MemoryNodeDetail } from './index.js';
 import { apiRequest } from './http.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -632,6 +632,13 @@ describe('confirmations routes', () => {
     expect(requests[0]!.url).toContain('/api/confirmations/tc-1');
     expect((requests[0]!.body as { approve: boolean }).approve).toBe(true);
   });
+
+  it('respond: uses an encoded toolCallId when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { ok: true } }]);
+    await client.confirmations.respond('tc/with?reserved#id', { approve: false });
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/confirmations/tc%2Fwith%3Freserved%23id');
+  });
 });
 
 describe('memory routes', () => {
@@ -728,6 +735,43 @@ describe('memory routes', () => {
     expect(requests[0]!.url).toContain('/api/memory/journal');
     expect(requests[0]!.url).toContain('limit=5');
   });
+
+  it('get: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const detail: MemoryNodeDetail = {
+      node: {
+        id: 'mem/with?reserved#id', kind: 'fact', label: 'test', content: 'test content',
+        aliases: [], tags: [], importance: 1, confidence: 1, stability: 30, accessCount: 0,
+        lastAccessedAt: null, createdAt: 50, updatedAt: 50, status: 'active', pinned: false,
+        sensitivity: 'normal', source: { by: 'user' },
+      },
+      retention: 1, edges: [], neighbors: [], history: [],
+    };
+    const { client, requests } = makeClient([{ status: 200, body: detail }]);
+    await client.memory.get(detail.node.id);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/mem%2Fwith%3Freserved%23id');
+  });
+
+  it('update: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'mem/with?reserved#id' } }]);
+    await client.memory.update('mem/with?reserved#id', { label: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/mem%2Fwith%3Freserved%23id');
+  });
+
+  it('delete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { deleted: 1 } }]);
+    await client.memory.delete('mem/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/mem%2Fwith%3Freserved%23id');
+  });
+
+  it('unlink: uses an encoded edge ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { ok: true } }]);
+    await client.memory.unlink('edge/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/links/edge%2Fwith%3Freserved%23id');
+  });
 });
 
 describe('reminders routes', () => {
@@ -758,6 +802,46 @@ describe('reminders routes', () => {
     await client.reminders.complete('r1');
     expect(requests[0]!.url).toContain('/api/reminders/r1/complete');
   });
+
+  it('get: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const reminder: Reminder = {
+      id: 'rem/with?reserved#id', title: 'Call dentist', notes: null, dueAt: 1800000000000,
+      timezone: 'UTC', recurrence: null, status: 'scheduled', firedCount: 0,
+      lastFiredAt: null, messageId: null, createdAt: 50, updatedAt: 50,
+    };
+    const { client, requests } = makeClient([{ status: 200, body: reminder }]);
+    await client.reminders.get(reminder.id);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id');
+  });
+
+  it('update: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'rem/with?reserved#id' } }]);
+    await client.reminders.update('rem/with?reserved#id', { title: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id');
+  });
+
+  it('delete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.reminders.delete('rem/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id');
+  });
+
+  it('snooze: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'rem/with?reserved#id' } }]);
+    await client.reminders.snooze('rem/with?reserved#id', 15);
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id/snooze');
+  });
+
+  it('complete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'rem/with?reserved#id' } }]);
+    await client.reminders.complete('rem/with?reserved#id');
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id/complete');
+  });
 });
 
 describe('tasks routes', () => {
@@ -779,6 +863,20 @@ describe('tasks routes', () => {
     await client.tasks.deleteList('tl1');
     expect(requests[0]!.method).toBe('DELETE');
     expect(requests[0]!.url).toContain('/api/task-lists/tl1');
+  });
+
+  it('updateList: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'tl/with?reserved#id' } }]);
+    await client.tasks.updateList('tl/with?reserved#id', { name: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/task-lists/tl%2Fwith%3Freserved%23id');
+  });
+
+  it('deleteList: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.tasks.deleteList('tl/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/task-lists/tl%2Fwith%3Freserved%23id');
   });
 
   it('list: GET /api/tasks', async () => {
@@ -826,6 +924,20 @@ describe('tasks routes', () => {
     await client.tasks.delete('task1');
     expect(requests[0]!.method).toBe('DELETE');
   });
+
+  it('update: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'task/with?reserved#characters' } }]);
+    await client.tasks.update('task/with?reserved#characters', { title: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/tasks/task%2Fwith%3Freserved%23characters');
+  });
+
+  it('delete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.tasks.delete('task/with?reserved#characters');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/tasks/task%2Fwith%3Freserved%23characters');
+  });
 });
 
 describe('notes routes', () => {
@@ -846,6 +958,31 @@ describe('notes routes', () => {
     const { client, requests } = makeClient([{ status: 204, body: null }]);
     await client.notes.delete('n1');
     expect(requests[0]!.method).toBe('DELETE');
+  });
+
+  it('get: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const note: Note = {
+      id: 'note/with?reserved#id', title: 'My note', content: '# heading', tags: [], pinned: false,
+      createdAt: 50, updatedAt: 50,
+    };
+    const { client, requests } = makeClient([{ status: 200, body: note }]);
+    await client.notes.get(note.id);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/notes/note%2Fwith%3Freserved%23id');
+  });
+
+  it('update: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'note/with?reserved#id' } }]);
+    await client.notes.update('note/with?reserved#id', { title: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/notes/note%2Fwith%3Freserved%23id');
+  });
+
+  it('delete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.notes.delete('note/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/notes/note%2Fwith%3Freserved%23id');
   });
 });
 
@@ -935,6 +1072,34 @@ describe('providers routes', () => {
     expect(requests[0]!.url).toContain('/api/providers/test');
     expect((requests[0]!.body as { kind: string }).kind).toBe('openai');
   });
+
+  it('update: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'prov/with?reserved#id' } }]);
+    await client.providers.update('prov/with?reserved#id', { enabled: false });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/providers/prov%2Fwith%3Freserved%23id');
+  });
+
+  it('delete: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.providers.delete('prov/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/providers/prov%2Fwith%3Freserved%23id');
+  });
+
+  it('models: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { items: [] } }]);
+    await client.providers.models('prov/with?reserved#id');
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/providers/prov%2Fwith%3Freserved%23id/models');
+  });
+
+  it('test: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { ok: true } }]);
+    await client.providers.test('prov/with?reserved#id');
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/providers/prov%2Fwith%3Freserved%23id/test');
+  });
 });
 
 describe('settings routes', () => {
@@ -965,6 +1130,13 @@ describe('tools routes', () => {
     expect(requests[0]!.url).toContain('/api/tools/web_fetch/permission');
     expect((requests[0]!.body as { permission: string }).permission).toBe('auto');
   });
+
+  it('setPermission: uses an encoded name when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { name: 'tool/with?reserved#name' } }]);
+    await client.tools.setPermission('tool/with?reserved#name', 'auto');
+    expect(requests[0]!.method).toBe('PUT');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/tools/tool%2Fwith%3Freserved%23name/permission');
+  });
 });
 
 describe('devices routes', () => {
@@ -987,6 +1159,13 @@ describe('devices routes', () => {
     await client.devices.revoke('dev-1');
     expect(requests[0]!.method).toBe('DELETE');
     expect(requests[0]!.url).toContain('/api/devices/dev-1');
+  });
+
+  it('revoke: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.devices.revoke('dev/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/devices/dev%2Fwith%3Freserved%23id');
   });
 });
 
@@ -1036,6 +1215,13 @@ describe('pairing routes', () => {
     expect(await client.pairing.cancel('pair-1')).toBeUndefined();
     expect(requests[0]!.method).toBe('DELETE');
     expect(requests[0]!.url).toBe('http://localhost:7777/api/pairing/pair-1');
+  });
+
+  it('cancel: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.pairing.cancel('pair/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/pairing/pair%2Fwith%3Freserved%23id');
   });
 
   it('claim: POST /api/pairing/claim without a token', async () => {
