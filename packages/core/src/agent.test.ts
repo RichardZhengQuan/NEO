@@ -9,6 +9,7 @@ import {
   DEFAULT_SETTINGS,
   FORM_SUBMIT_ACTION_ID,
   MAX_UI_BLOCKS,
+  MAX_UI_TOP_LEVEL,
   NeoError,
   toChatMessages,
   toolSpec,
@@ -281,6 +282,30 @@ describe('model resolution', () => {
     // Cross-part aggregate must fire: no ui parts on the message.
     expect(uiParts(t.message).length).toBe(0);
     // Text parts should retain their original fence text (fences not stripped when blocks are dropped).
+    expect(t.message.parts.filter((p) => p.type === 'text').length).toBeGreaterThan(0);
+  });
+
+  it('drops all inline-ui blocks when two text parts together exceed MAX_UI_TOP_LEVEL top-level blocks', async () => {
+    // Each text part has a fence with (MAX_UI_TOP_LEVEL / 2 + 1) top-level text blocks.
+    // Each part individually passes the per-part check (≤ MAX_UI_TOP_LEVEL), but combined
+    // the total top-level count exceeds MAX_UI_TOP_LEVEL, so the cross-part aggregate must fire.
+    const halfPlusOne = Math.floor(MAX_UI_TOP_LEVEL / 2) + 1; // 26 for MAX_UI_TOP_LEVEL=50
+    const makeFence = (): string => {
+      const blocks = Array.from({ length: halfPlusOne }, (_, i) => ({ type: 'text', text: `item ${i}` }));
+      return '```neo-ui\n' + JSON.stringify(blocks) + '\n```';
+    };
+    const fence = makeFence();
+    const h = harness({ adapters: [new ScriptedAdapter({ caps: { tools: false, reasoning: true } })] });
+    h.model.script([
+      ev.text(`Part one.\n${fence}\n`),
+      ev.reasoning('thinking'),             // adds a reasoning part → breaks text coalescing
+      ev.text(`Part two.\n${fence}\n`),     // starts a second, separate text part
+      ev.done(),
+    ]);
+    const t = await runTurn(h, 'go');
+    // Combined top-level count = halfPlusOne * 2 > MAX_UI_TOP_LEVEL: drop all ui blocks.
+    expect(uiParts(t.message).length).toBe(0);
+    // Text parts should retain their original fence text.
     expect(t.message.parts.filter((p) => p.type === 'text').length).toBeGreaterThan(0);
   });
 });

@@ -45,6 +45,7 @@ import {
   childBlocks,
   collectActions,
   MAX_UI_BLOCKS,
+  MAX_UI_TOP_LEVEL,
   episodeOf,
   wrapUntrusted,
   type AgentEvent,
@@ -682,19 +683,20 @@ class TurnRunner {
         pending.push({ index, extracted });
       }
       if (pending.length) {
-        // Cross-part aggregate: total block count and duplicate action ids.
+        // Cross-part aggregate: total block count, top-level block count, and duplicate action ids.
         let totalCount = 0;
         const countBlock = (b: UIBlock) => { totalCount++; for (const c of childBlocks(b)) countBlock(c); };
         for (const { extracted } of pending) for (const b of extracted.blocks) countBlock(b);
+        const totalTopLevel = pending.reduce((sum, { extracted }) => sum + extracted.blocks.length, 0);
         const allIds = pending.flatMap(({ extracted }) => collectActions(extracted.blocks).map((a) => a.id));
         const crossPartDup = allIds.find((id, i) => allIds.indexOf(id) !== i);
-        if (totalCount <= MAX_UI_BLOCKS && !crossPartDup) {
+        if (totalCount <= MAX_UI_BLOCKS && totalTopLevel <= MAX_UI_TOP_LEVEL && !crossPartDup) {
           for (const { index, extracted } of pending) {
             this.replacePart(index, { type: 'text', text: extracted.text });
             for (const block of extracted.blocks) this.addPart({ type: 'ui', id: newId('ui'), block });
           }
         }
-        // Blocks exceeding the aggregate limit or with cross-part duplicate ids are silently dropped.
+        // Blocks exceeding the aggregate limit, the top-level limit, or with cross-part duplicate ids are silently dropped.
       }
     }
     this.persist(true);
