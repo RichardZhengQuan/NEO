@@ -8,6 +8,10 @@
  *
  * This test fails on the unpatched code where the drag-move handler
  * unconditionally calls kick(0.3) regardless of reduced-motion preference.
+ *
+ * A second test covers the transition scenario: the animation loop was already
+ * running (raf.current !== null) when reduced-motion became active.  The drag
+ * handler must call cancelAnimationFrame to stop the loop before redrawing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
@@ -280,5 +284,95 @@ describe('MemoryGraphView drag with prefers-reduced-motion', () => {
         `non-dragged node ${i + 1} y must be unchanged`,
       ).toBeCloseTo(othersBefore[i]!.y, 1);
     }
+  });
+
+  it('cancels an in-flight animation frame when dragging under reduced-motion (transition scenario)', async () => {
+    // Phase 1: render WITHOUT reduced-motion so kick() starts the loop and
+    // raf.current is set to a non-null handle.
+    let reducedMotion = false;
+    const mqListeners = new Map<string, (() => void)[]>();
+
+    vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => {
+      const getMatches = () => {
+        if (query === '(prefers-reduced-motion: reduce)') return reducedMotion;
+        return false;
+      };
+      const mql = {
+        get matches() { return getMatches(); },
+        media: query,
+        addEventListener: vi.fn((evt: string, cb: () => void) => {
+          if (!mqListeners.has(query)) mqListeners.set(query, []);
+          mqListeners.get(query)!.push(cb);
+        }),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+        onchange: null,
+      } as unknown as MediaQueryList;
+      return mql;
+    });
+
+    // Freeze rAF: record the handle but never actually invoke the callback
+    // so raf.current stays non-null across the transition.
+    let rafHandle = 0;
+    const frozenRafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => {
+      rafHandle = ++rafHandle;
+      return rafHandle;
+    });
+    const cafSpy = vi.spyOn(window, 'cancelAnimationFrame');
+
+    const { container } = render(
+      <I18nProvider locale="en">
+        <MemoryGraphView graph={graph} showLegend={false} />
+      </I18nProvider>,
+    );
+    await act(async () => {});
+
+    // With reduced-motion OFF, kick() should have called rAF at least once
+    // (animation loop started, raf.current is non-null).
+    expect(frozenRafSpy, 'rAF must have been called to start the animation loop').toHaveBeenCalled();
+
+    // Phase 2: switch to reduced-motion (simulate OS preference change).
+    reducedMotion = true;
+
+    const canvas = container.querySelector('canvas');
+    expect(canvas).toBeTruthy();
+
+    // Record arc calls from the last draw() to find a node's screen coords.
+    const screenNodes = nodeCircles(arcCalls);
+    expect(screenNodes.length).toBeGreaterThanOrEqual(3);
+    const { x: simX, y: simY } = screenNodes[0]!;
+    const { vx, vy, vk } = viewTransform;
+    const screenX = Math.round(simX * vk + vx);
+    const screenY = Math.round(simY * vk + vy);
+
+    // Reset spies so we only count calls made during the drag.
+    frozenRafSpy.mockClear();
+    cafSpy.mockClear();
+
+    // Phase 3: drag a node — moveGesture now runs in reduced-motion mode while
+    // raf.current is still set to the frozen handle.
+    fireEvent(canvas!, new PointerEvent('pointerdown', {
+      pointerId: 1, clientX: screenX, clientY: screenY, buttons: 1, bubbles: true, cancelable: true,
+    }));
+    fireEvent(canvas!, new PointerEvent('pointermove', {
+      pointerId: 1, clientX: screenX + 60, clientY: screenY + 30, buttons: 1, bubbles: true, cancelable: true,
+    }));
+    fireEvent(canvas!, new PointerEvent('pointerup', {
+      pointerId: 1, clientX: screenX + 60, clientY: screenY + 30, buttons: 0, bubbles: true, cancelable: true,
+    }));
+
+    // The in-flight frame must have been cancelled.
+    expect(cafSpy, 'cancelAnimationFrame must be called when drag occurs under reduced-motion with an active loop')
+      .toHaveBeenCalled();
+
+    // No new animation frame must have been queued during the drag.
+    expect(frozenRafSpy, 'requestAnimationFrame must not be called during reduced-motion drag')
+      .not.toHaveBeenCalled();
+
+    // Canvas must have been redrawn synchronously.
+    const afterNodes = nodeCircles(arcCalls);
+    expect(afterNodes.length, 'canvas must have been redrawn after drag').toBeGreaterThanOrEqual(3);
   });
 });

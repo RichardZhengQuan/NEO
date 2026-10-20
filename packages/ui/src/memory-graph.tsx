@@ -661,6 +661,7 @@ export function MemoryGraphView({ graph: input, selectedId = null, highlightIds 
       g.node.y = pt.y;
       g.node.fixed = true;
       if (prefersReducedMotion()) {
+        if (raf.current !== null) { cancelFrame(raf.current); raf.current = null; }
         draw();
       } else {
         kick(0.3);
@@ -684,7 +685,10 @@ export function MemoryGraphView({ graph: input, selectedId = null, highlightIds 
     }
     if (g.node) {
       g.node.fixed = false;
-      if (prefersReducedMotion()) draw();
+      if (prefersReducedMotion()) {
+        if (raf.current !== null) { cancelFrame(raf.current); raf.current = null; }
+        draw();
+      }
     }
     if (!cancelled && !g.moved) {
       if (g.mode === 'node' && g.node) onSelectRef.current?.(g.node.id === selectedRef.current ? null : g.node.id);
