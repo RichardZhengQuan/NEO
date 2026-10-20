@@ -1158,6 +1158,7 @@ function ChangeDetails({ item, timezone }: { item: ChangeItem; timezone?: string
     <div className="neo-change__details">
       {item.after.dueAt !== undefined && <p>{t('block.changes_due', { from: time(item.before.dueAt), to: time(item.after.dueAt) })}</p>}
       {item.after.title !== undefined && <p>{t('block.changes_title_field', { from: item.before.title ?? '', to: item.after.title })}</p>}
+      {item.kind === 'reminder.update' && item.after.timezone !== undefined && <p>{t('block.changes_timezone', { from: item.before.timezone ?? '', to: item.after.timezone })}</p>}
       {item.kind === 'task.update' && item.after.priority !== undefined && <p>{priority(item.before.priority)} → {priority(item.after.priority)}</p>}
       {item.kind === 'task.update' && item.after.done !== undefined && <p>{t(item.after.done ? 'block.changes_mark_done' : 'block.changes_reopen')}</p>}
     </div>
