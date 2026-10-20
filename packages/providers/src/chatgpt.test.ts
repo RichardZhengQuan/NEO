@@ -211,6 +211,37 @@ describe('ChatGPT Responses API with a loopback fake', () => {
     expect(unauthorized).toHaveBeenCalledTimes(status === 401 ? 1 : 0);
   });
 
+  it('keeps native search available when an unsupported function tool is rejected', async () => {
+    handler = (_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'unsupported_tool', param: 'tools[0]', message: 'The tool "my_func" is not supported.' } }));
+    };
+    const funcTool: ToolSpec = { name: 'my_func', description: 'A function tool', inputSchema: { type: 'object' as const } };
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    const error = await collectChat(adapter.chat(searchRequest)).catch((value: unknown) => value);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body?.['tools']).toMatchObject([{ type: 'function', name: 'my_func' }, { type: 'web_search' }]);
+    expect(adapter.capabilities(request.model).nativeWebSearch).toBe(true);
+    expect(error).toMatchObject({ code: 'provider_error' });
+  });
+
+  it('sends native search on a follow-up after an unsupported function tool is rejected', async () => {
+    handler = (_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'unsupported_tool', param: 'tools[0]', message: 'The tool "my_func" is not supported.' } }));
+    };
+    const funcTool: ToolSpec = { name: 'my_func', description: 'A function tool', inputSchema: { type: 'object' as const } };
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    await expect(collectChat(adapter.chat(searchRequest))).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body?.['tools']).toMatchObject([{ type: 'function', name: 'my_func' }, { type: 'web_search' }]);
+
+    stream(completed());
+    await collectChat(adapter.chat(searchRequest));
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.body?.['tools']).toContainEqual({ type: 'web_search' });
+  });
+
   it.each([
     ['subscription_sharing_usage_limit_exceeded', 'rate_limited', "You've reached the weekly limit you set for NEO in ChatGPT."],
     ['subscription_sharing_usage_unavailable', 'provider_error', 'ChatGPT is temporarily unavailable. Try again later.'],

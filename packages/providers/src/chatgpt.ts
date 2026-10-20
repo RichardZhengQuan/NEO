@@ -113,8 +113,7 @@ function isSearchRejection(value: unknown, status?: number): boolean {
   const param = typeof value['param'] === 'string' ? value['param'] : '';
   const message = typeof value['message'] === 'string' ? value['message'] : '';
   if (/^subscription_|invalid_grant/.test(code)) return false;
-  return /web_search|web search/i.test(`${code} ${param} ${message}`) || code === 'unsupported_tool'
-    || (/^tools(?:\.|\[|$)/.test(param) && /unsupported|not supported|not allowed|invalid tool/i.test(`${code} ${message}`));
+  return /web_search|web search/i.test(`${code} ${param} ${message}`);
 }
 
 export class ChatGPTAdapter implements ProviderAdapter {
