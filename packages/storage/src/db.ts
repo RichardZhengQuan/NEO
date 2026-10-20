@@ -95,7 +95,16 @@ export function openDatabase(path: string): NeoDatabase {
       } finally {
         depth = entryDepth;
         if (levelCallbacks) {
-          for (const cb of levelCallbacks) cb();
+          let firstErr: unknown;
+          let hasErr = false;
+          for (const cb of levelCallbacks) {
+            try {
+              cb();
+            } catch (err) {
+              if (!hasErr) { firstErr = err; hasErr = true; }
+            }
+          }
+          if (hasErr) throw firstErr;
         }
       }
     },

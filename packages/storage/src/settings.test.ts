@@ -237,6 +237,26 @@ describe('afterCommit', () => {
     db.transaction(() => settings.update({ locale: 'zh' }));
     expect(createSettingsStore(db).get()).toMatchObject({ theme: 'dark', locale: 'zh' });
   });
+
+  it('runs all callbacks even when an earlier callback throws, preserving cache and listeners', () => {
+    db = openNeoDatabase(':memory:');
+    const settings = createSettingsStore(db);
+    const error = new Error('early callback');
+
+    // Register the throwing callback BEFORE settings.update(), so the settings
+    // afterCommit callback is queued after the thrower. Without the fix the
+    // loop would stop at the thrower and skip the settings cache/listener update.
+    expect(() => db.transaction(() => {
+      db.afterCommit(() => { throw error; });
+      settings.update({ theme: 'dark' });
+    })).toThrow(error);
+
+    // The SQL write committed; the cache and listeners must reflect it.
+    expect(settings.get().theme).toBe('dark');
+    expect(createSettingsStore(db).get().theme).toBe('dark');
+    db.transaction(() => settings.update({ locale: 'zh' }));
+    expect(createSettingsStore(db).get()).toMatchObject({ theme: 'dark', locale: 'zh' });
+  });
 });
 
 describe('AI settings upgrade', () => {
