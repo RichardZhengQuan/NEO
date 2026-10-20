@@ -188,13 +188,25 @@ export interface ReminderStore {
   /** The scheduled reminder with the smallest dueAt. */
   nextDue(): Reminder | null;
   /** Record a firing: advances recurring reminders or marks one-shots 'fired'. */
-  markFired(id: string, firedAt: number): ReminderFiring;
+  markFired(id: string, firedAt: number, missed?: boolean): ReminderFiring;
   onChange(listener: (event: { type: 'upsert'; reminder: Reminder } | { type: 'delete'; id: string }) => void): () => void;
   /**
    * Set messageId to null for every reminder whose messageId is in the given set.
    * Called by the server's delete route after messages are removed.
    */
   clearMessageLinks(messageIds: string[]): void;
+  /**
+   * Return every pending_firings row that has not yet been acknowledged.
+   * A pending firing is written atomically with markFired so it survives
+   * a crash between markFired and the downstream notification write.
+   * On re-delivery (scheduler start), each row is re-emitted to onFire listeners.
+   */
+  pendingFirings?(): ReminderFiring[];
+  /**
+   * Remove one pending_firings row after the downstream notification succeeds.
+   * Idempotent: calling it twice for the same id is harmless.
+   */
+  clearPendingFiring?(id: string): void;
 }
 
 export interface TaskListQuery {

@@ -254,6 +254,8 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
           ...(firing.reminder.messageId ? { messageId: firing.reminder.messageId, url: `neo://timeline/${encodeURIComponent(firing.reminder.messageId)}` }
             : { url: `neo://reminders/${firing.reminder.id}` }),
         },
+      }).then(() => {
+        if (firing.pendingFiringId) stores.reminders.clearPendingFiring?.(firing.pendingFiringId);
       }).catch(err => { logger.warn('Reminder notification failed', { error: String(err) }); });
     }));
 

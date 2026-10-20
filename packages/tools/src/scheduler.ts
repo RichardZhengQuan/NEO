@@ -58,7 +58,12 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
   const emit = (firing: ReminderFiring) => {
     for (const listener of [...listeners]) {
       try {
-        listener(firing);
+        const result = listener(firing);
+        if (result != null && typeof (result as { catch?: unknown }).catch === 'function') {
+          (result as Promise<void>).catch(err => {
+            logger.error('reminder onFire listener failed', { reminderId: firing.reminder.id, error: String(err) });
+          });
+        }
       } catch (err) {
         logger.error('reminder onFire listener failed', { reminderId: firing.reminder.id, error: String(err) });
       }
@@ -90,9 +95,10 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
           // Re-read: an earlier listener in this batch may have snoozed, completed or deleted it.
           const current = reminders.get(candidate.id);
           if (!current || current.status !== 'scheduled' || current.dueAt > now) continue;
-          const firing = reminders.markFired(current.id, now);
+          const missed = now - current.dueAt > graceMs;
+          const firing = reminders.markFired(current.id, now, missed);
           retryAfter.delete(current.id);
-          const final: ReminderFiring = { ...firing, missed: now - firing.occurrenceAt > graceMs };
+          const final: ReminderFiring = { ...firing, missed };
           firings.push(final);
           emit(final);
         } catch (err) {
@@ -153,6 +159,20 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
       if (started) return;
       started = true;
       unsubscribe = reminders.onChange(() => reschedule());
+      // Re-deliver any firings committed before the last crash but not yet acknowledged.
+      let pending: ReminderFiring[] = [];
+      try {
+        pending = reminders.pendingFirings?.() ?? [];
+      } catch (err) {
+        logger.error('reminder pending firing re-delivery failed', { error: String(err) });
+      }
+      for (const firing of pending) {
+        try {
+          emit(firing);
+        } catch (err) {
+          logger.error('reminder pending firing re-delivery failed', { reminderId: firing.reminder.id, error: String(err) });
+        }
+      }
       tick(clock()); // catch-up; re-arms when done
     },
 

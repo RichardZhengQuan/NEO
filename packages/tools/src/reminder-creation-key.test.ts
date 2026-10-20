@@ -149,7 +149,7 @@ describe('reminder creation keys', () => {
     db.prepare(`INSERT INTO reminders
       (id,title,notes,due_at,anchor_at,timezone,creation_key,creation_fingerprint,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?)`).run('keyed-v7', request.title, null, request.dueAt, request.dueAt, 'UTC', request.creationKey!, 'existing-v7-fingerprint', 1, 1);
-    expect(migrate(db, 'tools', toolsMigrations).applied).toEqual([8, 9]);
+    expect(migrate(db, 'tools', toolsMigrations).applied).toEqual([8, 9, 10]);
     expect(migrate(db, 'tools', toolsMigrations).applied).toEqual([]);
     const reminders = createProductivityStores(db, { clock: () => 200 }).reminders;
     expect(reminders.get('keyed-v7')).toMatchObject({ id: 'keyed-v7', creationKey: request.creationKey, title: request.title });
