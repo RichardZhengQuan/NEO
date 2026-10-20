@@ -71,7 +71,7 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
   function schedulePing() {
     clearPing();
     pingTimer = setTimeout(() => {
-      if (ws?.readyState === WebSocket.OPEN) {
+      if (ws?.readyState === ctx.WebSocketCtor.OPEN) {
         const msg: WsClientMessage = { type: 'ping', id: String(Date.now()) };
         ws.send(JSON.stringify(msg));
       }
@@ -80,7 +80,7 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
   }
 
   function send(msg: WsClientMessage) {
-    if (ws?.readyState === WebSocket.OPEN) {
+    if (ws?.readyState === ctx.WebSocketCtor.OPEN) {
       ws.send(JSON.stringify(msg));
     }
   }
