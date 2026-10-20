@@ -1022,6 +1022,9 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
           edits.push(`due ${time(item.before.dueAt)} → ${time(item.after.dueAt)}`);
         }
         if (item.after.title !== undefined) edits.push(`title ${item.before.title} → ${item.after.title}`);
+        if (item.kind === 'reminder.update' && item.after.timezone !== undefined) {
+          edits.push(`timezone ${item.before.timezone} → ${item.after.timezone}`);
+        }
         if (item.kind === 'task.update') {
           if (item.after.priority !== undefined) edits.push(`priority ${item.before.priority} → ${item.after.priority}`);
           if (item.after.done !== undefined) edits.push(item.after.done ? 'Mark done' : 'Reopen');

@@ -12,6 +12,7 @@ import {
   resolveWidgetAction,
   uiBlockKey,
   uiBlockToText,
+  uiBlocksToText,
   validateUIBlocks,
   walkUIBlocks,
   widgetActionId,
@@ -234,6 +235,19 @@ describe('meaningful text fallback', () => {
     expect(uiBlockToText({ ...reminder('rem_notes'), notes })).toContain(notes);
     const text = uiBlockToText({ type: 'countdown', label: 'Launch', until: instant, timezone: 'Asia/Singapore' });
     expect(text).toContain('Oct 14, 2026, 12:30 AM');
+  });
+
+  it('renders timezone-only reminder updates', () => {
+    const block: UIBlock = {
+      type: 'changes', items: [{
+        id: 'change_1', kind: 'reminder.update', reminderId: 'rem_1', title: 'Call',
+        before: { timezone: 'UTC' }, after: { timezone: 'Asia/Singapore' },
+      }],
+    };
+    const text = uiBlocksToText([block]);
+    expect(text).toContain('UTC');
+    expect(text).toContain('Asia/Singapore');
+    expect(text).toContain('• Call: timezone UTC → Asia/Singapore');
   });
 
   it('includes every memory content, and the status only when it is not active', () => {
