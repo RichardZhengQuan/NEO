@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatRequest, ProviderConfig } from '@neo/protocol';
-import { collectChat } from '@neo/protocol';
+import { collectChat, NeoError } from '@neo/protocol';
 import { OpenAIAdapter } from './openai.js';
 import {
   collect,
@@ -305,6 +305,59 @@ describe('OpenAI streaming', () => {
   it('an error object inside the stream is surfaced', async () => {
     const { a } = make(() => sseResponse(dataFrames([chunk({ content: 'x' }), { error: { message: 'upstream exploded', code: 502 } }])));
     await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'provider_error', message: expect.stringContaining('upstream exploded') });
+  });
+
+  it('classifies an in-stream 429 as retryable rate_limited', async () => {
+    const { a, f, sleep } = make(stream({ error: { code: 429, message: 'Too many requests' } }));
+    const error = await collect(a.chat(req())).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'rate_limited', retryable: true, message: 'OpenAI error: Too many requests', details: { status: 429 } });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
+  });
+
+  it.each([
+    [401, 'provider_auth', false],
+    [403, 'provider_auth', false],
+    [400, 'provider_error', false],
+    [500, 'provider_error', true],
+    [503, 'provider_error', true],
+  ] as const)('classifies in-stream code %s as %s (retryable: %s)', async (status, code, retryable) => {
+    const { a } = make(stream({ error: { code: status, message: `Rejected ${KEY}` } }));
+    const error = await collect(a.chat(req())).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code, retryable, details: { status } });
+    expect((error as NeoError).message).not.toContain(KEY);
+  });
+
+  it.each([
+    [{ retryAfter: 0 }, 0],
+    [{ retryAfter: 1.5 }, 1500],
+    [{ retryAfter: 30 }, 30_000],
+    [{ retryDelay: '2.5s' }, 2500],
+    [{ retryDelay: 2 }, 2000],
+  ])('preserves in-stream rate-limit delay %j', async (delay, retryAfterMs) => {
+    const { a, f, sleep } = make(stream({ error: { code: 429, message: 'Too many requests', ...delay } }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'rate_limited', retryable: true, details: { status: 429, retryAfterMs } });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
+  });
+
+  it.each([
+    ['rate_limit_exceeded', 'rate_limited', true],
+    ['insufficient_quota', 'rate_limited', true],
+    ['invalid_api_key', 'provider_auth', false],
+    ['invalid_organization', 'provider_auth', false],
+    ['account_deactivated', 'provider_auth', false],
+    ['server_error', 'provider_error', true],
+  ] as const)('classifies in-stream string code %s as %s (retryable: %s)', async (codeStr, expected, retryable) => {
+    const { a } = make(stream({ error: { code: codeStr, message: 'OpenAI string error' } }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: expected, retryable });
+  });
+
+  it.each([{ message: 'Unknown failure' }, 'Unknown failure'])('does not retry an unclassified in-stream error %j', async (error) => {
+    const { a } = make(stream({ error }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'provider_error', retryable: false });
   });
 
   it('abort mid-stream ends with cancelled', async () => {
