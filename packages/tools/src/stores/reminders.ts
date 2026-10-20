@@ -154,13 +154,16 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       if (data.notes !== undefined) next.notes = data.notes;
       if (data.timezone !== undefined) next.timezone = assertTimeZone(data.timezone);
       if (data.recurrence !== undefined) next.recurrence = data.recurrence;
-      const reanchor =
-        (data.dueAt !== undefined && Math.round(data.dueAt) !== existing.dueAt) ||
-        (data.timezone !== undefined && data.timezone !== existing.timezone);
+      const dueAtMoved = data.dueAt !== undefined && Math.round(data.dueAt) !== existing.dueAt;
+      const timezoneMoved = data.timezone !== undefined && data.timezone !== existing.timezone;
+      // reanchor covers both cases for anchor_at / snoozed_due_at reset.
+      const reanchor = dueAtMoved || timezoneMoved;
       if (data.dueAt !== undefined) next.dueAt = Math.round(data.dueAt);
       if (data.status !== undefined) next.status = data.status;
       // Moving a reminder that already fired to a new time means "remind me again".
-      else if (reanchor && existing.status === 'fired') next.status = 'scheduled';
+      // Guard with dueAtMoved only: a timezone-only patch must not re-arm a fired
+      // reminder because dueAt is still in the past.
+      else if (dueAtMoved && existing.status === 'fired') next.status = 'scheduled';
 
       // When reanchoring, clear any outstanding snooze so the new dueAt is
       // not silently overwritten by a snoozed redelivery in markFired.

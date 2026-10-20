@@ -224,6 +224,16 @@ describe('ReminderStore', () => {
     expect(r.nextDue()?.id).toBe(once.id);
   });
 
+  it('timezone-only patch on a fired non-recurring reminder does not re-arm it', () => {
+    const r = stores.reminders;
+    const once = r.create({ title: 'tz-test', dueAt: utc(2026, 10, 10, 8), timezone: 'America/New_York' });
+    r.markFired(once.id, utc(2026, 10, 10, 8));
+    // Patch only the timezone — dueAt stays in the past.
+    const patched = r.update(once.id, { timezone: 'UTC' });
+    expect(patched.status).toBe('fired');
+    expect(r.nextDue()?.id).not.toBe(once.id);
+  });
+
   it('emits onChange after every mutation', () => {
     const r = stores.reminders;
     const events: string[] = [];
