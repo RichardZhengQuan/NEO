@@ -39,7 +39,7 @@ describe('database', () => {
       parts: [{ type: 'text', text: 'A historical answer' }, { type: 'reasoning', text: 'Original thinking', provider: 'mock', model: 'neo-demo' }],
     });
     const transcript = db.prepare('SELECT * FROM messages').all();
-    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([4, 5, 6, 7]);
+    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([4, 5, 6, 7, 8]);
     expect(createProviderConfigStore(db).get('demo')).toBeNull();
     expect(createProviderConfigStore(db).get('test-double')).toMatchObject({ id: 'test-double', kind: 'mock' });
     const migrated = JSON.parse((db.prepare('SELECT value FROM settings WHERE key = ?').get('settings') as { value: string }).value);
@@ -200,7 +200,7 @@ describe('conversation store', () => {
       .run('v2_context', conversation.id, 'user', JSON.stringify([{ type: 'context', text: secret, sensitive: true }]), 1, 'complete');
     db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
       .run('v2_answer', conversation.id, 'assistant', JSON.stringify([{ type: 'text', text: `I remember ${secret}` }]), 2, 'complete');
-    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([3, 4, 5, 6, 7]);
+    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([3, 4, 5, 6, 7, 8]);
     expect(store.getMessage('v2_answer')?.sensitive).toBe(true);
     expect(JSON.stringify(toChatMessages(store.messages(conversation.id), { omitSensitiveContext: true }))).not.toContain(secret);
   });
@@ -277,7 +277,7 @@ describe('conversation store', () => {
       db.prepare('INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)').run('old_conv', 'Old', 1, 1);
       db.prepare('INSERT INTO messages (id, conversation_id, role, parts, created_at, status) VALUES (?, ?, ?, ?, ?, ?)')
         .run('old_msg', 'old_conv', 'assistant', JSON.stringify([{ type: 'text', text: 'Old answer' }]), 1, 'complete');
-      expect(migrate(db, 'storage', storageMigrations).applied).toEqual([2, 3, 4, 5, 6, 7]);
+      expect(migrate(db, 'storage', storageMigrations).applied).toEqual([2, 3, 4, 5, 6, 7, 8]);
     }
     const store = createConversationStore(db);
     if (upgraded) {
