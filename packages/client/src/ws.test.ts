@@ -65,6 +65,35 @@ describe('connect() WebSocket', () => {
     instances.length = 0;
   });
 
+  it('closing from inside the open listener leaves no ping timer', () => {
+    vi.useFakeTimers();
+    const ctx = {
+      baseUrl: 'http://localhost:7777',
+      getToken: () => 'ws-token',
+      WebSocketCtor: FakeWebSocket as unknown as typeof WebSocket,
+    };
+    const conn = createConnection(ctx, {
+      onEvent: () => {},
+      onStatus: (s) => {
+        if (s === 'open') {
+          conn.close();
+        }
+      },
+      reconnect: true,
+    });
+    const ws = instances[0]!;
+
+    ws.simulateOpen();
+    ws.simulateMessage({ type: 'ready', serverVersion: '0.1.0', seq: 0 });
+    expect(conn.status).toBe('closed');
+
+    // Advance time well past PING_INTERVAL_MS — if a timer leaked it would
+    // reschedule itself here. The test passes as long as no unhandled error
+    // is thrown and the status stays 'closed'.
+    vi.advanceTimersByTime(100_000);
+    expect(conn.status).toBe('closed');
+  });
+
   it('closing from inside the reconnecting listener prevents further socket construction', () => {
     vi.useFakeTimers();
     const ctx = {

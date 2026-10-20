@@ -148,7 +148,9 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
         attempt = 0; // Reset backoff on successful connect.
         lastSeq = msg.seq;
         setStatus('open');
-        schedulePing();
+        if (!closed) {
+          schedulePing();
+        }
 
         // Send subscription after reconnect.
         const subMsg: WsClientMessage = { type: 'subscribe', conversations: currentConversations };
