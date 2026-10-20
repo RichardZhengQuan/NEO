@@ -24,6 +24,7 @@ export interface RelayLimits {
   registrationTimeoutMs: number;
   phoneIdleTimeoutMs: number;
   heartbeatIntervalMs: number;
+  closeTimeoutMs: number;
 }
 
 export const DEFAULT_RELAY_LIMITS: Readonly<RelayLimits> = Object.freeze({
@@ -39,6 +40,7 @@ export const DEFAULT_RELAY_LIMITS: Readonly<RelayLimits> = Object.freeze({
   registrationTimeoutMs: 10_000,
   phoneIdleTimeoutMs: 120_000,
   heartbeatIntervalMs: 30_000,
+  closeTimeoutMs: 250,
 });
 
 const MAX_TIMER_MS = 2_147_483_647;
@@ -46,6 +48,7 @@ const MS_LIMIT_FIELDS: ReadonlySet<keyof RelayLimits> = new Set([
   'registrationTimeoutMs',
   'phoneIdleTimeoutMs',
   'heartbeatIntervalMs',
+  'closeTimeoutMs',
 ]);
 
 export interface RelayStats {
@@ -198,7 +201,7 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
   function closeSocket(socket: WebSocket, code: number, reason: string): void {
     if (socket.readyState === WebSocket.CLOSED) return;
     if (terminateTimers.has(socket)) return;
-    const timeout = setTimeout(() => socket.terminate(), 250);
+    const timeout = setTimeout(() => socket.terminate(), limits.closeTimeoutMs);
     timeout.unref();
     terminateTimers.set(socket, timeout);
     socket.once('close', () => { clearTimeout(timeout); terminateTimers.delete(socket); });
@@ -402,7 +405,7 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     if (closing || (path !== RELAY_SERVER_PATH && !ServerIdSchema.safeParse(id).success)) {
       // Upgrade sockets are no longer owned by HTTP shutdown. Do not wait for
       // an untrusted half-open peer to acknowledge the refusal or send FIN.
-      const timeout = setTimeout(() => socket.destroy(), 250);
+      const timeout = setTimeout(() => socket.destroy(), limits.closeTimeoutMs);
       timeout.unref();
       socket.once('close', () => clearTimeout(timeout));
       socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n', () => socket.destroy());
@@ -411,7 +414,18 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     const ip = clientIp(request, options.trustProxy ?? false);
     sockets.handleUpgrade(request, socket, head, ws => {
       // ws emits an error for oversized/invalid wire frames; never log its contents.
-      ws.on('error', () => {});
+      // Install a terminate deadline so a half-open TCP write side cannot hold an
+      // admission slot past closeTimeoutMs (same hardening as the refused-upgrade handler).
+      ws.on('error', () => {
+        // resetAndDestroy() does not reliably force TCP RST on Linux when the socket
+        // receive buffer has already been drained before the error fires (the kernel
+        // sends FIN instead of RST, leaving a half-open peer alive indefinitely).
+        // Use a timer deadline instead: if ws has not closed on its own within
+        // closeTimeoutMs, force-terminate it — OS-independent and sufficient.
+        const t = setTimeout(() => ws.terminate(), limits.closeTimeoutMs);
+        t.unref();
+        ws.once('close', () => clearTimeout(t));
+      });
       if (closing) { closeSocket(ws, 1001, 'Relay stopped'); return; }
       if (path === RELAY_SERVER_PATH) serverSocket(ws, ip);
       else phoneSocket(ws, id, ip);
