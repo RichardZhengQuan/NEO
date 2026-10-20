@@ -435,6 +435,20 @@ describe('relay limits and lifecycle', () => {
     expect(pongFired).toBe(false);
   });
 
+  it('closes a server whose outgoing buffer is over maxBufferedBytes before the next heartbeat ping', async () => {
+    const relay = await start({ limits: { maxBufferedBytes: 8, heartbeatIntervalMs: 20 } });
+    const server = await register(relay, generateServerIdentity(), { autoPong: false });
+    const original = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!;
+    vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
+      return peers.some(peer => peer.socket === this) ? original.get!.call(this) : 9;
+    });
+    const pingSpy = vi.spyOn(WebSocket.prototype, 'ping');
+    // Unsolicited pong keeps alive=true — server buffers are over-limit but it sends keepalives.
+    server.socket.pong(Uint8Array.of(1));
+    expect(await server.closed).toBe(TunnelCloseCode.RateLimited);
+    expect(pingSpy).not.toHaveBeenCalled();
+  });
+
   it('does not add another terminate timer or close listener for a CLOSING server socket', async () => {
     const relay = await start();
     const server = await register(relay, generateServerIdentity(), { autoPong: false });

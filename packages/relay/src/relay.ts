@@ -425,7 +425,12 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     for (const server of servers.values()) {
       if (!server.alive) { server.socket.terminate(); continue; }
       server.alive = false;
-      if (server.socket.readyState === WebSocket.OPEN) server.socket.ping();
+      if (server.socket.readyState !== WebSocket.OPEN) continue;
+      if (server.socket.bufferedAmount > limits.maxBufferedBytes) {
+        closeSocket(server.socket, TunnelCloseCode.RateLimited, 'Destination is busy');
+        continue;
+      }
+      server.socket.ping();
     }
   }, limits.heartbeatIntervalMs);
   heartbeat.unref();
