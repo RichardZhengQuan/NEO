@@ -76,3 +76,31 @@ it('parseSSE: generator unwinds after abort even when reader.cancel() never reso
   const returnResult = await iterator.return!(undefined);
   expect(returnResult.done).toBe(true);
 });
+
+it('parseSSE: generator unwinds after a later abort while consumer return waits on reader.cancel()', async () => {
+  let onCancelStarted!: () => void;
+  const cancelStarted = new Promise<void>((resolve) => {
+    onCancelStarted = resolve;
+  });
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: first\n\n'));
+      // Stay open so consumer return enters finally before the stream is done.
+    },
+    cancel(): Promise<void> {
+      onCancelStarted();
+      return new Promise<void>(() => {});
+    },
+  });
+
+  const ac = new AbortController();
+  const iterator = parseSSE(body, ac.signal)[Symbol.asyncIterator]();
+  expect((await iterator.next()).value).toEqual({ data: 'first' });
+
+  const returnPromise = iterator.return!(undefined);
+  // Abort only after finally has started waiting on the never-resolving cancel.
+  await cancelStarted;
+  ac.abort();
+
+  await expect(returnPromise).resolves.toMatchObject({ done: true });
+}, 1000);
