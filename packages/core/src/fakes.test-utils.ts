@@ -54,6 +54,7 @@ import {
 } from '@neo/protocol';
 
 import { AgentRuntime, type AgentRuntimeDeps } from './runtime.js';
+import { raceAbort } from './abort.js';
 
 const clone = <T>(v: T): T => structuredClone(v);
 
@@ -373,7 +374,7 @@ export class FakeMemory implements MemoryService {
 
   async recall(query: RecallQuery): Promise<RecallResult> {
     this.recallCalls.push(query);
-    if (this.recallGate) await this.recallGate;
+    if (this.recallGate) await (query.signal ? raceAbort(this.recallGate, query.signal) : this.recallGate);
     if (this.recallError) throw this.recallError;
     return { items: this.recallItems, tookMs: 1, seeds: 0, considered: 0 };
   }

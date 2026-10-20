@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AgentRuntime } from './runtime.js';
 import { z } from 'zod';
-import { estimateMessageTokens, type ContentPart, type Message, type ToolDefinition } from '@neo/protocol';
+import { estimateMessageTokens, NeoError, type ContentPart, type Message, type ToolDefinition } from '@neo/protocol';
 import { collect, deferred, ev, harness, memoryNode, recalled, ScriptedAdapter, settle, standardTools, until, userText, waitsForAbort, type Harness } from './fakes.test-utils.js';
 
 const MINUTE = 60_000;
@@ -109,6 +109,78 @@ describe('timeline episode selection', () => {
     await failed;
     await h.runtime.waitForIdle();
     expect(h.conversations.list()).toEqual([]);
+  });
+
+  it('cancels pending recall without waiting for its gate and releases the timeline', async () => {
+    const h = harness();
+    const gate = deferred();
+    h.memory.recallGate = gate.promise;
+    const pending = h.runtime.sendTimeline({ parts: userText('cancel stalled recall') });
+    const cancelled = pending.catch((err: unknown) => err);
+    expect(h.memory.recallCalls).toHaveLength(1);
+    expect(h.runtime.cancelTimeline()).toBe(true);
+    await settle();
+    const error = await Promise.race([cancelled, Promise.resolve('pending')]);
+    expect.soft(error).toBeInstanceOf(NeoError);
+    expect.soft(error).toMatchObject({ code: 'cancelled' });
+    const idle = h.runtime.waitForIdle().then(() => true);
+    await settle();
+    expect.soft(await Promise.race([idle, Promise.resolve(false)])).toBe(true);
+    h.memory.recallGate = null;
+    const next = h.runtime.sendTimeline({ parts: userText('try again') });
+    await expect(next).resolves.toHaveProperty('turnId');
+    await (await next).done;
+  });
+
+  it.each(['budget rotation', 'reinforcement'] as const)('cancels pending %s recall without waiting for its gate', async (phase) => {
+    const h = harness({ settings: { agent: { contextTokenBudget: 2000 } } });
+    await send(h, 'first');
+    if (phase === 'budget rotation') stored(h, h.conv.id, 'x'.repeat(8000));
+    const gate = deferred();
+    const recall = h.memory.recall.bind(h.memory);
+    const calls = h.memory.recallCalls.length;
+    h.memory.recall = (query) => {
+      if (h.memory.recallCalls.length === calls + 1) h.memory.recallGate = gate.promise;
+      return recall(query);
+    };
+    const pending = h.runtime.sendTimeline({ parts: userText('cancel later recall') });
+    const cancelled = pending.catch((err: unknown) => err);
+    await settle();
+    expect(h.memory.recallCalls).toHaveLength(calls + 2);
+    expect(h.runtime.cancelTimeline()).toBe(true);
+    await settle();
+    const error = await Promise.race([cancelled, Promise.resolve('pending')]);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'cancelled' });
+    const idle = h.runtime.waitForIdle().then(() => true);
+    await settle();
+    expect(await Promise.race([idle, Promise.resolve(false)])).toBe(true);
+  });
+
+  it('cancels pending recall even when memory ignores its signal', async () => {
+    const h = harness();
+    const gate = deferred();
+    h.memory.recall = async () => {
+      await gate.promise;
+      return { items: [], tookMs: 0, seeds: 0, considered: 0 };
+    };
+    const pending = h.runtime.sendTimeline({ parts: userText('cancel unresponsive memory') });
+    const cancelled = pending.catch((err: unknown) => err);
+    expect(h.runtime.cancelTimeline()).toBe(true);
+    await settle();
+    const error = await Promise.race([cancelled, Promise.resolve('pending')]);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'cancelled' });
+    const idle = h.runtime.waitForIdle().then(() => true);
+    await settle();
+    expect(await Promise.race([idle, Promise.resolve(false)])).toBe(true);
+  });
+
+  it('propagates cancelled recall errors without persisting either message', async () => {
+    const h = harness();
+    h.memory.recallError = new NeoError('cancelled', 'Recall was cancelled.');
+    await expect(h.runtime.sendTimeline({ parts: userText('cancelled recall') })).rejects.toMatchObject({ code: 'cancelled' });
+    expect(h.conversations.messages(h.conv.id)).toEqual([]);
   });
 });
 
@@ -632,6 +704,21 @@ describe('timeline UI actions', () => {
 });
 
 describe('timeline mutation boundary', () => {
+  it('cancels stalled preflight recall before entering the mutation', async () => {
+    const h = harness();
+    const gate = deferred();
+    h.memory.recallGate = gate.promise;
+    const pending = h.runtime.sendTimeline({ parts: userText('will be cancelled') });
+    const cancelled = pending.catch((err: unknown) => err);
+    const mutation = h.runtime.mutateTimeline(async () => {
+      expect(h.conversations.messages(h.conv.id)).toEqual([]);
+      return 'deleted';
+    });
+    await settle();
+    expect.soft(await Promise.race([cancelled, Promise.resolve('pending')])).toMatchObject({ code: 'cancelled' });
+    expect(await Promise.race([mutation, Promise.resolve('pending')])).toBe('deleted');
+  });
+
   it('cancels pending preflight, waits for it, and blocks sends until the mutation releases', async () => {
     const h = harness();
     const recallGate = deferred();
