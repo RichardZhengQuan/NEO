@@ -524,7 +524,16 @@ export class OpenAIAdapter implements ProviderAdapter {
 
   private streamError(error: unknown): NeoError {
     const message = isPlainObject(error) && typeof error['message'] === 'string' ? error['message'] : typeof error === 'string' ? error : JSON.stringify(error);
-    return new NeoError('provider_error', this.clean(`${this.label()} error: ${message}`), { retryable: true });
+    const e = isPlainObject(error) ? error : {};
+    const code = typeof e['code'] === 'number' ? e['code'] : 0;
+    const detail = this.clean(`${this.label()} error: ${message}`);
+    if (code === 401 || code === 403) return new NeoError('provider_auth', detail, { details: { status: code } });
+    if (code === 429) {
+      const delay = e['retryAfter'] ?? e['retryDelay'];
+      const retryAfterMs = typeof delay === 'number' ? delay * 1000 : typeof delay === 'string' ? parseRetryAfter(delay.replace(/s$/, '')) : undefined;
+      return new NeoError('rate_limited', detail, { retryable: true, details: { status: code, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) } });
+    }
+    return new NeoError('provider_error', detail, { retryable: code >= 500, details: code ? { status: code } : {} });
   }
 }
 

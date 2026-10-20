@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { toolInputJsonSchema, type ChatMessage, type ChatRequest, type ProviderConfig, type MemoryService, type ProductivityStores } from '@neo/protocol';
+import { NeoError, toolInputJsonSchema, type ChatMessage, type ChatRequest, type ProviderConfig, type MemoryService, type ProductivityStores } from '@neo/protocol';
 import { createBuiltinTools } from '../../tools/src/builtins/index.js';
 import { GeminiAdapter, sanitizeGeminiSchema } from './gemini.js';
 import { collect, dataFrames, fakeFetch, jsonResponse, ofType, recordingSleep, sseResponse, textOfEvents, type FakeResponder } from './testing/http.js';
@@ -383,6 +383,51 @@ describe('Gemini errors, keys, models, embeddings', () => {
   it('an invalid key (HTTP 400 API_KEY_INVALID) is provider_auth', async () => {
     const { a } = make(gErr(400, 'API key not valid. Please pass a valid API key.', { details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'API_KEY_INVALID' }] }));
     await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'provider_auth' });
+  });
+
+  it('an in-stream 401 error on HTTP 200 is a nonretryable provider_auth NeoError', async () => {
+    const { a, f, sleep } = make(stream({ error: { code: 401, status: 'UNAUTHENTICATED', message: 'Invalid credentials' } }));
+    const error = await collect(a.chat(req())).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'provider_auth', retryable: false, details: { status: 401 } });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
+  });
+
+  it.each([
+    [{ code: 403 }, 'provider_auth', false],
+    [{ status: 'UNAUTHENTICATED' }, 'provider_auth', false],
+    [{ status: 'PERMISSION_DENIED' }, 'provider_auth', false],
+    [{ code: 429, status: 'UNAUTHENTICATED' }, 'provider_auth', false],
+    [{ code: 429, details: [{ reason: 'API_KEY_INVALID' }] }, 'provider_auth', false],
+    [{ code: 429, message: 'API key not valid. Please pass a valid API key.' }, 'provider_auth', false],
+    [{ code: 401, status: 'RESOURCE_EXHAUSTED' }, 'provider_auth', false],
+    [{ code: 429 }, 'rate_limited', true],
+    [{ status: 'RESOURCE_EXHAUSTED' }, 'rate_limited', true],
+    [{ code: 500 }, 'provider_error', true],
+    [{ code: 503 }, 'provider_error', true],
+    [{ code: 400 }, 'provider_error', false],
+    [{ code: 404 }, 'provider_error', false],
+    [{}, 'provider_error', false],
+  ])('classifies in-stream Gemini errors without retrying: %j', async (error, code, retryable) => {
+    const { a, f, sleep } = make(stream({ error: { message: 'Request failed', ...error } }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code, retryable });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
+  });
+
+  it.each([
+    [{ retryAfter: 2.5 }, 2500],
+    [{ retryAfter: '3' }, 3000],
+    [{ retryDelay: '1.5s' }, 1500],
+    [{ retryDelay: 4 }, 4000],
+    [{ details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '30s' }] }, 30_000],
+    [{ retryAfter: 0, details: [{ retryDelay: '30s' }] }, 0],
+  ])('preserves in-stream Gemini rate-limit retry metadata: %j', async (extra, retryAfterMs) => {
+    const { a, f, sleep } = make(stream({ error: { code: 429, message: 'Quota exhausted', ...extra } }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'rate_limited', retryable: true, details: { status: 429, retryAfterMs } });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
   });
 
   it('429 retries honor RetryInfo; an over-long delay surfaces rate_limited with retryAfterMs', async () => {

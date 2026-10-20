@@ -567,7 +567,21 @@ export class GeminiAdapter implements ProviderAdapter {
 
   private streamError(error: unknown): NeoError {
     const message = isPlainObject(error) && typeof error['message'] === 'string' ? error['message'] : JSON.stringify(error);
-    return new NeoError('provider_error', this.clean(`Gemini error: ${message}`), { retryable: true });
+    const code = isPlainObject(error) && typeof error['code'] === 'number' ? error['code'] : 0;
+    const status = isPlainObject(error) && typeof error['status'] === 'string' ? error['status'] : '';
+    const { reason, retryDelayMs } = parseErrorBody(JSON.stringify({ error }));
+    const detail = this.clean(`Gemini error: ${message}`);
+    if (code === 401 || code === 403 || status === 'UNAUTHENTICATED' || status === 'PERMISSION_DENIED' || reason === 'API_KEY_INVALID' || /api key not valid/i.test(message)) {
+      return new NeoError('provider_auth', detail, { details: { status: code } });
+    }
+    if (code === 429 || status === 'RESOURCE_EXHAUSTED') {
+      const retryAfter = isPlainObject(error) ? error['retryAfter'] : undefined;
+      const retryDelay = isPlainObject(error) ? error['retryDelay'] : undefined;
+      const delayMs = (value: unknown) => typeof value === 'number' || typeof value === 'string' ? parseRetryAfter(String(value).replace(/s$/, '')) : undefined;
+      const retryAfterMs = delayMs(retryAfter) ?? delayMs(retryDelay) ?? retryDelayMs;
+      return new NeoError('rate_limited', detail, { retryable: true, details: { status: code, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) } });
+    }
+    return new NeoError('provider_error', detail, { retryable: code >= 500, details: code ? { status: code } : {} });
   }
 }
 
