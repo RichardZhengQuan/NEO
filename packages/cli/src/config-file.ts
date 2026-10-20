@@ -177,12 +177,19 @@ export function writeInitConfig(dataDir: string, answers: InitAnswers, configPat
   // leaves the file at the world-readable mode.  renameSync is atomic on
   // POSIX: the target either has the old content or the new 0o600 content.
   const tmpPath = path.join(path.dirname(cfgPath), `.neo-config-tmp-${crypto.randomBytes(8).toString('hex')}`);
+  let tmpFd: number | null = null;
   let tmpCreated = false;
   try {
-    fs.writeFileSync(tmpPath, json, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    tmpFd = fs.openSync(tmpPath, 'wx', 0o600);
     tmpCreated = true;
+    fs.writeSync(tmpFd, json, 0, 'utf8');
+    fs.closeSync(tmpFd);
+    tmpFd = null;
     fs.renameSync(tmpPath, cfgPath);
   } catch (err) {
+    if (tmpFd !== null) {
+      try { fs.closeSync(tmpFd); } catch { /* ignore */ }
+    }
     if (tmpCreated) {
       try { fs.unlinkSync(tmpPath); } catch { /* ignore cleanup error */ }
     }
