@@ -160,10 +160,14 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       // Moving a reminder that already fired to a new time means "remind me again".
       else if (reanchor && existing.status === 'fired') next.status = 'scheduled';
 
+      // When reanchoring, clear any outstanding snooze so the new dueAt is
+      // not silently overwritten by a snoozed redelivery in markFired.
       db.prepare(
-        `UPDATE reminders SET title = ?, notes = ?, due_at = ?, anchor_at = CASE WHEN ? THEN ? ELSE anchor_at END,
+        `UPDATE reminders SET title = ?, notes = ?, due_at = ?,
+           anchor_at = CASE WHEN ? THEN ? ELSE anchor_at END,
+           snoozed_due_at = CASE WHEN ? THEN NULL ELSE snoozed_due_at END,
            timezone = ?, recurrence = ?, status = ?, updated_at = ? WHERE id = ?`,
-      ).run(next.title, next.notes, next.dueAt, reanchor ? 1 : 0, next.dueAt, next.timezone, toJson(next.recurrence), next.status, now, id);
+      ).run(next.title, next.notes, next.dueAt, reanchor ? 1 : 0, next.dueAt, reanchor ? 1 : 0, next.timezone, toJson(next.recurrence), next.status, now, id);
       emit({ type: 'upsert', reminder: next });
       return next;
     },
@@ -186,11 +190,17 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0 || minutes > MAX_SNOOZE_MINUTES) {
         throw new NeoError('bad_request', `Invalid snooze: minutes must be between 1 and ${MAX_SNOOZE_MINUTES}.`);
       }
-      const existing = mustGet(id);
+      const r = row(id);
+      if (!r) throw new NeoError('not_found', `Reminder ${id} not found.`);
+      const existing = toReminder(r);
       const now = clock();
       const dueAt = now + Math.round(minutes * 60_000);
+      // Preserve the original occurrence time so markFired can distinguish a
+      // snoozed redelivery from a true occurrence.  If the reminder is already
+      // snoozed, keep the first snooze's anchor rather than overwriting it.
+      const snoozedDueAt = toNumOrNull(r.snoozed_due_at) ?? existing.dueAt;
       const updated: Reminder = { ...existing, dueAt, status: 'scheduled', updatedAt: now };
-      db.prepare('UPDATE reminders SET due_at = ?, status = ?, updated_at = ? WHERE id = ?').run(dueAt, 'scheduled', now, id);
+      db.prepare('UPDATE reminders SET due_at = ?, snoozed_due_at = ?, status = ?, updated_at = ? WHERE id = ?').run(dueAt, snoozedDueAt, 'scheduled', now, id);
       emit({ type: 'upsert', reminder: updated });
       return updated;
     },
@@ -223,6 +233,27 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
           throw new NeoError('conflict', `Reminder ${id} is ${existing.status}, not scheduled.`);
         }
         const now = clock();
+        const snoozedDueAt = toNumOrNull(r.snoozed_due_at);
+        const isSnoozedRedelivery = snoozedDueAt !== null;
+        // A snoozed redelivery re-delivers the current occurrence without
+        // consuming a new one from the series.  Restore the already-scheduled
+        // next dueAt and leave firedCount unchanged.  Non-recurring reminders
+        // have no next occurrence to restore; fall through to the normal firing
+        // path so they reach 'fired' rather than staying 'scheduled'.
+        if (isSnoozedRedelivery && existing.recurrence !== null) {
+          const reminder: Reminder = {
+            ...existing,
+            status: 'scheduled',
+            dueAt: snoozedDueAt,
+            // firedCount is unchanged: the snooze was not a new occurrence.
+            lastFiredAt: firedAt,
+            updatedAt: now,
+          };
+          db.prepare('UPDATE reminders SET status = ?, due_at = ?, snoozed_due_at = NULL, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
+            'scheduled', snoozedDueAt, firedAt, now, id,
+          );
+          return { reminder, occurrenceAt: existing.dueAt, firedAt, missed: false, nextDueAt: snoozedDueAt };
+        }
         const firedCount = existing.firedCount + 1;
         // Advance past both the occurrence and the firing time, so a long downtime
         // collapses every missed occurrence into this one firing.
@@ -237,7 +268,7 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
           lastFiredAt: firedAt,
           updatedAt: now,
         };
-        db.prepare('UPDATE reminders SET status = ?, due_at = ?, fired_count = ?, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
+        db.prepare('UPDATE reminders SET status = ?, due_at = ?, snoozed_due_at = NULL, fired_count = ?, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
           reminder.status, reminder.dueAt, firedCount, firedAt, now, id,
         );
         return { reminder, occurrenceAt: existing.dueAt, firedAt, missed: false, nextDueAt };

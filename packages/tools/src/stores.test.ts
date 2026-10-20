@@ -78,6 +78,24 @@ describe('ReminderStore', () => {
     expect(r.markFired(daily.id, t.now).reminder.dueAt).toBe(utc(2026, 10, 13, 18));
   });
 
+  it('update({dueAt}) during active snooze clears the snooze anchor so markFired honours the new time', () => {
+    const r = stores.reminders;
+    // Recurring reminder fires for the first time → dueAt=Day2
+    const daily = r.create({ title: 'standup', dueAt: utc(2026, 10, 10, 9), recurrence: { freq: 'daily' } });
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(daily.id, t.now); // dueAt → 10-11 09:00
+    // User snoozes 10 min → snoozed_due_at=10-11 09:00, dueAt=09:11
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(daily.id, 10);
+    // While snoozed, user reschedules the series to a new anchor (Day3 18:00)
+    r.update(daily.id, { dueAt: utc(2026, 10, 12, 18) });
+    // The snooze delivery fires; it must NOT restore the stale snoozed_due_at (Day2)
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    const fired = r.markFired(daily.id, t.now);
+    // Next occurrence must be anchored at 18:00, not 09:00
+    expect(fired.reminder.dueAt).toBe(utc(2026, 10, 13, 18));
+  });
+
   it('markFired: one-shot, recurring, exhausted and long-downtime collapse', () => {
     const r = stores.reminders;
     const once = r.create({ title: 'once', dueAt: utc(2026, 10, 10, 8) });
@@ -96,6 +114,55 @@ describe('ReminderStore', () => {
     expect(collapsed.occurrenceAt).toBe(utc(2026, 9, 1, 7));
     expect(collapsed.reminder.dueAt).toBe(utc(2026, 10, 11, 7));
     expect(collapsed.reminder.firedCount).toBe(1);
+  });
+
+  it('snoozing a count-bounded recurring reminder does not consume an occurrence', () => {
+    const r = stores.reminders;
+    const rem = r.create({
+      title: 'medication',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', interval: 1, count: 2 },
+    });
+    // Day 1 fires
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    // User snoozes 10 min
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 10);
+    // Snoozed redelivery fires
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    r.markFired(rem.id, t.now);
+    // Day 2 must still be scheduled
+    const after = r.get(rem.id)!;
+    expect(after.status).toBe('scheduled');
+    expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
+    // Day 2 fires
+    t.setNow(after.dueAt);
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('fired');
+  });
+
+  it('snoozing an until-bounded recurring reminder does not consume an occurrence', () => {
+    const r = stores.reminders;
+    const day3 = utc(2026, 10, 12, 9);
+    const rem = r.create({
+      title: 'standup',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', interval: 1, until: day3 },
+    });
+    // Day 1 fires
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    // User snoozes 10 min
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 10);
+    // Snoozed redelivery fires
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    r.markFired(rem.id, t.now);
+    // Day 2 must still be scheduled (not consumed)
+    const after = r.get(rem.id)!;
+    expect(after.status).toBe('scheduled');
+    expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
   });
 
   it('markFired refuses reminders that are not scheduled (no resurrection of a completed series)', () => {
