@@ -8,6 +8,7 @@ import { z } from 'zod';
 import {
   DEFAULT_SETTINGS,
   FORM_SUBMIT_ACTION_ID,
+  MAX_UI_BLOCKS,
   NeoError,
   toChatMessages,
   toolSpec,
@@ -254,6 +255,33 @@ describe('model resolution', () => {
     expect(t.message.parts.find((p) => p.type === 'text')).toEqual({ type: 'text', text: 'Saved.' });
     expect(uiParts(t.message)[0]!.block).toEqual({ type: 'callout', tone: 'success', text: 'Saved!' });
     expect(replayLikeClient(t.events, t.message.id)).toEqual(t.message.parts);
+  });
+
+  it('drops all inline-ui blocks when two text parts in one step together exceed MAX_UI_BLOCKS', async () => {
+    // Each text part has a fence with 4 stacks × (1 + 60 children) = 244 blocks per part.
+    // 244 ≤ 300 so each part individually passes; combined 488 > 300 so the cross-part
+    // aggregate check must fire and discard all ui blocks.
+    // A reasoning delta between the two text events forces the second to start a new text part.
+    const makeInlineFence = (): string => {
+      const stacks = Array.from({ length: 4 }, () => ({
+        type: 'stack',
+        children: Array.from({ length: 60 }, (_, i) => ({ type: 'text', text: `item ${i}` })),
+      }));
+      return '```neo-ui\n' + JSON.stringify(stacks) + '\n```';
+    };
+    const bigFence = makeInlineFence(); // 4 × (1 stack + 60 text children) = 244 blocks per part
+    const h = harness({ adapters: [new ScriptedAdapter({ caps: { tools: false, reasoning: true } })] });
+    h.model.script([
+      ev.text(`Part one.\n${bigFence}\n`),
+      ev.reasoning('thinking'),             // adds a reasoning part → breaks text coalescing
+      ev.text(`Part two.\n${bigFence}\n`),  // starts a second, separate text part
+      ev.done(),
+    ]);
+    const t = await runTurn(h, 'go');
+    // Cross-part aggregate must fire: no ui parts on the message.
+    expect(uiParts(t.message).length).toBe(0);
+    // Text parts should retain their original fence text (fences not stripped when blocks are dropped).
+    expect(t.message.parts.filter((p) => p.type === 'text').length).toBeGreaterThan(0);
   });
 });
 

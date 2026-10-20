@@ -42,6 +42,9 @@ import {
   toolSpec,
   validateUIBlocks,
   extractInlineUI,
+  childBlocks,
+  collectActions,
+  MAX_UI_BLOCKS,
   episodeOf,
   wrapUntrusted,
   type AgentEvent,
@@ -75,6 +78,7 @@ import {
   type ToolResultPart,
   type ToolSpec,
   type TurnHandle,
+  type UIBlock,
   type UIPart,
   type Usage,
 } from '@neo/protocol';
@@ -666,13 +670,31 @@ class TurnRunner {
     // Without native tools in the request (tool-less model, or a conversation whose frozen prompt
     // taught ```neo-ui fences), inline UI blocks become ui parts.
     if (!this.toolSpecs.length) {
+      // Gather per-part results first so one cross-part aggregate check can run
+      // before any part is written — a model streaming multiple text parts in a
+      // single step must not collectively exceed MAX_UI_BLOCKS.
+      const pending: Array<{ index: number; extracted: ReturnType<typeof extractInlineUI> }> = [];
       for (const index of [...this.stepText].sort((a, b) => a - b)) {
         const part = this.parts[index];
         if (part?.type !== 'text') continue;
         const extracted = extractInlineUI(part.text);
         if (!extracted.blocks.length) continue;
-        this.replacePart(index, { type: 'text', text: extracted.text });
-        for (const block of extracted.blocks) this.addPart({ type: 'ui', id: newId('ui'), block });
+        pending.push({ index, extracted });
+      }
+      if (pending.length) {
+        // Cross-part aggregate: total block count and duplicate action ids.
+        let totalCount = 0;
+        const countBlock = (b: UIBlock) => { totalCount++; for (const c of childBlocks(b)) countBlock(c); };
+        for (const { extracted } of pending) for (const b of extracted.blocks) countBlock(b);
+        const allIds = pending.flatMap(({ extracted }) => collectActions(extracted.blocks).map((a) => a.id));
+        const crossPartDup = allIds.find((id, i) => allIds.indexOf(id) !== i);
+        if (totalCount <= MAX_UI_BLOCKS && !crossPartDup) {
+          for (const { index, extracted } of pending) {
+            this.replacePart(index, { type: 'text', text: extracted.text });
+            for (const block of extracted.blocks) this.addPart({ type: 'ui', id: newId('ui'), block });
+          }
+        }
+        // Blocks exceeding the aggregate limit or with cross-part duplicate ids are silently dropped.
       }
     }
     this.persist(true);

@@ -782,27 +782,27 @@ export function extractInlineUI(text: string): { text: string; blocks: UIBlock[]
 
   // Aggregate re-check across all fences: the combined blocks form one assistant
   // message, so the per-message limits and uniqueness rules apply to the whole set.
-  if (errors.length === 0) {
-    if (blocks.length > MAX_UI_TOP_LEVEL) {
-      errors.push(`At most ${MAX_UI_TOP_LEVEL} top-level blocks are allowed.`);
+  // Run unconditionally — per-fence errors do not excuse the successfully parsed
+  // blocks from the aggregate limits.
+  if (blocks.length > MAX_UI_TOP_LEVEL) {
+    errors.push(`At most ${MAX_UI_TOP_LEVEL} top-level blocks are allowed.`);
+    blocks.splice(0);
+  } else {
+    let totalCount = 0;
+    const countBlocks = (b: UIBlock) => {
+      totalCount++;
+      for (const c of childBlocks(b)) countBlocks(c);
+    };
+    for (const b of blocks) countBlocks(b);
+    if (totalCount > MAX_UI_BLOCKS) {
+      errors.push(`At most ${MAX_UI_BLOCKS} UI blocks are allowed per message.`);
       blocks.splice(0);
     } else {
-      let totalCount = 0;
-      const countBlocks = (b: UIBlock) => {
-        totalCount++;
-        for (const c of childBlocks(b)) countBlocks(c);
-      };
-      for (const b of blocks) countBlocks(b);
-      if (totalCount > MAX_UI_BLOCKS) {
-        errors.push(`At most ${MAX_UI_BLOCKS} UI blocks are allowed per message.`);
+      const ids = collectActions(blocks).map((a) => a.id);
+      const dup = ids.find((id, i) => ids.indexOf(id) !== i);
+      if (dup) {
+        errors.push(`Duplicate action id "${dup}"; action ids must be unique within a message.`);
         blocks.splice(0);
-      } else {
-        const ids = collectActions(blocks).map((a) => a.id);
-        const dup = ids.find((id, i) => ids.indexOf(id) !== i);
-        if (dup) {
-          errors.push(`Duplicate action id "${dup}"; action ids must be unique within a message.`);
-          blocks.splice(0);
-        }
       }
     }
   }

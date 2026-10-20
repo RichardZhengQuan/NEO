@@ -306,4 +306,19 @@ describe('extractInlineUI aggregate limits', () => {
     expect(result.errors.some((e) => e.includes('shared-action'))).toBe(true);
     expect(result.blocks.length).toBe(0);
   });
+
+  it('enforces aggregate limit even when a prior fence produced a per-fence error', () => {
+    // First fence has invalid JSON → per-fence parse error (errors.length becomes 1).
+    // Subsequent 6 fences each have 51 blocks — together they exceed MAX_UI_BLOCKS.
+    // The aggregate check must still fire despite errors.length > 0 after the first fence.
+    const invalidFence = '```neo-ui\nnot-valid-json\n```';
+    const bigFences = Array.from({ length: 6 }, () => makeFence(50)).join('\n');
+    const result = extractInlineUI(invalidFence + '\n' + bigFences);
+    // Per-fence parse error from the invalid fence.
+    expect(result.errors.some((e) => e.includes('Invalid neo-ui JSON'))).toBe(true);
+    // Aggregate error from exceeding MAX_UI_BLOCKS.
+    expect(result.errors.some((e) => e.includes(`${MAX_UI_BLOCKS}`))).toBe(true);
+    // All blocks dropped.
+    expect(result.blocks.length).toBe(0);
+  });
 });
