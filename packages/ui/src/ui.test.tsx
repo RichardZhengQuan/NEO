@@ -739,6 +739,12 @@ describe('MessageView', () => {
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith('cnf_1', { approve: false }, confirmation));
   });
 
+  it('does not show another message\'s confirmation on a completed message with the same tool call id', () => {
+    const msgOld = msg({ id: 'msg_old', role: 'assistant', parts: [{ type: 'tool_call', id: 'tc_1', name: 'delete_note', input: { id: 'note_1' } }] });
+    wrap(<MessageView message={msgOld} confirmations={[confirmation]} />);
+    expect(screen.queryByText("Delete note 'Groceries'")).toBeNull();
+  });
+
   it('ui actions carry the message id and ui part id', async () => {
     const onUiAction = vi.fn();
     wrap(

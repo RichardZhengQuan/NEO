@@ -421,7 +421,7 @@ export function MessageView(props: MessageViewProps): ReactElement {
   // Placed next to their tool chip by tool call id (this message's own first:
   // provider call ids can repeat across turns); answered by `id`.
   const confirmationFor = new Map<string, ToolConfirmation>();
-  for (const c of confirmations) {
+  for (const c of confirmations.filter((c) => c.messageId === message.id)) {
     if (!confirmationFor.has(c.toolCallId) || c.messageId === message.id) confirmationFor.set(c.toolCallId, c);
   }
   const shownConfirmations = new Set<string>();
