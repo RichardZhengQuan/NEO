@@ -71,4 +71,36 @@ describe('ReminderEditor store updates', () => {
 
     expect(input.value).toBe('New notes');
   });
+
+  it('preserves a title draft when reminder title is updated remotely', async () => {
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><RemindersScreen /></ConfirmProvider></I18nProvider>);
+    openEditor();
+    const input = screen.getByRole('textbox', { name: /Remind me to/ }) as HTMLInputElement;
+
+    // User types a draft title
+    fireEvent.change(input, { target: { value: 'User draft' } });
+    expect(input.value).toBe('User draft');
+
+    // Remote update changes the title to something different
+    act(() => { useData.setState({ reminders: { [reminder.id]: { ...reminder, title: 'Remote title', updatedAt: 1 } } }); });
+
+    // Local draft must survive — must NOT be overwritten by the remote value
+    expect(input.value).toBe('User draft');
+  });
+
+  it('preserves a notes draft when reminder notes is updated remotely', async () => {
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><RemindersScreen /></ConfirmProvider></I18nProvider>);
+    openEditor();
+    const input = screen.getByRole('textbox', { name: 'Notes' }) as HTMLTextAreaElement;
+
+    // User types a draft
+    fireEvent.change(input, { target: { value: 'User draft notes' } });
+    expect(input.value).toBe('User draft notes');
+
+    // Remote update changes notes to something different
+    act(() => { useData.setState({ reminders: { [reminder.id]: { ...reminder, notes: 'Remote notes', updatedAt: 1 } } }); });
+
+    // Local draft must survive
+    expect(input.value).toBe('User draft notes');
+  });
 });

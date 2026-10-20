@@ -90,4 +90,36 @@ describe('TaskDetails store updates', () => {
     expect(input.value).toBe('New notes');
     expect(useData.getState().tasks[task.id]!.notes).toBe('New notes');
   });
+
+  it('preserves a title draft when a remote update changes the same title field', async () => {
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const input = screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement;
+
+    // User types a draft title
+    fireEvent.change(input, { target: { value: 'User draft' } });
+    expect(input.value).toBe('User draft');
+
+    // Remote update changes the same title field to something different
+    act(() => { useData.setState({ tasks: { [task.id]: { ...task, title: 'Remote title', updatedAt: 1 } } }); });
+
+    // Local draft must survive — must NOT be overwritten by the remote value
+    expect(input.value).toBe('User draft');
+  });
+
+  it('preserves a notes draft when a remote update changes the same notes field', async () => {
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const input = screen.getByRole('textbox', { name: 'Notes' }) as HTMLTextAreaElement;
+
+    // User types a draft
+    fireEvent.change(input, { target: { value: 'User draft notes' } });
+    expect(input.value).toBe('User draft notes');
+
+    // Remote update changes the same notes field
+    act(() => { useData.setState({ tasks: { [task.id]: { ...task, notes: 'Remote notes', updatedAt: 1 } } }); });
+
+    // Local draft must survive
+    expect(input.value).toBe('User draft notes');
+  });
 });

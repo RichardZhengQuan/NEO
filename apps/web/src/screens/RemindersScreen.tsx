@@ -51,16 +51,41 @@ function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder; open:
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const zones = useMemo(() => listTimeZones(), []);
+  const serverRef = useRef({
+    title: reminder.title,
+    notes: reminder.notes ?? '',
+    timezone: reminder.timezone,
+    due: toLocalInputValue(reminder.dueAt, reminder.timezone),
+    preset: presetOf(reminder.recurrence) as RepeatPreset,
+    interval: reminder.recurrence?.interval ?? 1,
+    weekdays: (reminder.recurrence?.byWeekday ?? []) as number[],
+  });
 
-  // Remote edits (another device) resync all fields when the server version advances.
+  // Remote edits (another device) resync untouched fields when the server version advances.
   useEffect(() => {
-    setTitle(reminder.title);
-    setNotes(reminder.notes ?? '');
-    setTimezone(reminder.timezone);
-    setDue(toLocalInputValue(reminder.dueAt, reminder.timezone));
-    setPreset(presetOf(reminder.recurrence));
-    setInterval(reminder.recurrence?.interval ?? 1);
-    setWeekdays(reminder.recurrence?.byWeekday ?? []);
+    const prev = serverRef.current;
+    const next = {
+      title: reminder.title,
+      notes: reminder.notes ?? '',
+      timezone: reminder.timezone,
+      due: toLocalInputValue(reminder.dueAt, reminder.timezone),
+      preset: presetOf(reminder.recurrence) as RepeatPreset,
+      interval: reminder.recurrence?.interval ?? 1,
+      weekdays: (reminder.recurrence?.byWeekday ?? []) as number[],
+    };
+    serverRef.current = next;
+    // Only resync a field if the user hasn't edited it since the last server sync.
+    setTitle((curr) => (curr === prev.title ? next.title : curr));
+    setNotes((curr) => (curr === prev.notes ? next.notes : curr));
+    setTimezone((curr) => (curr === prev.timezone ? next.timezone : curr));
+    setDue((curr) => (curr === prev.due ? next.due : curr));
+    setPreset((curr) => (curr === prev.preset ? next.preset : curr));
+    setInterval((curr) => (curr === prev.interval ? next.interval : curr));
+    setWeekdays((curr) =>
+      curr.length === prev.weekdays.length && curr.every((d, i) => d === prev.weekdays[i])
+        ? next.weekdays
+        : curr,
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reminder.updatedAt]);
   const dueAt = fromLocalInputValue(due, timezone);
