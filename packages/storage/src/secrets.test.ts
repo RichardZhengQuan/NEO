@@ -53,6 +53,36 @@ it('returns the persisted key to both concurrent creators and decrypts secrets e
   }
 });
 
+it('retries readFileSync when existsSync=true but file is initially empty (open→write race window)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'neo-secrets-exist-race-'));
+  const p = join(dir, 'key');
+  try {
+    // The winning process has already called open() so the file is visible, but
+    // write() hasn't completed yet — the file is empty.
+    writeFileSync(p, '', { mode: 0o600 });
+
+    // Caller observes existsSync=true and takes the existsSync branch.
+    vi.mocked(existsSync).mockReturnValueOnce(true);
+
+    // Key that the winner will have written once write() completes.
+    const winnerKey = randomBytes(32);
+    const winnerContent = `${winnerKey.toString('base64')}\n`;
+
+    // First readFileSync returns '' (race window); second returns the winner's key.
+    vi.mocked(readFileSync).mockReturnValueOnce('').mockReturnValueOnce(winnerContent);
+
+    const result = loadOrCreateKey(p);
+
+    expect(result).toEqual(winnerKey);
+    // The retry loop must have called readFileSync at least twice.
+    expect(vi.mocked(readFileSync)).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.mocked(existsSync).mockReset();
+    vi.mocked(readFileSync).mockReset();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 it('retries readFileSync after EEXIST when the file is initially empty (open→write race window)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'neo-secrets-race-'));
   const p = join(dir, 'key');

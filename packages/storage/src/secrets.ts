@@ -10,9 +10,9 @@ import type { NeoDatabase } from './db.js';
  */
 export function loadOrCreateKey(path: string): Buffer {
   if (existsSync(path)) {
-    const key = Buffer.from(readFileSync(path, 'utf8').trim(), 'base64');
-    if (key.length !== 32) throw new Error(`Invalid key file at ${path} (expected 32 bytes base64).`);
-    return key;
+    // The file may be visible but not yet fully written (open→write race window);
+    // use the same retry loop as the EEXIST path.
+    return _readKeyWithRetry(path);
   }
   mkdirSync(dirname(path), { recursive: true });
   const key = randomBytes(32);
@@ -26,27 +26,34 @@ export function loadOrCreateKey(path: string): Buffer {
     return key;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    // writeFileSync 'wx' makes the file visible at open() before write() completes;
-    // a concurrent loser receiving EEXIST may read an empty or partial file.
-    // Retry for up to 50 × 1 ms (50 ms total) to cover the open→write window.
-    for (let attempt = 0; attempt < 50; attempt++) {
-      const raw = readFileSync(path, 'utf8').trim();
-      if (raw.length > 0) {
-        const existing = Buffer.from(raw, 'base64');
-        if (existing.length !== 32) throw new Error(`Invalid key file at ${path} (expected 32 bytes base64).`);
-        return existing;
-      }
-      // 1 ms pause. In worker threads Atomics.wait provides a true sleep;
-      // on the main thread it throws, so fall back to a busy-spin.
-      try {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
-      } catch {
-        const end = Date.now() + 1;
-        while (Date.now() < end) { /* spin */ }
-      }
-    }
-    throw new Error(`Invalid key file at ${path} (expected 32 bytes base64).`);
+    return _readKeyWithRetry(path);
   }
+}
+
+/**
+ * Read the key file, retrying for up to 50 × 1 ms when the file is empty.
+ * `writeFileSync` with flag `'wx'` makes the file visible after `open()` but
+ * before `write()` completes; both the `existsSync=true` path and the `EEXIST`
+ * catch path can observe an empty file during that open→write race window.
+ */
+function _readKeyWithRetry(path: string): Buffer {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const raw = readFileSync(path, 'utf8').trim();
+    if (raw.length > 0) {
+      const key = Buffer.from(raw, 'base64');
+      if (key.length !== 32) throw new Error(`Invalid key file at ${path} (expected 32 bytes base64).`);
+      return key;
+    }
+    // 1 ms pause. In worker threads Atomics.wait provides a true sleep;
+    // on the main thread it throws, so fall back to a busy-spin.
+    try {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+    } catch {
+      const end = Date.now() + 1;
+      while (Date.now() < end) { /* spin */ }
+    }
+  }
+  throw new Error(`Invalid key file at ${path} (expected 32 bytes base64).`);
 }
 
 /** Secrets (API keys entered in the app) encrypted at rest with AES-256-GCM. */
