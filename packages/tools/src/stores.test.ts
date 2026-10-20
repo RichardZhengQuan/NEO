@@ -78,6 +78,46 @@ describe('ReminderStore', () => {
     expect(r.markFired(daily.id, t.now).reminder.dueAt).toBe(utc(2026, 10, 13, 18));
   });
 
+  it('updating timezone re-anchors a recurring reminder across DST', () => {
+    // America/New_York spring-forward: 2026-03-08 02:00 → 03:00.
+    // Reminder: daily New York reminder anchored at 2026-03-07 14:00Z (= 09:00 NY EST).
+    const r = stores.reminders;
+    const mar7_14z = utc(2026, 3, 7, 14); // 2026-03-07T14:00Z
+    const mar8_13z = utc(2026, 3, 8, 13); // 2026-03-08T13:00Z (= 09:00 NY EDT after spring-forward)
+    const mar9_13z = utc(2026, 3, 9, 13); // expected next after re-anchor to UTC
+
+    const reminder = r.create({
+      title: 'morning',
+      dueAt: mar7_14z,
+      timezone: 'America/New_York',
+      recurrence: { freq: 'daily' },
+    });
+
+    // Fire March 7 occurrence; dueAt advances to March 8 13:00Z (09:00 NY EDT).
+    t.setNow(mar7_14z);
+    const after1 = r.markFired(reminder.id, t.now);
+    expect(after1.reminder.dueAt).toBe(mar8_13z);
+
+    // User patches timezone to UTC with the same epoch — reanchor must fire.
+    r.update(reminder.id, { timezone: 'UTC', dueAt: mar8_13z });
+
+    // Fire March 8 occurrence; next must be exactly one day later (13:00Z on March 9).
+    t.setNow(mar8_13z);
+    const after2 = r.markFired(reminder.id, t.now);
+    expect(after2.reminder.dueAt).toBe(mar9_13z); // not Mar 8 14:00Z (old NY anchor)
+  });
+
+  it('updating dueAt with timezone unchanged re-anchors', () => {
+    const r = stores.reminders;
+    const daily = r.create({ title: 'standup', dueAt: utc(2026, 10, 10, 9), recurrence: { freq: 'daily' } });
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(daily.id, t.now); // dueAt → Oct 11 09:00
+    // Re-anchor to 18:00 without changing timezone
+    r.update(daily.id, { dueAt: utc(2026, 10, 12, 18) });
+    t.setNow(utc(2026, 10, 12, 18));
+    expect(r.markFired(daily.id, t.now).reminder.dueAt).toBe(utc(2026, 10, 13, 18));
+  });
+
   it('update({dueAt}) during active snooze clears the snooze anchor so markFired honours the new time', () => {
     const r = stores.reminders;
     // Recurring reminder fires for the first time → dueAt=Day2

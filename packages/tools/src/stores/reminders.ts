@@ -154,7 +154,9 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       if (data.notes !== undefined) next.notes = data.notes;
       if (data.timezone !== undefined) next.timezone = assertTimeZone(data.timezone);
       if (data.recurrence !== undefined) next.recurrence = data.recurrence;
-      const reanchor = data.dueAt !== undefined && Math.round(data.dueAt) !== existing.dueAt;
+      const reanchor =
+        (data.dueAt !== undefined && Math.round(data.dueAt) !== existing.dueAt) ||
+        (data.timezone !== undefined && data.timezone !== existing.timezone);
       if (data.dueAt !== undefined) next.dueAt = Math.round(data.dueAt);
       if (data.status !== undefined) next.status = data.status;
       // Moving a reminder that already fired to a new time means "remind me again".
