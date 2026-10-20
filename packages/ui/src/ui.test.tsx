@@ -1194,3 +1194,45 @@ describe('UI action confirmation (server description only)', () => {
     await waitFor(() => expect(onResult).toHaveBeenLastCalledWith(false));
   });
 });
+
+describe('lightbox focus trap', () => {
+  it('focuses the first button, wraps Tab in both directions and restores the opener on close', () => {
+    const { container } = wrap(
+      <BlockRenderer block={{
+        type: 'gallery',
+        images: [
+          { url: 'data:image/png;base64,iVBORw0KGgo=', alt: 'First image' },
+          { url: 'data:image/png;base64,iVBORw0KGgo=', alt: 'Second image' },
+        ],
+      }} />,
+    );
+    const thumb = container.querySelector<HTMLButtonElement>('.neo-gallery__thumb')!;
+    thumb.focus();
+    act(() => { fireEvent.click(thumb); });
+
+    const lightbox = container.querySelector<HTMLElement>('.neo-lightbox')!;
+    expect(lightbox).not.toBeNull();
+    expect(lightbox.contains(document.activeElement)).toBe(true);
+    const buttons = lightbox.querySelectorAll<HTMLButtonElement>('button');
+    expect(buttons.length).toBe(3);
+    const first = buttons[0]!;
+    const last = buttons[buttons.length - 1]!;
+    expect(document.activeElement).toBe(first);
+
+    last.focus();
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(last);
+
+    act(() => { fireEvent.keyDown(last, { key: 'ArrowRight' }); });
+    expect(lightbox.getAttribute('aria-label')).toBe('Second image');
+    expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(document.activeElement).toBe(first);
+
+    act(() => { fireEvent.click(first); });
+    expect(container.querySelector('.neo-lightbox')).toBeNull();
+    expect(document.activeElement).toBe(thumb);
+  });
+});
