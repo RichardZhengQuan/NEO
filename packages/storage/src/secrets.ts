@@ -26,9 +26,26 @@ export function loadOrCreateKey(path: string): Buffer {
     return key;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    const existing = Buffer.from(readFileSync(path, 'utf8').trim(), 'base64');
-    if (existing.length !== 32) throw new Error(`Invalid key file at ${path} (expected 32 bytes base64).`);
-    return existing;
+    // writeFileSync 'wx' makes the file visible at open() before write() completes;
+    // a concurrent loser receiving EEXIST may read an empty or partial file.
+    // Retry for up to 50 × 1 ms (50 ms total) to cover the open→write window.
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const raw = readFileSync(path, 'utf8').trim();
+      if (raw.length > 0) {
+        const existing = Buffer.from(raw, 'base64');
+        if (existing.length !== 32) throw new Error(`Invalid key file at ${path} (expected 32 bytes base64).`);
+        return existing;
+      }
+      // 1 ms pause. In worker threads Atomics.wait provides a true sleep;
+      // on the main thread it throws, so fall back to a busy-spin.
+      try {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+      } catch {
+        const end = Date.now() + 1;
+        while (Date.now() < end) { /* spin */ }
+      }
+    }
+    throw new Error(`Invalid key file at ${path} (expected 32 bytes base64).`);
   }
 }
 

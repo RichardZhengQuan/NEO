@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
@@ -7,7 +7,11 @@ import { loadOrCreateKey } from './index.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+  return {
+    ...actual,
+    existsSync: vi.fn(actual.existsSync),
+    readFileSync: vi.fn(actual.readFileSync),
+  };
 });
 
 it('returns the persisted key to both concurrent creators and decrypts secrets encrypted by either', async () => {
@@ -44,6 +48,37 @@ it('returns the persisted key to both concurrent creators and decrypts secrets e
     }
   } finally {
     vi.mocked(existsSync).mockReset();
+    vi.mocked(readFileSync).mockReset();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it('retries readFileSync after EEXIST when the file is initially empty (open→write race window)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'neo-secrets-race-'));
+  const p = join(dir, 'key');
+  try {
+    // Simulate the winning process: it has called open() (file exists) but has not
+    // finished write() yet, so the file is empty.
+    writeFileSync(p, '', { mode: 0o600 });
+
+    // Loser sees the file absent (its existsSync ran before the winner opened it).
+    vi.mocked(existsSync).mockReturnValueOnce(false);
+
+    // Key that the winner will have written by the time the loser retries.
+    const winnerKey = randomBytes(32);
+    const winnerContent = `${winnerKey.toString('base64')}\n`;
+
+    // First readFileSync in the retry loop returns '' (race window); second returns the winner's key.
+    vi.mocked(readFileSync).mockReturnValueOnce('').mockReturnValueOnce(winnerContent);
+
+    const result = loadOrCreateKey(p);
+
+    expect(result).toEqual(winnerKey);
+    // The retry loop must have called readFileSync at least twice.
+    expect(vi.mocked(readFileSync)).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.mocked(existsSync).mockReset();
+    vi.mocked(readFileSync).mockReset();
     rmSync(dir, { recursive: true, force: true });
   }
 });
