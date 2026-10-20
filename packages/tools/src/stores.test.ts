@@ -78,6 +78,46 @@ describe('ReminderStore', () => {
     expect(r.markFired(daily.id, t.now).reminder.dueAt).toBe(utc(2026, 10, 13, 18));
   });
 
+  it('updating timezone re-anchors a recurring reminder across DST', () => {
+    // America/New_York spring-forward: 2026-03-08 02:00 → 03:00.
+    // Reminder: daily New York reminder anchored at 2026-03-07 14:00Z (= 09:00 NY EST).
+    const r = stores.reminders;
+    const mar7_14z = utc(2026, 3, 7, 14); // 2026-03-07T14:00Z
+    const mar8_13z = utc(2026, 3, 8, 13); // 2026-03-08T13:00Z (= 09:00 NY EDT after spring-forward)
+    const mar9_13z = utc(2026, 3, 9, 13); // expected next after re-anchor to UTC
+
+    const reminder = r.create({
+      title: 'morning',
+      dueAt: mar7_14z,
+      timezone: 'America/New_York',
+      recurrence: { freq: 'daily' },
+    });
+
+    // Fire March 7 occurrence; dueAt advances to March 8 13:00Z (09:00 NY EDT).
+    t.setNow(mar7_14z);
+    const after1 = r.markFired(reminder.id, t.now);
+    expect(after1.reminder.dueAt).toBe(mar8_13z);
+
+    // User patches timezone to UTC with the same epoch — reanchor must fire.
+    r.update(reminder.id, { timezone: 'UTC', dueAt: mar8_13z });
+
+    // Fire March 8 occurrence; next must be exactly one day later (13:00Z on March 9).
+    t.setNow(mar8_13z);
+    const after2 = r.markFired(reminder.id, t.now);
+    expect(after2.reminder.dueAt).toBe(mar9_13z); // not Mar 8 14:00Z (old NY anchor)
+  });
+
+  it('updating dueAt with timezone unchanged re-anchors', () => {
+    const r = stores.reminders;
+    const daily = r.create({ title: 'standup', dueAt: utc(2026, 10, 10, 9), recurrence: { freq: 'daily' } });
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(daily.id, t.now); // dueAt → Oct 11 09:00
+    // Re-anchor to 18:00 without changing timezone
+    r.update(daily.id, { dueAt: utc(2026, 10, 12, 18) });
+    t.setNow(utc(2026, 10, 12, 18));
+    expect(r.markFired(daily.id, t.now).reminder.dueAt).toBe(utc(2026, 10, 13, 18));
+  });
+
   it('update({dueAt}) during active snooze clears the snooze anchor so markFired honours the new time', () => {
     const r = stores.reminders;
     // Recurring reminder fires for the first time → dueAt=Day2
@@ -165,6 +205,39 @@ describe('ReminderStore', () => {
     expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
   });
 
+  it('timezone-only patch on a snoozed count-bounded reminder does not corrupt recurrence state', () => {
+    // Regression: when timezoneMoved and the reminder is snoozed, the previous
+    // code set anchor_at = snoozed dueAt (delivery epoch) AND cleared snoozed_due_at.
+    // markFired then treated the snoozed redelivery as a true occurrence, incremented
+    // firedCount, and exhausted a count:2 series after only one real firing.
+    const r = stores.reminders;
+    const rem = r.create({
+      title: 'medication',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', interval: 1, count: 2 },
+      timezone: 'America/New_York',
+    });
+    // Day 1 fires
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now); // firedCount=1, dueAt → Day 2 09:00
+    // User snoozes 10 min while Day 2 is the live dueAt
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 10); // snoozed_due_at = Day2 09:00, dueAt = Day2 09:11
+    // User patches only the timezone (dueAt does not move)
+    r.update(rem.id, { timezone: 'UTC' });
+    // Snoozed redelivery fires — must NOT count as a true occurrence
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    r.markFired(rem.id, t.now);
+    // Day 2 must still be scheduled (firedCount should still be 1)
+    const after = r.get(rem.id)!;
+    expect(after.status).toBe('scheduled');
+    expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
+    // Day 2 fires — series is now exhausted after 2 real occurrences
+    t.setNow(after.dueAt);
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('fired');
+  });
+
   it('markFired refuses reminders that are not scheduled (no resurrection of a completed series)', () => {
     const r = stores.reminders;
     const series = r.create({ title: 'daily', dueAt: utc(2026, 10, 10, 8), recurrence: { freq: 'daily' } });
@@ -182,6 +255,16 @@ describe('ReminderStore', () => {
     const moved = r.update(once.id, { dueAt: utc(2026, 10, 11, 8) });
     expect(moved.status).toBe('scheduled');
     expect(r.nextDue()?.id).toBe(once.id);
+  });
+
+  it('timezone-only patch on a fired non-recurring reminder does not re-arm it', () => {
+    const r = stores.reminders;
+    const once = r.create({ title: 'tz-test', dueAt: utc(2026, 10, 10, 8), timezone: 'America/New_York' });
+    r.markFired(once.id, utc(2026, 10, 10, 8));
+    // Patch only the timezone — dueAt stays in the past.
+    const patched = r.update(once.id, { timezone: 'UTC' });
+    expect(patched.status).toBe('fired');
+    expect(r.nextDue()?.id).not.toBe(once.id);
   });
 
   it('emits onChange after every mutation', () => {

@@ -147,27 +147,47 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
 
     update(id: string, patch: ReminderPatch): Reminder {
       const data = parseInput(ReminderPatchSchema, patch, 'reminder update');
-      const existing = mustGet(id);
+      // Read raw row so we can access snoozed_due_at without a second query.
+      const existingRow = row(id);
+      if (!existingRow) throw new NeoError('not_found', `Reminder ${id} not found.`);
+      const existing = toReminder(existingRow);
       const now = clock();
       const next: Reminder = { ...existing, updatedAt: now };
       if (data.title !== undefined) next.title = requireText(data.title, 'title');
       if (data.notes !== undefined) next.notes = data.notes;
       if (data.timezone !== undefined) next.timezone = assertTimeZone(data.timezone);
       if (data.recurrence !== undefined) next.recurrence = data.recurrence;
-      const reanchor = data.dueAt !== undefined && Math.round(data.dueAt) !== existing.dueAt;
+      const dueAtMoved = data.dueAt !== undefined && Math.round(data.dueAt) !== existing.dueAt;
+      const timezoneMoved = data.timezone !== undefined && data.timezone !== existing.timezone;
       if (data.dueAt !== undefined) next.dueAt = Math.round(data.dueAt);
       if (data.status !== undefined) next.status = data.status;
       // Moving a reminder that already fired to a new time means "remind me again".
-      else if (reanchor && existing.status === 'fired') next.status = 'scheduled';
+      // Guard with dueAtMoved only: a timezone-only patch must not re-arm a fired
+      // reminder because dueAt is still in the past.
+      else if (dueAtMoved && existing.status === 'fired') next.status = 'scheduled';
 
-      // When reanchoring, clear any outstanding snooze so the new dueAt is
-      // not silently overwritten by a snoozed redelivery in markFired.
+      // anchor_at / snoozed_due_at update rules:
+      //  dueAtMoved: set anchor_at = new dueAt; clear snoozed_due_at so the
+      //    new time is not silently overwritten by a snoozed redelivery in markFired.
+      //  timezoneMoved && !dueAtMoved && snoozed: set anchor_at = snoozedDueAt
+      //    (original occurrence epoch) so markFired does not treat the snoozed
+      //    redelivery as a true occurrence from the wrong anchor.  Leave
+      //    snoozed_due_at intact — the snooze is still active and must fire normally.
+      //  timezoneMoved && !dueAtMoved && !snoozed: set anchor_at = next.dueAt
+      //    so the recurrence advances from the right wall-clock time in the new zone.
+      const reanchor = dueAtMoved || timezoneMoved;
+      const existingSnoozedDueAt = toNumOrNull(existingRow.snoozed_due_at);
+      // When timezone-only and the reminder is snoozed, reanchor to the original
+      // occurrence (snoozedDueAt), not the snooze delivery epoch.
+      const anchorValue = (timezoneMoved && !dueAtMoved && existingSnoozedDueAt !== null)
+        ? existingSnoozedDueAt
+        : next.dueAt;
       db.prepare(
         `UPDATE reminders SET title = ?, notes = ?, due_at = ?,
            anchor_at = CASE WHEN ? THEN ? ELSE anchor_at END,
            snoozed_due_at = CASE WHEN ? THEN NULL ELSE snoozed_due_at END,
            timezone = ?, recurrence = ?, status = ?, updated_at = ? WHERE id = ?`,
-      ).run(next.title, next.notes, next.dueAt, reanchor ? 1 : 0, next.dueAt, reanchor ? 1 : 0, next.timezone, toJson(next.recurrence), next.status, now, id);
+      ).run(next.title, next.notes, next.dueAt, reanchor ? 1 : 0, anchorValue, dueAtMoved ? 1 : 0, next.timezone, toJson(next.recurrence), next.status, now, id);
       emit({ type: 'upsert', reminder: next });
       return next;
     },
