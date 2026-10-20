@@ -345,6 +345,61 @@ describe('NeoApiError mapping', () => {
       vi.useRealTimers();
     }
   });
+
+  it('preserves a pre-classified NeoApiError thrown by fetch in the request path', async () => {
+    const injected = new NeoApiError(403, { code: 'forbidden', message: 'Owner only', details: { reason: 'owner_only' }, retryable: false });
+    const throwFetch = async (): Promise<Response> => { throw injected; };
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: throwFetch as typeof fetch });
+    const err = await client.health().catch((e: unknown) => e);
+    expect(err).toBe(injected);
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.httpStatus).toBe(403);
+    expect(apiErr.code).toBe('forbidden');
+    expect(apiErr.retryable).toBe(false);
+  });
+
+  it('preserves a pre-classified NeoApiError thrown by fetch in the stream path', async () => {
+    const injected = new NeoApiError(403, { code: 'forbidden', message: 'Owner only', details: { reason: 'owner_only' }, retryable: false });
+    const throwFetch = async (): Promise<Response> => { throw injected; };
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: throwFetch as typeof fetch });
+    const err = await (async () => {
+      for await (const _ of client.timeline.stream({ text: 'hello' })) { /* drain */ }
+    })().catch((e: unknown) => e);
+    expect(err).toBe(injected);
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.httpStatus).toBe(403);
+    expect(apiErr.code).toBe('forbidden');
+    expect(apiErr.retryable).toBe(false);
+  });
+
+  it('propagates AbortError from stream error-body read instead of wrapping as HTTP 503', async () => {
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const abortCtrl = new AbortController();
+    const stallingFetch = async (_: unknown, init?: RequestInit): Promise<Response> => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          streamController = ctrl;
+          // Partial JSON — stalls response.json().
+          ctrl.enqueue(new TextEncoder().encode('{"code":'));
+        },
+      });
+      const sig = (init as RequestInit | undefined)?.signal;
+      sig?.addEventListener('abort', () => { streamController?.error(sig.reason); }, { once: true });
+      return new Response(stream, { status: 503 });
+    };
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: stallingFetch as typeof fetch });
+    const resultP = (async () => {
+      for await (const _ of client.timeline.stream({ text: 'hi' }, abortCtrl.signal)) { /* drain */ }
+    })().catch((e: unknown) => e);
+    // Yield so the fetch resolves and response.json() starts reading.
+    await Promise.resolve();
+    abortCtrl.abort();
+    const err = await resultP;
+    expect(err).toMatchObject({ name: 'AbortError' });
+    expect(err).not.toBeInstanceOf(NeoApiError);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

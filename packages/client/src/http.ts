@@ -5,7 +5,7 @@
  * (comma-separated arrays, boolean strings), 204 no-content, per-request
  * timeout via AbortSignal.any (with fallback), and NeoApiError mapping.
  */
-import type { ErrorShape } from '@neo/protocol';
+import { NeoError, type ErrorShape } from '@neo/protocol';
 import { NeoApiError } from './errors.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +112,9 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
   } catch (err) {
     // Clear the timeout handle if set.
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+
+    // Let pre-classified errors propagate unchanged (e.g. from an injected fetch).
+    if (err instanceof NeoError) throw err;
 
     // Check for timeout/abort errors.
     if (
