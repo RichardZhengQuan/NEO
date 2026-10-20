@@ -36,6 +36,26 @@ it('cancels while the access token is still pending', async () => {
   expect(unauthorized).not.toHaveBeenCalled();
 });
 
+it('abort while reading error body throws cancelled, not provider_error', async () => {
+  const controller = new AbortController();
+  const fetchFn = vi.fn<typeof globalThis.fetch>().mockImplementationOnce(async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) {
+        ctrl.error(new DOMException('aborted', 'AbortError'));
+      },
+    });
+    controller.abort();
+    return new Response(body, { status: 400 });
+  });
+  const a = new ChatGPTAdapter(config, {
+    fetch: fetchFn,
+    getChatGPTAccessToken: async () => TOKEN,
+    onChatGPTUnauthorized: vi.fn(),
+  });
+  const iterator = a.chat({ ...request, signal: controller.signal })[Symbol.asyncIterator]();
+  await expect(iterator.next()).rejects.toMatchObject({ code: 'cancelled' });
+});
+
 describe('ChatGPT Responses API with a loopback fake', () => {
   let server: Server;
   let base: string;

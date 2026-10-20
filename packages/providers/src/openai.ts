@@ -471,7 +471,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       if (cancelled) throw cancelled;
       throw this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, signal);
     return response;
   }
 
@@ -497,8 +497,12 @@ export class OpenAIAdapter implements ProviderAdapter {
     return new NeoError('provider_error', this.clean(message), { retryable: true, cause: err });
   }
 
-  private async httpError(response: Response): Promise<NeoError> {
-    const text = await response.text().catch(() => '');
+  private async httpError(response: Response, signal?: AbortSignal): Promise<NeoError> {
+    const text = await response.text().catch((err: unknown) => {
+      const cancelled = asCancelled(err, signal);
+      if (cancelled) throw cancelled;
+      return '';
+    });
     let message = text.trim().slice(0, 1000);
     try {
       const parsed = JSON.parse(text) as { error?: unknown; message?: unknown };

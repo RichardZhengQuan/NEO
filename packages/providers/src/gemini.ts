@@ -320,7 +320,7 @@ export class GeminiAdapter implements ProviderAdapter {
     } catch (err) {
       throw asCancelled(err, request.signal) ?? this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, request.signal);
     if (!response.body) throw new NeoError('provider_error', 'Gemini returned an empty response.', { retryable: true });
 
     let thought = '';
@@ -504,7 +504,7 @@ export class GeminiAdapter implements ProviderAdapter {
     } catch (err) {
       throw asCancelled(err, request.signal) ?? this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, request.signal);
     const vectors = (((await response.json()) as { embeddings?: { values?: number[] }[] }).embeddings ?? []).map((e) => e.values ?? []);
     if (vectors.length !== request.texts.length) {
       throw new NeoError('provider_error', `Gemini returned ${vectors.length} embeddings for ${request.texts.length} texts.`);
@@ -534,7 +534,7 @@ export class GeminiAdapter implements ProviderAdapter {
     } catch (err) {
       throw asCancelled(err, signal) ?? this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, signal);
     return response;
   }
 
@@ -550,8 +550,12 @@ export class GeminiAdapter implements ProviderAdapter {
     return new NeoError('provider_error', this.clean(`Can't reach Gemini at ${hostOf(this.baseUrl)}: ${describeNetworkError(err)}`), { retryable: true, cause: err });
   }
 
-  private async httpError(response: Response): Promise<NeoError> {
-    const text = await response.text().catch(() => '');
+  private async httpError(response: Response, signal?: AbortSignal): Promise<NeoError> {
+    const text = await response.text().catch((err: unknown) => {
+      const cancelled = asCancelled(err, signal);
+      if (cancelled) throw cancelled;
+      return '';
+    });
     const { message, reason, retryDelayMs } = parseErrorBody(text);
     const status = response.status;
     const detail = this.clean(`Gemini error (HTTP ${status})${message ? `: ${message}` : ''}`);
