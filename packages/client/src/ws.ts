@@ -110,7 +110,11 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
     try {
       ws = new ctx.WebSocketCtor(wsUrl);
     } catch (err) {
-      scheduleReconnect();
+      if (closed || !reconnect) {
+        setStatus('closed');
+      } else {
+        scheduleReconnect();
+      }
       return;
     }
 
