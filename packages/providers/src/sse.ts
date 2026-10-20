@@ -108,8 +108,16 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>, signal?: Abort
       buf = buf.slice(start);
     }
   } finally {
+    if (!done) {
+      const cancelPromise = reader.cancel().catch(() => {});
+      // Race cancel against abort, including a later abort while cancel is pending,
+      // so a never-resolving cancel callback cannot hold the generator open after abort.
+      const settled = signal
+        ? Promise.race([cancelPromise, abortPromise.catch(() => undefined)])
+        : cancelPromise;
+      await settled;
+    }
     signal?.removeEventListener('abort', onAbort);
-    if (!done) await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }
