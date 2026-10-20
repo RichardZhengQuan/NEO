@@ -436,7 +436,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
     async findForForget(query: string, limit = 20): Promise<MemoryNode[]> {
       const text = query.trim();
       if (!text) return [];
-      const max = Math.max(1, Math.min(500, limit));
+      const max = Math.max(1, Math.min(10_000, limit));
       // Never the self node: "forget everything about me" must not reach every memory through it.
       const where: Where = (alias = '') => ({ sql: `${alias ? `${alias}.` : ''}status IN ('active', 'archived') AND ${alias ? `${alias}.` : ''}id != ?`, params: [SELF_MEMORY_ID] });
       const scored = new Map<string, number>();

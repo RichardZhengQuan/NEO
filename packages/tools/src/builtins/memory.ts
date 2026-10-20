@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { MemoryKindSchema, NeoError, SELF_MEMORY_ID, defineTool, type MemoryNode, type MemoryService, type UIBlock } from '@neo/protocol';
 import { clip } from './format.js';
 
+const SAMPLE_CAP = 100;
 const SENSITIVE_LABEL = '(a sensitive memory)';
 
 export function createMemoryTools(memory: MemoryService) {
@@ -140,6 +141,7 @@ export function createMemoryTools(memory: MemoryService) {
       let ids: string[];
       let forgotten: string[];
       let sensitive = false;
+      let truncated = false;
       if (input.ids?.length) {
         ids = [...new Set(input.ids)];
         const details = await Promise.all(ids.map((id) => memory.get(id).catch(() => null)));
@@ -149,18 +151,28 @@ export function createMemoryTools(memory: MemoryService) {
           return n ? shown(n, ctx.allowSensitive) : id;
         });
       } else {
-        const found = await memory.findForForget(input.query as string, 20);
+        const found = await memory.findForForget(input.query as string, 10_000);
         if (!found.length) return { output: { forgotten: [], note: `No memories match “${input.query}”.` }, summary: 'Nothing to forget' };
         ids = found.map((n) => n.id);
         forgotten = found.map((n) => shown(n, ctx.allowSensitive));
         sensitive = ctx.allowSensitive && found.some((n) => n.sensitivity === 'sensitive');
+        truncated = found.length > SAMPLE_CAP;
       }
       if (ctx.offRecord) throw new NeoError('forbidden', 'Memory writes are unavailable off the record.');
       if (ctx.signal.aborted) throw new NeoError('cancelled', 'The operation was cancelled.');
       const deleted = await memory.forget(ids);
       for (const id of ids) labels.delete(id);
       if (deleted === 0) throw new NeoError('not_found', 'None of those memories exist (already forgotten?).');
-      return { output: { forgotten, ids: ids.filter(id => id !== SELF_MEMORY_ID) }, summary: `Forgot ${deleted} memor${deleted === 1 ? 'y' : 'ies'}`, ...(sensitive ? { sensitive: true } : {}) };
+      return {
+        output: truncated ? {
+          forgotten: forgotten.slice(0, SAMPLE_CAP),
+          ids: ids.filter(id => id !== SELF_MEMORY_ID).slice(0, SAMPLE_CAP),
+          totalForgotten: deleted,
+          truncated: true,
+        } : { forgotten, ids: ids.filter(id => id !== SELF_MEMORY_ID) },
+        summary: `Forgot ${deleted} memor${deleted === 1 ? 'y' : 'ies'}`,
+        ...(sensitive ? { sensitive: true } : {}),
+      };
     },
   });
 
