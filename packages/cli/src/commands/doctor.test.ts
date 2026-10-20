@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,6 +30,18 @@ afterEach(() => {
 });
 
 describe('doctor without an AI provider', () => {
+  it('runDoctor does not follow a symlink at the old predictable test-file path', async () => {
+    if (process.platform === 'win32') return;
+    const sentinelPath = join(dataDir, 'sentinel.txt');
+    const sentinelContent = 'sentinel-content';
+    writeFileSync(sentinelPath, sentinelContent);
+    symlinkSync(sentinelPath, join(dataDir, '.neo-doctor-test'));
+
+    await runDoctor({ dataDir });
+
+    expect(readFileSync(sentinelPath, 'utf8')).toBe(sentinelContent);
+  });
+
   it.each([{ items: [] }, { items: [
     { id: 'test', kind: 'mock', enabled: true },
     { id: 'off', kind: 'ollama', enabled: false },
