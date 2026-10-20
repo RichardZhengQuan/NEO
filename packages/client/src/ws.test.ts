@@ -94,6 +94,32 @@ describe('connect() WebSocket', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('status becomes closed when WebSocket constructor throws and reconnect:false', () => {
+    const statuses: string[] = [];
+    let throwOnConstruct = true;
+    class ThrowingWebSocket extends FakeWebSocket {
+      constructor(url: string) {
+        if (throwOnConstruct) {
+          throw new Error('constructor error');
+        }
+        super(url);
+      }
+    }
+    const ctx = {
+      baseUrl: 'http://localhost:7777',
+      getToken: () => 'ws-token',
+      WebSocketCtor: ThrowingWebSocket as unknown as typeof WebSocket,
+    };
+    const conn = createConnection(ctx, {
+      onEvent: () => {},
+      onStatus: (s) => statuses.push(s),
+      reconnect: false,
+    });
+
+    expect(conn.status).toBe('closed');
+    expect(statuses).toContain('closed');
+  });
+
   it('closing from inside the reconnecting listener prevents further socket construction', () => {
     vi.useFakeTimers();
     const ctx = {

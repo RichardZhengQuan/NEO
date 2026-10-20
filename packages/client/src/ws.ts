@@ -110,7 +110,11 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
     try {
       ws = new ctx.WebSocketCtor(wsUrl);
     } catch (err) {
-      scheduleReconnect();
+      if (closed || !reconnect) {
+        setStatus('closed');
+      } else {
+        scheduleReconnect();
+      }
       return;
     }
 
@@ -199,7 +203,11 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
         return;
       }
 
-      // Unexpected close — reconnect with backoff.
+      // Unexpected close — close if reconnect is disabled, otherwise reconnect with backoff.
+      if (!reconnect) {
+        setStatus('closed');
+        return;
+      }
       scheduleReconnect();
     };
 
