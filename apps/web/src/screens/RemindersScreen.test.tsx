@@ -74,6 +74,30 @@ describe('ReminderEditor recurrence preservation', () => {
     await saveAndExpect({ freq: 'daily', interval: 1, until: UNTIL });
   });
 
+  it('preserves byMonthDay when monthly preset is changed to daily and back', async () => {
+    renderEditor({ freq: 'monthly', interval: 1, byMonthDay: [1, 15] });
+    const repeatSelect = screen.getByRole('combobox', { name: 'Repeat' });
+    fireEvent.change(repeatSelect, { target: { value: 'daily' } });
+    fireEvent.change(repeatSelect, { target: { value: 'monthly' } });
+    await saveAndExpect({ freq: 'monthly', interval: 1, byMonthDay: [1, 15] });
+  });
+
+  it('preserves count when monthly preset is changed to daily and back', async () => {
+    renderEditor({ freq: 'monthly', interval: 1, count: 5 });
+    const repeatSelect = screen.getByRole('combobox', { name: 'Repeat' });
+    fireEvent.change(repeatSelect, { target: { value: 'daily' } });
+    fireEvent.change(repeatSelect, { target: { value: 'monthly' } });
+    await saveAndExpect({ freq: 'monthly', interval: 1, count: 5 });
+  });
+
+  it('preserves until when daily preset is changed to weekly and back', async () => {
+    renderEditor({ freq: 'daily', interval: 1, until: UNTIL });
+    const repeatSelect = screen.getByRole('combobox', { name: 'Repeat' });
+    fireEvent.change(repeatSelect, { target: { value: 'weekly' } });
+    fireEvent.change(repeatSelect, { target: { value: 'daily' } });
+    await saveAndExpect({ freq: 'daily', interval: 1, until: UNTIL });
+  });
+
   it.each<{ recurrence: Reminder['recurrence']; expected: RecurrenceInput }>([
     { recurrence: { freq: 'hourly', interval: 2, count: 5 }, expected: { freq: 'hourly', interval: 3, count: 5 } },
     { recurrence: { freq: 'monthly', interval: 1, byMonthDay: [1, 15], until: UNTIL }, expected: { freq: 'monthly', interval: 3, byMonthDay: [1, 15], until: UNTIL } },

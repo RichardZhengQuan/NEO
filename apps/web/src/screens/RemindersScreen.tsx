@@ -46,7 +46,7 @@ export function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder
   const [notes, setNotes] = useState(reminder.notes ?? '');
   const [due, setDue] = useState(() => toLocalInputValue(reminder.dueAt, reminder.timezone));
   const [preset, setPreset] = useState<RepeatPreset>(presetOf(reminder.recurrence));
-  const [presetChanged, setPresetChanged] = useState(false);
+  const presetChanged = preset !== presetOf(reminder.recurrence);
   const [interval, setInterval] = useState(reminder.recurrence?.interval ?? 1);
   const [weekdays, setWeekdays] = useState<number[]>(reminder.recurrence?.byWeekday ?? []);
   const [saving, setSaving] = useState(false);
@@ -129,7 +129,7 @@ export function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder
           <Select
             label={t('reminders.repeat')}
             value={preset}
-            onChange={(v) => { setPreset(v as RepeatPreset); setPresetChanged(true); }}
+            onChange={(v) => { setPreset(v as RepeatPreset); }}
             options={(['none', 'daily', 'weekdays', 'weekly', 'monthly', 'yearly'] as const).map((p) => ({ value: p, label: t(`reminders.repeat_${p}`) }))}
           />
           {preset !== 'none' && preset !== 'weekdays' && (
