@@ -1272,6 +1272,38 @@ describe('connect() WebSocket', () => {
     expect(instances).toHaveLength(1); // No new WebSocket created.
   });
 
+  it('close() from inside the reconnecting listener prevents new socket', () => {
+    vi.useFakeTimers();
+    const statuses: string[] = [];
+    const client = makeWsClient();
+    const conn = client.connect({
+      onEvent: () => {},
+      onStatus: (s) => {
+        statuses.push(s);
+        if (s === 'reconnecting') {
+          conn.close();
+        }
+      },
+      reconnect: true,
+    });
+    const ws1 = instances[0]!;
+    ws1.simulateOpen();
+    ws1.simulateMessage({ type: 'ready', serverVersion: '0.1.0', seq: 0 });
+
+    // Trigger unexpected close to arm the reconnect timer.
+    ws1.simulateClose(1006, 'network drop');
+    expect(instances).toHaveLength(1);
+
+    // Advance timers past the first backoff delay.
+    vi.advanceTimersByTime(2000);
+
+    // The listener called close() from inside 'reconnecting' — no new socket.
+    expect(instances).toHaveLength(1);
+    expect(conn.status).toBe('closed');
+    expect(statuses).toContain('reconnecting');
+    expect(statuses[statuses.length - 1]).toBe('closed');
+  });
+
   it('no reconnect after 4401 auth failure', () => {
     vi.useFakeTimers();
     const client = makeWsClient();
