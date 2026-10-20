@@ -237,7 +237,12 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
           tags: data.tags ?? existing.tags,
           listId: data.listId ?? existing.listId,
           order: data.order ?? (movedList ? nextOrder('tasks', data.listId) : existing.order),
-          parentId: data.parentId !== undefined ? data.parentId : (movedAwayFromParent ? null : existing.parentId),
+          parentId: (() => {
+            let pid = data.parentId !== undefined ? data.parentId : (movedAwayFromParent ? null : existing.parentId);
+            const effectiveListId = data.listId ?? existing.listId;
+            if (pid !== null && pid !== undefined && get(pid)?.listId !== effectiveListId) pid = null;
+            return pid;
+          })(),
           updatedAt: now,
         };
         db.prepare(
