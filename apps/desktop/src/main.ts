@@ -481,10 +481,16 @@ async function main(): Promise<void> {
     if (shutdownDone) return;
     event.preventDefault();
     if (!shutdownPromise) {
-      shutdownPromise = (neoServer?.stop() ?? Promise.resolve()).then(() => {
-        shutdownDone = true;
-        app.quit();
-      });
+      shutdownPromise = (neoServer?.stop() ?? Promise.resolve())
+        .then(() => {
+          shutdownDone = true;
+          app.quit();
+        })
+        .catch((err: unknown) => {
+          console.error('[NEO desktop] Error stopping server during quit:', err);
+          shutdownDone = true;
+          app.quit();
+        });
     }
   });
 }

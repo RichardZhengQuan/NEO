@@ -183,4 +183,53 @@ describe('before-quit graceful shutdown', () => {
     expect(server.stopServer).toHaveBeenCalledTimes(1);
     expect(electron.app.quit).toHaveBeenCalledTimes(1);
   });
+
+  it('still quits and logs when server stop rejects', async () => {
+    const stopError = new Error('stop failed');
+    server.stopServer.mockRejectedValueOnce(stopError);
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7777',
+      ownerToken: 'test-owner-token',
+      stop: server.stopServer,
+    });
+
+    const shutdownReady = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+    await import('./main.js');
+    await shutdownReady;
+
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const quit = new Promise<void>((resolve) => {
+      electron.app.quit.mockImplementationOnce(resolve);
+    });
+    function createQuitEvent() {
+      const event = {
+        defaultPrevented: false,
+        preventDefault: vi.fn(() => { event.defaultPrevented = true; }),
+      };
+      return event;
+    }
+
+    const firstEvent = createQuitEvent();
+    electron.app.emit('before-quit', firstEvent);
+    expect(firstEvent.defaultPrevented).toBe(true);
+    expect(server.stopServer).toHaveBeenCalledTimes(1);
+
+    await quit;
+    expect(electron.app.quit).toHaveBeenCalledTimes(1);
+    expect(logError).toHaveBeenCalledWith(
+      '[NEO desktop] Error stopping server during quit:',
+      stopError,
+    );
+
+    // After rejection + quit, shutdownDone is true so subsequent events pass through.
+    const completedEvent = createQuitEvent();
+    electron.app.emit('before-quit', completedEvent);
+    expect(completedEvent.preventDefault).not.toHaveBeenCalled();
+    expect(server.stopServer).toHaveBeenCalledTimes(1);
+    expect(electron.app.quit).toHaveBeenCalledTimes(1);
+  });
 });
