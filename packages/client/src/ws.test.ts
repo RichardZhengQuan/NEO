@@ -87,11 +87,11 @@ describe('connect() WebSocket', () => {
     ws.simulateMessage({ type: 'ready', serverVersion: '0.1.0', seq: 0 });
     expect(conn.status).toBe('closed');
 
-    // Advance time well past PING_INTERVAL_MS — if a timer leaked it would
-    // reschedule itself here. The test passes as long as no unhandled error
-    // is thrown and the status stays 'closed'.
+    // Advance time well past PING_INTERVAL_MS — a leaked self-rescheduling
+    // ping timer would keep scheduling itself here and leave a non-zero count.
     vi.advanceTimersByTime(100_000);
     expect(conn.status).toBe('closed');
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('closing from inside the reconnecting listener prevents further socket construction', () => {
