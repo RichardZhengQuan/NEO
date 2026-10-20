@@ -256,6 +256,27 @@ describe('ChatGPT Responses API with a loopback fake', () => {
     expect(calls[1]?.body?.['tools']).toContainEqual({ type: 'web_search' });
   });
 
+  it('does not disable search when a function tool named my_web_search_assistant at tools[0] is rejected', async () => {
+    handler = (_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'unsupported_tool', param: 'tools[0]', message: 'The tool "my_web_search_assistant" is not supported.' } }));
+    };
+    const funcTool: ToolSpec = { name: 'my_web_search_assistant', description: 'A web search helper', inputSchema: { type: 'object' as const } };
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    const error = await collectChat(adapter.chat(searchRequest)).catch((value: unknown) => value);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body?.['tools']).toMatchObject([{ type: 'function', name: 'my_web_search_assistant' }, { type: 'web_search' }]);
+    // Must NOT have disabled search; the rejection was for the function tool, not the hosted web_search.
+    expect(adapter.capabilities(request.model).nativeWebSearch).toBe(true);
+    expect(error).toMatchObject({ code: 'provider_error' });
+
+    // Follow-up request on the same adapter must still include the hosted web_search tool.
+    stream(completed());
+    await expect(collectChat(adapter.chat(searchRequest))).resolves.toBeDefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.body?.['tools']).toContainEqual({ type: 'web_search' });
+  });
+
   it.each([
     ['subscription_sharing_usage_limit_exceeded', 'rate_limited', "You've reached the weekly limit you set for NEO in ChatGPT."],
     ['subscription_sharing_usage_unavailable', 'provider_error', 'ChatGPT is temporarily unavailable. Try again later.'],
@@ -342,6 +363,67 @@ describe('ChatGPT Responses API with a loopback fake', () => {
 
   it('rejects non-public production endpoints including backend-api', () => {
     expect(() => new ChatGPTAdapter({ ...config, baseUrl: 'https://chatgpt.com/backend-api' })).toThrow('public OpenAI API');
+  });
+});
+
+describe('ChatGPT structured search rejection with injected fetch', () => {
+  it.each(['http', 'stream'] as const)('disables search when web_search tool is rejected with a field-level param like tools[1].type (%s)', async transport => {
+    const error = { code: 'unsupported_value', param: 'tools[1].type', message: 'The value "web_search" is not supported.' };
+    const calls: Record<string, unknown>[] = [];
+    const adapter = new ChatGPTAdapter(config, {
+      fetch: async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (calls.length === 1) {
+          return transport === 'http'
+            ? new Response(JSON.stringify({ error }), { status: 400, headers: { 'content-type': 'application/json' } })
+            : new Response(frame({ type: 'response.failed', response: { error } }), { headers: { 'content-type': 'text/event-stream' } });
+        }
+        return new Response(frame(completed()), { headers: { 'content-type': 'text/event-stream' } });
+      },
+      getChatGPTAccessToken: async () => TOKEN,
+    });
+    const funcTool: ToolSpec = { name: 'my_func', description: 'A helper', inputSchema: { type: 'object' } };
+    // tools array sent: [funcTool, web_search]; web_search is at index 1.
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    const rejected = await collectChat(adapter.chat(searchRequest)).catch((value: unknown) => value);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.['tools']).toMatchObject([{ type: 'function', name: 'my_func' }, { type: 'web_search' }]);
+    // The rejection param tools[1].type refers to the web_search tool at index 1; search must be disabled.
+    expect(adapter.capabilities(request.model).nativeWebSearch).toBe(false);
+    expect(rejected).toMatchObject({ code: 'search_unavailable' });
+
+    // Follow-up must not re-send the rejected web_search tool.
+    await expect(collectChat(adapter.chat(searchRequest))).resolves.toBeDefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.['tools']).not.toContainEqual(expect.objectContaining({ type: 'web_search' }));
+  });
+
+  it.each(['http', 'stream'] as const)('keeps hosted search after an indexed function-tool name rejection (%s)', async transport => {
+    const error = { code: 'unsupported_tool', param: 'tools[0]', message: 'The tool "my_web_search_assistant" is not supported.' };
+    const calls: Record<string, unknown>[] = [];
+    const adapter = new ChatGPTAdapter(config, {
+      fetch: async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (calls.length === 1) {
+          return transport === 'http'
+            ? new Response(JSON.stringify({ error }), { status: 400, headers: { 'content-type': 'application/json' } })
+            : new Response(frame({ type: 'response.failed', response: { error } }), { headers: { 'content-type': 'text/event-stream' } });
+        }
+        return new Response(frame(completed()), { headers: { 'content-type': 'text/event-stream' } });
+      },
+      getChatGPTAccessToken: async () => TOKEN,
+    });
+    const funcTool: ToolSpec = { name: 'my_web_search_assistant', description: 'A web search helper', inputSchema: { type: 'object' } };
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    const rejected = await collectChat(adapter.chat(searchRequest)).catch((value: unknown) => value);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.['tools']).toMatchObject([{ type: 'function', name: 'my_web_search_assistant' }, { type: 'web_search' }]);
+    expect(adapter.capabilities(request.model).nativeWebSearch).toBe(true);
+    expect(rejected).toMatchObject({ code: 'provider_error' });
+
+    await expect(collectChat(adapter.chat(searchRequest))).resolves.toBeDefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.['tools']).toContainEqual({ type: 'web_search' });
   });
 });
 
