@@ -160,10 +160,14 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       // Moving a reminder that already fired to a new time means "remind me again".
       else if (reanchor && existing.status === 'fired') next.status = 'scheduled';
 
+      // When reanchoring, clear any outstanding snooze so the new dueAt is
+      // not silently overwritten by a snoozed redelivery in markFired.
       db.prepare(
-        `UPDATE reminders SET title = ?, notes = ?, due_at = ?, anchor_at = CASE WHEN ? THEN ? ELSE anchor_at END,
+        `UPDATE reminders SET title = ?, notes = ?, due_at = ?,
+           anchor_at = CASE WHEN ? THEN ? ELSE anchor_at END,
+           snoozed_due_at = CASE WHEN ? THEN NULL ELSE snoozed_due_at END,
            timezone = ?, recurrence = ?, status = ?, updated_at = ? WHERE id = ?`,
-      ).run(next.title, next.notes, next.dueAt, reanchor ? 1 : 0, next.dueAt, next.timezone, toJson(next.recurrence), next.status, now, id);
+      ).run(next.title, next.notes, next.dueAt, reanchor ? 1 : 0, next.dueAt, reanchor ? 1 : 0, next.timezone, toJson(next.recurrence), next.status, now, id);
       emit({ type: 'upsert', reminder: next });
       return next;
     },
