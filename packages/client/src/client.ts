@@ -67,6 +67,7 @@ import type {
   UpdateProviderRequest,
   ProviderKind,
 } from '@neo/protocol';
+import { NeoError } from '@neo/protocol';
 import type { NeoClientOptions, ConnectOptions, EventConnection } from './types.js';
 import type { HttpContext } from './http.js';
 import { apiRequest } from './http.js';
@@ -420,6 +421,8 @@ async function* streamTimeline(
       signal,
     });
   } catch (err) {
+    // Let pre-classified errors propagate unchanged (e.g. from an injected fetch).
+    if (err instanceof NeoError) throw err;
     if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
       throw err;
     }
@@ -433,7 +436,14 @@ async function* streamTimeline(
       if (typeof shape.code !== 'string' || typeof shape.message !== 'string') {
         throw new Error('invalid shape');
       }
-    } catch {
+    } catch (bodyErr) {
+      // Let abort/timeout errors propagate (mirrors http.ts:151-157).
+      if (
+        bodyErr instanceof Error &&
+        (bodyErr.name === 'AbortError' || bodyErr.name === 'TimeoutError')
+      ) {
+        throw bodyErr;
+      }
       shape = { code: 'internal', message: `HTTP ${response.status}`, retryable: response.status >= 500 };
     }
     throw new NeoApiError(response.status, shape);
