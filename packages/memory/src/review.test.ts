@@ -780,6 +780,33 @@ describe('consolidation', () => {
     const report = await svc.consolidate({ force: true });
     expect(report.episodesConsolidated).toBe(0);
     expect((await svc.get(e1.id))!.node.consolidatedAt ?? null).toBeNull();
+    tickDays(30);
+    await svc.consolidate({ force: true });
+    expect((await svc.get(e1.id))!.node.consolidatedAt ?? null).toBeNull();
+  });
+
+  it('retries previously-faded episodes on the next run when the model becomes usable', async () => {
+    let attempts = 0;
+    const { model } = scriptedLLM({
+      consolidate: () => (++attempts === 1 ? 'not json' : abstraction([])),
+    });
+    const { svc, tickDays } = setup({ llm: model });
+    const ep = await svc.remember({
+      kind: 'episode',
+      label: 'Hiking',
+      content: 'The user enjoyed hiking in the Alps.',
+      importance: 0.5,
+    });
+    tickDays(30);
+    const first = await svc.consolidate({ force: true });
+    expect(first.episodesConsolidated).toBe(0);
+    const after1 = (await svc.get(ep.id))!.node;
+    expect(after1.status).toBe('archived');
+    expect(after1.consolidatedAt ?? null).toBeNull();
+    tickDays(1);
+    const second = await svc.consolidate({ force: true });
+    expect(second.episodesConsolidated).toBe(1);
+    expect(attempts).toBe(2);
   });
 
   it('is idempotent and single-flight', async () => {
