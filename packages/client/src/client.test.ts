@@ -494,12 +494,104 @@ describe('timeline routes', () => {
 
   it('streams timeline events with episode ids', async () => {
     const event = { type: 'text.delta', episodeId: 'ep', conversationId: 'ep', turnId: 't', messageId: 'm', text: 'hello' };
-    const { client, requests } = makeClient([{ status: 200, body: `event: text.delta\ndata: ${JSON.stringify(event)}\n\n` }]);
+    const { client, requests } = makeClient([{ status: 200, body: `event: text.delta\ndata: ${JSON.stringify(event)}\n\n`, headers: { 'content-type': 'text/event-stream' } }]);
     const events = [];
     for await (const item of client.timeline.stream({ text: 'hello' })) events.push(item);
     expect(events).toEqual([event]);
     expect(requests[0]!.url).toContain('/api/timeline/messages');
     expect(requests[0]!.headers.accept).toBe('text/event-stream');
+  });
+});
+
+describe('timeline.stream', () => {
+  it('throws bad_upstream when response content-type is text/html', async () => {
+    const { fetchFn, requests } = makeFetch([{
+      status: 200,
+      body: '<html>Frontend fallback</html>',
+      headers: { 'content-type': 'text/html' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    const events = [];
+    let err: unknown;
+    try {
+      for await (const item of client.timeline.stream({ text: 'hi' })) events.push(item);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.code).toBe('bad_upstream');
+    expect(apiErr.message).toBe('Expected text/event-stream, got text/html');
+    expect(apiErr.httpStatus).toBe(502);
+    expect(apiErr.retryable).toBe(true);
+    expect(events).toEqual([]);
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toContain('/api/timeline/messages');
+    expect(requests[0]!.body).toEqual({ text: 'hi' });
+  });
+
+  it('accepts mixed-case text/event-stream', async () => {
+    const event = { type: 'text.delta', episodeId: 'ep', conversationId: 'ep', turnId: 't', messageId: 'm', text: 'hi' };
+    const { fetchFn } = makeFetch([{
+      status: 200,
+      body: `event: text.delta\ndata: ${JSON.stringify(event)}\n\n`,
+      headers: { 'content-type': 'Text/Event-Stream' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    const events = [];
+    for await (const item of client.timeline.stream({ text: 'hi' })) events.push(item);
+    expect(events).toEqual([event]);
+  });
+
+  it('accepts text/event-stream with charset parameter', async () => {
+    const event = { type: 'text.delta', episodeId: 'ep', conversationId: 'ep', turnId: 't', messageId: 'm', text: 'hi' };
+    const { fetchFn } = makeFetch([{
+      status: 200,
+      body: `event: text.delta\ndata: ${JSON.stringify(event)}\n\n`,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    const events = [];
+    for await (const item of client.timeline.stream({ text: 'hi' })) events.push(item);
+    expect(events).toEqual([event]);
+  });
+
+  it('throws bad_upstream on prefix lookalike text/event-streaming', async () => {
+    const { fetchFn } = makeFetch([{
+      status: 200,
+      body: '<html>Not SSE</html>',
+      headers: { 'content-type': 'text/event-streaming' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    const events = [];
+    let err: unknown;
+    try {
+      for await (const item of client.timeline.stream({ text: 'hi' })) events.push(item);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.code).toBe('bad_upstream');
+    expect(apiErr.message).toBe('Expected text/event-stream, got text/event-streaming');
+    expect(events).toEqual([]);
+  });
+
+  it('throws bad_upstream on prefix lookalike text/event-stream+json', async () => {
+    const { fetchFn } = makeFetch([{
+      status: 200,
+      body: '{"not":"sse"}',
+      headers: { 'content-type': 'text/event-stream+json' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    let err: unknown;
+    try {
+      for await (const _ of client.timeline.stream({ text: 'hi' })) { /* drain */ }
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NeoApiError);
+    expect((err as NeoApiError).code).toBe('bad_upstream');
   });
 });
 

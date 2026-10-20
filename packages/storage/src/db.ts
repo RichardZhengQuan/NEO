@@ -38,6 +38,8 @@ export interface NeoDatabase {
   prepare(sql: string): StatementSync;
   /** Run `fn` atomically. Nested calls use savepoints. Re-throws after rolling back. */
   transaction<T>(fn: () => T): T;
+  /** Run after the outermost commit, or immediately when outside a transaction. */
+  afterCommit(fn: () => void): void;
   close(): void;
 }
 
@@ -53,6 +55,7 @@ export function openDatabase(path: string): NeoDatabase {
   }
   const cache = new Map<string, StatementSync>();
   let depth = 0;
+  const commitStack: (() => void)[][] = [];
 
   const db: NeoDatabase = {
     raw,
@@ -71,12 +74,18 @@ export function openDatabase(path: string): NeoDatabase {
       const outer = entryDepth === 0;
       const savepoint = `sp_${entryDepth}`;
       raw.exec(outer ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepoint}`);
+      commitStack.push([]);
       depth++;
+      let levelCallbacks: (() => void)[] | undefined;
       try {
         const result = fn();
         raw.exec(outer ? 'COMMIT' : `RELEASE ${savepoint}`);
+        const level = commitStack.pop()!;
+        if (outer) levelCallbacks = level;
+        else commitStack[commitStack.length - 1]!.push(...level);
         return result;
       } catch (err) {
+        commitStack.pop();
         try {
           raw.exec(outer ? 'ROLLBACK' : `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
         } catch (cleanupErr) {
@@ -85,7 +94,14 @@ export function openDatabase(path: string): NeoDatabase {
         throw err;
       } finally {
         depth = entryDepth;
+        if (levelCallbacks) {
+          for (const cb of levelCallbacks) cb();
+        }
       }
+    },
+    afterCommit(fn) {
+      if (depth === 0) fn();
+      else commitStack[commitStack.length - 1]!.push(fn);
     },
     close() {
       cache.clear();

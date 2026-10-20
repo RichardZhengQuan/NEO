@@ -449,5 +449,15 @@ async function* streamTimeline(
     throw new NeoApiError(response.status, shape);
   }
 
+  const contentType = response.headers.get('content-type') ?? '';
+  const mediaType = contentType.split(';', 1)[0]!.trim().toLowerCase();
+  if (mediaType !== 'text/event-stream') {
+    throw new NeoApiError(502, {
+      code: 'bad_upstream',
+      message: `Expected text/event-stream, got ${contentType || '(none)'}`,
+      retryable: true,
+    });
+  }
+
   yield* parseEventStream(response, signal);
 }
