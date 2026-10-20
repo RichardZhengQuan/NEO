@@ -36,7 +36,9 @@ export interface StorageDeviceStore extends DeviceStore {
 export function createDeviceStore(db: NeoDatabase): StorageDeviceStore {
   const listeners = new Set<(deviceId: string) => void>();
   const emitRevoke = (id: string) => {
-    for (const listener of listeners) listener(id);
+    for (const listener of listeners) {
+      try { listener(id); } catch {}
+    }
   };
   const store: StorageDeviceStore = {
     list() {
@@ -64,29 +66,31 @@ export function createDeviceStore(db: NeoDatabase): StorageDeviceStore {
       return toDevice(row);
     },
     revoke(id) {
-      const revoked = db.transaction(() => {
+      let revoked = false;
+      db.transaction(() => {
         const changed = Number(db.prepare('UPDATE devices SET revoked_at = ? WHERE id = ? AND owner = 0 AND revoked_at IS NULL').run(Date.now(), id).changes) > 0;
-        if (changed) db.prepare('DELETE FROM push_subscriptions WHERE device_id = ?').run(id);
-        return changed;
+        if (changed) {
+          db.prepare('DELETE FROM push_subscriptions WHERE device_id = ?').run(id);
+          db.afterCommit(() => emitRevoke(id));
+        }
+        revoked = changed;
       });
-      if (revoked) emitRevoke(id);
       return revoked;
     },
     replaceOwner(token) {
       if (!token) throw new Error('Owner token must not be empty.');
-      const revokedIds: string[] = [];
-      const owner = db.transaction(() => {
+      let owner: ReturnType<DeviceStore['create']>;
+      db.transaction(() => {
         const previous = db.prepare('SELECT id FROM devices WHERE owner = 1 AND revoked_at IS NULL').all() as { id: string }[];
         db.prepare('DELETE FROM push_subscriptions WHERE device_id IN (SELECT id FROM devices WHERE owner = 1)').run();
         db.prepare('UPDATE devices SET revoked_at = ? WHERE owner = 1 AND revoked_at IS NULL').run(Date.now());
         // An explicitly reused former owner token still gets a fresh row; paired tokens cannot be promoted.
         db.prepare('DELETE FROM devices WHERE token_hash = ? AND owner = 1 AND revoked_at IS NOT NULL').run(hashToken(token));
-        const result = store.create({ name: 'owner', platform: 'other', owner: true, token });
-        revokedIds.push(...previous.map((device) => device.id));
-        return result;
+        owner = store.create({ name: 'owner', platform: 'other', owner: true, token });
+        const revokedIds = previous.map((device) => device.id);
+        db.afterCommit(() => { for (const id of revokedIds) emitRevoke(id); });
       });
-      for (const id of revokedIds) emitRevoke(id);
-      return owner;
+      return owner!;
     },
     onRevoke(listener) {
       listeners.add(listener);
