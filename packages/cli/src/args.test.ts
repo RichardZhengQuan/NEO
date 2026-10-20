@@ -171,9 +171,19 @@ describe('parseCliArgs', () => {
       expect(r).toMatchObject({ cmd: 'memory', sub: 'export', file: undefined });
     });
 
+    it('rejects memory export with extra file paths', () => {
+      const r = parseCliArgs(['memory', 'export', 'a.json', 'b.json']);
+      expect(r).toEqual({ error: 'memory export takes at most one file path, got: b.json' });
+    });
+
     it('parses memory import', () => {
       const r = parseCliArgs(['memory', 'import', '/tmp/export.json', '--replace']);
       expect(r).toMatchObject({ cmd: 'memory', sub: 'import', file: '/tmp/export.json', replace: true });
+    });
+
+    it('rejects memory import with extra file paths', () => {
+      const r = parseCliArgs(['memory', 'import', 'a.json', 'b.json']);
+      expect(r).toEqual({ error: 'memory import takes exactly one file path, got extra: b.json' });
     });
 
     it('rejects memory import with no file', () => {
