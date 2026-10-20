@@ -16,13 +16,20 @@ export function loadOrCreateKey(path: string): Buffer {
   }
   mkdirSync(dirname(path), { recursive: true });
   const key = randomBytes(32);
-  writeFileSync(path, `${key.toString('base64')}\n`, { mode: 0o600 });
   try {
-    chmodSync(path, 0o600);
-  } catch {
-    // best effort on platforms without POSIX modes
+    writeFileSync(path, `${key.toString('base64')}\n`, { mode: 0o600, flag: 'wx' });
+    try {
+      chmodSync(path, 0o600);
+    } catch {
+      // best effort on platforms without POSIX modes
+    }
+    return key;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    const existing = Buffer.from(readFileSync(path, 'utf8').trim(), 'base64');
+    if (existing.length !== 32) throw new Error(`Invalid key file at ${path} (expected 32 bytes base64).`);
+    return existing;
   }
-  return key;
 }
 
 /** Secrets (API keys entered in the app) encrypted at rest with AES-256-GCM. */
