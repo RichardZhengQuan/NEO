@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage, ChatRequest, ProviderAdapter, ProviderConfig } from '@neo/protocol';
-import { collectChat } from '@neo/protocol';
+import { collectChat, NeoError } from '@neo/protocol';
 import { AnthropicAdapter } from './anthropic.js';
 import type { ProviderOptions } from './index.js';
 import {
@@ -441,6 +441,45 @@ describe('Anthropic streaming', () => {
     expect(f.calls).toHaveLength(1);
   });
 
+  it('abort after first tool_call in post-stream batch is honoured', async () => {
+    const ac = new AbortController();
+    const { a } = adapter(stream(
+      messageStart(),
+      toolBlock(0, 'toolu_1', 'get_weather', '{"city":"Paris"}'),
+      toolBlock(1, 'toolu_2', 'get_weather', '{"city":"Rome"}'),
+      messageDelta('tool_use'),
+      messageStop,
+    ));
+    const it = a.chat(req({ signal: ac.signal, tools: TOOLS }))[Symbol.asyncIterator]();
+    expect((await it.next()).value).toMatchObject({ type: 'tool_call', id: 'toolu_1', input: { city: 'Paris' } });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it.each([
+    ['provider_part', 'tool_call', 'tool_use'],
+    ['text', 'provider_part', 'refusal'],
+    ['sources', 'provider_part', 'end_turn'],
+    ['usage', 'sources', 'end_turn'],
+    ['done', 'usage', 'end_turn'],
+  ] as const)('abort before post-stream %s is honoured', async (_nextType, firstType, stop) => {
+    const ac = new AbortController();
+    const { a } = adapter(stream(
+      messageStart(),
+      { type: 'content_block_start', index: 0, content_block: { type: 'web_search_tool_result', tool_use_id: 'srv_1', content: [{ type: 'web_search_result', url: 'https://example.com', title: 'Example', encrypted_content: 'opaque' }] } },
+      { type: 'content_block_stop', index: 0 },
+      toolBlock(1, 'toolu_1', 'get_weather', '{"city":"Paris"}'),
+      messageDelta(stop),
+      messageStop,
+    ));
+    const it = a.chat(req({ signal: ac.signal, tools: TOOLS, webSearch: {} }))[Symbol.asyncIterator]();
+    let first = await it.next();
+    while (!first.done && first.value.type !== firstType) first = await it.next();
+    expect(first.value).toMatchObject({ type: firstType });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
   it('abort mid-stream ends with NeoError cancelled', async () => {
     const ac = new AbortController();
     const { a } = adapter((r) =>
@@ -572,6 +611,20 @@ describe('Anthropic retries and errors', () => {
     const { a } = adapter(apiError(400, `bad key ${KEY} in request`));
     const err = (await collect(a.chat(req())).catch((e: unknown) => e)) as Error;
     expect(err.message).not.toContain(KEY);
+  });
+
+  it('redacts credential-bearing custom headers from error messages', async () => {
+    const { a, f } = adapter(apiError(400, 'bad authorization Bearer HEADER_SECRET (token HEADER_SECRET) in request'), {
+      headers: { authorization: 'Bearer HEADER_SECRET' },
+    });
+    const err = (await collect(a.chat(req())).catch((e: unknown) => e)) as NeoError;
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.headers.get('authorization')).toBe('Bearer HEADER_SECRET');
+    expect(err).toBeInstanceOf(NeoError);
+    expect(err).toMatchObject({ code: 'provider_error', retryable: false });
+    expect(err.message).toContain('Anthropic error: bad authorization');
+    expect(err.message).not.toContain('HEADER_SECRET');
+    expect(err.message).not.toContain('Bearer HEADER_SECRET');
   });
 
   it('network failures are retried, then reported as retryable provider_error', async () => {

@@ -205,6 +205,7 @@ export interface RecallQuery {
   /** Strengthen recalled memories (spaced repetition + Hebbian links). Default true. */
   reinforce?: boolean;
   now?: number;
+  signal?: AbortSignal;
 }
 
 export interface RecalledMemory {

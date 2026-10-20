@@ -176,9 +176,32 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
 
   // 2. Recall.
   const allowSensitive = adapter.isLocal || settings.memory.sendSensitiveToCloud;
-  const prepared = plan.context && plan.recalled
-    ? { context: plan.context, recalled: plan.recalled }
-    : await prepareTurnContext(services, conv, settings, plan.parts, history, allowSensitive);
+  let prepared: { context: ContentPart; recalled: RecalledMemory[] };
+  if (plan.context && plan.recalled) {
+    prepared = { context: plan.context, recalled: plan.recalled };
+  } else {
+    try {
+      prepared = await prepareTurnContext(services, conv, settings, plan.parts, history, allowSensitive, undefined, record.controller.signal);
+    } catch (err) {
+      if (!(err instanceof NeoError && err.code === 'cancelled' && record.controller.signal.aborted)) throw err;
+      // Recall was interrupted by cancellation before the TurnRunner existed.
+      // Build a minimal context so the TurnRunner can run its cancelled-signal
+      // fast-path and emit the terminal event cleanly.
+      prepared = {
+        recalled: [],
+        context: {
+          type: 'context',
+          text: buildContextBlock({
+            now: clock(),
+            timezone: settings.timezone,
+            locale: settings.locale,
+            memories: [],
+            offRecord: conv.offRecord ?? conv.incognito,
+          }),
+        },
+      };
+    }
+  }
   const { context, recalled } = prepared;
 
   // 3. Persist the user message (with its context part) and the streaming assistant message.
@@ -260,8 +283,9 @@ export async function prepareTurnContext(
   history: readonly Message[],
   allowSensitive: boolean,
   reinforce?: boolean,
+  signal?: AbortSignal,
 ): Promise<{ context: ContentPart; recalled: RecalledMemory[] }> {
-  const recalled = await recallMemories(services, conversation, settings, parts, history, allowSensitive, reinforce);
+  const recalled = await recallMemories(services, conversation, settings, parts, history, allowSensitive, reinforce, signal);
   const sensitive = recalled.some(({ node }) => node.sensitivity === 'sensitive');
   return {
     recalled,
@@ -293,6 +317,7 @@ async function recallMemories(
   history: readonly Message[],
   allowSensitive: boolean,
   reinforce?: boolean,
+  signal?: AbortSignal,
 ): Promise<RecalledMemory[]> {
   const policy = settings.memory;
   if (!policy.recall) return [];
@@ -304,7 +329,7 @@ async function recallMemories(
   const previousReply = previousMessage && !(containsSensitive(previousMessage) && !allowSensitive) ? textOf(previousMessage.parts).trim() : '';
   const context = previousReply.slice(-RECALL_PREVIOUS_REPLY_CHARS).trim();
   try {
-    const result = await services.memory.recall({
+    const pending = services.memory.recall({
       text,
       ...(context ? { context } : {}),
       conversationId: conv.id,
@@ -313,9 +338,12 @@ async function recallMemories(
       allowSensitive,
       ...((conv.offRecord ?? conv.incognito) || reinforce === false ? { reinforce: false } : {}),
       now: services.clock(),
+      signal,
     });
+    const result = await (signal ? raceAbort(pending, signal) : pending);
     return result.items;
   } catch (err) {
+    if (err instanceof NeoError && err.code === 'cancelled') throw err;
     services.logger.warn('memory recall failed; continuing without memories', { conversationId: conv.id, error: String(err) });
     return [];
   }

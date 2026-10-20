@@ -273,15 +273,20 @@ export class OpenAIAdapter implements ProviderAdapter {
         collectAnnotations(sources, delta['annotations']);
 
         const reasoning = delta['reasoning_content'] ?? delta['reasoning'];
-        if (typeof reasoning === 'string' && reasoning) yield { type: 'reasoning', text: reasoning };
+        if (typeof reasoning === 'string' && reasoning) {
+          throwIfAborted(request.signal);
+          yield { type: 'reasoning', text: reasoning };
+        }
         if (typeof delta['content'] === 'string' && delta['content']) {
           sawText = true;
+          throwIfAborted(request.signal);
           yield { type: 'text', text: delta['content'] };
         }
         // OpenAI streams a model refusal as `delta.refusal` text instead of content.
         if (typeof delta['refusal'] === 'string' && delta['refusal']) {
           sawText = true;
           refused = true;
+          throwIfAborted(request.signal);
           yield { type: 'text', text: delta['refusal'] };
         }
         if (Array.isArray(delta['tool_calls'])) {
@@ -303,7 +308,10 @@ export class OpenAIAdapter implements ProviderAdapter {
       throw new NeoError('provider_error', `The connection to ${this.label()} closed before the response finished.`, { retryable: true });
     }
 
-    for (const tc of tools) yield { type: 'tool_call', id: tc.id ?? newCallId('call'), name: tc.name, input: parseToolInput(tc.args) };
+    for (const tc of tools) {
+      throwIfAborted(request.signal);
+      yield { type: 'tool_call', id: tc.id ?? newCallId('call'), name: tc.name, input: parseToolInput(tc.args) };
+    }
 
     let stopReason: StopReason;
     if (finishReason === 'length') stopReason = 'max_tokens';
@@ -312,9 +320,19 @@ export class OpenAIAdapter implements ProviderAdapter {
     else if (finishReason === 'tool_calls' || finishReason === 'function_call' || tools.length > 0) stopReason = 'tool_use';
     else stopReason = 'end';
 
-    if (stopReason === 'refusal' && !sawText) yield { type: 'text', text: REFUSAL_NOTE };
-    if (sources.length) yield { type: 'sources', items: sources };
-    if (usage) yield { type: 'usage', usage };
+    if (stopReason === 'refusal' && !sawText) {
+      throwIfAborted(request.signal);
+      yield { type: 'text', text: REFUSAL_NOTE };
+    }
+    if (sources.length) {
+      throwIfAborted(request.signal);
+      yield { type: 'sources', items: sources };
+    }
+    if (usage) {
+      throwIfAborted(request.signal);
+      yield { type: 'usage', usage };
+    }
+    throwIfAborted(request.signal);
     yield { type: 'done', stopReason };
   }
 
