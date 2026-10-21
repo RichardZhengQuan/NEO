@@ -396,6 +396,11 @@ describe('misc helpers', () => {
     expect(describeRecurrence(null)).toBe('once');
   });
 
+  it('describeRecurrence includes weekday restrictions on daily recurrences', () => {
+    expect(describeRecurrence({ freq: 'daily', byWeekday: [1, 2, 3, 4, 5] })).toBe('every day on Mon, Tue, Wed, Thu, Fri');
+    expect(describeRecurrence({ freq: 'daily', interval: 2, byWeekday: [1, 3, 5] })).toBe('every 2 days on Mon, Wed, Fri');
+  });
+
   it('normalizes errors', () => {
     const e = NeoError.from(Object.assign(new Error('x'), { name: 'AbortError' }));
     expect(e.code).toBe('cancelled');
