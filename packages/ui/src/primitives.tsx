@@ -662,11 +662,12 @@ export function Modal(props: {
     }
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key === 'Escape') {
-        e.stopPropagation();
+        e.stopImmediatePropagation();
         onCloseRef.current();
         return;
       }
       if (e.key !== 'Tab' || !dialogRef.current) return;
+      e.stopImmediatePropagation();
       const items = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
       if (items.length === 0) return;
       const first = items[0]!;
