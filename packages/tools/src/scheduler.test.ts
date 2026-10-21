@@ -423,6 +423,32 @@ describe('ReminderScheduler', () => {
     scheduler.stop();
   });
 
+  it('a failing markFired on A does not delay reminder B due inside the retry window', async () => {
+    const store = makeStore();
+    const a = store.create({ title: 'A', dueAt: START });
+    store.create({ title: 'B', dueAt: START + 1000 });
+    const flaky: ReminderStore = {
+      ...store,
+      markFired: (id, firedAt, missed) => {
+        if (id === a.id) throw new Error('corrupt row');
+        return store.markFired(id, firedAt, missed);
+      },
+    };
+    const { logger } = recordingLogger();
+    const scheduler = createReminderScheduler({
+      reminders: flaky,
+      clock: () => Date.now(),
+      failureBackoffMs: 10_000,
+      logger,
+    });
+    const fired: string[] = [];
+    scheduler.onFire((f) => fired.push(f.reminder.title));
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fired).toContain('B');
+    scheduler.stop();
+  });
+
   it('a reminder that cannot be marked fired does not block the others or spin the timer', async () => {
     const store = makeStore();
     const poison = store.create({ title: 'poison', dueAt: START - 1000 });

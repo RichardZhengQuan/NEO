@@ -238,7 +238,13 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       return (db.prepare("SELECT * FROM reminders WHERE status = 'scheduled' AND due_at <= ? ORDER BY due_at ASC, created_at ASC").all(finite(now, 'time')) as Row[]).map(toReminder);
     },
 
-    nextDue(): Reminder | null {
+    nextDue(excludeIds?: ReadonlySet<string>): Reminder | null {
+      if (excludeIds?.size) {
+        const ids = [...excludeIds];
+        const placeholders = ids.map(() => '?').join(', ');
+        const r = db.prepare(`SELECT * FROM reminders WHERE status = 'scheduled' AND id NOT IN (${placeholders}) ORDER BY due_at ASC LIMIT 1`).get(...ids) as Row | undefined;
+        return r ? toReminder(r) : null;
+      }
       const r = db.prepare("SELECT * FROM reminders WHERE status = 'scheduled' ORDER BY due_at ASC LIMIT 1").get() as Row | undefined;
       return r ? toReminder(r) : null;
     },

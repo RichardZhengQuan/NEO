@@ -142,17 +142,19 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
     clearTimer();
     if (!started) return;
     const now = clock();
-    let delay = maxTimerMs;
+    let nextDeadline = Infinity;
     try {
-      const next = reminders.nextDue();
-      if (next) {
-        const retry = retryAfter.get(next.id);
-        delay = Math.max(0, Math.max(next.dueAt, retry ?? 0) - now);
+      const retryIds = retryAfter.size > 0 ? new Set(retryAfter.keys()) : undefined;
+      const next = reminders.nextDue(retryIds);
+      if (next) nextDeadline = Math.min(nextDeadline, next.dueAt);
+      for (const retryAt of retryAfter.values()) {
+        nextDeadline = Math.min(nextDeadline, retryAt);
       }
     } catch (err) {
       storeFailedUntil = now + failureBackoffMs;
       logger.error('reminder scheduler could not read the next reminder', { error: String(err) });
     }
+    let delay = nextDeadline === Infinity ? maxTimerMs : Math.max(0, nextDeadline - now);
     if (storeFailedUntil > now) delay = Math.max(delay, storeFailedUntil - now);
     timer = setTimeout(onTimer, Math.min(delay, maxTimerMs));
     (timer as { unref?: () => void }).unref?.();
