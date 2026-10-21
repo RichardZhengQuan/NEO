@@ -277,18 +277,40 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
         // have no next occurrence to restore; fall through to the normal firing
         // path so they reach 'fired' rather than staying 'scheduled'.
         if (isSnoozedRedelivery && existing.recurrence !== null) {
-          const reminder: Reminder = {
-            ...existing,
-            status: 'scheduled',
-            dueAt: snoozedDueAt,
-            // firedCount is unchanged: the snooze was not a new occurrence.
-            lastFiredAt: firedAt,
-            updatedAt: now,
-          };
-          db.prepare('UPDATE reminders SET status = ?, due_at = ?, snoozed_due_at = NULL, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
-            'scheduled', snoozedDueAt, firedAt, now, id,
-          );
-          result = { reminder, occurrenceAt: existing.dueAt, firedAt, missed, nextDueAt: snoozedDueAt };
+          // If the series is already exhausted, the snoozed redelivery must not
+          // re-arm the reminder.  Call nextOccurrence from snoozedDueAt with the
+          // current firedCount (unchanged: the snooze was not a new occurrence) to
+          // determine whether there is any remaining occurrence in the series.
+          const seriesExhausted =
+            nextOccurrence(existing.recurrence, toNum(r.anchor_at), snoozedDueAt, existing.timezone, existing.firedCount) === null;
+          if (seriesExhausted) {
+            // Re-deliver the occurrence but leave the series terminated.
+            const reminder: Reminder = {
+              ...existing,
+              status: 'fired',
+              dueAt: existing.dueAt,
+              // firedCount is unchanged: the snooze was not a new occurrence.
+              lastFiredAt: firedAt,
+              updatedAt: now,
+            };
+            db.prepare('UPDATE reminders SET status = ?, snoozed_due_at = NULL, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
+              'fired', firedAt, now, id,
+            );
+            result = { reminder, occurrenceAt: existing.dueAt, firedAt, missed, nextDueAt: null };
+          } else {
+            const reminder: Reminder = {
+              ...existing,
+              status: 'scheduled',
+              dueAt: snoozedDueAt,
+              // firedCount is unchanged: the snooze was not a new occurrence.
+              lastFiredAt: firedAt,
+              updatedAt: now,
+            };
+            db.prepare('UPDATE reminders SET status = ?, due_at = ?, snoozed_due_at = NULL, last_fired_at = ?, updated_at = ? WHERE id = ?').run(
+              'scheduled', snoozedDueAt, firedAt, now, id,
+            );
+            result = { reminder, occurrenceAt: existing.dueAt, firedAt, missed, nextDueAt: snoozedDueAt };
+          }
         } else {
           const firedCount = existing.firedCount + 1;
           // Advance past both the occurrence and the firing time, so a long downtime

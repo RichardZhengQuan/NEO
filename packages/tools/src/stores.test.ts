@@ -281,6 +281,57 @@ describe('ReminderStore', () => {
     expect(r.get(rem.id)!.status).toBe('fired');
   });
 
+  it('snoozed redelivery of an exhausted count=1 recurring series does not re-arm beyond the count', () => {
+    const r = stores.reminders;
+    const rem = r.create({
+      title: 'once-a-day',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', count: 1 },
+      timezone: 'UTC',
+    });
+    // The one occurrence fires normally: firedCount=1, status='fired'.
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('fired');
+    // Owner snoozes the fired reminder.
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 5);
+    // Scheduler fires the snoozed redelivery.
+    const snoozeDue = utc(2026, 10, 10, 9, 6);
+    t.setNow(snoozeDue);
+    const first = r.markFired(rem.id, snoozeDue);
+    expect(first.reminder.firedCount).toBe(1);
+    expect(first.reminder.status).toBe('fired');
+    // The scheduler must not pick this reminder up again.
+    expect(r.due(snoozeDue + 10 * 60_000)).toEqual([]);
+  });
+
+  it('snoozed redelivery of an exhausted until-bounded recurring series does not re-arm past until', () => {
+    const r = stores.reminders;
+    const until = utc(2026, 10, 10, 9);
+    const rem = r.create({
+      title: 'standup',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', until },
+      timezone: 'UTC',
+    });
+    // The last occurrence before `until` fires normally.
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    // nextOccurrence would advance past `until`, so status is 'fired'.
+    expect(r.get(rem.id)!.status).toBe('fired');
+    // Owner snoozes the fired reminder; the snooze delivery falls after `until`.
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 5);
+    // Scheduler fires the snoozed redelivery.
+    const snoozeDue = utc(2026, 10, 10, 9, 6);
+    t.setNow(snoozeDue);
+    const first = r.markFired(rem.id, snoozeDue);
+    expect(first.reminder.status).toBe('fired');
+    // The scheduler must not pick this reminder up again.
+    expect(r.due(snoozeDue + 10 * 60_000)).toEqual([]);
+  });
+
   it('markFired refuses reminders that are not scheduled (no resurrection of a completed series)', () => {
     const r = stores.reminders;
     const series = r.create({ title: 'daily', dueAt: utc(2026, 10, 10, 8), recurrence: { freq: 'daily' } });
