@@ -95,26 +95,47 @@ describe('task state', () => {
 });
 
 describe('accordion reserved ids', () => {
-  it.each(['__proto__', 'constructor', 'toString'])('AccordionRenderer treats a reserved id %s as a closed (not open) accordion item', (id) => {
-    render(widget({ type: 'accordion', items: [{ id, title: 'Section', open: false, children: [{ type: 'text', text: 'Inner content' }] }] }));
-    const button = screen.getByRole('button', { name: 'Section' });
-    expect(button.getAttribute('aria-expanded')).toBe('false');
-    expect(screen.queryByText('Inner content')).toBeNull();
-  });
+  // These tests render a "seed" item first so the retained-state map is initialised
+  // without an own property for the reserved id.  When we rerender with an additional
+  // item whose id is a reserved Object-prototype key, the map still has no own property
+  // for it, so open[id] on origin/main returns the inherited prototype value — a truthy
+  // function for 'constructor'/'toString' and Object.prototype for '__proto__' — and
+  // incorrectly renders the new item as expanded.  The hasOwnProperty guard fixes this.
+  it.each(['__proto__', 'constructor', 'toString'])(
+    'AccordionRenderer does not expand a dynamically-added item whose id %s has no own entry in the open-state map',
+    (id) => {
+      const seed = { id: 'seed', title: 'Seed', open: false, children: [] as { type: 'text'; text: string }[] };
+      const { rerender } = render(widget({ type: 'accordion', items: [seed] }));
+      // The open-state map is now { seed: false } — no own property for the reserved id.
+      const reserved = { id, title: 'Reserved', open: false, children: [{ type: 'text' as const, text: 'Must stay hidden' }] };
+      rerender(widget({ type: 'accordion', items: [seed, reserved] }));
+      const button = screen.getByRole('button', { name: 'Reserved' });
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(screen.queryByText('Must stay hidden')).toBeNull();
+    }
+  );
 });
 
 describe('changes reserved ids', () => {
-  it.each(['__proto__', 'constructor', 'toString'])('ChangesRenderer treats a reserved id %s as a checked checkbox, not Object.prototype', (id) => {
-    const block: import('@neo/protocol').ChangesBlock = {
-      type: 'changes',
-      items: [{ id, kind: 'task.update', taskId: 'task_1', title: 'Work', status: 'pending', before: { done: false }, after: { done: true } }],
-    };
-    render(widget(block, undefined, vi.fn()));
-    const checkbox = screen.getByRole('checkbox', { name: 'Work' }) as HTMLInputElement;
-    expect(checkbox.checked).toBe(true);
-    expect(typeof checkbox.checked).toBe('boolean');
-    expect(screen.getByRole('button', { name: 'Apply 1 change' })).toBeTruthy();
-  });
+  // The ChangesRenderer uses Object.fromEntries for initial state and spread+computed
+  // keys for updates; both create own properties, so no Object.prototype method can
+  // leak in as a boolean substitute through DOM-observable behaviour.  The
+  // hasOwnProperty guard is defensive type-correctness.  We test the static invariant:
+  // an item whose id is a reserved key and whose status is 'pending' is selected and
+  // counted in the Apply button from the moment the block is rendered.
+  it.each(['__proto__', 'constructor', 'toString'])(
+    'ChangesRenderer counts an item with reserved id %s as pending and renders its checkbox as checked',
+    (id) => {
+      const block: import('@neo/protocol').ChangesBlock = {
+        type: 'changes',
+        items: [{ id, kind: 'task.update', taskId: 'task_1', title: 'Work', status: 'pending', before: { done: false }, after: { done: true } }],
+      };
+      render(widget(block, undefined, vi.fn()));
+      const checkbox = screen.getByRole('checkbox', { name: 'Work' }) as HTMLInputElement;
+      expect(checkbox.checked).toBe(true);
+      expect(screen.getByRole('button', { name: 'Apply 1 change' })).toBeTruthy();
+    }
+  );
 });
 
 describe('memory status', () => {
