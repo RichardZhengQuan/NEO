@@ -527,6 +527,37 @@ describe('TaskStore', () => {
     ]));
   });
 
+  it('deleting a root with ≥1000 descendants succeeds and emits a delete event for every task', () => {
+    const { root, ids } = t.db.transaction(() => {
+      const root = stores.tasks.create({ title: 'Root' });
+      const ids = [root.id];
+      for (let i = 0; i < 1000; i++) {
+        ids.push(stores.tasks.create({ title: `Child ${i}`, parentId: root.id }).id);
+      }
+      return { root, ids };
+    });
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    // Enforce SQLite's conservative limit even when node:sqlite allows more.
+    const prepare = t.db.prepare;
+    t.db.prepare = (sql) => {
+      if ((sql.match(/\?/g) ?? []).length > 999) throw new Error('too many SQL variables');
+      return prepare.call(t.db, sql);
+    };
+    try {
+      expect(stores.tasks.delete(root.id)).toBe(true);
+
+      for (const id of ids) expect(stores.tasks.get(id)).toBeNull();
+      expect(events).toHaveLength(1001);
+      expect(events).toEqual(expect.arrayContaining(
+        ids.map((id) => ({ type: 'delete', id }))
+      ));
+    } finally {
+      t.db.prepare = prepare;
+    }
+  });
+
   it('deleting a subtask recursively deletes only its subtree', () => {
     const parent = stores.tasks.create({ title: 'Parent' });
     const child = stores.tasks.create({ title: 'Child', parentId: parent.id });

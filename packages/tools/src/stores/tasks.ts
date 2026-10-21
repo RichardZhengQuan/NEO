@@ -300,7 +300,11 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
             ids.push(subtaskId);
           }
         }
-        db.prepare(`DELETE FROM tasks WHERE id IN (${ids.map(() => '?').join(', ')})`).run(...ids);
+        const CHUNK = 999;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const chunk = ids.slice(i, i + CHUNK);
+          db.prepare(`DELETE FROM tasks WHERE id IN (${chunk.map(() => "?").join(", ")})`).run(...chunk);
+        }
         return ids;
       });
       for (const deletedId of deletedIds) emit({ type: 'delete', id: deletedId });
