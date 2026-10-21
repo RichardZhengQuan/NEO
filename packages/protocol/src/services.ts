@@ -174,6 +174,8 @@ export interface ReminderListQuery {
   from?: number;
   to?: number;
   limit?: number;
+  /** Filter to reminders whose last_fired_at >= this timestamp (ms). */
+  lastFiredAtFrom?: number;
 }
 
 export interface ReminderStore {
