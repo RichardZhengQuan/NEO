@@ -80,7 +80,7 @@ CREATE TABLE notifications (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT 
 ## Reminder scheduler (`createReminderScheduler`)
 
 - `start()`: `tick(now)` immediately (catch-up), then `arm()`.
-- `arm()`: clear the timer, look at `nextDue()`, and `setTimeout(tick, clamp(dueAt − now, 0, maxTimerMs))`. The 60 s default cap self-corrects after sleep and clock changes. Timers are `unref()`'d.
+- `arm()`: clear the timer, call `nextDue(retryIds)` (passing the IDs currently in the retry-backoff map). If the result is not itself a retrying reminder, include its `dueAt` as a candidate deadline; also include every value in `retryAfter`. The effective deadline is the minimum of all candidates. Store errors are caught: on failure `storeFailedUntil` is set to `now + failureBackoffMs` and the deadline is pushed out accordingly. `delay = min(nextDeadline, maxTimerMs)`; `storeFailedUntil` is applied as a lower bound. The 60 s default cap self-corrects after sleep and clock changes. Timers are `unref()`'d.
 - `tick(now)`: for each `due(now)` reminder, call `markFired`. Set `missed = now − occurrenceAt > graceMs` (15 min). Emit `onFire` listeners (errors in listeners are logged, never break the loop), then re-arm. A reminder that fires a recurrence many times over a long downtime fires **once** (catch-up collapses missed occurrences: advance past `now` in one go).
 - The store's `onChange` triggers `reschedule()` (debounced via microtask).
 

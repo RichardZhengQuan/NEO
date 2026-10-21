@@ -185,8 +185,8 @@ export interface ReminderStore {
   complete(id: string): Reminder;
   /** Scheduled reminders with dueAt <= now, oldest first. */
   due(now: number): Reminder[];
-  /** The scheduled reminder with the smallest dueAt. */
-  nextDue(): Reminder | null;
+  /** The scheduled reminder with the smallest dueAt, excluding the given ids. */
+  nextDue(excludeIds?: ReadonlySet<string>): Reminder | null;
   /** Record a firing: advances recurring reminders or marks one-shots 'fired'. */
   markFired(id: string, firedAt: number, missed?: boolean): ReminderFiring;
   onChange(listener: (event: { type: 'upsert'; reminder: Reminder } | { type: 'delete'; id: string }) => void): () => void;
