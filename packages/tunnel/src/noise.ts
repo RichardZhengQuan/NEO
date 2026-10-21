@@ -23,7 +23,7 @@ function noiseError(error: unknown): NoiseError {
 
 function keyBytes(key: Uint8Array): Uint8Array {
   if (!(key instanceof Uint8Array) || key.length !== 32) throw new NoiseError('Noise keys must be 32 bytes');
-  return key.slice();
+  return new Uint8Array(key);
 }
 
 function keyPairBytes(key: KeyPair): KeyPair {
@@ -291,7 +291,7 @@ export class NkResponder {
       if (this.state !== 'read') throw new NoiseError('Unexpected Noise handshake operation');
       this.state = 'failed';
       checkMessage(message, 48);
-      this.remoteEphemeral = message.slice(0, 32);
+      this.remoteEphemeral = new Uint8Array(message.subarray(0, 32));
       this.symmetric.mixHash(this.remoteEphemeral);
       this.symmetric.mixKey(x25519.getSharedSecret(this.staticKey.privateKey, this.remoteEphemeral));
       const payload = this.symmetric.decryptAndHash(message.subarray(32));
