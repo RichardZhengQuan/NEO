@@ -48,7 +48,38 @@ export function decodeEntities(text: string): string {
 }
 
 const TAG_NAME = /[A-Za-z][A-Za-z0-9:-]*/y;
-const HREF = /(?:^|[\s/])href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
+function extractHref(attrs: string): string | null {
+  let i = 0;
+  while (i < attrs.length) {
+    while (i < attrs.length && /[\s/]/.test(attrs.charAt(i))) i++;
+    const nameStart = i;
+    while (i < attrs.length && !/[=\s/>]/.test(attrs.charAt(i))) i++;
+    if (i === nameStart) {
+      i++;
+      continue;
+    }
+    const name = attrs.slice(nameStart, i).toLowerCase();
+    while (i < attrs.length && /\s/.test(attrs.charAt(i))) i++;
+    if (attrs.charAt(i) !== '=') continue;
+    i++;
+    while (i < attrs.length && /\s/.test(attrs.charAt(i))) i++;
+    const quote = attrs.charAt(i);
+    let value: string;
+    if (quote === '"' || quote === "'") {
+      const valueStart = ++i;
+      while (i < attrs.length && attrs.charAt(i) !== quote) i++;
+      value = attrs.slice(valueStart, i);
+      if (i < attrs.length) i++;
+    } else {
+      const valueStart = i;
+      while (i < attrs.length && !/[\s>]/.test(attrs.charAt(i))) i++;
+      value = attrs.slice(valueStart, i);
+    }
+    if (name === 'href') return value;
+  }
+  return null;
+}
+
 const closingTagRe = new Map<string, RegExp>();
 function closingTag(name: string): RegExp {
   let re = closingTagRe.get(name);
@@ -234,8 +265,7 @@ export function htmlToText(html: string, baseUrl?: string): { title: string; tex
         break;
       case 'a':
         if (!closing) {
-          const href = HREF.exec(attrs);
-          if (anchors.length < 1000) anchors.push({ href: href ? (href[1] ?? href[2] ?? href[3] ?? null) : null, start: out.length });
+          if (anchors.length < 1000) anchors.push({ href: extractHref(attrs), start: out.length });
         } else {
           const a = anchors.pop();
           const url = a?.href ? absoluteHttpUrl(a.href, baseUrl) : null;
