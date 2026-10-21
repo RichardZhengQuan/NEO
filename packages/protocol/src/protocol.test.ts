@@ -17,6 +17,7 @@ import {
   ReminderPatchSchema,
   StartOffRecordRequestSchema,
   TaskInputSchema,
+  TaskPatchSchema,
   EndOffRecordResponseSchema,
   TimelineOffRecordEventSchema,
   SendMessageRequestSchema,
@@ -432,6 +433,13 @@ describe('misc helpers', () => {
     expect(TaskInputSchema.safeParse({ title: 'x', dueAt: -1e20 }).success).toBe(false);
     expect(TaskInputSchema.safeParse({ title: 'x', dueAt: null }).success).toBe(true);
     expect(TaskInputSchema.safeParse({ title: 'x', dueAt: Date.now() }).success).toBe(true);
+  });
+
+  it('rejects TaskPatch dueAt outside the ECMAScript Date range', () => {
+    expect(TaskPatchSchema.safeParse({ dueAt: 1e20 }).success).toBe(false);
+    expect(TaskPatchSchema.safeParse({ dueAt: -1e20 }).success).toBe(false);
+    expect(TaskPatchSchema.safeParse({ dueAt: Date.now() }).success).toBe(true);
+    expect(TaskPatchSchema.safeParse({}).success).toBe(true);
   });
 
   it('normalizes errors', () => {
