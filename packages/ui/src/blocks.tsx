@@ -619,10 +619,10 @@ function FormRenderer({ block, uiId, onAction, blockPath = [] }: BlockRendererPr
           field={field}
           id={`${formId}-${field.name}`}
           value={values[field.name] ?? ''}
-          error={errors[field.name] ?? null}
+          error={Object.hasOwn(errors, field.name) ? (errors[field.name] ?? null) : null}
           onChange={(v) => {
             setValues((prev) => ({ ...prev, [field.name]: v }));
-            if (errors[field.name]) setErrors((prev) => ({ ...prev, [field.name]: null }));
+            if (Object.hasOwn(errors, field.name) && errors[field.name]) setErrors((prev) => ({ ...prev, [field.name]: null }));
             if (state === 'sent') setState('idle');
           }}
         />
