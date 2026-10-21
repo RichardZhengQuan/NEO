@@ -88,6 +88,73 @@ describe('Noise NK', () => {
     expect(server.decrypt(phone.encrypt(plaintext))).toEqual(plaintext);
   });
 
+  it('snapshots Buffer-backed initiator injected ephemeral at construction', () => {
+    const staticKey = generateKeyPair();
+    const prologue = tunnelPrologue('server');
+    const ephemeralKey = generateKeyPair();
+    const ephemeralPrivBuf = Buffer.from(ephemeralKey.privateKey);
+    const ephemeralPubBuf = Buffer.from(ephemeralKey.publicKey);
+    const initiator = new NkInitiator({
+      remoteStaticKey: staticKey.publicKey,
+      prologue,
+      ephemeral: { privateKey: ephemeralPrivBuf, publicKey: ephemeralPubBuf },
+    });
+    ephemeralPrivBuf.fill(0);
+    ephemeralPubBuf.fill(0);
+    const responder = new NkResponder({ staticKey, prologue });
+    const message1 = initiator.writeMessage1();
+    responder.readMessage1(message1);
+    const { message: message2, transport: server } = responder.writeMessage2();
+    const { transport: phone } = initiator.readMessage2(message2);
+    expect(phone.handshakeHash).toEqual(server.handshakeHash);
+    const plaintext = new Uint8Array([1, 2, 3, 4]);
+    expect(server.decrypt(phone.encrypt(plaintext))).toEqual(plaintext);
+  });
+
+  it('snapshots Buffer-backed responder static key pair at construction', () => {
+    const staticKey = generateKeyPair();
+    const staticPrivBuf = Buffer.from(staticKey.privateKey);
+    const staticPubBuf = Buffer.from(staticKey.publicKey);
+    const prologue = tunnelPrologue('server');
+    const responder = new NkResponder({
+      staticKey: { privateKey: staticPrivBuf, publicKey: staticPubBuf },
+      prologue,
+    });
+    staticPrivBuf.fill(0);
+    staticPubBuf.fill(0);
+    const initiator = new NkInitiator({ remoteStaticKey: staticKey.publicKey, prologue });
+    const message1 = initiator.writeMessage1();
+    responder.readMessage1(message1);
+    const { message: message2, transport: server } = responder.writeMessage2();
+    const { transport: phone } = initiator.readMessage2(message2);
+    expect(phone.handshakeHash).toEqual(server.handshakeHash);
+    const plaintext = new Uint8Array([5, 6, 7, 8]);
+    expect(server.decrypt(phone.encrypt(plaintext))).toEqual(plaintext);
+  });
+
+  it('snapshots Buffer-backed responder injected ephemeral at construction', () => {
+    const staticKey = generateKeyPair();
+    const ephemeralKey = generateKeyPair();
+    const ephemeralPrivBuf = Buffer.from(ephemeralKey.privateKey);
+    const ephemeralPubBuf = Buffer.from(ephemeralKey.publicKey);
+    const prologue = tunnelPrologue('server');
+    const responder = new NkResponder({
+      staticKey,
+      prologue,
+      ephemeral: { privateKey: ephemeralPrivBuf, publicKey: ephemeralPubBuf },
+    });
+    ephemeralPrivBuf.fill(0);
+    ephemeralPubBuf.fill(0);
+    const initiator = new NkInitiator({ remoteStaticKey: staticKey.publicKey, prologue });
+    const message1 = initiator.writeMessage1();
+    responder.readMessage1(message1);
+    const { message: message2, transport: server } = responder.writeMessage2();
+    const { transport: phone } = initiator.readMessage2(message2);
+    expect(phone.handshakeHash).toEqual(server.handshakeHash);
+    const plaintext = new Uint8Array([9, 10, 11, 12]);
+    expect(server.decrypt(phone.encrypt(plaintext))).toEqual(plaintext);
+  });
+
   it('authenticates empty handshake payloads and the pinned static key', () => {
     const actual = generateKeyPair();
     const wrong = generateKeyPair();
