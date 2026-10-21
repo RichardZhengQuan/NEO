@@ -754,9 +754,9 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
           }
           return true;
         case 'update':
-          return !refused(op.label, op.content);
+          return !refused(op.label, op.content, op.reason);
         case 'supersede':
-          return (!op.kind || allowed.has(op.kind)) && !refused(op.label, op.content);
+          return (!op.kind || allowed.has(op.kind)) && !refused(op.label, op.content, op.reason);
         case 'reinforce':
           // Written by the remember tool a moment ago: already as strong as this turn makes it.
           return !writtenIds.has(op.id);

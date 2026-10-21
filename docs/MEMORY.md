@@ -310,7 +310,7 @@ Core calls it after every **completed** turn of a normal timeline episode, off t
 
      It gets a `precedes` edge (weight 1) from the latest earlier non-superseded episode of the same conversation.
    - **create** `{kind, label, content, importance (0.5), sensitivity?, entities?, entityType?, tags?, validUntil?}`: first the **same-turn check** (below), then the [create path](#the-create-path) with `confidence = extractionConfidence` (0.8) and the episode as provenance.
-   - **update** `{id, label?, content, reason?, sensitivity?}`: the node must exist and be active. The update is applied in place:
+   - **update** `{id, label?, content, reason?, sensitivity?}`: the node must exist and be active. A `reason` containing credentials causes the op to be refused with `bad_request`. The update is applied in place:
      - label and content are set;
      - `confidence = min(1, c + 0.05)`;
      - `sensitivity = stricter(old, op)` (an update can make a memory sensitive, never less sensitive);
@@ -320,7 +320,7 @@ Core calls it after every **completed** turn of a normal timeline episode, off t
      - importance, tags and pin are copied from the old node, its entity type when the revision is an entity, and its aliases when both are entities;
      - `confidence = extractionConfidence`, `S = S₀(kind, old.importance)`;
      - `sensitivity = stricter(old, op)`;
-     - `metadata.reason` holds the reason (≤ 500 chars).
+     - `metadata.reason` holds the reason (≤ 500 chars); a `reason` containing credentials causes the op to be refused with `bad_request` before any write.
 
      It gets a `new —supersedes→ old` edge (1.0), copies of the old node's outgoing `about` edges (with their weights), and `derived_from` the episode (0.5). The old node becomes `superseded` right away with `confidence × 0.5`.
    - **reinforce** `{id}`: reinforcement, active nodes only.
@@ -455,7 +455,7 @@ Standing instructions are split into individual directives, preserving titles, i
 `remember` is explicit memory, from the user through the API (`source.by === 'user'`) or the model's `remember` tool (`source.by === 'tool'`, the default). The memory UI never adds memories by hand: you tell NEO, and it remembers. It only edits them (`update`). The input is validated (`RememberInputSchema`).
 
 - `content` is trimmed and must be non-empty. `label = label?.trim() || deriveLabel(content)`, ≤ 300 chars. `kind` defaults to `fact`.
-- **Secrets** in the label, content, entities or tags are always refused with `bad_request`.
+- **Secrets** in the label, content, entities or tags are always refused with `bad_request`. For `update` and `supersede` extraction-plan ops, `reason` is also screened for credentials.
 - **From the tool**:
   - a kind outside `allowedKinds` → `forbidden`;
 - **From the user**: always active, and the allowed-kind check is skipped, because it's the user's own edit.
