@@ -158,6 +158,7 @@ describe('database', () => {
     expect(ftsQuery('Hello "world" a')).toBe('"hello" OR "world"');
     expect(ftsQuery('école')).toBe('"école"');
     expect(ftsQuery('école'.normalize('NFD'))).toBe('"école"');
+    expect(ftsQuery('İstanbul')).toBe('"istanbul"');
     expect(ftsQuery('!!')).toBeNull();
   });
 });
