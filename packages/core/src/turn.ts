@@ -1012,13 +1012,14 @@ class TurnRunner {
     }
 
     const preview = previewOf(this.parts);
-    if (preview) {
-      try {
-        const conversation = conversations.update(this.conversationId, { preview, lastMessageAt: clock() });
-        this.emit({ type: 'conversation.updated', conversation: episodeOf(conversation) });
-      } catch (err) {
-        this.logger.warn('could not update the conversation preview', { error: String(err) });
-      }
+    try {
+      const conversation = conversations.update(this.conversationId, {
+        ...(preview ? { preview } : {}),
+        lastMessageAt: clock(),
+      });
+      this.emit({ type: 'conversation.updated', conversation: episodeOf(conversation) });
+    } catch (err) {
+      this.logger.warn('could not update the conversation preview', { error: String(err) });
     }
 
     // Free the conversation before the terminal event, so its listeners may send again.
