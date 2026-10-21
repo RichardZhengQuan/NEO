@@ -88,6 +88,28 @@ describe('settingsStore rollback safety', () => {
     expect(seen).toEqual(['dark:en', 'dark:zh']);
   });
 
+  it('publication order keeps the cache equal to the latest committed value', () => {
+    db = openNeoDatabase(':memory:');
+    const settings = createSettingsStore(db);
+    settings.update({ theme: 'light', locale: 'en' });
+    let reentrantWrites = 0;
+    settings.onChange((next) => {
+      if (next.theme === 'dark' && next.locale === 'en') {
+        reentrantWrites++;
+        settings.update({ theme: 'light' });
+      }
+    });
+
+    db.transaction(() => {
+      settings.update({ theme: 'dark' });
+      settings.update({ locale: 'zh' });
+    });
+
+    expect(reentrantWrites).toBe(1);
+    expect(settings.get()).toEqual(createSettingsStore(db).get());
+    expect(settings.get()).toMatchObject({ theme: 'light', locale: 'zh' });
+  });
+
   it('discards a rolled-back savepoint while publishing parent and later sibling updates', () => {
     db = openNeoDatabase(':memory:');
     const settings = createSettingsStore(db);

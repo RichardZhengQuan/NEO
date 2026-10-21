@@ -19,6 +19,8 @@ const KEY = 'settings';
  * are merged over the current defaults, so new fields always get defaults.
  */
 export function createSettingsStore(db: NeoDatabase, defaults: NeoSettings = DEFAULT_SETTINGS): SettingsStore {
+  let updateGen = 0;
+  let publishGen = 0;
   const listeners = new Set<(s: NeoSettings) => void>();
 
   const read = (): NeoSettings => {
@@ -45,7 +47,10 @@ export function createSettingsStore(db: NeoDatabase, defaults: NeoSettings = DEF
         'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
       ).run(KEY, JSON.stringify(next), Date.now());
       // Publish only after the outermost commit; a rollback must leave the cache and listeners unchanged.
+      const gen = ++updateGen;
       db.afterCommit(() => {
+        if (gen <= publishGen) return;
+        publishGen = gen;
         current = next;
         for (const l of listeners) l(next);
       });
