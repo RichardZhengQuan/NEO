@@ -21,6 +21,41 @@ describe('heuristicExtract', () => {
     expect(results[0]!.importance).toBe(0.9);
   });
 
+  it.each([
+    ['Please remember that I have diabetes.', 'The user has diabetes.'],
+    ["Please remember that I've diabetes.", 'The user has diabetes.'],
+    ['Please remember that I have been diagnosed with diabetes.', 'The user has been diagnosed with diabetes.'],
+    ["Please remember that I've been diagnosed with diabetes.", 'The user has been diagnosed with diabetes.'],
+    ['Please remember that I have been treated for diabetes.', 'The user has been treated for diabetes.'],
+    ["Please remember that I've been treated for diabetes.", 'The user has been treated for diabetes.'],
+    // Lowercase pronoun: the heuristic regex is case-insensitive, so `thirdPerson()` must handle it too.
+    // Codex P2 on PR #445 head 22ef0e3: without lowercase handling, extraction stored "I have diabetes."
+    // (first-person) which `isAboutSelf()` only accepts for `source.by === 'user'`, breaking the mem_self link.
+    ['i have diabetes.', 'The user has diabetes.'],
+    ["i've been diagnosed with diabetes.", 'The user has been diagnosed with diabetes.'],
+    ["i've been treated for diabetes.", 'The user has been treated for diabetes.'],
+  ])('suppresses normal copies of sensitive health facts for "%s"', (text, content) => {
+    const results = heuristicExtract(text);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.label).toBe('Health: diabetes');
+    expect(results[0]!.sensitivity).toBe('sensitive');
+    expect(results[0]!.content).toBe(content);
+  });
+
+  it.each([
+    // Mixed-script sibling case flagged by Codex on f293be5: the health regex (`[\p{L}'-]+\s+`) accepts
+    // a Han-character condition token, and the pre-fix thirdPerson() took the Han branch and returned
+    // `i have ... asthma。` with the English pronoun intact. isAboutSelf() then rejected the fact
+    // (no `the user`/`用户` reference, extraction source), so it never linked to mem_self.
+    ['i have 慢性 asthma.', 'The user has 慢性 asthma。'],
+    ['I have 慢性 asthma.', 'The user has 慢性 asthma。'],
+  ])('converts first-person for mixed-script health facts "%s"', (text, content) => {
+    const results = heuristicExtract(text);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.sensitivity).toBe('sensitive');
+    expect(results[0]!.content).toBe(content);
+  });
+
   it('does not merge candidates with different cleaned labels', () => {
     const results = heuristicExtract('My name is Alice.');
     expect(results.some((r) => r.kind === 'entity' && r.label?.includes('Alice'))).toBe(true);
