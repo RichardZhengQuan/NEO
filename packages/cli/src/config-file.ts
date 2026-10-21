@@ -168,7 +168,11 @@ export function writeInitConfig(dataDir: string, answers: InitAnswers, configPat
       port: answers.port,
     };
   } else {
-    config['server'] = { host: '127.0.0.1', port: 7777 };
+    config['server'] = {
+      ...((existing as Record<string, unknown>)['server'] as Record<string, unknown> | undefined ?? {}),
+      host: '127.0.0.1',
+      port: 7777,
+    };
   }
 
   const json = JSON.stringify(config, null, 2);
