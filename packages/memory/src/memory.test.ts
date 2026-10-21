@@ -1178,6 +1178,35 @@ describe('consolidation detailed', () => {
 
 describe('observe() detailed', () => {
 
+  it.each(['supersede', 'update'] as const)('does not persist credential-bearing %s reasons in metadata', async (op) => {
+    const { svc: initialSvc, db, clock } = makeTestService();
+    const oldNode = await initialSvc.remember({ kind: 'fact', label: 'Router location', content: 'The router is in the hallway' });
+    const response = JSON.stringify({
+      episode: null,
+      memories: [
+        { op, id: oldNode.id, kind: 'fact', label: 'Router location', content: 'The router is in the study', reason: 'password: hunter2' },
+      ],
+      links: [],
+    });
+    const svc = createMemoryService({
+      db,
+      embedder: new HashingEmbedder(256),
+      llm: () => ({ model: makeFakeLLM(response), name: 'fake', isLocal: true }),
+      clock,
+      logger: silentLogger,
+    });
+
+    const result = await svc.observe(makeTurn('The router is in the study.', 'Thanks for the update.'));
+    const { items } = await svc.search({ kinds: ['fact'] });
+    expect(items).toHaveLength(1);
+    expect(items[0]!.metadata?.['reason'] ?? '').not.toContain('hunter2');
+    expect(items[0]!.id).toBe(oldNode.id);
+    expect(items[0]!.content).toBe(oldNode.content);
+    expect(result.created).toHaveLength(0);
+    expect(result.updated).toHaveLength(0);
+    expect(result.superseded).toHaveLength(0);
+  });
+
   it('credential-like content (sk-abc...) is never stored even when LLM extracts it', async () => {
     const credentialResponse = JSON.stringify({
       episode: null,
