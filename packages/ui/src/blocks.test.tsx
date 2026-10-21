@@ -16,6 +16,16 @@ function widget(block: UIBlock, live?: LiveData, onAction?: OnUIAction, locale =
   return <I18nProvider locale={locale}><BlockRenderer block={block} live={live} onAction={onAction} /></I18nProvider>;
 }
 
+describe('card icons', () => {
+  it('renders a card with a fallback for a prototype-inherited icon name', () => {
+    const { container } = render(widget({ type: 'card', title: 'x', icon: 'constructor' }));
+    const card = container.querySelector('section.neo-card');
+    expect(card).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'x' })).toBeTruthy();
+    expect(card?.querySelector('.neo-card__icon svg[data-icon="constructor"] path')).toBeTruthy();
+  });
+});
+
 describe('ChangeDetails: reminder.update timezone', () => {
   it('renders a timezone-only reminder update with the from and to zones in the approval card', () => {
     const block: ChangesBlock = {
