@@ -34,7 +34,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
       return [{ text: dim(`[thinking] ${stripModelText(event.text)}`), delta: true }];
 
     case 'tool.started': {
-      const chip = `  ⚙ ${event.title || event.name}…`;
+      const chip = `  ⚙ ${stripModelText(event.title || event.name)}…`;
       return [{ text: dim(chip) }];
     }
 
@@ -42,18 +42,18 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
       const c = event.confirmation;
       return [
         { text: '' },
-        { text: yellow(`  ❓ ${c.title}`) },
-        { text: dim(`     ${c.description}`) },
+        { text: yellow(`  ❓ ${stripModelText(c.title)}`) },
+        { text: dim(`     ${stripModelText(c.description)}`) },
         { text: dim('     [y]es  [n]o  [a]lways') },
       ];
     }
 
     case 'tool.finished': {
       if (event.isError) {
-        const chip = `  ✗ ${event.name}${event.summary ? `: ${event.summary}` : ''}`;
+        const chip = `  ✗ ${stripModelText(event.name)}${event.summary ? `: ${stripModelText(event.summary)}` : ''}`;
         return [{ text: red(chip) }];
       }
-      const chip = `  ✓ ${event.name}${event.summary ? `: ${event.summary}` : ''}`;
+      const chip = `  ✓ ${stripModelText(event.name)}${event.summary ? `: ${stripModelText(event.summary)}` : ''}`;
       return [{ text: green(chip) }];
     }
 
@@ -74,7 +74,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
       if (part.type === 'sources' && part.items.length) {
         return [
           { text: dim('  Sources') },
-          ...part.items.map((source, index) => ({ text: `  ${index + 1}. ${source.title || source.url} — ${source.url}` })),
+          ...part.items.map((source, index) => ({ text: `  ${index + 1}. ${stripModelText(source.title || source.url)} — ${stripModelText(source.url)}` })),
         ];
       }
       return [];
@@ -108,7 +108,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
     case 'turn.failed': {
       return [
         { text: '' },
-        { text: red(`  ✗ ${event.error.message}`) },
+        { text: red(`  ✗ ${stripModelText(event.error.message)}`) },
       ];
     }
 
