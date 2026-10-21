@@ -31,6 +31,7 @@ import {
   type OffRecordState,
   type ProviderAdapter,
   type ProviderRegistry,
+  type ReminderStore,
   type SendInput,
   type SendTimelineInput,
   type SettingsStore,
@@ -54,6 +55,7 @@ import { describeUiToolCall, findUiPart, patchWidgetBlock, resolveStoredAction, 
 
 export interface AgentRuntimeDeps {
   conversations: ConversationStore;
+  reminders?: ReminderStore;
   settings: SettingsStore;
   providers: ProviderRegistry;
   memory: MemoryService;
@@ -79,6 +81,7 @@ interface UiApproval {
 
 export class AgentRuntime implements AgentRuntimeApi {
   private readonly conversations: ConversationStore;
+  private readonly reminders: ReminderStore | undefined;
   private readonly settingsStore: SettingsStore;
   private readonly providers: ProviderRegistry;
   private readonly memory: MemoryService;
@@ -109,6 +112,7 @@ export class AgentRuntime implements AgentRuntimeApi {
 
   constructor(deps: AgentRuntimeDeps) {
     this.conversations = deps.conversations;
+    this.reminders = deps.reminders;
     this.settingsStore = deps.settings;
     this.providers = deps.providers;
     this.memory = deps.memory;
@@ -467,7 +471,9 @@ export class AgentRuntime implements AgentRuntimeApi {
 
   private deleteOffRecord(before: number): number {
     const episodes = this.conversations.offRecordEpisodes(before);
+    const messageIds = episodes.flatMap((episode) => this.conversations.messages(episode.id).map((message) => message.id));
     const deleted = this.conversations.purgeOffRecord(before);
+    if (messageIds.length) this.reminders?.clearMessageLinks(messageIds);
     for (const episode of episodes) this.broadcast({ type: 'conversation.deleted', conversationId: episode.id, episodeId: episode.id });
     return deleted;
   }

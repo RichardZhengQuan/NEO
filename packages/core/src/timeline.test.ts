@@ -324,6 +324,19 @@ describe('off-record lifecycle', () => {
     expect(h.memory.observeCalls).toHaveLength(2);
   });
 
+  it('endOffRecord clears messageId on reminders created in the episode', async () => {
+    const h = harness();
+    const normal = await send(h, 'normal');
+    const normalReminder = h.reminders.plant({ id: 'rem-normal', title: 'Keep the normal link', messageId: normal.message.id });
+    const off = await send(h, 'private', true);
+    const reminder = h.reminders.plant({ id: 'rem-private', title: 'Keep this reminder', messageId: off.message.id });
+    await h.runtime.endOffRecord();
+    expect(h.conversations.getMessage(off.message.id)).toBeNull();
+    expect(h.reminders.get(reminder.id)?.messageId).toBeNull();
+    expect(h.reminders.get(reminder.id)).toEqual({ ...reminder, messageId: null });
+    expect(h.reminders.get(normalReminder.id)).toEqual(normalReminder);
+  });
+
   it('removes every ephemeral off-record episode on exit, including an automatic gap break', async () => {
     const h = harness();
     const first = await send(h, 'private one', true);
@@ -389,9 +402,13 @@ describe('off-record lifecycle', () => {
     const h = harness();
     const legacy = h.conversations.create({ incognito: true, closedAt: h.clock() });
     const old = await send(h, 'old private', true);
+    const oldReminder = h.reminders.plant({ id: 'rem-old', title: 'Older reminder', messageId: old.message.id });
     h.advance(12 * HOUR + 1);
     const fresh = await send(h, 'fresh private', true);
+    const freshReminder = h.reminders.plant({ id: 'rem-fresh', title: 'Newer reminder', messageId: fresh.message.id });
     expect(await h.runtime.purgeOffRecord(h.clock() - 12 * HOUR)).toBe(2);
+    expect(h.reminders.get(oldReminder.id)).toEqual({ ...oldReminder, messageId: null });
+    expect(h.reminders.get(freshReminder.id)).toEqual({ ...freshReminder, messageId: null });
     expect(h.conversations.get(old.handle.episodeId)).toBeNull();
     expect(h.events).toContainEqual({ type: 'conversation.deleted', conversationId: old.handle.episodeId, episodeId: old.handle.episodeId });
     expect(h.conversations.get(fresh.handle.episodeId)).toBeNull();
