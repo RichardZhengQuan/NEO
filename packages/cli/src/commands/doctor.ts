@@ -58,12 +58,24 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     const testFile = path.join(dataDir, `.neo-doctor-test-${crypto.randomBytes(8).toString('hex')}`);
     let testCreated = false;
-    fs.writeFileSync(testFile, 'test', { flag: 'wx' });
-    testCreated = true;
-    dataDirOk = true;
-    dataDirMsg = dataDir;
-    if (testCreated) {
-      try { fs.unlinkSync(testFile); } catch { /* ignore */ }
+    let testFd: number | undefined;
+    try {
+      testFd = fs.openSync(testFile, 'wx', 0o600);
+      testCreated = true;
+      fs.writeSync(testFd, 'test');
+      fs.closeSync(testFd);
+      testFd = undefined;
+      dataDirOk = true;
+      dataDirMsg = dataDir;
+    } catch (e) {
+      dataDirMsg = `${dataDir} — ${String(e)}`;
+    } finally {
+      if (testFd !== undefined) {
+        try { fs.closeSync(testFd); } catch { /* ignore */ }
+      }
+      if (testCreated) {
+        try { fs.unlinkSync(testFile); } catch { /* ignore */ }
+      }
     }
   } catch (e) {
     dataDirMsg = `${dataDir} — ${String(e)}`;

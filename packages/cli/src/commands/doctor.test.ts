@@ -1,4 +1,5 @@
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +27,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  syncBuiltinESMExports();
   rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -40,6 +42,30 @@ describe('doctor without an AI provider', () => {
     await runDoctor({ dataDir });
 
     expect(readFileSync(sentinelPath, 'utf8')).toBe(sentinelContent);
+  });
+
+  it('cleans up the data-directory test file when writing fails after creation', async () => {
+    // Buffer data bypasses Node's native UTF-8 fast path so the old
+    // writeFileSync implementation also reaches the writeSync failure.
+    const originalWriteFileSync = fs.writeFileSync;
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((file, data, options) => {
+      const isTestFile = typeof file === 'string' && file.startsWith(join(dataDir, '.neo-doctor-test-'));
+      originalWriteFileSync(file, isTestFile && typeof data === 'string' ? Buffer.from(data) : data, options);
+    });
+    const write = vi.spyOn(fs, 'writeSync').mockImplementation(() => {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    });
+    syncBuiltinESMExports();
+    vi.mocked(process.exit).mockImplementation(() => undefined as never);
+
+    await expect(runDoctor({ dataDir })).resolves.toBeUndefined();
+
+    expect(write).toHaveBeenCalledOnce();
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(output).toContain('✗ Data directory');
+    expect(output).toContain('ENOSPC: no space left on device');
+    expect(process.exit).toHaveBeenCalledWith(1);
+    expect(fs.readdirSync(dataDir).filter(name => name.startsWith('.neo-doctor-test-'))).toEqual([]);
   });
 
   it.each([{ items: [] }, { items: [
