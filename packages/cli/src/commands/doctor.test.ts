@@ -138,6 +138,33 @@ describe('doctor without an AI provider', () => {
     expect(process.exit).not.toHaveBeenCalled();
   });
 
+  it('treats NeoApiError 500 with "404" in message as a failure, not a warning', async () => {
+    client.providers.list.mockRejectedValue(
+      new NeoApiError(500, { code: 'internal', message: 'Backend 404 dependency failed' }),
+    );
+    vi.mocked(process.exit).mockImplementation(() => { throw new Error('exit(1) called'); });
+    await expect(runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' }))
+      .rejects.toThrow('exit(1) called');
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('✗ Providers');
+    expect(output).toContain('provider list failed');
+    expect(output).not.toContain('provider list unavailable (older server?)');
+    expect(output).toContain('Some checks failed.');
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('treats a plain Error with "404" in message as an older-server warning (regex fallback)', async () => {
+    client.providers.list.mockRejectedValue(new Error('timed out after 404 ms'));
+    await runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' });
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('! Providers');
+    expect(output).toContain('provider list unavailable (older server?)');
+    expect(output).toContain('All checks passed.');
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
   it('checks enabled supported providers normally', async () => {
     client.providers.list.mockResolvedValue({ items: [{ id: 'local', kind: 'ollama', enabled: true }] });
     client.providers.test.mockResolvedValue({ ok: true });
