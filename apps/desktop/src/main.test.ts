@@ -21,6 +21,20 @@ const electron = await vi.hoisted(async () => {
 
     constructor() {
       super();
+      this.on('closed', () => {
+        for (const method of [
+          this.loadURL,
+          this.show,
+          this.focus,
+          this.isMinimized,
+          this.restore,
+          this.hide,
+          this.isVisible,
+          ...Object.values(this.webContents),
+        ]) {
+          method.mockImplementation(() => { throw new Error('Object has been destroyed'); });
+        }
+      });
       this.on('newListener', (event) => {
         if (event === 'ready-to-show') resolveWindow(this);
       });
@@ -123,6 +137,40 @@ describe('desktop startup failure', () => {
     electron.app.emit('activate');
 
     expect(electron.app.quit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('desktop window lifecycle', () => {
+  it('second-instance after window close does not access a destroyed window', async () => {
+    const serverUrl = 'http://127.0.0.1:7777';
+    server.startServer.mockResolvedValueOnce({
+      url: serverUrl,
+      ownerToken: 'test-owner-token',
+      stop: server.stopServer,
+    });
+
+    const startupReady = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+    await import('./main.js');
+    await startupReady;
+
+    expect(startServer).toHaveBeenCalledTimes(1);
+    expect(electron.BrowserWindow).toHaveBeenCalledTimes(1);
+    const win = electron.BrowserWindow.mock.results[0]!.value;
+    expect(win.loadURL).toHaveBeenCalledWith(serverUrl);
+
+    win.emit('closed');
+    expect(() => win.isMinimized()).toThrow('Object has been destroyed');
+    expect(() => win.show()).toThrow('Object has been destroyed');
+
+    expect.soft(() => electron.app.emit('second-instance')).not.toThrow();
+    expect.soft(() => electron.app.emit('activate')).not.toThrow();
+    expect(electron.BrowserWindow).toHaveBeenCalledTimes(2);
+    const reopenedWindow = electron.BrowserWindow.mock.results[1]!.value;
+    expect(reopenedWindow.loadURL).toHaveBeenCalledWith(serverUrl);
   });
 });
 
