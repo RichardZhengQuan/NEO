@@ -601,6 +601,31 @@ describe('TaskStore', () => {
     }
   });
 
+  it('moving a root with ≥1000 descendants to another list stays under the SQL variable limit', () => {
+    const otherList = stores.tasks.createList({ name: 'Side' });
+    const { root, ids } = t.db.transaction(() => {
+      const root = stores.tasks.create({ title: 'Root' });
+      const ids = [root.id];
+      for (let i = 0; i < 1000; i++) {
+        ids.push(stores.tasks.create({ title: `Child ${i}`, parentId: root.id }).id);
+      }
+      return { root, ids };
+    });
+
+    const prepare = t.db.prepare;
+    t.db.prepare = (sql) => {
+      if ((sql.match(/\?/g) ?? []).length > 999) throw new Error('too many SQL variables');
+      return prepare.call(t.db, sql);
+    };
+    try {
+      const updated = stores.tasks.update(root.id, { listId: otherList.id });
+      expect(updated.listId).toBe(otherList.id);
+      for (const id of ids) expect(stores.tasks.get(id)?.listId).toBe(otherList.id);
+    } finally {
+      t.db.prepare = prepare;
+    }
+  });
+
   it('deleting a subtask recursively deletes only its subtree', () => {
     const parent = stores.tasks.create({ title: 'Parent' });
     const child = stores.tasks.create({ title: 'Child', parentId: parent.id });
