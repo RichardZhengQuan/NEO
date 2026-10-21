@@ -123,7 +123,7 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
     ) {
       // Re-throw as NeoApiError only if it's the timeout (not a user abort).
       if (err.name === 'TimeoutError') {
-        throw new NeoApiError(504, { code: 'timeout', message: 'Request timed out.', retryable: true });
+        throw new NeoApiError(504, { code: 'timeout', message: 'Request timed out.', retryable: true }, { cause: err });
       }
       // User abort — let the AbortError propagate naturally (caller checks signal).
       throw err;
@@ -145,6 +145,7 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
     if (!response.ok) {
       // Try to parse the error body as ErrorShape.
       let shape: ErrorShape;
+      let bodyParseErr: unknown;
       try {
         shape = (await response.json()) as ErrorShape;
         // Validate that shape has the required fields.
@@ -152,6 +153,7 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
           throw new Error('invalid shape');
         }
       } catch (bodyErr) {
+        bodyParseErr = bodyErr;
         // Let abort/timeout errors propagate to the outer catch for proper mapping.
         if (
           bodyErr instanceof Error &&
@@ -165,7 +167,7 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
           retryable: response.status >= 500,
         };
       }
-      throw new NeoApiError(response.status, shape);
+      throw new NeoApiError(response.status, shape, { cause: bodyParseErr });
     }
 
     // 202 or other 2xx with a body.
@@ -173,11 +175,22 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
     if (!text) return undefined as unknown as T;
     return JSON.parse(text) as T;
   } catch (err) {
-    // Map a body-read timeout to the same NeoApiError shape as a headers-phase timeout.
+    // Let pre-classified errors propagate unchanged.
+    if (err instanceof NeoError) throw err;
+
     if (err instanceof Error && err.name === 'TimeoutError') {
-      throw new NeoApiError(504, { code: 'timeout', message: 'Request timed out.', retryable: true });
+      throw new NeoApiError(504, { code: 'timeout', message: 'Request timed out.', retryable: true }, { cause: err });
     }
-    throw err;
+
+    // User abort — let AbortError propagate naturally (caller checks signal).
+    if (err instanceof Error && err.name === 'AbortError') throw err;
+
+    // Any other body-read failure (e.g. TCP reset mid-body, TypeError: terminated).
+    throw new NeoApiError(0, {
+      code: 'internal',
+      message: err instanceof Error ? err.message : 'Network error',
+      retryable: true,
+    }, { cause: err });
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }

@@ -129,7 +129,9 @@ export function registerChatGPT(app: Hono, services: NeoServices): void {
     prune();
     if (closing || attempts.size >= 100) throw new NeoError('rate_limited', 'Too many pending sign-ins. Cancel one or try again later.');
     let body: unknown = {};
-    if (c.req.header('content-type')?.includes('application/json')) body = await c.req.json().catch(() => { throw new NeoError('bad_request', 'Invalid ChatGPT sign-in request.'); });
+    const ct = c.req.header('content-type');
+    const mediaType = ct ? ct.split(';')[0]!.trim().toLowerCase() : '';
+    if (mediaType === 'application/json') body = await c.req.json().catch(() => { throw new NeoError('bad_request', 'Invalid ChatGPT sign-in request.'); });
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'providerId')) throw new NeoError('bad_request', 'Invalid ChatGPT sign-in request.');
     const providerId = 'providerId' in body ? body.providerId : undefined;
     if (providerId !== undefined && (typeof providerId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(providerId))) throw new NeoError('bad_request', 'Invalid ChatGPT provider id.');

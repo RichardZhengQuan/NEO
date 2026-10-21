@@ -283,12 +283,17 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
 
     delete: deleteEpisode,
 
-    messages(conversationId: string, options: { limit?: number; before?: number } = {}) {
+    messages(conversationId: string, options: { limit?: number; before?: number; beforeId?: string } = {}) {
       const args: (string | number)[] = [conversationId];
       let where = 'conversation_id = ?';
       if (options.before !== undefined) {
-        where += ' AND created_at < ?';
-        args.push(options.before);
+        if (options.beforeId !== undefined) {
+          where += ' AND (created_at < ? OR (created_at = ? AND rowid < (SELECT rowid FROM messages WHERE id = ?)))';
+          args.push(options.before, options.before, options.beforeId);
+        } else {
+          where += ' AND created_at < ?';
+          args.push(options.before);
+        }
       }
       if (options.limit !== undefined) {
         const rows = db
