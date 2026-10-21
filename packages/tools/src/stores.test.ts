@@ -1,7 +1,7 @@
 /** Review tests for the productivity stores and their migrations. */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createConversationStore, migrate, openDatabase, storageMigrations, type NeoDatabase } from '@neo/storage';
-import { INBOX_LIST_ID, NeoError, type ProductivityStores } from '@neo/protocol';
+import { INBOX_LIST_ID, NeoError, type ProductivityStores, type ReminderStatus } from '@neo/protocol';
 import { createProductivityStores, toolsMigrations } from './stores/index.js';
 
 const utc = (y: number, mo: number, d: number, h = 0, mi = 0) => Date.UTC(y, mo - 1, d, h, mi);
@@ -81,6 +81,25 @@ describe('ReminderStore', () => {
       expect(stores.reminders.nextDue(excludeIds)).toEqual(remaining);
       excludeIds.add(remaining.id);
       expect(stores.reminders.nextDue(excludeIds)).toBeNull();
+    } finally {
+      t.db.prepare = prepare;
+    }
+  });
+
+  it('list dedupes repeated statuses so the IN(?) clause stays under the SQL variable limit', () => {
+    const scheduled = t.db.transaction(() => stores.reminders.create({ title: 'A', dueAt: t.now + 1 }));
+    // Caller passes the same enum value 1,000 times (an API shape that passes zod
+    // because status is a non-empty array of enum values with no uniqueness
+    // guard). Without deduping, the IN(?,?,...) clause binds 1,000 variables and
+    // the 999-cap wrapper rejects the prepare.
+    const statuses: ReminderStatus[] = Array.from({ length: 1000 }, () => 'scheduled');
+    const prepare = t.db.prepare;
+    t.db.prepare = (sql) => {
+      if ((sql.match(/\?/g) ?? []).length > 999) throw new Error('too many SQL variables');
+      return prepare.call(t.db, sql);
+    };
+    try {
+      expect(stores.reminders.list({ status: statuses })).toEqual([scheduled]);
     } finally {
       t.db.prepare = prepare;
     }

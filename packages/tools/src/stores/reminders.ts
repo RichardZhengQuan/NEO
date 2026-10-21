@@ -83,8 +83,11 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       const where: string[] = [];
       const args: (string | number)[] = [];
       if (query.status?.length) {
-        where.push(`status IN (${query.status.map(() => '?').join(', ')})`);
-        args.push(...query.status);
+        // Dedupe statuses so a caller that passes the same value many times
+        // can't push the IN(…) clause past SQLite's variable limit.
+        const statuses = [...new Set(query.status)];
+        where.push(`status IN (${statuses.map(() => '?').join(', ')})`);
+        args.push(...statuses);
       }
       if (typeof query.from === 'number' && Number.isFinite(query.from)) {
         where.push('due_at >= ?');
