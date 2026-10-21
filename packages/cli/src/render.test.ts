@@ -217,6 +217,26 @@ describe('renderEvent', () => {
     ]);
     expect(renderEvent({ ...ev, part: { type: 'sources', items: [] } })).toEqual([]);
   });
+
+  it('part.added sources strips ANSI from title and url', () => {
+    const ev: Extract<AgentEvent, { type: 'part.added' }> = {
+      type: 'part.added', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm', index: 0,
+      part: {
+        type: 'sources',
+        items: [
+          { title: 'bad\x1b[2Jtitle', url: 'https://safe.example/\x1b[2J' },
+          { title: '', url: 'https://also.example/\x1b[31mred\x1b[0m' },
+        ],
+      },
+    };
+    const lines = renderEvent(ev);
+    const text = lines.map((l) => l.text).join('\n');
+    expect(text).not.toContain('\x1b');
+    expect(text).toContain('badtitle');
+    expect(text).toContain('safe.example');
+    expect(text).toContain('also.example');
+    expect(text).toContain('red');
+  });
 });
 
 describe('renderEvents', () => {

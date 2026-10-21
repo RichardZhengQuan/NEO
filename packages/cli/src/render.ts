@@ -74,7 +74,7 @@ export function renderEvent(event: AgentEvent, opts: RenderOptions = {}): Render
       if (part.type === 'sources' && part.items.length) {
         return [
           { text: dim('  Sources') },
-          ...part.items.map((source, index) => ({ text: `  ${index + 1}. ${source.title || source.url} — ${source.url}` })),
+          ...part.items.map((source, index) => ({ text: `  ${index + 1}. ${stripModelText(source.title || source.url)} — ${stripModelText(source.url)}` })),
         ];
       }
       return [];
