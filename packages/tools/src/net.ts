@@ -114,6 +114,7 @@ export function isBlockedAddress(address: string): boolean {
 
 export interface GuardOptions {
   resolver: DnsResolver;
+  signal?: AbortSignal;
   /** Skip the address checks (local mode). Scheme and credential checks still apply. */
   allowPrivateNetwork: boolean;
   isBlockedAddress: (ip: string) => boolean;
@@ -153,8 +154,9 @@ export async function vetUrl(input: string | URL, opts: GuardOptions): Promise<V
 
   let addresses: string[];
   try {
-    addresses = await opts.resolver(host);
+    addresses = await (opts.signal ? abortable(opts.resolver(host), opts.signal) : opts.resolver(host));
   } catch (err) {
+    if (opts.signal?.aborted) throw opts.signal.reason;
     throw new NeoError('bad_request', `Could not resolve ${host} (${(err as { code?: string }).code ?? (err as Error).message}).`);
   }
   if (!addresses.length) throw new NeoError('bad_request', `Could not resolve ${host}.`);
