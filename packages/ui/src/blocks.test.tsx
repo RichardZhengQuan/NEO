@@ -16,6 +16,37 @@ function widget(block: UIBlock, live?: LiveData, onAction?: OnUIAction, locale =
   return <I18nProvider locale={locale}><BlockRenderer block={block} live={live} onAction={onAction} /></I18nProvider>;
 }
 
+describe('ChangeDetails: reminder.create', () => {
+  it('ChangeDetails falls back to the reminder.create item timezone when the block has none', () => {
+    const block: ChangesBlock = {
+      type: 'changes',
+      items: [{
+        id: 'c1', kind: 'reminder.create', title: 'Call Dr. Lee',
+        dueAt: Date.parse('2026-10-23T01:00:00Z'),
+        timezone: 'Asia/Tokyo',
+        creationKey: '00000000-0000-4000-8000-000000000000',
+      }],
+    };
+    const { getByText } = render(widget(block));
+    // 01:00 UTC → 10:00 Tokyo
+    expect(getByText(/10:00/)).toBeTruthy();
+  });
+
+  it('ChangeDetails shows reminder.create notes', () => {
+    const block: ChangesBlock = {
+      type: 'changes', timezone: 'UTC',
+      items: [{
+        id: 'c1', kind: 'reminder.create', title: 'Call Dr. Lee',
+        dueAt: Date.parse('2026-10-23T09:00:00Z'),
+        notes: 'Ask for the blood test results',
+        creationKey: '00000000-0000-4000-8000-000000000000',
+      }],
+    };
+    const { getByText } = render(widget(block));
+    expect(getByText('Ask for the blood test results')).toBeTruthy();
+  });
+});
+
 describe('ChangeDetails: reminder.update timezone', () => {
   it('renders a timezone-only reminder update with the from and to zones in the approval card', () => {
     const block: ChangesBlock = {
