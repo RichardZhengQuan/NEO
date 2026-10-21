@@ -247,6 +247,31 @@ describe('tunnel server validation and ownership', () => {
     expect(decodeJson<TunnelReset>((await frames.next(TunnelFrameType.Reset, 2)).payload).code).toBe('internal');
   });
 
+  it.each([
+    { chunk: 'abc' },
+    { chunk: [1, 2, 3] },
+    { chunk: new Int16Array([1, 2, 3]) },
+  ])('resets response streams that emit non-Uint8Array chunks', async ({ chunk }) => {
+    const fetch = vi.fn(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(chunk);
+        controller.close();
+      },
+    })));
+    const { client, frames, request, end } = await session({ handler: { fetch, openWebSocket: () => null } });
+    const completed = Promise.race([
+      frames.next(TunnelFrameType.Reset, 1),
+      frames.next(TunnelFrameType.ResponseEnd, 1),
+    ]);
+    request(1);
+    end(1);
+    const terminal = await completed;
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(terminal.type).toBe(TunnelFrameType.Reset);
+    expect(decodeJson<TunnelReset>(terminal.payload).code).toBe('internal');
+    expect(client.closed).toBe(false);
+  });
+
   it('aborts request signals and cancels body readers on Reset or session close', async () => {
     const signals: AbortSignal[] = [];
     const canceled = vi.fn();
