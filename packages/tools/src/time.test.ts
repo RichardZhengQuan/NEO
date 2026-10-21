@@ -148,11 +148,20 @@ describe('parseDateTime', () => {
     const WED_SGT = utc(2026, 10, 14, 1);
     const SG = 'Asia/Singapore';
     expect(parseDateTime('this wednesday at 18:00', WED_SGT, SG)).toBe(utc(2026, 10, 14, 10));
-    expect(parseDateTime('this wednesday at 06:00', WED_SGT, SG)).toBe(utc(2026, 10, 20, 22));
-    expect(parseDateTime('this wednesday at 09:00', WED_SGT, SG)).toBe(utc(2026, 10, 21, 1));
+    expect(parseDateTime('this wednesday at 06:00', WED_SGT, SG)).toBe(utc(2026, 10, 14, 22));
+    expect(parseDateTime('this wednesday at 09:00', WED_SGT, SG)).toBe(utc(2026, 10, 15, 1));
     expect(parseDateTime('next wednesday at 18:00', WED_SGT, SG)).toBe(utc(2026, 10, 21, 10));
     expect(parseDateTime('on wednesday at 18:00', WED_SGT, SG)).toBe(utc(2026, 10, 21, 10));
     expect(parseDateTime('wednesday at 18:00', WED_SGT, SG)).toBe(utc(2026, 10, 21, 10));
+  });
+
+  it("'this <weekday> at <past time>' rolls forward one day like bare times, not seven", () => {
+    // Monday 10:00 local time
+    const now = Date.UTC(2026, 9, 19, 2, 0); // Mon 10:00 Asia/Singapore = UTC 02:00
+    // 9am has already passed; "this monday" should roll to tomorrow (Tuesday 09:00 SGT), not next Monday.
+    expect(parseDateTime('this monday at 9am', now, 'Asia/Singapore')).toBe(Date.UTC(2026, 9, 20, 1));
+    // Exact-now edge case: time == now is also treated as passed, rolls to tomorrow.
+    expect(parseDateTime('this monday at 10am', now, 'Asia/Singapore')).toBe(Date.UTC(2026, 9, 20, 2));
   });
 
   it('bare times roll to tomorrow once passed', () => {

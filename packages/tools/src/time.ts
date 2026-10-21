@@ -328,7 +328,7 @@ function parse(input: string | number, nowMs: number, timezone: string): number 
     const target = WEEKDAY_WORDS[wd[2] as string] as number;
     const time = timePart(wd[3] as string, [9, 0, 0], raw);
     let ahead = (target - now.weekday + 7) % 7;
-    if (ahead === 0) ahead = wd[1]?.startsWith('this') && at(0, time) > nowMs ? 0 : 7;
+    if (ahead === 0) ahead = wd[1]?.startsWith('this') ? (at(0, time) > nowMs ? 0 : 1) : 7;
     return at(ahead, time);
   }
 
