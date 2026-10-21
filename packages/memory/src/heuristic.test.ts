@@ -42,6 +42,20 @@ describe('heuristicExtract', () => {
     expect(results[0]!.content).toBe(content);
   });
 
+  it.each([
+    // Mixed-script sibling case flagged by Codex on f293be5: the health regex (`[\p{L}'-]+\s+`) accepts
+    // a Han-character condition token, and the pre-fix thirdPerson() took the Han branch and returned
+    // `i have ... asthma。` with the English pronoun intact. isAboutSelf() then rejected the fact
+    // (no `the user`/`用户` reference, extraction source), so it never linked to mem_self.
+    ['i have 慢性 asthma.', 'The user has 慢性 asthma。'],
+    ['I have 慢性 asthma.', 'The user has 慢性 asthma。'],
+  ])('converts first-person for mixed-script health facts "%s"', (text, content) => {
+    const results = heuristicExtract(text);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.sensitivity).toBe('sensitive');
+    expect(results[0]!.content).toBe(content);
+  });
+
   it('does not merge candidates with different cleaned labels', () => {
     const results = heuristicExtract('My name is Alice.');
     expect(results.some((r) => r.kind === 'entity' && r.label?.includes('Alice'))).toBe(true);

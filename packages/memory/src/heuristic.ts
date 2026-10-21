@@ -75,13 +75,16 @@ const capitalize = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : 
 
 /** "I am vegetarian" → "The user is vegetarian."; "my cat is Luna" → "The user's cat is Luna."; others unchanged. */
 function thirdPerson(statement: string): string {
-  if (HAN.test(statement)) {
-    const zh = statement.replace(/我的/g, '用户的').replace(/我/g, '用户').replace(/[。！!.\s]+$/u, '');
-    return `${zh}。`;
-  }
+  // English first-person pronouns / possessives first, on any script. Mixed inputs like
+  // "i have 慢性 asthma" would otherwise fall into the Han branch below with the English
+  // pronoun intact — same shape as the Codex P2 that f293be5 addressed for ASCII-only input.
   let s = statement.replace(/\bI'm\b/gi, 'I am').replace(/\bI've\b/gi, 'I have').replace(/\bI'd\b/gi, 'I would').replace(/\bI'll\b/gi, 'I will');
   s = s.replace(/\bI\s+([A-Za-z']+)/gi, (_m, verb: string) => `the user ${conjugate(verb.toLowerCase())}`);
   s = s.replace(/\bmy\b/gi, "the user's").replace(/\bmine\b/gi, "the user's").replace(/\bmyself\b/gi, 'themselves').replace(/\bme\b/gi, 'the user');
+  if (HAN.test(s)) {
+    const zh = s.replace(/我的/g, '用户的').replace(/我/g, '用户').replace(/[。！!.\s]+$/u, '');
+    return `${capitalize(zh)}。`;
+  }
   s = capitalize(s.replace(/[\s.!?]+$/, ''));
   return `${s}.`;
 }
