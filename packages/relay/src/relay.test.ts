@@ -348,10 +348,43 @@ describe('relay limits and lifecycle', () => {
     await once(phoneSock, 'open');
     const openFrame = await serverInbox.frame();
     expect(openFrame.op).toBe(RelayOp.Open);
-    // The relay should have canonicalized '::ffff:127.0.0.1' to '::ffff:7f00:1'.
-    expect(Buffer.from(openFrame.payload).toString('utf8')).toBe('::ffff:7f00:1');
-    // Second phone: X-Forwarded-For carries the same IP (non-canonical spelling).
+    // IPv4-mapped IPv6 is normalized to plain IPv4 so that socket and XFF share one key.
+    expect(Buffer.from(openFrame.payload).toString('utf8')).toBe('127.0.0.1');
+    // Second phone: X-Forwarded-For carries the same IP as an IPv4-mapped IPv6 (non-canonical spelling).
     const refused = new WebSocket(ipv4Url + `/v1/connect/${identity.serverId}`, { headers: { 'x-forwarded-for': '::ffff:127.0.0.1' } });
+    refused.on('error', () => {});
+    const refusedClosed = new Promise<number>(resolve => refused.once('close', code => resolve(code)));
+    peers.push({ socket: refused, inbox: new Inbox(refused), closed: refusedClosed });
+    expect(await refusedClosed).toBe(TunnelCloseCode.RateLimited);
+    expect(relay.stats().phones).toBe(1);
+  });
+
+  it('counts IPv4-mapped-IPv6 socket address and plain-IPv4 XFF against one per-IP phone cap', async () => {
+    // socket.remoteAddress = '::ffff:127.0.0.1', XFF = '127.0.0.1' — different spellings, same host.
+    const relay = await startRelay({ host: '::', port: 0, trustProxy: true, limits: { perIpPhoneConnections: 1 } });
+    relays.push(relay);
+    const ipv4Url = `ws://127.0.0.1:${relay.port}`;
+    const serverPeer = new WebSocket(ipv4Url + '/v1/server');
+    serverPeer.on('error', () => {});
+    const serverInbox = new Inbox(serverPeer);
+    peers.push({ socket: serverPeer, inbox: serverInbox, closed: new Promise<number>(resolve => serverPeer.once('close', code => resolve(code))) });
+    await once(serverPeer, 'open');
+    const challenge = await serverInbox.control();
+    expect(challenge.type).toBe('challenge');
+    if (challenge.type !== 'challenge') throw new Error('No challenge');
+    const identity = generateServerIdentity();
+    serverPeer.send(JSON.stringify({ type: 'register', serverId: identity.serverId, key: toBase64Url(identity.signing.publicKey), signature: toBase64Url(signRelayChallenge(identity, fromBase64Url(challenge.nonce))) }));
+    expect(await serverInbox.control()).toEqual({ type: 'registered', serverId: identity.serverId });
+    // First phone: socket.remoteAddress = '::ffff:127.0.0.1', no XFF header.
+    const phoneSock = new WebSocket(ipv4Url + `/v1/connect/${identity.serverId}`);
+    phoneSock.on('error', () => {});
+    peers.push({ socket: phoneSock, inbox: new Inbox(phoneSock), closed: new Promise<number>(resolve => phoneSock.once('close', code => resolve(code))) });
+    await once(phoneSock, 'open');
+    const openFrame = await serverInbox.frame();
+    expect(openFrame.op).toBe(RelayOp.Open);
+    expect(Buffer.from(openFrame.payload).toString('utf8')).toBe('127.0.0.1');
+    // Second phone: XFF carries plain '127.0.0.1' — must share the same rate-limit key.
+    const refused = new WebSocket(ipv4Url + `/v1/connect/${identity.serverId}`, { headers: { 'x-forwarded-for': '127.0.0.1' } });
     refused.on('error', () => {});
     const refusedClosed = new Promise<number>(resolve => refused.once('close', code => resolve(code)));
     peers.push({ socket: refused, inbox: new Inbox(refused), closed: refusedClosed });

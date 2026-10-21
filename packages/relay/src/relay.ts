@@ -115,6 +115,17 @@ function canonicalizeIp(ip: string): string {
       const inner = hostname.startsWith('[') && hostname.endsWith(']')
         ? hostname.slice(1, -1)
         : hostname;
+      // Normalize IPv4-mapped IPv6 (::ffff:xxxx:yyyy, no zone) to plain IPv4
+      // so that socket.remoteAddress '::ffff:127.0.0.1' and an XFF value of
+      // '127.0.0.1' produce the same rate-limit key.
+      if (!zone) {
+        const m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(inner);
+        if (m) {
+          const hi = parseInt(m[1]!, 16);
+          const lo = parseInt(m[2]!, 16);
+          return `${(hi >>> 8) & 0xff}.${hi & 0xff}.${(lo >>> 8) & 0xff}.${lo & 0xff}`;
+        }
+      }
       return inner + zone;
     }
     return new URL(`http://${ip}/`).hostname;
