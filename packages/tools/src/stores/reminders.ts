@@ -278,11 +278,16 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
         // path so they reach 'fired' rather than staying 'scheduled'.
         if (isSnoozedRedelivery && existing.recurrence !== null) {
           // If the series is already exhausted, the snoozed redelivery must not
-          // re-arm the reminder.  Call nextOccurrence from snoozedDueAt with the
-          // current firedCount (unchanged: the snooze was not a new occurrence) to
-          // determine whether there is any remaining occurrence in the series.
-          const seriesExhausted =
-            nextOccurrence(existing.recurrence, toNum(r.anchor_at), snoozedDueAt, existing.timezone, existing.firedCount) === null;
+          // re-arm the reminder.  When the series was exhausted at snooze time,
+          // nextOccurrence returned null so dueAt did not advance: snoozedDueAt
+          // equals the last-fired occurrence and is at or before lastFiredAt.
+          // When the series had a remaining occurrence, dueAt advanced to it
+          // (strictly after lastFiredAt), so snoozedDueAt > lastFiredAt.
+          // Using nextOccurrence(afterMs=snoozedDueAt) is wrong for until-bounded
+          // series: when snoozedDueAt equals `until`, the candidate falls strictly
+          // past `until` and nextOccurrence returns null, incorrectly marking the
+          // series exhausted and dropping that last undelivered occurrence.
+          const seriesExhausted = existing.lastFiredAt !== null && snoozedDueAt <= existing.lastFiredAt;
           if (seriesExhausted) {
             // Re-deliver the occurrence but leave the series terminated.
             const reminder: Reminder = {

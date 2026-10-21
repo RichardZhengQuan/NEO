@@ -332,6 +332,46 @@ describe('ReminderStore', () => {
     expect(r.due(snoozeDue + 10 * 60_000)).toEqual([]);
   });
 
+  it('snoozed redelivery of an until-bounded series with a valid remaining occurrence re-arms to that occurrence', () => {
+    // Regression: hourly series anchor=09:00 until=10:00 has two occurrences (09:00, 10:00).
+    // After 09:00 fires (firedCount=1, dueAt→10:00), the owner snoozes.
+    // snoozedDueAt=10:00 (the next scheduled occurrence, equal to `until`).
+    // The exhaustion check must NOT call nextOccurrence(afterMs=snoozedDueAt=10:00),
+    // because that asks for occurrences strictly after 10:00; the candidate (11:00)
+    // exceeds `until` and nextOccurrence returns null, incorrectly marking the series
+    // exhausted and dropping the 10:00 occurrence.
+    const r = stores.reminders;
+    const until = utc(2026, 10, 10, 10);
+    const rem = r.create({
+      title: 'hourly-two',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'hourly', until },
+      timezone: 'UTC',
+    });
+    // 09:00 fires normally: firedCount=1, dueAt advances to 10:00.
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('scheduled');
+    expect(r.get(rem.id)!.dueAt).toBe(until);
+    // Owner snoozes at 09:01.
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 5);
+    // Snoozed redelivery fires at 09:06.
+    const snoozeDue = utc(2026, 10, 10, 9, 6);
+    t.setNow(snoozeDue);
+    const redelivery = r.markFired(rem.id, snoozeDue);
+    // Must re-arm to 10:00, not mark as exhausted.
+    expect(redelivery.reminder.status).toBe('scheduled');
+    expect(redelivery.reminder.dueAt).toBe(until);
+    expect(redelivery.reminder.firedCount).toBe(1);
+    // The 10:00 occurrence fires normally: series is now exhausted.
+    t.setNow(until);
+    const last = r.markFired(rem.id, until);
+    expect(last.reminder.status).toBe('fired');
+    expect(last.reminder.firedCount).toBe(2);
+    expect(r.due(until + 10 * 60_000)).toEqual([]);
+  });
+
   it('markFired refuses reminders that are not scheduled (no resurrection of a completed series)', () => {
     const r = stores.reminders;
     const series = r.create({ title: 'daily', dueAt: utc(2026, 10, 10, 8), recurrence: { freq: 'daily' } });
