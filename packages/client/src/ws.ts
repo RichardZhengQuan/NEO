@@ -90,6 +90,8 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
     if (reconnectTimer !== null) return; // already scheduled
 
     setStatus('reconnecting');
+    // The onStatus callback may have called close(), check again before scheduling.
+    if (closed) return;
 
     const delay = backoffDelay(attempt);
     attempt++;

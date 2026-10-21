@@ -227,5 +227,6 @@ describe('connect() WebSocket', () => {
     vi.advanceTimersByTime(2000);
     expect(instances).toHaveLength(1);
     expect(conn.status).toBe('closed');
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
