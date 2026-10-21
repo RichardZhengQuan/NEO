@@ -85,8 +85,9 @@ export const systemClock: Clock = () => Date.now();
 
 export interface ConversationListQuery {
   limit?: number;
-  /** Return conversations updated strictly before this time (pagination). */
+  /** Cursor updatedAt; beforePinned must accompany it for correct composite pagination. */
   before?: number;
+  beforePinned?: boolean;
   archived?: boolean;
   query?: string;
 }

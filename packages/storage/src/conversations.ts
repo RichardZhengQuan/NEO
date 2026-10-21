@@ -235,8 +235,14 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
       const where: string[] = ['archived = ?'];
       const args: (string | number)[] = [fromBool(query.archived ?? false)];
       if (query.before !== undefined) {
-        where.push('updated_at < ?');
-        args.push(query.before);
+        if (query.beforePinned !== undefined) {
+          const cp = fromBool(query.beforePinned);
+          where.push('(pinned < ? OR (pinned = ? AND updated_at < ?))');
+          args.push(cp, cp, query.before);
+        } else {
+          where.push('updated_at < ?');
+          args.push(query.before);
+        }
       }
       if (query.query?.trim()) {
         where.push("(title LIKE ? ESCAPE '\\' OR preview LIKE ? ESCAPE '\\')");
