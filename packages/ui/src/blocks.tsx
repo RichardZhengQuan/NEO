@@ -1137,7 +1137,7 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
                       <Icon name="flag" size={12} />
                     </span>
                   ) : null}
-                  {task.dueAt ? <time dateTime={new Date(task.dueAt).toISOString()}>{formatDate(task.dueAt, locale, undefined, 'short')}</time> : null}
+                  {task.dueAt ? <time dateTime={new Date(task.dueAt).toISOString()}>{formatDate(task.dueAt, locale, block.timezone, 'short')}</time> : null}
                 </span>
               </li>
             );

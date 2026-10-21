@@ -139,6 +139,25 @@ describe('memory status', () => {
 });
 
 describe('formatted blocks', () => {
+  it('uses tasks timezone for due dates when the device timezone is behind UTC', () => {
+    const DateTimeFormat = Intl.DateTimeFormat;
+    const dateTimeFormatSpy = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (locales, options) {
+      return new DateTimeFormat(locales, { ...options, timeZone: options?.timeZone ?? 'America/New_York' });
+    });
+    try {
+      const dueAt = Date.parse('2025-01-01T00:30:00Z');
+      expect(new Intl.DateTimeFormat('en', { dateStyle: 'short' }).format(dueAt)).toBe('12/31/24');
+
+      const { container } = render(widget({ type: 'tasks', timezone: 'Asia/Tokyo', tasks: [{ id: 'task_1', title: 'Buy milk', done: false, dueAt }] }));
+      const time = container.querySelector('time');
+      expect(time?.textContent).toBe('1/1/25');
+      expect(time?.textContent).not.toContain('12/31/24');
+      expect(time?.getAttribute('datetime')).toBe('2025-01-01T00:30:00.000Z');
+    } finally {
+      dateTimeFormatSpy.mockRestore();
+    }
+  });
+
   it('uses countdown timezone for the visible date and timer label', () => {
     vi.useFakeTimers();
     vi.setSystemTime('2026-10-13T00:00:00Z');
