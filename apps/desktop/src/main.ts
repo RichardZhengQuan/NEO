@@ -364,12 +364,23 @@ function focusWindowAtHash(hash: string): void {
 function startNotificationListener(serverUrl: string, ownerToken: string): void {
   const client = new NeoClient({ baseUrl: serverUrl, token: ownerToken });
 
+  // Record the time before connecting so we can detect reminders that fired
+  // during the startup gap (after the scheduler tick but before the WS opens).
+  // Use a generous lookback window because the scheduler fires reminders
+  // synchronously inside startServer(), before this point is reached.
+  const listenStartAt = Date.now();
+  const STARTUP_CATCH_UP_WINDOW_MS = 60_000;
+  // Track reminders already notified via WS events to avoid duplicates.
+  const notifiedIds = new Set<string>();
+  let catchupDone = false;
+
   const connection = client.connect({
     onEvent(envelope: EventEnvelope) {
       const event = envelope.event as ServerEvent;
 
       if (event.type === 'reminder.fired') {
         if (!ElectronNotification.isSupported()) return;
+        notifiedIds.add(event.firing.reminder.id);
         const { title, body, deepLink } = formatReminderNotification(event.firing);
         const notif = new ElectronNotification({ title, body });
         notif.on('click', () => focusWindowAtHash(deepLinkToHash(deepLink)));
@@ -385,6 +396,38 @@ function startNotificationListener(serverUrl: string, ownerToken: string): void 
       }
     },
     onStatus(status: ConnectionStatus) {
+      if (status === 'open' && !catchupDone) {
+        catchupDone = true;
+        // Catch up on reminders that fired during the startup gap (between the
+        // scheduler's first tick and this WS connection becoming open).
+        void (async () => {
+          try {
+            const { items } = await client.reminders.list({ status: ['fired'] });
+            for (const reminder of items) {
+              if (
+                reminder.lastFiredAt !== null &&
+                reminder.lastFiredAt >= listenStartAt - STARTUP_CATCH_UP_WINDOW_MS &&
+                !notifiedIds.has(reminder.id)
+              ) {
+                if (!ElectronNotification.isSupported()) return;
+                const firing = {
+                  reminder,
+                  occurrenceAt: reminder.lastFiredAt,
+                  firedAt: reminder.lastFiredAt,
+                  missed: true,
+                  nextDueAt: null,
+                };
+                const { title, body, deepLink } = formatReminderNotification(firing);
+                const notif = new ElectronNotification({ title, body });
+                notif.on('click', () => focusWindowAtHash(deepLinkToHash(deepLink)));
+                notif.show();
+              }
+            }
+          } catch {
+            // Non-fatal: catch-up is best-effort.
+          }
+        })();
+      }
       if (status === 'closed') {
         // Reconnect is handled internally by NeoClient; nothing to do here.
       }

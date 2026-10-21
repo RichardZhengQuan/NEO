@@ -74,18 +74,27 @@ const server = vi.hoisted(() => ({
   stopServer: vi.fn<() => Promise<void>>(),
 }));
 
-vi.mock('electron', () => ({
-  app: electron.app,
-  BrowserWindow: electron.BrowserWindow,
-  dialog: {},
-  ipcMain: { handle: vi.fn() },
-  Menu: { buildFromTemplate: vi.fn(), setApplicationMenu: vi.fn() },
-  MenuItem: vi.fn(),
-  Notification: vi.fn(),
-  nativeImage: { createFromBuffer: vi.fn(() => ({ setTemplateImage: vi.fn() })) },
-  shell: { openExternal: vi.fn() },
-  Tray: electron.Tray,
+const clientMock = vi.hoisted(() => ({
+  onStatus: null as ((status: string) => void) | null,
+  remindersList: vi.fn<(q?: { status?: string[] }) => Promise<{ items: unknown[] }>>()
+    .mockResolvedValue({ items: [] }),
 }));
+
+vi.mock('electron', () => {
+  const Notification = Object.assign(vi.fn(), { isSupported: vi.fn(() => false) });
+  return {
+    app: electron.app,
+    BrowserWindow: electron.BrowserWindow,
+    dialog: {},
+    ipcMain: { handle: vi.fn() },
+    Menu: { buildFromTemplate: vi.fn(), setApplicationMenu: vi.fn() },
+    MenuItem: vi.fn(),
+    Notification,
+    nativeImage: { createFromBuffer: vi.fn(() => ({ setTemplateImage: vi.fn() })) },
+    shell: { openExternal: vi.fn() },
+    Tray: electron.Tray,
+  };
+});
 
 vi.mock('electron-updater', () => ({
   default: {
@@ -103,7 +112,15 @@ vi.mock('@neo/server', () => ({
 
 vi.mock('@neo/client', () => ({
   NeoClient: vi.fn(function () {
-    return { connect: vi.fn(() => ({ close: vi.fn() })) };
+    return {
+      connect: vi.fn((opts: { onStatus?: (s: string) => void; onEvent?: (e: unknown) => void; reconnect?: boolean }) => {
+        clientMock.onStatus = opts.onStatus ?? null;
+        return { close: vi.fn() };
+      }),
+      reminders: {
+        list: clientMock.remindersList,
+      },
+    };
   }),
 }));
 
@@ -112,6 +129,7 @@ afterEach(() => {
   vi.clearAllMocks();
   vi.resetModules();
   electron.app.removeAllListeners();
+  clientMock.onStatus = null;
 });
 
 describe('desktop startup failure', () => {
@@ -360,5 +378,59 @@ describe('before-quit graceful shutdown', () => {
     expect(completedEvent.preventDefault).not.toHaveBeenCalled();
     expect(server.stopServer).toHaveBeenCalledTimes(1);
     expect(electron.app.quit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('startup reminder catch-up', () => {
+  it('notifies overdue reminders when desktop starts', async () => {
+    // Seed a one-shot reminder whose dueAt is in the past so the scheduler fires
+    // it synchronously inside startServer(), before the WS subscriber connects.
+    const overdueReminder = {
+      id: 'r-overdue-1',
+      title: 'Buy milk',
+      notes: null,
+      dueAt: Date.now() - 60 * 60 * 1000, // 1 hour ago
+      status: 'fired',
+      firedCount: 1,
+      lastFiredAt: Date.now(), // fired recently (startup gap simulation)
+      messageId: null,
+    };
+    clientMock.remindersList.mockResolvedValueOnce({ items: [overdueReminder] });
+
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7778',
+      ownerToken: 'owner-tok-catchup',
+      stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    });
+
+    // Wait until main() has registered its before-quit listener (signals full startup).
+    const startupDone = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+
+    await import('./main.js');
+    await startupDone;
+
+    // Obtain the Notification constructor from the current mock cycle.
+    const { Notification } = await import('electron');
+    // Allow ElectronNotification.isSupported() to return true for this test.
+    vi.spyOn(Notification as { isSupported: () => boolean }, 'isSupported').mockReturnValue(true);
+
+    // Simulate the WS becoming 'open' for the first time — triggers catch-up.
+    clientMock.onStatus?.('open');
+
+    // Flush microtask ticks: one for async catch-up to start, one for
+    // reminders.list() to resolve, one more for the notification loop to run.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Exactly one 'Missed reminder' notification must have been shown.
+    expect(Notification).toHaveBeenCalledTimes(1);
+    expect(Notification).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Missed reminder' }),
+    );
   });
 });
