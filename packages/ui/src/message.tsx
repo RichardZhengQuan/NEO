@@ -109,7 +109,7 @@ export function ConfirmationCard({
   assistantName = 'NEO',
 }: {
   confirmation: ToolConfirmation;
-  onDecision: (decision: ConfirmationDecision) => void | Promise<void>;
+  onDecision?: (decision: ConfirmationDecision) => void | Promise<void>;
   /** Persona name for the heading ("Nova wants to do this"). */
   assistantName?: string;
 }): ReactElement {
@@ -118,6 +118,7 @@ export function ConfirmationCard({
   const [showInput, setShowInput] = useState(false);
   const left = useCountdown(confirmation.expiresAt);
   const decide = async (kind: 'approve' | 'always' | 'deny') => {
+    if (!onDecision) return;
     setBusy(kind);
     try {
       await onDecision(kind === 'deny' ? { approve: false } : kind === 'always' ? { approve: true, always: true } : { approve: true });
@@ -158,13 +159,13 @@ export function ConfirmationCard({
         </div>
       )}
       <div className="neo-confirm__actions">
-        <Button variant="primary" size="sm" icon="check" loading={busy === 'approve'} disabled={busy !== null} onClick={() => void decide('approve')}>
+        <Button variant="primary" size="sm" icon="check" loading={busy === 'approve'} disabled={busy !== null || !onDecision} onClick={() => void decide('approve')}>
           {t('common.approve')}
         </Button>
-        <Button variant="secondary" size="sm" loading={busy === 'always'} disabled={busy !== null} onClick={() => void decide('always')}>
+        <Button variant="secondary" size="sm" loading={busy === 'always'} disabled={busy !== null || !onDecision} onClick={() => void decide('always')}>
           {t('common.always_allow')}
         </Button>
-        <Button variant="ghost" size="sm" loading={busy === 'deny'} disabled={busy !== null} onClick={() => void decide('deny')}>
+        <Button variant="ghost" size="sm" loading={busy === 'deny'} disabled={busy !== null || !onDecision} onClick={() => void decide('deny')}>
           {t('common.deny')}
         </Button>
       </div>
@@ -444,7 +445,7 @@ export function MessageView(props: MessageViewProps): ReactElement {
         items.push({ key: `c${part.id}`, node: <ToolChip call={part} result={result} status={status} /> });
         if (confirmation) {
           shownConfirmations.add(confirmation.id);
-          items.push({ key: `k${confirmation.id}`, node: <ConfirmationCard confirmation={confirmation} assistantName={assistantName} onDecision={(d) => onConfirm?.(confirmation.id, d, confirmation)} /> });
+          items.push({ key: `k${confirmation.id}`, node: <ConfirmationCard confirmation={confirmation} assistantName={assistantName} onDecision={onConfirm ? (d) => onConfirm(confirmation.id, d, confirmation) : undefined} /> });
         }
         break;
       }
@@ -480,7 +481,7 @@ export function MessageView(props: MessageViewProps): ReactElement {
   // Confirmations that arrived before their tool_call part.
   for (const c of confirmations) {
     if (!shownConfirmations.has(c.id) && c.messageId === message.id) {
-      items.push({ key: `k${c.id}`, node: <ConfirmationCard confirmation={c} assistantName={assistantName} onDecision={(d) => onConfirm?.(c.id, d, c)} /> });
+      items.push({ key: `k${c.id}`, node: <ConfirmationCard confirmation={c} assistantName={assistantName} onDecision={onConfirm ? (d) => onConfirm(c.id, d, c) : undefined} /> });
     }
   }
 
