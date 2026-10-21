@@ -114,7 +114,7 @@ export interface ConversationStore {
   /** Deletes the conversation and all its messages. */
   delete(id: string): boolean;
   /** Oldest → newest. `before` is a message createdAt for pagination; `limit` keeps the newest N. */
-  messages(conversationId: string, options?: { limit?: number; before?: number }): Message[];
+  messages(conversationId: string, options?: { limit?: number; before?: number; beforeId?: string }): Message[];
   getMessage(id: string): Message | null;
   /** Inserts the message and bumps the conversation's updatedAt/lastMessageAt/preview. */
   appendMessage(message: Message): Message;
