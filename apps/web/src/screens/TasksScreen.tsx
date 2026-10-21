@@ -128,6 +128,7 @@ function TaskDetails({ task, lists, onClose }: { task: Task; lists: TaskList[]; 
 function TaskRow({ task, subtasks, lists, expanded, onToggleExpand, highlight }: { task: Task; subtasks: Task[]; lists: TaskList[]; expanded: boolean; onToggleExpand: () => void; highlight: boolean }): ReactElement {
   const t = useT();
   const locale = useLocale();
+  const tz = useSession((s) => s.settings?.timezone);
   const ref = useRef<HTMLLIElement>(null);
   const overdue = !task.done && task.dueAt !== null && task.dueAt < Date.now();
   useEffect(() => {
@@ -151,7 +152,7 @@ function TaskRow({ task, subtasks, lists, expanded, onToggleExpand, highlight }:
               )}
               {task.dueAt && (
                 <span style={overdue ? { color: 'var(--neo-tone-danger-text)', fontWeight: 600 } : undefined}>
-                  <Icon name="calendar" size={12} /> {formatDate(task.dueAt, locale, undefined, 'medium')}
+                  <Icon name="calendar" size={12} /> {formatDate(task.dueAt, locale, tz, 'medium')}
                 </span>
               )}
               {task.notes && <Icon name="file-text" size={12} label={t('tasks.has_notes')} />}

@@ -29,6 +29,38 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe('TasksScreen timezone', () => {
+  it('task row and editor use the configured timezone', () => {
+    const DateTimeFormat = Intl.DateTimeFormat;
+    const resolvedOptions = new DateTimeFormat().resolvedOptions();
+    const resolvedOptionsSpy = vi.spyOn(DateTimeFormat.prototype, 'resolvedOptions').mockReturnValue({ ...resolvedOptions, timeZone: 'America/New_York' });
+    // resolvedOptions alone does not change the timezone used by native formatting.
+    const dateTimeFormatSpy = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (locales, options) {
+      return new DateTimeFormat(locales, { ...options, timeZone: options?.timeZone ?? 'America/New_York' });
+    });
+    try {
+      useSession.setState({ settings: { ...DEFAULT_SETTINGS, timezone: 'Asia/Tokyo' } });
+      const dueAt = Date.UTC(2026, 9, 22);
+      useData.setState({ tasks: { [task.id]: { ...task, dueAt } } });
+
+      expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe('America/New_York');
+      expect(Intl.DateTimeFormat().resolvedOptions().timeZone).not.toBe(useSession.getState().settings?.timezone);
+      expect(new Intl.DateTimeFormat('en', { dateStyle: 'medium' }).format(dueAt)).toBe('Oct 21, 2026');
+
+      render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+      const row = screen.getByRole('button', { name: /^Old\b/, expanded: false });
+      expect(row.textContent).toContain('Oct 22');
+      expect(row.textContent).not.toContain('Oct 21');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+      expect((screen.getByLabelText('Due date') as HTMLInputElement).value).toBe('2026-10-22');
+    } finally {
+      dateTimeFormatSpy.mockRestore();
+      resolvedOptionsSpy.mockRestore();
+    }
+  });
+});
+
 describe('TaskDetails store updates', () => {
   it('resyncs an untouched title before blur so it cannot overwrite a remote update', async () => {
     render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
