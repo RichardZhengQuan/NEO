@@ -79,8 +79,8 @@ function thirdPerson(statement: string): string {
     const zh = statement.replace(/我的/g, '用户的').replace(/我/g, '用户').replace(/[。！!.\s]+$/u, '');
     return `${zh}。`;
   }
-  let s = statement.replace(/\bI'm\b/g, 'I am').replace(/\bI've\b/g, 'I have').replace(/\bI'd\b/g, 'I would').replace(/\bI'll\b/g, 'I will');
-  s = s.replace(/\bI\s+([A-Za-z']+)/g, (_m, verb: string) => `the user ${conjugate(verb)}`);
+  let s = statement.replace(/\bI'm\b/gi, 'I am').replace(/\bI've\b/gi, 'I have').replace(/\bI'd\b/gi, 'I would').replace(/\bI'll\b/gi, 'I will');
+  s = s.replace(/\bI\s+([A-Za-z']+)/gi, (_m, verb: string) => `the user ${conjugate(verb.toLowerCase())}`);
   s = s.replace(/\bmy\b/gi, "the user's").replace(/\bmine\b/gi, "the user's").replace(/\bmyself\b/gi, 'themselves').replace(/\bme\b/gi, 'the user');
   s = capitalize(s.replace(/[\s.!?]+$/, ''));
   return `${s}.`;

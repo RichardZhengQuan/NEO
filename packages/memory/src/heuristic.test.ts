@@ -28,6 +28,12 @@ describe('heuristicExtract', () => {
     ["Please remember that I've been diagnosed with diabetes.", 'The user has been diagnosed with diabetes.'],
     ['Please remember that I have been treated for diabetes.', 'The user has been treated for diabetes.'],
     ["Please remember that I've been treated for diabetes.", 'The user has been treated for diabetes.'],
+    // Lowercase pronoun: the heuristic regex is case-insensitive, so `thirdPerson()` must handle it too.
+    // Codex P2 on PR #445 head 22ef0e3: without lowercase handling, extraction stored "I have diabetes."
+    // (first-person) which `isAboutSelf()` only accepts for `source.by === 'user'`, breaking the mem_self link.
+    ['i have diabetes.', 'The user has diabetes.'],
+    ["i've been diagnosed with diabetes.", 'The user has been diagnosed with diabetes.'],
+    ["i've been treated for diabetes.", 'The user has been treated for diabetes.'],
   ])('suppresses normal copies of sensitive health facts for "%s"', (text, content) => {
     const results = heuristicExtract(text);
     expect(results).toHaveLength(1);

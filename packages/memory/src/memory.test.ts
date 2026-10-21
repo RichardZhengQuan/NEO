@@ -248,6 +248,10 @@ describe('observe: duplicate-content health facts keep sensitivity (regression f
     "Please remember that I've been diagnosed with diabetes.",
     'Please remember that I have been treated for diabetes.',
     "Please remember that I've been treated for diabetes.",
+    // Lowercase pronoun: regression for the Codex P2 on head 22ef0e3.
+    'i have diabetes.',
+    "i've been diagnosed with diabetes.",
+    "i've been treated for diabetes.",
   ])('keeps diabetes out of cloud embeddings and non-sensitive recall for "%s"', async (text) => {
     const db = openNeoDatabase(':memory:');
     const hashing = new HashingEmbedder(256);
