@@ -304,6 +304,37 @@ describe('web_fetch', () => {
 });
 
 describe('htmlToText', () => {
+  it('uses the real href, not href= embedded in another attribute value', () => {
+    const out = htmlToText('<a title="See href=\'https://wrong.example/\'" href="https://right.example/">Read</a>');
+    expect(out.text).toContain('https://right.example/');
+    expect(out.text).not.toContain('https://wrong.example/');
+  });
+
+  it.each([
+    'title=\'See href="https://wrong.example/"\'',
+    'aria-label="See href=\'https://wrong.example/\'"',
+    'aria-label=\'See href="https://wrong.example/"\'',
+    'data-example="See href=\'https://wrong.example/\'"',
+    'data-example=\'See href="https://wrong.example/"\'',
+  ])('ignores embedded href= in %s', (attrs) => {
+    const out = htmlToText(`<a ${attrs} href="https://right.example/">Read</a>`);
+    expect(out.text).toContain('https://right.example/');
+    expect(out.text).not.toContain('https://wrong.example/');
+    expect(htmlToText(`<a ${attrs}>Read</a>`).text).toBe('Read');
+  });
+
+  it('preserves href parsing with boolean, named and unquoted attributes', () => {
+    for (const attrs of [
+      'download HREF \t=\nhttps://right.example/',
+      'title=Read href=\'https://right.example/\'',
+      'data-href="https://wrong.example/" href="https://right.example/"',
+      '/href="https://right.example/"',
+      'href="https://right.example/" href="https://wrong.example/"',
+    ]) {
+      expect(htmlToText(`<a ${attrs}>Read</a>`).text, attrs).toBe('Read (https://right.example/)');
+    }
+  });
+
   it('limits decoded titles to 300 characters without splitting a surrogate pair', () => {
     const out = htmlToText(`<title>${'T'.repeat(299)}&#x1F600;${'T'.repeat(1000)}</title>`);
     expect(out.title.length).toBeLessThanOrEqual(300);
