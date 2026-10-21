@@ -143,6 +143,18 @@ describe('parseDateTime', () => {
     expect(parseDateTime('saturday', NOW, SH)).toBe(utc(2026, 10, 17, 1)); // a week ahead, not today
   });
 
+  it('"this" weekday can be today only while its time is still ahead', () => {
+    // Wednesday 2026-10-14 01:00Z = 09:00 in Singapore.
+    const WED_SGT = utc(2026, 10, 14, 1);
+    const SG = 'Asia/Singapore';
+    expect(parseDateTime('this wednesday at 18:00', WED_SGT, SG)).toBe(utc(2026, 10, 14, 10));
+    expect(parseDateTime('this wednesday at 06:00', WED_SGT, SG)).toBe(utc(2026, 10, 20, 22));
+    expect(parseDateTime('this wednesday at 09:00', WED_SGT, SG)).toBe(utc(2026, 10, 21, 1));
+    expect(parseDateTime('next wednesday at 18:00', WED_SGT, SG)).toBe(utc(2026, 10, 21, 10));
+    expect(parseDateTime('on wednesday at 18:00', WED_SGT, SG)).toBe(utc(2026, 10, 21, 10));
+    expect(parseDateTime('wednesday at 18:00', WED_SGT, SG)).toBe(utc(2026, 10, 21, 10));
+  });
+
   it('bare times roll to tomorrow once passed', () => {
     expect(parseDateTime('21:00', NOW, SH)).toBe(utc(2026, 10, 10, 13));
     expect(parseDateTime('at 7pm', NOW, SH)).toBe(utc(2026, 10, 11, 11)); // 19:00 already passed today

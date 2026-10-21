@@ -323,12 +323,13 @@ function parse(input: string | number, nowMs: number, timezone: string): number 
   }
 
   // Weekday: "friday", "next fri 14:00", "on tuesday at 6pm", "this monday".
-  const wd = /^(?:(?:on|next|this) )?([a-z]+)\b ?(.*)$/.exec(s);
-  if (wd && WEEKDAY_WORDS[wd[1] as string] !== undefined) {
-    const target = WEEKDAY_WORDS[wd[1] as string] as number;
+  const wd = /^((?:on|next|this) )?([a-z]+)\b ?(.*)$/.exec(s);
+  if (wd && WEEKDAY_WORDS[wd[2] as string] !== undefined) {
+    const target = WEEKDAY_WORDS[wd[2] as string] as number;
+    const time = timePart(wd[3] as string, [9, 0, 0], raw);
     let ahead = (target - now.weekday + 7) % 7;
-    if (ahead === 0) ahead = 7;
-    return at(ahead, timePart(wd[2] as string, [9, 0, 0], raw));
+    if (ahead === 0) ahead = wd[1]?.startsWith('this') && at(0, time) > nowMs ? 0 : 7;
+    return at(ahead, time);
   }
 
   // A bare time of day: today, or tomorrow when it has already passed.
