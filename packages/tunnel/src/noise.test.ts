@@ -63,6 +63,31 @@ describe('Noise NK', () => {
     });
   }
 
+  it('snapshots Buffer-backed keys at construction', () => {
+    const staticKey = generateKeyPair();
+    const remoteStaticBuf = Buffer.from(staticKey.publicKey);
+    const prologue = tunnelPrologue('server');
+    const initiator = new NkInitiator({ remoteStaticKey: remoteStaticBuf, prologue });
+    remoteStaticBuf.fill(0);
+    expect(() => initiator.writeMessage1()).not.toThrow();
+  });
+
+  it('snapshots a Buffer-backed first handshake message', () => {
+    const staticKey = generateKeyPair();
+    const prologue = tunnelPrologue('server');
+    const initiator = new NkInitiator({ remoteStaticKey: staticKey.publicKey, prologue });
+    const responder = new NkResponder({ staticKey, prologue });
+    const message1Plain = initiator.writeMessage1();
+    const message1Buf = Buffer.from(message1Plain);
+    responder.readMessage1(message1Buf);
+    message1Buf.fill(0, 0, 32);
+    const { message: message2, transport: server } = responder.writeMessage2();
+    const { transport: phone } = initiator.readMessage2(message2);
+    expect(phone.handshakeHash).toEqual(server.handshakeHash);
+    const plaintext = new Uint8Array([1, 2, 3, 4]);
+    expect(server.decrypt(phone.encrypt(plaintext))).toEqual(plaintext);
+  });
+
   it('authenticates empty handshake payloads and the pinned static key', () => {
     const actual = generateKeyPair();
     const wrong = generateKeyPair();
