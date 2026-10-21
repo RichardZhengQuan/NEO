@@ -81,4 +81,41 @@ describe('init API key input', () => {
     expect(captured).not.toContain(secret);
     expect(captured).toContain('Config written.');
   });
+
+  it('aborts via SIGINT when the user presses Ctrl-C at the API-key prompt', async () => {
+    const originalStdin = Object.getOwnPropertyDescriptor(process, 'stdin')!;
+    const originalStdout = Object.getOwnPropertyDescriptor(process, 'stdout')!;
+    const fakeStdin = Object.assign(new PassThrough(), {
+      isTTY: true,
+      setRawMode(this: PassThrough, _mode: boolean) { return this; },
+    });
+    const fakeStdout = Object.assign(new PassThrough(), { isTTY: true, columns: 120 });
+
+    Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true });
+    Object.defineProperty(process, 'stdout', { value: fakeStdout, configurable: true });
+    syncBuiltinESMExports();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+
+    try {
+      const providerPrompt = waitForOutput(fakeStdout, 'Enter number [0]');
+      const run = runInit({ dataDir });
+      run.catch(() => {});
+      await providerPrompt;
+
+      const keyPrompt = waitForOutput(fakeStdout, ' API key');
+      fakeStdin.write('1\n');
+      await keyPrompt;
+
+      fakeStdin.write(Buffer.from([0x03]));
+      await new Promise((r) => setImmediate(r));
+      expect(process.kill).toHaveBeenCalledWith(process.pid, 'SIGINT');
+    } finally {
+      Object.defineProperty(process, 'stdin', originalStdin);
+      Object.defineProperty(process, 'stdout', originalStdout);
+      fakeStdin.destroy();
+      fakeStdout.destroy();
+      kill.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
 });
