@@ -41,20 +41,17 @@ export async function runServe(opts: ServeOptions): Promise<void> {
     }
   }
 
-  // Auto-detect web dir if not provided
-  if (!opts.webDir && !overrides['server']) {
-    const webDir = detectWebDir();
-    if (webDir) overrides['server'] = { webDir };
-  } else if (!opts.webDir && overrides['server'] && !(overrides['server'] as Record<string, unknown>)['webDir']) {
-    const webDir = detectWebDir();
-    if (webDir) (overrides['server'] as Record<string, unknown>)['webDir'] = webDir;
-  }
-
   const loadOpts: LoadConfigOptions = {
     path: opts.config,
     overrides: overrides as LoadConfigOptions['overrides'],
   };
   const config = loadConfig(loadOpts);
+
+  // Auto-detect only when config file, env, and CLI flags left webDir unset.
+  if (!config.server.webDir) {
+    const webDir = detectWebDir();
+    if (webDir) config.server.webDir = webDir;
+  }
 
   // Start the server
   const server = await startServer(config);
