@@ -195,7 +195,9 @@ export function ftsQuery(text: string): string | null {
   const tokens = text
     .normalize('NFC')
     .toLowerCase()
-    .split(/[^\p{L}\p{N}_]+/u)
+    .split(/[^\p{L}\p{N}_\p{M}]+/u)
+    // Fold the dot introduced by lowercasing İ while preserving other marks.
+    .map((t) => t.replace(/i\u0307/g, 'i'))
     .filter((t) => t.length > 1)
     .slice(0, 32);
   if (!tokens.length) return null;
