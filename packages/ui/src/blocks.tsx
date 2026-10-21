@@ -591,7 +591,7 @@ function FormRenderer({ block, uiId, onAction, blockPath = [] }: BlockRendererPr
     let invalid = false;
     for (const f of block.fields) {
       const err = validateFormField(f, values[f.name] ?? '', t);
-      next[f.name] = err;
+      Object.defineProperty(next, f.name, { value: err, writable: true, enumerable: true, configurable: true });
       if (err) invalid = true;
     }
     setErrors(next);

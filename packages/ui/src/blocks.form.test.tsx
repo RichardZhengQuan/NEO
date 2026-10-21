@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { BlockRenderer } from './blocks.js';
 import { I18nProvider } from './i18n.js';
 
@@ -15,5 +15,15 @@ describe('form field names', () => {
       </I18nProvider>,
     );
     expect(screen.getByRole('textbox')).toBeTruthy();
+  });
+
+  it('shows validation error for a required __proto__ field on submit', () => {
+    const { container } = render(
+      <I18nProvider locale="en">
+        <BlockRenderer block={{ type: 'form', title: 'Test form', fields: [{ name: '__proto__', label: 'Value', kind: 'text', required: true }] }} />
+      </I18nProvider>,
+    );
+    fireEvent.submit(container.querySelector('form')!);
+    expect(screen.getByRole('alert').textContent).toBe('This field is required');
   });
 });
