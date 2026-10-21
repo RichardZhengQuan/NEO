@@ -270,6 +270,10 @@ export function serveTunnel(link: MessageLink, options: {
         while (await waitForBuffer(stream, state)) {
           const next = await reader.read();
           if (!active(stream, state) || next.done) break;
+          if (!(next.value instanceof Uint8Array)) {
+            reset(stream, 'internal');
+            return;
+          }
           for (let offset = 0; offset < next.value.byteLength; offset += TUNNEL_BODY_CHUNK) {
             if (!await waitForBuffer(stream, state)) return;
             if (!send({
