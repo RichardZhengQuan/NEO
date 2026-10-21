@@ -266,18 +266,20 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
         );
         const subtasks: Task[] = [];
         if (movedList) {
-          const visited = new Set<string>([id]);
-          const queue = [id];
-          for (const parentId of queue) {
-            const rows = db.prepare('SELECT * FROM tasks WHERE parent_id = ?').all(parentId) as Row[];
-            for (const row of rows) {
-              const subtask: Task = { ...toTask(row), listId: updated.listId, updatedAt: now };
-              if (visited.has(subtask.id)) continue;
-              visited.add(subtask.id);
-              db.prepare('UPDATE tasks SET list_id = ?, updated_at = ? WHERE id = ?').run(subtask.listId, now, subtask.id);
-              subtasks.push(subtask);
-              queue.push(subtask.id);
-            }
+          const rows = db
+            .prepare(
+              `WITH RECURSIVE descendants(id) AS (
+                 SELECT id FROM tasks WHERE id = ?
+                 UNION
+                 SELECT t.id FROM tasks t JOIN descendants d ON t.parent_id = d.id
+               )
+               SELECT * FROM tasks WHERE id IN (SELECT id FROM descendants) AND id != ?`,
+            )
+            .all(id, id) as Row[];
+          for (const row of rows) {
+            const subtask: Task = { ...toTask(row), listId: updated.listId, updatedAt: now };
+            db.prepare('UPDATE tasks SET list_id = ?, updated_at = ? WHERE id = ?').run(subtask.listId, now, subtask.id);
+            subtasks.push(subtask);
           }
         }
         return { updated, subtasks };
@@ -290,16 +292,17 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
     delete(id: string): boolean {
       const deletedIds = db.transaction(() => {
         if (!get(id)) return [];
-        const visited = new Set<string>([id]);
-        const ids = [id];
-        for (const parentId of ids) {
-          const rows = db.prepare('SELECT id FROM tasks WHERE parent_id = ?').all(parentId) as { id: string }[];
-          for (const { id: subtaskId } of rows) {
-            if (visited.has(subtaskId)) continue;
-            visited.add(subtaskId);
-            ids.push(subtaskId);
-          }
-        }
+        const rows = db
+          .prepare(
+            `WITH RECURSIVE descendants(id) AS (
+               SELECT id FROM tasks WHERE id = ?
+               UNION
+               SELECT t.id FROM tasks t JOIN descendants d ON t.parent_id = d.id
+             )
+             SELECT id FROM descendants`,
+          )
+          .all(id) as { id: string }[];
+        const ids = rows.map((r) => r.id);
         db.prepare(`DELETE FROM tasks WHERE id IN (${ids.map(() => '?').join(', ')})`).run(...ids);
         return ids;
       });
