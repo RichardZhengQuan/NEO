@@ -251,13 +251,13 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
   function consume(phone: Phone, size: number): boolean {
     const now = clock();
     phone.tokens = Math.min(limits.burstBytes, phone.tokens + Math.max(0, now - phone.tokenTime) * limits.bytesPerSecond / 1000);
-    phone.tokenTime = now;
+    if (now > phone.tokenTime) phone.tokenTime = now;
     if (size > phone.tokens) {
       closePhone(phone, TunnelCloseCode.RateLimited, 'Byte rate limit exceeded');
       return false;
     }
     phone.tokens -= size;
-    phone.lastActivity = now;
+    if (now > phone.lastActivity) phone.lastActivity = now;
     return true;
   }
 
