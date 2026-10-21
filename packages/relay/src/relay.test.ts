@@ -199,6 +199,28 @@ describe('relay registration and routing', () => {
     expect(await secondPhone.closed).toBe(1000);
   });
 
+  it('does not count a forwarding write whose callback reports failure', async () => {
+    const relay = await start();
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    let captureWriteCb!: (cb: (error?: Error) => void) => void;
+    const writeCbCaptured = new Promise<(error?: Error) => void>(r => { captureWriteCb = r; });
+    const origSend = WebSocket.prototype.send;
+    vi.spyOn(WebSocket.prototype, 'send').mockImplementation(function (this: WebSocket, ...args: unknown[]) {
+      const cbArg = args[1];
+      if (!peers.some(peer => peer.socket === this) && typeof cbArg === 'function') {
+        captureWriteCb(cbArg as (error?: Error) => void);
+        return; // drop the write, keep the callback
+      }
+      return (origSend as (...a: unknown[]) => void).apply(this, args);
+    });
+    mobile.socket.send(Uint8Array.of(1));
+    const writeCb = await writeCbCaptured;
+    writeCb(new Error('write EPIPE'));
+    expect(await mobile.closed).toBe(TunnelCloseCode.UnknownServer);
+    expect(relay.stats()).toMatchObject({ messages: 0, bytes: 0 });
+  });
+
   it('rejects text from phones and from registered servers', async () => {
     const relay = await start();
     const server = await register(relay);
