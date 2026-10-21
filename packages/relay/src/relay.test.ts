@@ -324,6 +324,41 @@ describe('relay limits and lifecycle', () => {
     expect(relay.stats().phones).toBe(1);
   });
 
+  it('counts the socket fallback and the matching X-Forwarded-For against one per-IP phone cap', async () => {
+    // Listen on :: (dual-stack) so IPv4 clients appear as ::ffff:127.0.0.1 in socket.remoteAddress.
+    const relay = await startRelay({ host: '::', port: 0, trustProxy: true, limits: { perIpPhoneConnections: 1 } });
+    relays.push(relay);
+    // Use an IPv4 URL so that socket.remoteAddress is the IPv4-mapped form '::ffff:127.0.0.1'.
+    const ipv4Url = `ws://127.0.0.1:${relay.port}`;
+    const serverPeer = new WebSocket(ipv4Url + '/v1/server');
+    serverPeer.on('error', () => {});
+    const serverInbox = new Inbox(serverPeer);
+    peers.push({ socket: serverPeer, inbox: serverInbox, closed: new Promise<number>(resolve => serverPeer.once('close', code => resolve(code))) });
+    await once(serverPeer, 'open');
+    const challenge = await serverInbox.control();
+    expect(challenge.type).toBe('challenge');
+    if (challenge.type !== 'challenge') throw new Error('No challenge');
+    const identity = generateServerIdentity();
+    serverPeer.send(JSON.stringify({ type: 'register', serverId: identity.serverId, key: toBase64Url(identity.signing.publicKey), signature: toBase64Url(signRelayChallenge(identity, fromBase64Url(challenge.nonce))) }));
+    expect(await serverInbox.control()).toEqual({ type: 'registered', serverId: identity.serverId });
+    // First phone: no X-Forwarded-For header; socket.remoteAddress = '::ffff:127.0.0.1'.
+    const phoneSock = new WebSocket(ipv4Url + `/v1/connect/${identity.serverId}`);
+    phoneSock.on('error', () => {});
+    peers.push({ socket: phoneSock, inbox: new Inbox(phoneSock), closed: new Promise<number>(resolve => phoneSock.once('close', code => resolve(code))) });
+    await once(phoneSock, 'open');
+    const openFrame = await serverInbox.frame();
+    expect(openFrame.op).toBe(RelayOp.Open);
+    // The relay should have canonicalized '::ffff:127.0.0.1' to '::ffff:7f00:1'.
+    expect(Buffer.from(openFrame.payload).toString('utf8')).toBe('::ffff:7f00:1');
+    // Second phone: X-Forwarded-For carries the same IP (non-canonical spelling).
+    const refused = new WebSocket(ipv4Url + `/v1/connect/${identity.serverId}`, { headers: { 'x-forwarded-for': '::ffff:127.0.0.1' } });
+    refused.on('error', () => {});
+    const refusedClosed = new Promise<number>(resolve => refused.once('close', code => resolve(code)));
+    peers.push({ socket: refused, inbox: new Inbox(refused), closed: refusedClosed });
+    expect(await refusedClosed).toBe(TunnelCloseCode.RateLimited);
+    expect(relay.stats().phones).toBe(1);
+  });
+
   it('caps phones per server and globally', async () => {
     const relay = await start({ trustProxy: true, limits: { perServerPhoneConnections: 1, maxPhones: 2 } });
     const first = await register(relay);

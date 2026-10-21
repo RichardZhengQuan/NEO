@@ -129,7 +129,7 @@ function clientIp(request: IncomingMessage, trustProxy: boolean): string {
     const first = (Array.isArray(header) ? header[0] : header)?.split(',')[0]?.trim();
     if (first && isIP(first)) return canonicalizeIp(first);
   }
-  return request.socket.remoteAddress ?? 'unknown';
+  return canonicalizeIp(request.socket.remoteAddress ?? 'unknown');
 }
 
 function listen(server: Server, host: string, port: number): Promise<number> {
