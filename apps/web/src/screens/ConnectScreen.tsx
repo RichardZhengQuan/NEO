@@ -8,7 +8,7 @@ import { pairWithLink, pairingOutcomeKey } from '../actions/pairing.js';
 import { connectWith } from '../actions/session.js';
 import { credentialsFromInput, verifyCredentials } from '../connection.js';
 import { getPlatform } from '../platform/index.js';
-import { showConnect, useSession } from '../state/session.js';
+import { currentSessionEpoch, isCurrentSession, showConnect, useSession } from '../state/session.js';
 
 export function ConnectScreen(): ReactElement {
   const t = useT();
@@ -160,8 +160,10 @@ export function OfflineScreen(): ReactElement {
 
   const retry = async () => {
     if (!hint?.serverUrl || !hint.token) return;
+    const epoch = currentSessionEpoch();
     setBusy(true);
     const result = await verifyCredentials(hint.serverUrl, hint.token, hint.tunnel);
+    if (!isCurrentSession(epoch)) { setBusy(false); return; }
     if (result === 'ok') await connectWith({ serverUrl: hint.serverUrl, token: hint.token, tunnel: hint.tunnel }, 'saved');
     else if (result === 'unauthorized') showConnect({ reason: 'unauthorized', serverUrl: hint.serverUrl, tunnel: hint.tunnel });
     setBusy(false);
