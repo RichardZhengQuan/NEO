@@ -87,7 +87,19 @@ describe('reminder state', () => {
   });
 });
 
+describe('task state', () => {
+  it.each(['__proto__', 'constructor', 'toString'])('TasksRenderer treats the reserved id %s as a normal, isolated task', (id) => {
+    render(widget({ type: 'tasks', tasks: [{ id, title: 'Work', done: false }] }));
+    expect(screen.getByText(/0 of 1 done/i)).toBeTruthy();
+  });
+});
+
 describe('memory status', () => {
+  it('MemoryRenderer shows a Forget control for an active node with id "__proto__"', () => {
+    render(widget({ type: 'memory', nodes: [{ id: '__proto__', kind: 'fact', label: 'Likes tea', content: 'Likes tea', status: 'active' }] }, undefined, () => undefined));
+    expect(screen.getByRole('button', { name: /forget/i })).toBeTruthy();
+  });
+
   it('keeps a stored forgotten node resolved after remount despite stale live data', async () => {
     const block: UIBlock = { type: 'memory', nodes: [{ id: 'mem_1', kind: 'fact', label: 'Likes tea', status: 'active' }] };
     const onAction = vi.fn(async () => undefined);
@@ -108,6 +120,11 @@ describe('memory status', () => {
 });
 
 describe('formatted blocks', () => {
+  it('TableRenderer renders "—" for a column keyed "toString" with no row value', () => {
+    render(widget({ type: 'table', columns: [{ key: 'toString', label: 'Signature' }], rows: [{}] }));
+    expect(screen.getByText('—')).toBeTruthy();
+  });
+
   it('uses countdown timezone for the visible date and timer label', () => {
     vi.useFakeTimers();
     vi.setSystemTime('2026-10-13T00:00:00Z');
