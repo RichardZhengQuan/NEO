@@ -239,7 +239,7 @@ export class NeoClient {
   };
 
   readonly reminders = {
-    list: (q?: { status?: ReminderStatus[]; from?: number; to?: number; limit?: number }): Promise<ListResponse<Reminder>> =>
+    list: (q?: { status?: ReminderStatus[]; from?: number; to?: number; limit?: number; lastFiredAtFrom?: number }): Promise<ListResponse<Reminder>> =>
       this._impl.reminders.list(q),
     get: (id: string): Promise<Reminder> =>
       this._impl.reminders.get(id),

@@ -2,6 +2,13 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { ipcMain, shell } from 'electron';
 import { startServer } from '@neo/server';
 
+// Mock node:fs/promises so catch-up state persistence doesn't touch disk.
+const fsMock = vi.hoisted(() => ({
+  readFile: vi.fn<(p: string, enc: string) => Promise<string>>().mockRejectedValue(new Error('ENOENT')),
+  writeFile: vi.fn<(p: string, d: string, enc: string) => Promise<void>>().mockResolvedValue(undefined),
+}));
+vi.mock('node:fs/promises', () => fsMock);
+
 const electron = await vi.hoisted(async () => {
   const { EventEmitter } = await import('node:events');
 
@@ -76,7 +83,7 @@ const server = vi.hoisted(() => ({
 
 const clientMock = vi.hoisted(() => ({
   onStatus: null as ((status: string) => void) | null,
-  remindersList: vi.fn<(q?: { status?: string[] }) => Promise<{ items: unknown[] }>>()
+  remindersList: vi.fn<(q?: { status?: string[]; lastFiredAtFrom?: number }) => Promise<{ items: unknown[] }>>()
     .mockResolvedValue({ items: [] }),
 }));
 
@@ -130,6 +137,9 @@ afterEach(() => {
   vi.resetModules();
   electron.app.removeAllListeners();
   clientMock.onStatus = null;
+  // Reset fs mock to default (no persisted state).
+  fsMock.readFile.mockRejectedValue(new Error('ENOENT'));
+  fsMock.writeFile.mockResolvedValue(undefined);
 });
 
 describe('desktop startup failure', () => {
@@ -381,6 +391,17 @@ describe('before-quit graceful shutdown', () => {
   });
 });
 
+/** Flush enough microtask ticks for the catch-up async block to complete:
+ *  1. void IIFE starts
+ *  2. loadPersistedState / readFile resolves
+ *  3. client.reminders.list resolves
+ *  4. notification loop iterates
+ *  5. savePersistedState writeFile resolves
+ */
+async function flushCatchup(): Promise<void> {
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+}
+
 describe('startup reminder catch-up', () => {
   it('notifies overdue reminders when desktop starts', async () => {
     // Seed a one-shot reminder whose dueAt is in the past so the scheduler fires
@@ -421,13 +442,110 @@ describe('startup reminder catch-up', () => {
     // Simulate the WS becoming 'open' for the first time — triggers catch-up.
     clientMock.onStatus?.('open');
 
-    // Flush microtask ticks: one for async catch-up to start, one for
-    // reminders.list() to resolve, one more for the notification loop to run.
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushCatchup();
 
     // Exactly one 'Missed reminder' notification must have been shown.
+    expect(Notification).toHaveBeenCalledTimes(1);
+    expect(Notification).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Missed reminder' }),
+    );
+    // Catch-up must query by lastFiredAtFrom (not status:'fired') so recurring
+    // reminders (status='scheduled') are included and the 100-item page limit is
+    // not a filter boundary.
+    expect(clientMock.remindersList).toHaveBeenCalledWith(
+      expect.objectContaining({ lastFiredAtFrom: expect.any(Number) }),
+    );
+    expect(clientMock.remindersList.mock.calls[0]![0]).not.toHaveProperty('status');
+  });
+
+  it('uses lastFiredAtFrom from persisted state to avoid duplicate on rapid restart', async () => {
+    const firedAt = Date.now() - 5_000; // fired 5 s ago
+    const lastRunAt = firedAt + 1_000;  // previous process completed catch-up 1 s after firing
+    // Simulate persisted state from the previous process run.
+    fsMock.readFile.mockResolvedValueOnce(JSON.stringify({ lastRunAt }));
+
+    const overdueReminder = {
+      id: 'r-restart-dup',
+      title: 'Call dentist',
+      notes: null,
+      dueAt: firedAt - 1_000,
+      status: 'fired',
+      firedCount: 1,
+      // lastFiredAt is BEFORE lastRunAt, so it should not be shown again.
+      lastFiredAt: firedAt,
+      messageId: null,
+    };
+    // The server returns the reminder; the catch-up must not show it because
+    // lastFiredAtFrom will be lastRunAt (> firedAt), so the server would filter
+    // it out.  We verify by checking that the query carries lastFiredAtFrom >= lastRunAt.
+    clientMock.remindersList.mockResolvedValueOnce({ items: [] });
+
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7779',
+      ownerToken: 'owner-tok-restart',
+      stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    });
+
+    const startupDone = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+
+    await import('./main.js');
+    await startupDone;
+
+    const { Notification } = await import('electron');
+    vi.spyOn(Notification as { isSupported: () => boolean }, 'isSupported').mockReturnValue(true);
+    clientMock.onStatus?.('open');
+    await flushCatchup();
+
+    // No notification: the persisted lastRunAt floors the window above firedAt.
+    expect(Notification).not.toHaveBeenCalled();
+    // The query's lastFiredAtFrom must be >= lastRunAt.
+    const callArg = clientMock.remindersList.mock.calls[0]?.[0];
+    expect(callArg?.lastFiredAtFrom).toBeGreaterThanOrEqual(lastRunAt);
+    // Ignore unused variable — only needed to illustrate the scenario.
+    void overdueReminder;
+  });
+
+  it('includes recurring reminders (status=scheduled) in catch-up', async () => {
+    // A recurring reminder that fired during the gap gets status='scheduled'
+    // (not 'fired') because markFired advances it.  The old status:['fired']
+    // query would miss it; the new lastFiredAtFrom query catches it.
+    const recurringReminder = {
+      id: 'r-recurring-1',
+      title: 'Daily standup',
+      notes: null,
+      dueAt: Date.now() + 24 * 60 * 60 * 1000, // next occurrence tomorrow
+      status: 'scheduled',     // <-- NOT 'fired'
+      firedCount: 3,
+      lastFiredAt: Date.now(), // fired recently during the startup gap
+      messageId: null,
+    };
+    clientMock.remindersList.mockResolvedValueOnce({ items: [recurringReminder] });
+
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7780',
+      ownerToken: 'owner-tok-recurring',
+      stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    });
+
+    const startupDone = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+
+    await import('./main.js');
+    await startupDone;
+
+    const { Notification } = await import('electron');
+    vi.spyOn(Notification as { isSupported: () => boolean }, 'isSupported').mockReturnValue(true);
+    clientMock.onStatus?.('open');
+    await flushCatchup();
+
+    // The recurring reminder must be shown — it was returned by the server.
     expect(Notification).toHaveBeenCalledTimes(1);
     expect(Notification).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Missed reminder' }),
