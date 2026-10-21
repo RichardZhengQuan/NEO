@@ -154,6 +154,7 @@ export async function vetUrl(input: string | URL, opts: GuardOptions): Promise<V
 
   let addresses: string[];
   try {
+    if (opts.signal?.aborted) throw opts.signal.reason;
     addresses = await (opts.signal ? abortable(opts.resolver(host), opts.signal) : opts.resolver(host));
   } catch (err) {
     if (opts.signal?.aborted) throw opts.signal.reason;

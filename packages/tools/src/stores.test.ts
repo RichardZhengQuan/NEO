@@ -1,5 +1,5 @@
 /** Review tests for the productivity stores and their migrations. */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createConversationStore, migrate, openDatabase, storageMigrations, type NeoDatabase } from '@neo/storage';
 import { INBOX_LIST_ID, NeoError, type ProductivityStores, type ReminderStatus } from '@neo/protocol';
 import { createProductivityStores, toolsMigrations } from './stores/index.js';
@@ -760,6 +760,50 @@ describe('TaskStore', () => {
     // Now A can become a child of C's original position (B) — still no cycle
     const updated2 = stores.tasks.update(d.id, { parentId: a.id });
     expect(updated2.parentId).toBe(a.id);
+  });
+
+  it('update movedList collects a 100-descendant chain in bounded SQL round trips', () => {
+    // Build a 100-level linear chain: root → c0 → c1 → … → c99
+    const list = stores.tasks.createList({ name: 'Work' });
+    const root = stores.tasks.create({ title: 'root' });
+    let parentId = root.id;
+    for (let i = 0; i < 100; i++) {
+      parentId = stores.tasks.create({ title: `c${i}`, parentId }).id;
+    }
+
+    // Spy on db.prepare to count calls that happen during update.
+    let calls = 0;
+    const orig = t.db.prepare.bind(t.db);
+    vi.spyOn(t.db, 'prepare').mockImplementation((sql) => { calls++; return orig(sql); });
+
+    stores.tasks.update(root.id, { listId: list.id });
+
+    // A bulk-UPDATE implementation uses at most 8 prepare calls:
+    // mustGet, mustGetList, nextOrder, main UPDATE, CTE SELECT, bulk UPDATE (≤6 fixed).
+    // The old N+1 loop would call prepare ≥100 times for a 100-descendant chain.
+    expect(calls).toBeLessThanOrEqual(8);
+    expect(stores.tasks.get(root.id)?.listId).toBe(list.id);
+  });
+
+  it('delete collects a 100-descendant chain in one SQL round trip', () => {
+    // Build a 100-level linear chain: root → c0 → c1 → … → c99
+    const root = stores.tasks.create({ title: 'root' });
+    let parentId = root.id;
+    for (let i = 0; i < 100; i++) {
+      parentId = stores.tasks.create({ title: `c${i}`, parentId }).id;
+    }
+
+    // Spy on db.prepare to count calls that happen during delete.
+    let calls = 0;
+    const orig = t.db.prepare.bind(t.db);
+    vi.spyOn(t.db, 'prepare').mockImplementation((sql) => { calls++; return orig(sql); });
+
+    expect(stores.tasks.delete(root.id)).toBe(true);
+
+    // A recursive-CTE implementation uses at most 3 prepare calls: get, CTE, DELETE.
+    // The old BFS would call prepare ≥100 times for a 100-descendant chain.
+    expect(calls).toBeLessThanOrEqual(3);
+    expect(stores.tasks.get(root.id)).toBeNull();
   });
 });
 

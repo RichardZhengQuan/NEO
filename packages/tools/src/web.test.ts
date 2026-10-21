@@ -246,6 +246,28 @@ describe('web_fetch', () => {
     }
   });
 
+  it('does not invoke the resolver when the signal is already aborted', async () => {
+    const ac = new AbortController();
+    const reason = new DOMException('pre-aborted', 'AbortError');
+    ac.abort(reason);
+    let resolverCalls = 0;
+    const resolver: DnsResolver = async () => { resolverCalls++; return ['93.184.216.34']; };
+    const f = fakeFetch(() => html(''));
+    await expect(
+      guardedFetch('https://stall.example/', {
+        resolver,
+        transport: fetchTransport(f.fn),
+        signal: ac.signal,
+        allowPrivateNetwork: false,
+        isBlockedAddress,
+        maxRedirects: 5,
+        headers: {},
+      }),
+    ).rejects.toBe(reason);
+    expect(resolverCalls).toBe(0);
+    expect(f.calls).toHaveLength(0);
+  });
+
   it('turns HTML into readable text with title and link URLs', async () => {
     const page = `<!doctype html><html><head><title>My &amp; Page</title><style>p{color:red}</style>
       <script>var x = "<p>not text</p>";</script></head><body>
