@@ -401,6 +401,22 @@ describe('relay limits and lifecycle', () => {
     expect(relay.stats().phones).toBe(1);
   });
 
+  it('does not refill tokens when the clock moves backward and recovers', async () => {
+    let now = 1000;
+    const relay = await start({ clock: () => now, limits: { burstBytes: 6, bytesPerSecond: 4 } });
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    mobile.socket.send(Uint8Array.of(1, 2, 3, 4));
+    expect((await server.inbox.frame()).payload).toHaveLength(4);
+    now = 0;
+    mobile.socket.send(Uint8Array.of(5));
+    expect((await server.inbox.frame()).payload).toHaveLength(1);
+    now = 1000;
+    mobile.socket.send(Uint8Array.of(6, 7));
+    expect((await server.inbox.frame()).op).toBe(RelayOp.Close);
+    expect(await mobile.closed).toBe(TunnelCloseCode.RateLimited);
+  });
+
   it('rejects a slow destination instead of queuing additional phone data', async () => {
     const relay = await start({ limits: { maxBufferedBytes: 8 } });
     const server = await register(relay);
