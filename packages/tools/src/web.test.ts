@@ -13,6 +13,7 @@ import {
   systemResolver,
   type DnsResolver,
 } from './builtins/web.js';
+import { fetchTransport, guardedFetch } from './net.js';
 import { createToolRegistry } from './registry.js';
 
 function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
@@ -194,6 +195,55 @@ describe('web_fetch', () => {
     const t2 = await createWebFetchTool({ fetch: slowBody.fn, resolver: publicResolver, timeoutMs: 50 }).execute({ url: 'https://slow.example/' }, ctx());
     expect(t2.isError).toBe(true);
     expect(errorOf(t2)).toMatch(/timed out/i);
+  });
+
+  it('aborts during DNS resolution and settles promptly', async () => {
+    const ac = new AbortController();
+    let resolveStall!: () => void;
+    const stall = new Promise<string[]>((resolve) => { resolveStall = () => resolve([]); });
+    let startDns!: () => void;
+    const dnsStarted = new Promise<void>((resolve) => { startDns = resolve; });
+    const resolver: DnsResolver = () => { startDns(); return stall; };
+    const f = fakeFetch(() => html(''));
+    const tool = createWebFetchTool({ fetch: f.fn, resolver, timeoutMs: 5000 });
+    const resultP = tool.execute({ url: 'https://stall.example/' }, ctx({ signal: ac.signal }));
+    try {
+      await dnsStarted;
+      ac.abort(new DOMException('user aborted', 'AbortError'));
+      const result = await resultP;
+      expect(result.isError).toBe(true);
+      expect(errorOf(result)).toMatch(/cancelled/i);
+      expect(f.calls).toHaveLength(0);
+    } finally {
+      resolveStall();
+    }
+  });
+
+  it('preserves the guardedFetch abort reason during DNS resolution', async () => {
+    const ac = new AbortController();
+    const reason = new DOMException('user aborted', 'AbortError');
+    let resolveStall!: () => void;
+    const stall = new Promise<string[]>((resolve) => { resolveStall = () => resolve([]); });
+    const hosts: string[] = [];
+    const resolver: DnsResolver = (host) => { hosts.push(host); return stall; };
+    const f = fakeFetch(() => html(''));
+    const resultP = guardedFetch('https://stall.example/', {
+      resolver,
+      transport: fetchTransport(f.fn),
+      signal: ac.signal,
+      allowPrivateNetwork: false,
+      isBlockedAddress,
+      maxRedirects: 5,
+      headers: {},
+    });
+    try {
+      expect(hosts).toEqual(['stall.example']);
+      ac.abort(reason);
+      await expect(resultP).rejects.toBe(reason);
+      expect(f.calls).toHaveLength(0);
+    } finally {
+      resolveStall();
+    }
   });
 
   it('turns HTML into readable text with title and link URLs', async () => {
