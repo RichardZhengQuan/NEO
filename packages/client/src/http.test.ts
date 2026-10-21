@@ -2,6 +2,73 @@ import { describe, it, expect, vi } from 'vitest';
 import { NeoClient, NeoApiError } from './index.js';
 import { apiRequest } from './http.js';
 
+describe('Error cause preservation', () => {
+  it('preserves TimeoutError as cause on a headers-phase timeout', async () => {
+    const timeoutErr = new DOMException('Timeout', 'TimeoutError');
+    const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(timeoutErr);
+
+    const err = await apiRequest({
+      baseUrl: 'http://localhost:7777',
+      token: undefined,
+      fetch: fetchFn,
+      timeoutMs: 30_000,
+    }, { path: '/health', timeout: false }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.httpStatus).toBe(504);
+    expect(apiErr.code).toBe('timeout');
+    expect(apiErr.cause).toBe(timeoutErr);
+    expect((apiErr.cause as DOMException).name).toBe('TimeoutError');
+  });
+
+  it('preserves TimeoutError as cause on a body-phase timeout', async () => {
+    const timeoutErr = new DOMException('Timeout', 'TimeoutError');
+    const mockResponse = {
+      ok: true,
+      status: 200,
+      text: vi.fn<() => Promise<string>>().mockRejectedValue(timeoutErr),
+    } as unknown as Response;
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(mockResponse);
+
+    const err = await apiRequest({
+      baseUrl: 'http://localhost:7777',
+      token: undefined,
+      fetch: fetchFn,
+      timeoutMs: 30_000,
+    }, { path: '/data', timeout: false }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.httpStatus).toBe(504);
+    expect(apiErr.code).toBe('timeout');
+    expect(apiErr.cause).toBe(timeoutErr);
+    expect((apiErr.cause as DOMException).name).toBe('TimeoutError');
+  });
+
+  it('preserves the body-parse error as cause when the error body is malformed', async () => {
+    const mockResponse = {
+      ok: false,
+      status: 500,
+      json: vi.fn<() => Promise<unknown>>().mockRejectedValue(new SyntaxError('Unexpected token')),
+    } as unknown as Response;
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(mockResponse);
+
+    const err = await apiRequest({
+      baseUrl: 'http://localhost:7777',
+      token: undefined,
+      fetch: fetchFn,
+      timeoutMs: 30_000,
+    }, { path: '/data', timeout: false }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.httpStatus).toBe(500);
+    expect(apiErr.code).toBe('internal');
+    expect(apiErr.cause).toBeInstanceOf(SyntaxError);
+  });
+});
+
 describe('Network failure causes', () => {
   it('preserves the original fetch error and nested cause in apiRequest', async () => {
     const failure = new TypeError('fetch failed', { cause: new Error('cert') });
