@@ -67,7 +67,9 @@ export function formatReminderNotification(firing: ReminderFiring): {
   deepLink: string;
 } {
   const { reminder, missed } = firing;
-  const deepLink = `neo://reminders/${reminder.id}`;
+  const deepLink = reminder.messageId
+    ? `neo://timeline/${encodeURIComponent(reminder.messageId)}`
+    : `neo://reminders/${reminder.id}`;
 
   if (missed) {
     return {
