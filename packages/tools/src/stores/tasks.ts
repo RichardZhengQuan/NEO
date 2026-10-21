@@ -278,9 +278,16 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
             .all(id, id) as Row[];
           if (rows.length > 0) {
             const ids = rows.map((r) => r.id as string);
-            db.prepare(
-              `UPDATE tasks SET list_id = ?, updated_at = ? WHERE id IN (${ids.map(() => '?').join(', ')})`,
-            ).run(updated.listId, now, ...ids);
+            // The UPDATE binds two set-list placeholders (list_id and
+            // updated_at) in addition to the IN(?,...) ids, so keep each
+            // chunk at 997 to stay under SQLite's 999 variable cap.
+            const CHUNK = 997;
+            for (let i = 0; i < ids.length; i += CHUNK) {
+              const chunk = ids.slice(i, i + CHUNK);
+              db.prepare(
+                `UPDATE tasks SET list_id = ?, updated_at = ? WHERE id IN (${chunk.map(() => '?').join(', ')})`,
+              ).run(updated.listId, now, ...chunk);
+            }
           }
           for (const row of rows) {
             subtasks.push({ ...toTask(row), listId: updated.listId, updatedAt: now });
@@ -307,7 +314,11 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
           )
           .all(id) as { id: string }[];
         const ids = rows.map((r) => r.id);
-        db.prepare(`DELETE FROM tasks WHERE id IN (${ids.map(() => '?').join(', ')})`).run(...ids);
+        const CHUNK = 999;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const chunk = ids.slice(i, i + CHUNK);
+          db.prepare(`DELETE FROM tasks WHERE id IN (${chunk.map(() => '?').join(', ')})`).run(...chunk);
+        }
         return ids;
       });
       for (const deletedId of deletedIds) emit({ type: 'delete', id: deletedId });
