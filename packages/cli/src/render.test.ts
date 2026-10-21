@@ -60,6 +60,72 @@ describe('renderEvent', () => {
     expect(lines[0]?.text).toContain('Create reminder');
   });
 
+  it('tool.started strips ANSI from title/name', () => {
+    const ev: AgentEvent = {
+      type: 'tool.started', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
+      toolCallId: 'tc1', name: 'bad\x1b[2Jname', title: 'bad\x1b[2Jtitle', input: {},
+    };
+    const lines = renderEvent(ev);
+    expect(lines.length).toBeGreaterThan(0);
+    const text = lines.map((l) => l.text).join('');
+    expect(text).not.toContain('\x1b');
+    expect(text).toContain('badtitle');
+    const fallbackText = renderEvent({ ...ev, title: '' }).map((l) => l.text).join('');
+    expect(fallbackText).not.toContain('\x1b');
+    expect(fallbackText).toContain('badname');
+  });
+
+  it('tool.confirmation strips ANSI from title and description', () => {
+    const ev: AgentEvent = {
+      type: 'tool.confirmation', episodeId: 'c', conversationId: 'c', turnId: 't',
+      confirmation: {
+        id: 'cnf_1', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
+        toolCallId: 'tc1', name: 'web_fetch', title: 'bad\x1b[2Jtitle', input: {},
+        description: 'bad\x1b[2Jdesc', risk: 'read', requestedAt: 0, expiresAt: 1000,
+      },
+    };
+    const lines = renderEvent(ev);
+    const text = lines.map((l) => l.text).join('');
+    expect(text).not.toContain('\x1b');
+    expect(text).toContain('badtitle');
+    expect(text).toContain('baddesc');
+  });
+
+  it('tool.finished (error) strips ANSI from name and summary', () => {
+    const ev: AgentEvent = {
+      type: 'tool.finished', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
+      toolCallId: 'tc1', name: 'bad\x1b[2Jname', isError: true, summary: 'bad\x1b[2Jsum',
+    };
+    const lines = renderEvent(ev);
+    const text = lines.map((l) => l.text).join('');
+    expect(text).not.toContain('\x1b');
+    expect(text).toContain('badname');
+    expect(text).toContain('badsum');
+  });
+
+  it('tool.finished (success) strips ANSI from name and summary', () => {
+    const ev: AgentEvent = {
+      type: 'tool.finished', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
+      toolCallId: 'tc1', name: 'bad\x1b[2Jname', isError: false, summary: 'bad\x1b[2Jsum',
+    };
+    const lines = renderEvent(ev);
+    const text = lines.map((l) => l.text).join('');
+    expect(text).not.toContain('\x1b');
+    expect(text).toContain('badname');
+    expect(text).toContain('badsum');
+  });
+
+  it('turn.failed strips ANSI from error message', () => {
+    const ev: AgentEvent = {
+      type: 'turn.failed', episodeId: 'c', conversationId: 'c', turnId: 't',
+      error: { code: 'internal', message: 'bad\x1b[2Jmessage' },
+    };
+    const lines = renderEvent(ev);
+    const text = lines.map((l) => l.text).join('');
+    expect(text).not.toContain('\x1b');
+    expect(text).toContain('badmessage');
+  });
+
   it('tool.finished ok returns check chip', () => {
     const ev: AgentEvent = {
       type: 'tool.finished', episodeId: 'c', conversationId: 'c', turnId: 't', messageId: 'm',
