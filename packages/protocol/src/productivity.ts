@@ -205,7 +205,7 @@ export function describeRecurrence(r: RecurrenceInput | null | undefined): strin
   const n = r.interval ?? 1;
   const unit = { hourly: 'hour', daily: 'day', weekly: 'week', monthly: 'month', yearly: 'year' }[r.freq];
   let s = n === 1 ? `every ${unit}` : `every ${n} ${unit}s`;
-  if (r.freq === 'weekly' && r.byWeekday?.length) s += ` on ${[...r.byWeekday].sort().map((d) => WEEKDAYS[d]).join(', ')}`;
+  if ((r.freq === 'weekly' || r.freq === 'daily') && r.byWeekday?.length) s += ` on ${[...r.byWeekday].sort().map((d) => WEEKDAYS[d]).join(', ')}`;
   if (r.freq === 'monthly' && r.byMonthDay?.length)
     s += ` on ${r.byMonthDay.map((d) => (d === -1 ? 'the last day' : `day ${d}`)).join(', ')}`;
   if (r.count) s += `, ${r.count} times`;
