@@ -4,7 +4,7 @@ import { I18nProvider, buildMessages } from '@neo/ui';
 import { pairWithLink, pairingOutcomeKey, type PairOutcome } from '../actions/pairing.js';
 import { appDictionaries } from '../i18n.js';
 import { useSession } from '../state/session.js';
-import { ConnectScreen } from './ConnectScreen.js';
+import { ConnectScreen, OfflineScreen } from './ConnectScreen.js';
 
 const mocks = vi.hoisted(() => ({
   pair: vi.fn(),
@@ -27,6 +27,11 @@ vi.mock('../connection.js', async (importOriginal) => ({
 
 function show(locale = 'en') {
   return render(<I18nProvider locale={locale} messages={appDictionaries}><ConnectScreen /></I18nProvider>);
+}
+
+function showOffline() {
+  useSession.setState({ phase: 'offline', connectHint: { reason: 'none', serverUrl: 'https://a.example.com', token: 'tok' } });
+  return render(<I18nProvider locale="en" messages={appDictionaries}><OfflineScreen /></I18nProvider>);
 }
 
 beforeEach(() => {
@@ -105,5 +110,32 @@ describe('ConnectScreen pairing', () => {
       const messages = buildMessages(locale, appDictionaries);
       for (const outcome of outcomes) expect(messages[pairingOutcomeKey(outcome)]).toBeTruthy();
     }
+  });
+});
+
+describe('OfflineScreen retry', () => {
+  it('does not reconnect after choosing a different server', async () => {
+    let resolve!: (value: 'ok' | 'unauthorized' | 'unreachable') => void;
+    mocks.verify.mockReturnValue(new Promise((r) => { resolve = r; }));
+    showOffline();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(mocks.verify).toHaveBeenCalledExactlyOnceWith('https://a.example.com', 'tok', undefined);
+    fireEvent.click(screen.getByRole('button', { name: 'Use a different server' }));
+    await act(async () => { resolve('ok'); });
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(useSession.getState().phase).toBe('connect');
+  });
+
+  it('does not replace the manual connection hint after a stale unauthorized reply', async () => {
+    let resolve!: (value: 'ok' | 'unauthorized' | 'unreachable') => void;
+    mocks.verify.mockReturnValue(new Promise((r) => { resolve = r; }));
+    showOffline();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(mocks.verify).toHaveBeenCalledExactlyOnceWith('https://a.example.com', 'tok', undefined);
+    fireEvent.click(screen.getByRole('button', { name: 'Use a different server' }));
+    await act(async () => { resolve('unauthorized'); });
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(useSession.getState().phase).toBe('connect');
+    expect(useSession.getState().connectHint).toEqual({ reason: 'manual', serverUrl: 'https://a.example.com', tunnel: undefined });
   });
 });
