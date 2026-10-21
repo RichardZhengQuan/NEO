@@ -146,7 +146,7 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
     try {
       const retryIds = retryAfter.size > 0 ? new Set(retryAfter.keys()) : undefined;
       const next = reminders.nextDue(retryIds);
-      if (next) nextDeadline = Math.min(nextDeadline, next.dueAt);
+      if (next && !(retryIds?.has(next.id))) nextDeadline = Math.min(nextDeadline, next.dueAt);
       for (const retryAt of retryAfter.values()) {
         nextDeadline = Math.min(nextDeadline, retryAt);
       }

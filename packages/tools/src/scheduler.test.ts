@@ -474,4 +474,38 @@ describe('ReminderScheduler', () => {
     expect(attempts).toBeLessThan(60);
     scheduler.stop();
   });
+
+  it('arm() does not spin when nextDue() ignores excludeIds and returns a retrying reminder', async () => {
+    // A store whose nextDue() ignores the excludeIds argument simulates a third-party
+    // or legacy implementation. When reminder A is in retry state (retryAfter map),
+    // arm() must not use A.dueAt (past) as the next deadline — doing so produces a 0 ms
+    // delay and a CPU spin. The guard `!(retryIds?.has(next.id))` prevents this.
+    const store = makeStore();
+    const a = store.create({ title: 'A', dueAt: START });
+    store.create({ title: 'B', dueAt: START + 30_000 });
+    let armCount = 0;
+    const ignoringExclude: ReminderStore = {
+      ...store,
+      nextDue: (_excludeIds?: ReadonlySet<string>) => store.nextDue(), // intentionally ignores excludeIds
+      markFired: (id, firedAt, missed) => {
+        if (id === a.id) throw new Error('corrupt row');
+        return store.markFired(id, firedAt, missed);
+      },
+    };
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const { logger } = recordingLogger();
+    const scheduler = createReminderScheduler({
+      reminders: ignoringExclude,
+      clock: () => Date.now(),
+      failureBackoffMs: 10_000,
+      logger,
+    });
+    scheduler.start();
+    armCount = setTimeoutSpy.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5_000);
+    // With the spin the timer would have fired hundreds of times; with the fix it fires at most a handful.
+    expect(setTimeoutSpy.mock.calls.length - armCount).toBeLessThan(20);
+    scheduler.stop();
+    setTimeoutSpy.mockRestore();
+  });
 });
