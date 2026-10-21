@@ -14,6 +14,7 @@ import {
   OffRecordStateSchema,
   RecurrenceSchema,
   ReminderInputSchema,
+  ReminderPatchSchema,
   StartOffRecordRequestSchema,
   TaskInputSchema,
   EndOffRecordResponseSchema,
@@ -417,6 +418,13 @@ describe('misc helpers', () => {
     expect(ReminderInputSchema.safeParse(base).success).toBe(false);
     expect(ReminderInputSchema.safeParse({ ...base, dueAt: -1e20 }).success).toBe(false);
     expect(ReminderInputSchema.safeParse({ ...base, dueAt: Date.now() }).success).toBe(true);
+  });
+
+  it('rejects ReminderPatch dueAt outside the ECMAScript Date range', () => {
+    expect(ReminderPatchSchema.safeParse({ dueAt: 1e20 }).success).toBe(false);
+    expect(ReminderPatchSchema.safeParse({ dueAt: -1e20 }).success).toBe(false);
+    expect(ReminderPatchSchema.safeParse({ dueAt: Date.now() }).success).toBe(true);
+    expect(ReminderPatchSchema.safeParse({}).success).toBe(true);
   });
 
   it('rejects TaskInput dueAt outside the ECMAScript Date range', () => {
