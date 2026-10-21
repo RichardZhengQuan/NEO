@@ -423,6 +423,40 @@ describe('widget actions', () => {
 });
 
 describe('privacy helpers', () => {
+  it.each<[string, boolean]>([
+    ['http://[::ffff:127.0.0.1]:1234/v1', true],
+    ['http://[::ffff:10.0.0.5]/', true],
+    ['http://[::ffff:192.168.1.1]/', true],
+    ['http://[::ffff:8.8.8.8]/', false],
+    ['http://[::ffff:172.16.0.1]/', true],
+    ['http://[::127.0.0.1]:1234/v1', true],
+    ['http://[::10.0.0.5]/', true],
+    ['http://[::192.168.1.1]/', true],
+    ['http://[::8.8.8.8]/', false],
+    ['http://[::172.16.0.1]/', true],
+    ['http://[::ffff:7f00:1]/', true],
+    ['http://[::7f00:1]/', true],
+    ['http://[0:0:0:0:0:FFFF:7F00:1]/', true],
+    ['http://[::ffff:172.15.0.1]/', false],
+    ['http://[::ffff:172.31.255.255]/', true],
+    ['http://[::ffff:172.32.0.1]/', false],
+    ['http://[::172.15.0.1]/', false],
+    ['http://[::172.31.255.255]/', true],
+    ['http://[::172.32.0.1]/', false],
+    ['http://[::ffff:100.63.255.255]/', false],
+    ['http://[::ffff:100.64.0.1]/', true],
+    ['http://[::ffff:100.127.255.255]/', true],
+    ['http://[::ffff:100.128.0.1]/', false],
+    ['http://[::100.63.255.255]/', false],
+    ['http://[::100.64.0.1]/', true],
+    ['http://[::100.127.255.255]/', true],
+    ['http://[::100.128.0.1]/', false],
+    ['http://[::ffff:0:7f00:1]/', false],
+    ['http://[::1:2:3:4:5:6]/', false],
+  ])('classifies IPv4-mapped/compatible URL %s as local=%s', (url, local) => {
+    expect(isLocalUrl(url)).toBe(local);
+  });
+
   it('only treats IPv6 literals (not DNS names) as unique-local/link-local', () => {
     expect(isLocalUrl('https://fd-collector.example.com/v1')).toBe(false);
     expect(isLocalUrl('https://fe80.example.com')).toBe(false);
