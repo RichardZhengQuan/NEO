@@ -336,3 +336,29 @@ describe('extractInlineUI aggregate limits', () => {
     expect(result.blocks.length).toBe(0);
   });
 });
+
+describe('validateUIBlocks — deep nesting guard', () => {
+  it('returns {ok:false} without throwing for 20k-level nested stack input', () => {
+    // Build deeply nested: [{type:'stack', children:[{type:'stack', children:[...]}]}]
+    let inner: unknown = [];
+    for (let i = 0; i < 20000; i++) {
+      inner = [{ type: 'stack', children: inner }];
+    }
+    const result = validateUIBlocks(inner);
+    expect(result.ok).toBe(false);
+    expect((result as { ok: false; error: string }).error).toMatch(/nest at most/);
+    expect(result).toEqual({ ok: false, error: 'UI blocks may nest at most 8 levels deep.' });
+  });
+});
+
+describe('extractInlineUI — deep nesting guard', () => {
+  it('returns text, no blocks and the depth error for 20k-level nested input', () => {
+    // Construct the JSON directly: JSON.stringify would overflow before extraction.
+    const json = '[{"type":"stack","children":'.repeat(20000) + '[]' + '}]'.repeat(20000);
+    const text = 'Before\n```neo-ui\n' + json + '\n```\nAfter';
+    const result = extractInlineUI(text);
+    expect(result.text).toBe('Before\n\nAfter');
+    expect(result.blocks).toEqual([]);
+    expect(result.errors).toEqual(['UI blocks may nest at most 8 levels deep.']);
+  });
+});
