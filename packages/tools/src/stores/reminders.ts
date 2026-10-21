@@ -240,10 +240,16 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
 
     nextDue(excludeIds?: ReadonlySet<string>): Reminder | null {
       if (excludeIds?.size) {
-        const ids = [...excludeIds];
-        const placeholders = ids.map(() => '?').join(', ');
-        const r = db.prepare(`SELECT * FROM reminders WHERE status = 'scheduled' AND id NOT IN (${placeholders}) ORDER BY due_at ASC LIMIT 1`).get(...ids) as Row | undefined;
-        return r ? toReminder(r) : null;
+        // Walk the scheduled reminders in due-order and skip excluded ids in JS,
+        // so the SQL query binds no per-id variables and stays under SQLite's
+        // ~999 variable limit regardless of excludeIds.size.
+        const rows = db.prepare(
+          "SELECT * FROM reminders WHERE status = 'scheduled' ORDER BY due_at ASC LIMIT ?",
+        ).all(excludeIds.size + 1) as Row[];
+        for (const r of rows) {
+          if (!excludeIds.has(r.id as string)) return toReminder(r);
+        }
+        return null;
       }
       const r = db.prepare("SELECT * FROM reminders WHERE status = 'scheduled' ORDER BY due_at ASC LIMIT 1").get() as Row | undefined;
       return r ? toReminder(r) : null;

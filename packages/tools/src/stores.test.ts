@@ -62,6 +62,30 @@ describe('ReminderStore', () => {
     expect(updated.firedCount).toBe(0);
   });
 
+  it('nextDue handles ≥1000 excluded reminders within the SQL variable limit', () => {
+    const reminders = t.db.transaction(() => Array.from({ length: 1001 }, (_, i) =>
+      stores.reminders.create({ title: `Reminder ${i}`, dueAt: t.now + i }),
+    ));
+    const remaining = reminders[1000]!;
+    const excludeIds = new Set(reminders.slice(0, -1).map((reminder) => reminder.id));
+
+    // Enforce SQLite's conservative limit even when node:sqlite allows more.
+    const prepare = t.db.prepare;
+    t.db.prepare = (sql) => {
+      if ((sql.match(/\?/g) ?? []).length > 999) throw new Error('too many SQL variables');
+      return prepare.call(t.db, sql);
+    };
+    try {
+      expect(stores.reminders.nextDue(excludeIds)).toEqual(remaining);
+      excludeIds.add('rem_missing');
+      expect(stores.reminders.nextDue(excludeIds)).toEqual(remaining);
+      excludeIds.add(remaining.id);
+      expect(stores.reminders.nextDue(excludeIds)).toBeNull();
+    } finally {
+      t.db.prepare = prepare;
+    }
+  });
+
   it('snooze keeps the recurrence anchor; updating dueAt re-anchors', () => {
     const r = stores.reminders;
     const daily = r.create({ title: 'standup', dueAt: utc(2026, 10, 10, 9), recurrence: { freq: 'daily' } });
