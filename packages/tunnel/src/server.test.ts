@@ -439,6 +439,31 @@ describe('tunnel server validation and ownership', () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it('applies the outbound buffer limit to synchronous opening messages', async () => {
+    const handlerClosed = vi.fn();
+    const { client, frames } = await session({
+      prepareLink: (link) => Object.defineProperty(link, 'bufferedAmount', { get: () => 2 * 1024 * 1024 }),
+      handler: {
+        fetch: async () => new Response(),
+        openWebSocket: (_path, _peer, socket) => {
+          socket.send('welcome');
+          return { message() {}, close: handlerClosed };
+        },
+      },
+    });
+    const opened = frames.next(TunnelFrameType.WsOpened, 1);
+    const nextFrame = Promise.race([
+      frames.next(TunnelFrameType.WsMessage, 1),
+      frames.next(TunnelFrameType.Reset, 1),
+    ]);
+    client.send({ type: TunnelFrameType.WsOpen, stream: 1, payload: encodeJson({ path: '/api/ws' }) });
+    await opened;
+    const frame = await nextFrame;
+    expect(frame.type).toBe(TunnelFrameType.Reset);
+    expect(decodeJson<TunnelReset>(frame.payload).code).toBe('limit');
+    expect(handlerClosed).toHaveBeenCalledExactlyOnceWith(1013, expect.stringMatching(/\S/));
+  });
+
   it('closes every remaining WebSocket handler with 1006 when the session ends', async () => {
     const handlerClosed = vi.fn((_code: number, _reason: string) => { throw new Error('cleanup failed'); });
     const onClose = vi.fn();
