@@ -176,6 +176,17 @@ describe('writeInitConfig', () => {
     expect(server.port).toBe(9000);
   });
 
+  it('switching server configuration to local restores the loopback bind', () => {
+    const cfgPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({ mode: 'server', server: { host: '0.0.0.0', port: 9000 } }));
+    writeInitConfig(tmpDir, baseAnswers);
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    expect(cfg['mode']).toBe('local');
+    const server = cfg['server'] as { host: string; port: number };
+    expect(server.host).toBe('127.0.0.1');
+    expect(server.port).toBe(7777);
+  });
+
   it('merges with existing config when file already exists', () => {
     const cfgPath = path.join(tmpDir, 'config.json');
     fs.writeFileSync(cfgPath, JSON.stringify({ customField: 'preserved', mode: 'local' }));
