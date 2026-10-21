@@ -426,10 +426,20 @@ export class OpenAIAdapter implements ProviderAdapter {
     let vectors: number[][];
     if (this.kind === 'ollama') {
       const resp = await this.request(`${this.ollamaRoot}/api/embed`, { method: 'POST', headers, body }, request.signal, false);
-      vectors = ((await resp.json()) as { embeddings?: number[][] }).embeddings ?? [];
+      const json = await resp.json().catch((err: unknown) => {
+        const cancelled = asCancelled(err, request.signal);
+        if (cancelled) throw cancelled;
+        throw err;
+      });
+      vectors = (json as { embeddings?: number[][] }).embeddings ?? [];
     } else {
       const resp = await this.request(`${this.baseUrl}/embeddings`, { method: 'POST', headers, body }, request.signal, false);
-      const data = ((await resp.json()) as { data?: { index?: number; embedding?: number[] }[] }).data ?? [];
+      const json = await resp.json().catch((err: unknown) => {
+        const cancelled = asCancelled(err, request.signal);
+        if (cancelled) throw cancelled;
+        throw err;
+      });
+      const data = (json as { data?: { index?: number; embedding?: number[] }[] }).data ?? [];
       vectors = [...data].sort((x, y) => (x.index ?? 0) - (y.index ?? 0)).map((d) => d.embedding ?? []);
     }
     if (vectors.length !== request.texts.length) {

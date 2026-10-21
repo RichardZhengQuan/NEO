@@ -505,7 +505,10 @@ export class GeminiAdapter implements ProviderAdapter {
       throw asCancelled(err, request.signal) ?? this.networkError(err);
     }
     if (!response.ok) throw await this.httpError(response, request.signal);
-    const vectors = (((await response.json()) as { embeddings?: { values?: number[] }[] }).embeddings ?? []).map((e) => e.values ?? []);
+    const json = await response.json().catch((err: unknown) => {
+      throw asCancelled(err, request.signal) ?? err;
+    });
+    const vectors = ((json as { embeddings?: { values?: number[] }[] }).embeddings ?? []).map((e) => e.values ?? []);
     if (vectors.length !== request.texts.length) {
       throw new NeoError('provider_error', `Gemini returned ${vectors.length} embeddings for ${request.texts.length} texts.`);
     }

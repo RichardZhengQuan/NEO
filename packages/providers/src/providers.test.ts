@@ -516,6 +516,31 @@ describe('OpenAIAdapter — chat streaming', () => {
     expect(result[0]).toEqual([0.1, 0.2, 0.3]);
     expect(result[1]).toEqual([0.4, 0.5, 0.6]);
   });
+
+  it('embed maps an abort while reading the OpenAI success JSON body to cancelled', async () => {
+    const ac = new AbortController();
+    let bodyStarted!: () => void;
+    const readingBody = new Promise<void>((resolve) => { bodyStarted = resolve; });
+    const json = vi.fn(() => new Promise<never>((_resolve, reject) => {
+      ac.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      bodyStarted();
+    }));
+    const fakeResp = new Response(null, { status: 200 });
+    Object.defineProperty(fakeResp, 'json', { value: json });
+    const fakeFetch = vi.fn().mockResolvedValue(fakeResp);
+    const adapter = new OpenAIAdapter(makeOpenAIConfig(), { fetch: fakeFetch });
+
+    const result = adapter.embed({ model: 'text-embedding-3-small', texts: ['hello'], signal: ac.signal });
+    const cancelled = expect(result).rejects.toMatchObject({ code: 'cancelled' });
+    await readingBody;
+    ac.abort();
+    await cancelled;
+    expect(json).toHaveBeenCalledTimes(1);
+    expect(fakeFetch).toHaveBeenCalledExactlyOnceWith(
+      'https://api.openai.com/v1/embeddings',
+      expect.objectContaining({ signal: ac.signal }),
+    );
+  });
 });
 
 describe('OpenAIAdapter — Ollama', () => {
@@ -578,6 +603,31 @@ describe('OpenAIAdapter — Ollama', () => {
     const result = await adapter.embed({ model: 'nomic-embed-text', texts: ['hello'] });
     expect(capturedUrl).toBe('http://127.0.0.1:11434/api/embed');
     expect(result[0]).toEqual([0.1, 0.2]);
+  });
+
+  it('embed maps an abort while reading the Ollama success JSON body to cancelled', async () => {
+    const ac = new AbortController();
+    let bodyStarted!: () => void;
+    const readingBody = new Promise<void>((resolve) => { bodyStarted = resolve; });
+    const json = vi.fn(() => new Promise<never>((_resolve, reject) => {
+      ac.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      bodyStarted();
+    }));
+    const fakeResp = new Response(null, { status: 200 });
+    Object.defineProperty(fakeResp, 'json', { value: json });
+    const fakeFetch = vi.fn().mockResolvedValue(fakeResp);
+    const adapter = new OpenAIAdapter(makeOllamaConfig(), { fetch: fakeFetch });
+
+    const result = adapter.embed({ model: 'nomic-embed-text', texts: ['hello'], signal: ac.signal });
+    const cancelled = expect(result).rejects.toMatchObject({ code: 'cancelled' });
+    await readingBody;
+    ac.abort();
+    await cancelled;
+    expect(json).toHaveBeenCalledTimes(1);
+    expect(fakeFetch).toHaveBeenCalledExactlyOnceWith(
+      'http://127.0.0.1:11434/api/embed',
+      expect.objectContaining({ signal: ac.signal }),
+    );
   });
 
   it('wraps chat network errors with Ollama hint', async () => {
@@ -930,6 +980,31 @@ describe('GeminiAdapter — chat streaming', () => {
     });
     expect(result[0]).toEqual([0.1, 0.2, 0.3]);
     expect(result[1]).toEqual([0.4, 0.5, 0.6]);
+  });
+
+  it('embed maps an abort while reading the Gemini success JSON body to cancelled', async () => {
+    const ac = new AbortController();
+    let bodyStarted!: () => void;
+    const readingBody = new Promise<void>((resolve) => { bodyStarted = resolve; });
+    const json = vi.fn(() => new Promise<never>((_resolve, reject) => {
+      ac.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      bodyStarted();
+    }));
+    const fakeResp = new Response(null, { status: 200 });
+    Object.defineProperty(fakeResp, 'json', { value: json });
+    const fakeFetch = vi.fn().mockResolvedValue(fakeResp);
+    const adapter = new GeminiAdapter(makeGeminiConfig(), { fetch: fakeFetch });
+
+    const result = adapter.embed({ model: 'text-embedding-004', texts: ['hello'], signal: ac.signal });
+    const cancelled = expect(result).rejects.toMatchObject({ code: 'cancelled' });
+    await readingBody;
+    ac.abort();
+    await cancelled;
+    expect(json).toHaveBeenCalledTimes(1);
+    expect(fakeFetch).toHaveBeenCalledExactlyOnceWith(
+      'https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents',
+      expect.objectContaining({ signal: ac.signal }),
+    );
   });
 
   it('adds thinkingConfig for gemini-2.5 models', async () => {
