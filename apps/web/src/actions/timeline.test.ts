@@ -194,6 +194,35 @@ describe('retryTurn preserves composed input (F09)', () => {
   });
 });
 
+describe('retryTurn cross-turn boundary guard', () => {
+  it('retry does not resend another turn after its user message is deleted', async () => {
+    const user1: Message = {
+      id: 'user_1', episodeId: 'ep_1', conversationId: 'ep_1',
+      role: 'user', parts: [{ type: 'text', text: 'Old request' }],
+      createdAt: 1, status: 'complete', turnId: 'turn_1',
+    };
+    const assistant1: Message = {
+      id: 'assistant_1', episodeId: 'ep_1', conversationId: 'ep_1',
+      role: 'assistant', parts: [], createdAt: 2, status: 'complete', turnId: 'turn_1',
+    };
+    // user2 ("New request") is deleted — not in the messages list
+    const assistant2: Message = {
+      id: 'assistant_2', episodeId: 'ep_1', conversationId: 'ep_1',
+      role: 'assistant', parts: [], createdAt: 4, status: 'error', turnId: 'turn_2',
+    };
+    useTimeline.setState({ messages: [user1, assistant1, assistant2] });
+    const stream = vi.fn(async function* () {});
+    const client = { timeline: { stream } } as unknown as NeoClient;
+    useSession.setState({ wsStatus: 'idle' });
+    await retryTurn(client, assistant2, t);
+    // Must not send the previous turn's text
+    expect(stream).not.toHaveBeenCalledWith(expect.objectContaining({ text: 'Old request' }), expect.anything());
+    // Must surface retry_unavailable toast instead
+    expect(useToasts.getState().toasts[0]?.tone).toBe('warning');
+    expect(useToasts.getState().toasts[0]?.title).toBe("This message can't be sent again.");
+  });
+});
+
 describe('HTTP turn model assignment', () => {
   it('uses Text capability before the legacy default-model alias', () => {
     const text = { provider: 'connected-ai', model: 'chosen-text' };

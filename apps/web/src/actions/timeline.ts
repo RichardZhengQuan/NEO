@@ -170,8 +170,13 @@ export async function cancelTurn(client: NeoClient, t: TranslateFn): Promise<voi
 export async function retryTurn(client: NeoClient, assistant: Message, t: TranslateFn): Promise<void> {
   const messages = useTimeline.getState().messages;
   const idx = messages.findIndex((m) => m.id === assistant.id);
-  const user = [...messages.slice(0, idx)].reverse().find((m) => m.role === 'user' && (m.episodeId ?? m.conversationId) === (assistant.episodeId ?? assistant.conversationId));
-  if (!user) return;
+  const user = [...messages.slice(0, idx)].reverse().find(
+    (m) => m.role === 'user' && (m.episodeId ?? m.conversationId) === (assistant.episodeId ?? assistant.conversationId) && (assistant.turnId == null || m.turnId === assistant.turnId),
+  );
+  if (!user) {
+    pushToast({ tone: 'warning', title: t('chat.retry_unavailable') });
+    return;
+  }
   const text = textOf(user.parts);
   const images = user.parts.filter((p): p is Extract<UserInputPart, { type: 'image' }> => p.type === 'image');
   if (!text.trim() && !images.length) {
