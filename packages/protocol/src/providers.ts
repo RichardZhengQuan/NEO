@@ -231,7 +231,9 @@ export function isLocalUrl(url: string | undefined): boolean {
   } catch {
     return false;
   }
-  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.lan')) return true;
+  // Strip FQDN trailing dot — WHATWG URL preserves it in hostname
+  const normalizedHost = host.endsWith('.') ? host.slice(0, -1) : host;
+  if (normalizedHost === 'localhost' || normalizedHost.endsWith('.localhost') || normalizedHost.endsWith('.local') || normalizedHost.endsWith('.lan')) return true;
   if (host.includes(':')) {
     // IPv6 literal: loopback, unique-local (fc00::/7) and link-local (fe80::/10). Never apply these
     // prefix checks to DNS names — "fd-api.example.com" is a public host.
