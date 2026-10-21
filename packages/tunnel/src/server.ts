@@ -406,7 +406,7 @@ export function serveTunnel(link: MessageLink, options: {
       state.pending = [];
       for (const frame of pending) {
         if (state.closed || closed) break;
-        send(frame);
+        outgoing(frame);
         if (frame.type === TunnelFrameType.WsClose) {
           const value = decodeJson<TunnelWsClose>(frame.payload);
           finishSocket(stream, value.code, value.reason);
