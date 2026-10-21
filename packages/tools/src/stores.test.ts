@@ -510,6 +510,92 @@ describe('TaskStore', () => {
     expect(events).toEqual([]);
   });
 
+  it('deleting a parent task also deletes its child and emits delete for each', () => {
+    const parent = stores.tasks.create({ title: 'A' });
+    const child = stores.tasks.create({ title: 'B', parentId: parent.id });
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(stores.tasks.delete(parent.id)).toBe(true);
+
+    expect(stores.tasks.get(child.id)).toBeNull();
+    expect(stores.tasks.get(parent.id)).toBeNull();
+    expect(events).toHaveLength(2);
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'delete', id: parent.id },
+      { type: 'delete', id: child.id }
+    ]));
+  });
+
+  it('deleting a subtask recursively deletes only its subtree', () => {
+    const parent = stores.tasks.create({ title: 'Parent' });
+    const child = stores.tasks.create({ title: 'Child', parentId: parent.id });
+    const grandchild = stores.tasks.create({ title: 'Grandchild', parentId: child.id });
+    const greatGrandchild = stores.tasks.create({ title: 'Detail', parentId: grandchild.id });
+    const otherChild = stores.tasks.create({ title: 'Other child', parentId: child.id });
+    const sibling = stores.tasks.create({ title: 'Sibling', parentId: parent.id });
+    const unrelated = stores.tasks.create({ title: 'Unrelated' });
+    const deleted = [child, grandchild, greatGrandchild, otherChild];
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(stores.tasks.delete(child.id)).toBe(true);
+
+    for (const task of deleted) expect(stores.tasks.get(task.id)).toBeNull();
+    for (const task of [parent, sibling, unrelated]) expect(stores.tasks.get(task.id)).toEqual(task);
+    expect(events).toHaveLength(deleted.length);
+    expect(events).toEqual(expect.arrayContaining(
+      deleted.map((task) => ({ type: 'delete', id: task.id }))
+    ));
+  });
+
+  it('deleting a task with a corrupt descendant cycle deletes each task once', () => {
+    const parent = stores.tasks.create({ title: 'Parent' });
+    const child = stores.tasks.create({ title: 'Child', parentId: parent.id });
+    const grandchild = stores.tasks.create({ title: 'Grandchild', parentId: child.id });
+    t.db.prepare('UPDATE tasks SET parent_id = ? WHERE id = ?').run(grandchild.id, parent.id);
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(stores.tasks.delete(parent.id)).toBe(true);
+
+    for (const task of [parent, child, grandchild]) expect(stores.tasks.get(task.id)).toBeNull();
+    expect(events).toHaveLength(3);
+    expect(events).toEqual(expect.arrayContaining(
+      [parent, child, grandchild].map((task) => ({ type: 'delete', id: task.id }))
+    ));
+  });
+
+  it('deleting a task rolls back and emits nothing when a descendant deletion fails', () => {
+    const parent = stores.tasks.create({ title: 'Parent' });
+    const child = stores.tasks.create({ title: 'Child', parentId: parent.id });
+    t.db.exec(`
+      CREATE TRIGGER reject_subtask_delete BEFORE DELETE ON tasks
+      WHEN OLD.parent_id IS NOT NULL
+      BEGIN
+        SELECT RAISE(FAIL, 'subtask delete failed');
+      END;
+    `);
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(() => stores.tasks.delete(parent.id)).toThrow('subtask delete failed');
+
+    for (const task of [parent, child]) expect(stores.tasks.get(task.id)).toEqual(task);
+    expect(events).toEqual([]);
+  });
+
+  it('deleting an unknown task returns false and emits nothing', () => {
+    const task = stores.tasks.create({ title: 'Unrelated' });
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(stores.tasks.delete('task_missing')).toBe(false);
+
+    expect(stores.tasks.get(task.id)).toEqual(task);
+    expect(events).toEqual([]);
+  });
+
   it('deleteList moves tasks to the inbox, bumps updatedAt and emits an upsert per moved task', () => {
     const list = stores.tasks.createList({ name: 'Groceries' });
     const ids = [stores.tasks.create({ title: 'milk', listId: list.id }).id, stores.tasks.create({ title: 'eggs', listId: list.id }).id];

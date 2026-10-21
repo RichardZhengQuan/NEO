@@ -20,7 +20,7 @@ import {
   type TaskStore,
 } from '@neo/protocol';
 import { fromJson, toBool, toJson, toNum, toNumOrNull, type NeoDatabase } from '@neo/storage';
-import { changes, clampLimit, likePattern, parseInput, requireText } from './validate.js';
+import { clampLimit, likePattern, parseInput, requireText } from './validate.js';
 
 type Row = Record<string, unknown>;
 type ChangeEvent = { type: 'upsert'; task: Task } | { type: 'delete'; id: string };
@@ -288,9 +288,23 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
     },
 
     delete(id: string): boolean {
-      if (changes(db.prepare('DELETE FROM tasks WHERE id = ?').run(id)) === 0) return false;
-      emit({ type: 'delete', id });
-      return true;
+      const deletedIds = db.transaction(() => {
+        if (!get(id)) return [];
+        const visited = new Set<string>([id]);
+        const ids = [id];
+        for (const parentId of ids) {
+          const rows = db.prepare('SELECT id FROM tasks WHERE parent_id = ?').all(parentId) as { id: string }[];
+          for (const { id: subtaskId } of rows) {
+            if (visited.has(subtaskId)) continue;
+            visited.add(subtaskId);
+            ids.push(subtaskId);
+          }
+        }
+        db.prepare(`DELETE FROM tasks WHERE id IN (${ids.map(() => '?').join(', ')})`).run(...ids);
+        return ids;
+      });
+      for (const deletedId of deletedIds) emit({ type: 'delete', id: deletedId });
+      return deletedIds.length > 0;
     },
 
     onChange(listener: (event: ChangeEvent) => void): () => void {
