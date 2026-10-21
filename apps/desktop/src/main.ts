@@ -406,6 +406,9 @@ function startNotificationListener(serverUrl: string, ownerToken: string): void 
       if (event.type === 'reminder.fired') {
         if (!ElectronNotification.isSupported()) return;
         notifiedIds.add(event.firing.reminder.id);
+        // Persist the delivery time so a restart within the catch-up window
+        // does not re-show this notification as a "Missed reminder".
+        savePersistedState(Date.now());
         const { title, body, deepLink } = formatReminderNotification(event.firing);
         const notif = new ElectronNotification({ title, body });
         notif.on('click', () => focusWindowAtHash(deepLinkToHash(deepLink)));

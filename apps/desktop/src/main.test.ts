@@ -83,12 +83,18 @@ const server = vi.hoisted(() => ({
 
 const clientMock = vi.hoisted(() => ({
   onStatus: null as ((status: string) => void) | null,
+  onEvent: null as ((e: unknown) => void) | null,
   remindersList: vi.fn<(q?: { status?: string[]; lastFiredAtFrom?: number }) => Promise<{ items: unknown[] }>>()
     .mockResolvedValue({ items: [] }),
 }));
 
 vi.mock('electron', () => {
-  const Notification = Object.assign(vi.fn(), { isSupported: vi.fn(() => false) });
+  // Each new Notification() must have on() and show() so that callers outside
+  // the catch-up try/catch (e.g. the onEvent WS handler) do not throw.
+  const Notification = Object.assign(
+    vi.fn(function () { return { on: vi.fn(), show: vi.fn() }; }),
+    { isSupported: vi.fn(() => false) },
+  );
   return {
     app: electron.app,
     BrowserWindow: electron.BrowserWindow,
@@ -122,6 +128,7 @@ vi.mock('@neo/client', () => ({
     return {
       connect: vi.fn((opts: { onStatus?: (s: string) => void; onEvent?: (e: unknown) => void; reconnect?: boolean }) => {
         clientMock.onStatus = opts.onStatus ?? null;
+        clientMock.onEvent = opts.onEvent ?? null;
         return { close: vi.fn() };
       }),
       reminders: {
@@ -140,6 +147,7 @@ afterEach(() => {
   // Reset fs mock to default (no persisted state).
   fsMock.readFile.mockRejectedValue(new Error('ENOENT'));
   fsMock.writeFile.mockResolvedValue(undefined);
+  clientMock.onEvent = null;
 });
 
 describe('desktop startup failure', () => {
@@ -550,5 +558,70 @@ describe('startup reminder catch-up', () => {
     expect(Notification).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Missed reminder' }),
     );
+  });
+
+  it('persists state on live WS delivery so restart within catch-up window does not re-fire', async () => {
+    // A reminder delivered live via WS (not through catch-up) must advance the
+    // persisted lastRunAt floor.  Without this fix a restart within the 60-second
+    // catch-up window would include the reminder in the next catch-up sweep and
+    // show it again as "Missed reminder".
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7781',
+      ownerToken: 'owner-tok-ws-persist',
+      stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    });
+
+    const startupDone = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+
+    await import('./main.js');
+    await startupDone;
+
+    const { Notification } = await import('electron');
+    vi.spyOn(Notification as { isSupported: () => boolean }, 'isSupported').mockReturnValue(true);
+
+    // Deliver a reminder via the live WS stream (not the catch-up path).
+    const wsReminder = {
+      id: 'r-ws-live-1',
+      title: 'Take medicine',
+      notes: null,
+      dueAt: Date.now() + 60_000,
+      status: 'fired',
+      firedCount: 1,
+      lastFiredAt: Date.now(),
+      messageId: null,
+    };
+    const beforeFire = Date.now();
+    clientMock.onEvent?.({
+      event: {
+        type: 'reminder.fired',
+        firing: {
+          reminder: wsReminder,
+          occurrenceAt: wsReminder.lastFiredAt,
+          firedAt: wsReminder.lastFiredAt,
+          missed: false,
+          nextDueAt: null,
+        },
+      },
+    });
+
+    // Flush the micro-task queue so the async writeFile inside savePersistedState
+    // has a chance to be called.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The notification must have been shown.
+    expect(Notification).toHaveBeenCalledTimes(1);
+
+    // savePersistedState must have been called with a timestamp >= beforeFire,
+    // writing the delivery time to disk so the next startup's catch-up window
+    // starts no earlier than this delivery.
+    expect(fsMock.writeFile).toHaveBeenCalled();
+    const writeArgs = fsMock.writeFile.mock.calls[fsMock.writeFile.mock.calls.length - 1]!;
+    const written = JSON.parse(writeArgs[1] as string) as { lastRunAt: number };
+    expect(written.lastRunAt).toBeGreaterThanOrEqual(beforeFire);
   });
 });
