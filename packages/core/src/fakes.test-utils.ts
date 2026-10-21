@@ -42,6 +42,8 @@ import {
   type RecallQuery,
   type RecallResult,
   type RecalledMemory,
+  type Reminder,
+  type ReminderStore,
   type SettingsStore,
   type ToolCallRequest,
   type ToolContext,
@@ -212,6 +214,45 @@ export class MemConversationStore implements ConversationStore {
     for (const message of messages) this.deleteMessage(message.id);
     return messages;
   }
+}
+
+// ───────────────────────────── reminders ─────────────────────────────
+
+export class FakeReminders implements ReminderStore {
+  private readonly reminders = new Map<string, Reminder>();
+  readonly clearMessageLinksCalls: string[][] = [];
+
+  plant(input: Pick<Reminder, 'id' | 'title' | 'messageId'>): Reminder {
+    const reminder: Reminder = {
+      ...input, notes: null, dueAt: EPOCH + 60_000, timezone: 'Asia/Shanghai',
+      recurrence: null, status: 'scheduled', firedCount: 0, lastFiredAt: null,
+      createdAt: EPOCH, updatedAt: EPOCH,
+    };
+    this.reminders.set(reminder.id, clone(reminder));
+    return clone(reminder);
+  }
+  get(id: string): Reminder | null {
+    const reminder = this.reminders.get(id);
+    return reminder ? clone(reminder) : null;
+  }
+  clearMessageLinks(messageIds: string[]): void {
+    this.clearMessageLinksCalls.push(clone(messageIds));
+    const ids = new Set(messageIds);
+    for (const [id, reminder] of this.reminders) {
+      if (reminder.messageId && ids.has(reminder.messageId)) this.reminders.set(id, { ...reminder, messageId: null });
+    }
+  }
+  private unsupported(): never { throw new Error('not supported by FakeReminders'); }
+  list = this.unsupported;
+  create = this.unsupported;
+  update = this.unsupported;
+  delete = this.unsupported;
+  snooze = this.unsupported;
+  complete = this.unsupported;
+  due = this.unsupported;
+  nextDue = this.unsupported;
+  markFired = this.unsupported;
+  onChange = this.unsupported;
 }
 
 // ───────────────────────────── settings ─────────────────────────────
@@ -555,6 +596,7 @@ export function standardTools(): ToolDefinition[] {
 export interface Harness {
   runtime: AgentRuntime;
   conversations: MemConversationStore;
+  reminders: FakeReminders;
   settings: MemSettingsStore;
   model: ScriptedAdapter;
   providers: ScriptedRegistry;
@@ -573,6 +615,7 @@ export function harness(
 ): Harness {
   const { clock, advance } = fakeClock();
   const conversations = new MemConversationStore(clock);
+  const reminders = new FakeReminders();
   const settings = new MemSettingsStore({ timezone: 'Asia/Shanghai', ...opts.settings });
   const adapters = opts.adapters ?? [new ScriptedAdapter()];
   const providers = new ScriptedRegistry(adapters);
@@ -586,11 +629,11 @@ export function harness(
     error: (msg, data) => void warnings.push({ msg, data }),
     child: () => logger,
   };
-  const runtime = new AgentRuntime({ conversations, settings, providers, memory, tools, logger, clock, ...(opts.resolveSearchTool ? { resolveSearchTool: opts.resolveSearchTool } : {}) });
+  const runtime = new AgentRuntime({ conversations, reminders, settings, providers, memory, tools, logger, clock, ...(opts.resolveSearchTool ? { resolveSearchTool: opts.resolveSearchTool } : {}) });
   const events: AgentEvent[] = [];
   runtime.subscribe((e) => void events.push(e));
   const conv = conversations.create(opts.conv ?? {});
-  return { runtime, conversations, settings, model: adapters[0]!, providers, memory, tools, clock, advance, events, warnings, conv };
+  return { runtime, conversations, reminders, settings, model: adapters[0]!, providers, memory, tools, clock, advance, events, warnings, conv };
 }
 
 export const userText = (text: string) => [{ type: 'text' as const, text }];
