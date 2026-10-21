@@ -240,6 +240,45 @@ describe('observe: duplicate-label heuristic candidates keep sensitivity (regres
   });
 });
 
+describe('observe: duplicate-content health facts keep sensitivity (regression for #436)', () => {
+  it.each([
+    'Please remember that I have diabetes.',
+    "Please remember that I've diabetes.",
+    'Please remember that I have been diagnosed with diabetes.',
+    "Please remember that I've been diagnosed with diabetes.",
+    'Please remember that I have been treated for diabetes.',
+    "Please remember that I've been treated for diabetes.",
+  ])('keeps diabetes out of cloud embeddings and non-sensitive recall for "%s"', async (text) => {
+    const db = openNeoDatabase(':memory:');
+    const hashing = new HashingEmbedder(256);
+    const cloudCalls: string[] = [];
+    const cloud = {
+      id: hashing.id, dimensions: hashing.dimensions, isLocal: false as const,
+      async embed(texts: string[]) {
+        cloudCalls.push(...texts);
+        // Hashing has no health semantics: make the query relevant so recall must filter the fact.
+        return hashing.embed(texts.map((t) => t === 'health conditions' ? 'The user has diabetes.' : t));
+      },
+    };
+    const { clock } = makeClock();
+    const svc = createMemoryService({ db, embedder: cloud, llm: () => null, clock, logger: silentLogger });
+
+    try {
+      await svc.remember({ kind: 'fact', label: 'Favorite color', content: 'The user likes blue.' });
+      await svc.observe(makeTurn(text, 'Noted.'));
+      const recalled = await svc.recall({ text: 'health conditions', limit: 10, reinforce: false, allowSensitive: false });
+
+      expect(cloudCalls.some((t) => t.length > 0)).toBe(true);
+      expect(cloudCalls).toContain('health conditions');
+      expect.soft(cloudCalls.every((t) => !/diabetes/i.test(t))).toBe(true);
+      expect.soft(recalled.items.every((r) => !/diabetes/i.test(r.node.content))).toBe(true);
+      expect((await svc.graph({ limit: 10 })).nodes.some((n) => n.label === 'Health: diabetes' && n.sensitivity === 'sensitive')).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 // ─── parseLenientJson ────────────────────────────────────────────────────────
 
 describe('parseLenientJson', () => {

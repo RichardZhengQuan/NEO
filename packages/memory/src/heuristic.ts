@@ -150,6 +150,15 @@ export function heuristicExtract(userText: string): RememberInput[] {
       existing.source ??= c.source;
       return;
     }
+    // A sensitive fact supersedes normal copies with the same content, even under different labels.
+    if (c.sensitivity === 'sensitive') {
+      const norm = (s: string) => s.replace(/["“”「」]/g, '').replace(/[\s.!?]+$/, '').toLowerCase();
+      const cn = norm(c.content);
+      for (let i = out.length - 1; i >= 0; i--) {
+        const o = out[i]!;
+        if (o.sensitivity !== 'sensitive' && norm(o.content) === cn) out.splice(i, 1);
+      }
+    }
     out.push({ ...c, label, tags: c.kind === 'preference' ? assistantStyleTags(`${label} ${c.content}`, tags) : tags, content: c.content.replace(/["“”「」]/g, '').slice(0, 1000) });
   };
 
@@ -266,7 +275,7 @@ export function heuristicExtract(userText: string): RememberInput[] {
     const m = /\bi(?:'ve| have)(?: been diagnosed with| been treated for)?\s+((?:[\p{L}'-]+\s+){0,3}(?:disease|disorder|syndrome|diabetes|asthma|anxiety|depression|cancer|adhd|epilepsy|migraines?))\b/iu.exec(text);
     const condition = m?.[1]?.trim() ?? '';
     if (condition) {
-      add({ kind: 'fact', label: `Health: ${condition}`.slice(0, 80), content: `The user has ${condition}.`, importance: 0.8, sensitivity: 'sensitive' });
+      add({ kind: 'fact', label: `Health: ${condition}`.slice(0, 80), content: thirdPerson(m![0]), importance: 0.8, sensitivity: 'sensitive' });
     }
   }
 
