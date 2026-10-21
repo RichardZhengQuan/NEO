@@ -142,7 +142,7 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      const is404 = (e instanceof NeoApiError && e.httpStatus === 404) || /\b404\b/.test(msg);
+      const is404 = e instanceof NeoApiError ? e.httpStatus === 404 : /\b404\b/.test(msg);
       checks.push({
         name: 'Providers',
         status: is404 ? 'warn' : 'fail',
