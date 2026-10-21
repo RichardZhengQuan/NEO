@@ -854,7 +854,7 @@ function AccordionRenderer({ block, uiId, onAction, live, depth, blockPath = [] 
   return (
     <div className="neo-accordion">
       {block.items.map((item, itemIndex) => {
-        const isOpen = open[item.id] ?? false;
+        const isOpen = Object.prototype.hasOwnProperty.call(open, item.id) ? open[item.id]! : false;
         const panelId = `${prefix}-${item.id}`;
         const childOffset = block.items.slice(0, itemIndex).reduce((count, previous) => count + previous.children.length, 0);
         return (
@@ -1187,7 +1187,7 @@ function ChangesRenderer({ block, uiId, onAction }: BlockRendererProps & { block
   const currentBlock = useRef(block);
   currentBlock.current = block;
   const isApplied = (item: ChangeItem) => item.status === 'applied' || state.results[item.id]?.status === 'applied';
-  const pending = block.items.filter((item) => !isApplied(item) && (selected[item.id] ?? true));
+  const pending = block.items.filter((item) => !isApplied(item) && (Object.prototype.hasOwnProperty.call(selected, item.id) ? selected[item.id]! : true));
   const retry = pending.some((item) => state.results[item.id]?.status === 'failed');
   const applyLabel = t(retry ? 'block.changes_retry' : 'block.changes_apply', { n: pending.length });
   const allApplied = block.items.every(isApplied);
@@ -1239,7 +1239,7 @@ function ChangesRenderer({ block, uiId, onAction }: BlockRendererProps & { block
                   id={checkboxId}
                   className="neo-checkbox neo-change__check"
                   type="checkbox"
-                  checked={selected[item.id] ?? true}
+                  checked={Object.prototype.hasOwnProperty.call(selected, item.id) ? selected[item.id]! : true}
                   disabled={state.running || !onAction}
                   onChange={(event) => setSelected((previous) => ({ ...previous, [item.id]: event.target.checked }))}
                 />
