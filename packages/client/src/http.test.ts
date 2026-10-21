@@ -93,6 +93,24 @@ describe('Network failure causes', () => {
     expect(((apiErr.cause as TypeError).cause as Error).message).toBe('cert');
   });
 
+  it('normalizes a mid-body stream failure into a NeoApiError (retryable network)', async () => {
+    const stream = new ReadableStream({
+      start(ctl) { ctl.error(new TypeError('terminated')); },
+    });
+    const response = new Response(stream, { status: 200, headers: { 'content-type': 'application/json' } });
+    const ctx = {
+      baseUrl: 'http://localhost:7777',
+      token: undefined,
+      fetch: () => Promise.resolve(response),
+      timeoutMs: 30_000,
+    };
+    const err = await apiRequest(ctx, { path: '/health' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NeoApiError);
+    expect((err as NeoApiError).code).toBe('internal');
+    expect((err as NeoApiError).retryable).toBe(true);
+    expect((err as NeoApiError).cause).toBeInstanceOf(TypeError);
+  });
+
   it('preserves the original fetch error and nested cause in timeline.stream', async () => {
     const failure = new TypeError('fetch failed', { cause: new Error('cert') });
     const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(failure);
