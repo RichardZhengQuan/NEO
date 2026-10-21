@@ -688,6 +688,29 @@ describe('TaskStore', () => {
     expect(updated2.parentId).toBe(a.id);
   });
 
+  it('update movedList collects a 100-descendant chain in bounded SQL round trips', () => {
+    // Build a 100-level linear chain: root → c0 → c1 → … → c99
+    const list = stores.tasks.createList({ name: 'Work' });
+    const root = stores.tasks.create({ title: 'root' });
+    let parentId = root.id;
+    for (let i = 0; i < 100; i++) {
+      parentId = stores.tasks.create({ title: `c${i}`, parentId }).id;
+    }
+
+    // Spy on db.prepare to count calls that happen during update.
+    let calls = 0;
+    const orig = t.db.prepare.bind(t.db);
+    vi.spyOn(t.db, 'prepare').mockImplementation((sql) => { calls++; return orig(sql); });
+
+    stores.tasks.update(root.id, { listId: list.id });
+
+    // A bulk-UPDATE implementation uses at most 8 prepare calls:
+    // mustGet, mustGetList, nextOrder, main UPDATE, CTE SELECT, bulk UPDATE (≤6 fixed).
+    // The old N+1 loop would call prepare ≥100 times for a 100-descendant chain.
+    expect(calls).toBeLessThanOrEqual(8);
+    expect(stores.tasks.get(root.id)?.listId).toBe(list.id);
+  });
+
   it('delete collects a 100-descendant chain in one SQL round trip', () => {
     // Build a 100-level linear chain: root → c0 → c1 → … → c99
     const root = stores.tasks.create({ title: 'root' });

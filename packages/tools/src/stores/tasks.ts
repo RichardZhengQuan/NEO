@@ -276,10 +276,14 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
                SELECT * FROM tasks WHERE id IN (SELECT id FROM descendants) AND id != ?`,
             )
             .all(id, id) as Row[];
+          if (rows.length > 0) {
+            const ids = rows.map((r) => r.id as string);
+            db.prepare(
+              `UPDATE tasks SET list_id = ?, updated_at = ? WHERE id IN (${ids.map(() => '?').join(', ')})`,
+            ).run(updated.listId, now, ...ids);
+          }
           for (const row of rows) {
-            const subtask: Task = { ...toTask(row), listId: updated.listId, updatedAt: now };
-            db.prepare('UPDATE tasks SET list_id = ?, updated_at = ? WHERE id = ?').run(subtask.listId, now, subtask.id);
-            subtasks.push(subtask);
+            subtasks.push({ ...toTask(row), listId: updated.listId, updatedAt: now });
           }
         }
         return { updated, subtasks };
