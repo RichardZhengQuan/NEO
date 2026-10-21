@@ -208,10 +208,13 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     if (socket.readyState === WebSocket.OPEN) socket.close(code, reason);
   }
 
-  function send(socket: WebSocket, data: string | Uint8Array): boolean {
+  function send(socket: WebSocket, data: string | Uint8Array, onWrite?: (error?: Error) => void): boolean {
     if (socket.readyState !== WebSocket.OPEN) return false;
     try {
-      socket.send(data, error => { if (error) socket.terminate(); });
+      socket.send(data, error => {
+        if (error) { socket.terminate(); onWrite?.(error); }
+        else onWrite?.();
+      });
       return true;
     } catch {
       socket.terminate();
@@ -268,12 +271,12 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       return;
     }
     const data = framed ? encodeRelayFrame({ op: RelayOp.Data, connection: phone.connection, payload }) : payload;
-    if (!send(destination, data)) {
+    if (!send(destination, data, error => {
+      if (error) closePhone(phone, TunnelCloseCode.UnknownServer, 'Connection unavailable');
+      else { counts.messages++; counts.bytes += payload.length; }
+    })) {
       closePhone(phone, TunnelCloseCode.UnknownServer, 'Connection unavailable');
-      return;
     }
-    counts.messages++;
-    counts.bytes += payload.length;
   }
 
   function serverSocket(socket: WebSocket, ip: string): void {
