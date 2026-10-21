@@ -26,4 +26,44 @@ describe('EventHub', () => {
     events.publish({ type: 'note.deleted', noteId: 'note-2' });
     expect(received).toEqual([1]);
   });
+
+  it('delivers reentrant publishes in sequence order to later subscribers', () => {
+    const events = new EventHub(() => 500);
+    const firstSeen: number[] = [];
+    const seen: number[] = [];
+    events.subscribe((event) => {
+      firstSeen.push(event.seq);
+      if (event.seq === 1) {
+        events.publish({ type: 'note.deleted', noteId: 'note-2' });
+      }
+    });
+    events.subscribe((event) => seen.push(event.seq));
+
+    events.publish({ type: 'note.deleted', noteId: 'note-1' });
+
+    expect(seen).toEqual([1, 2]);
+    expect(firstSeen).toEqual([1, 2]);
+  });
+
+  it('drains publishes queued during delivery despite listener errors and accepts later publishes', () => {
+    const events = new EventHub(() => 500);
+    const seen: number[] = [];
+    events.subscribe((event) => {
+      if (event.seq === 1) {
+        events.publish({ type: 'note.deleted', noteId: 'note-2' });
+        events.publish({ type: 'note.deleted', noteId: 'note-3' });
+      } else if (event.seq === 2) {
+        events.publish({ type: 'note.deleted', noteId: 'note-4' });
+      }
+      throw new Error('subscriber error');
+    });
+    events.subscribe((event) => seen.push(event.seq));
+
+    events.publish({ type: 'note.deleted', noteId: 'note-1' });
+    expect(seen).toEqual([1, 2, 3, 4]);
+
+    expect(events.publish({ type: 'note.deleted', noteId: 'note-5' }).seq).toBe(5);
+    expect(seen).toEqual([1, 2, 3, 4, 5]);
+    expect(events.since(0).map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
+  });
 });
