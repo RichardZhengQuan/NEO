@@ -28,7 +28,8 @@ export class EventHub {
     this._publishing = true;
     try {
       let current: EventEnvelope | undefined = envelope;
-      while (current) {
+      // Read the growing outbox by index so reentrant fan-out stays linear.
+      for (let i = 0; current; i++) {
         for (const listener of [...this._listeners]) {
           try {
             listener(current);
@@ -36,9 +37,10 @@ export class EventHub {
             // ignore listener errors
           }
         }
-        current = this._outbox.shift();
+        current = this._outbox[i]
       }
     } finally {
+      this._outbox.length = 0
       this._publishing = false;
     }
     return envelope;
