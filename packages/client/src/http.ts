@@ -173,11 +173,22 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
     if (!text) return undefined as unknown as T;
     return JSON.parse(text) as T;
   } catch (err) {
-    // Map a body-read timeout to the same NeoApiError shape as a headers-phase timeout.
+    // Let pre-classified errors propagate unchanged.
+    if (err instanceof NeoError) throw err;
+
     if (err instanceof Error && err.name === 'TimeoutError') {
       throw new NeoApiError(504, { code: 'timeout', message: 'Request timed out.', retryable: true });
     }
-    throw err;
+
+    // User abort — let AbortError propagate naturally (caller checks signal).
+    if (err instanceof Error && err.name === 'AbortError') throw err;
+
+    // Any other body-read failure (e.g. TCP reset mid-body, TypeError: terminated).
+    throw new NeoApiError(0, {
+      code: 'internal',
+      message: err instanceof Error ? err.message : 'Network error',
+      retryable: true,
+    }, { cause: err });
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
