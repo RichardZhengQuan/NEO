@@ -171,6 +171,35 @@ describe('connect() WebSocket', () => {
     expect(statuses).toContain('closed');
   });
 
+  it("transitions status to 'reconnecting' as soon as an unexpected close schedules a retry", () => {
+    vi.useFakeTimers();
+    const statuses: string[] = [];
+    const ctx = {
+      baseUrl: 'http://localhost:7777',
+      getToken: () => 'ws-token',
+      WebSocketCtor: FakeWebSocket as unknown as typeof WebSocket,
+    };
+    const conn = createConnection(ctx, {
+      onEvent: () => {},
+      onStatus: (s) => statuses.push(s),
+      reconnect: true,
+    });
+    const ws = instances[0]!;
+
+    ws.simulateOpen();
+    ws.simulateMessage({ type: 'ready', serverVersion: '0.1.0', seq: 0 });
+    expect(conn.status).toBe('open');
+
+    // Unexpected close — triggers scheduleReconnect.
+    ws.simulateClose(1006, '');
+
+    // Status must flip to 'reconnecting' before any backoff delay elapses.
+    expect(statuses.at(-1)).toBe('reconnecting');
+    expect(conn.status).toBe('reconnecting');
+
+    conn.close();
+  });
+
   it('closing from inside the reconnecting listener prevents further socket construction', () => {
     vi.useFakeTimers();
     const ctx = {

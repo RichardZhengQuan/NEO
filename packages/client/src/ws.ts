@@ -89,15 +89,14 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
     if (closed || !reconnect) return;
     if (reconnectTimer !== null) return; // already scheduled
 
+    setStatus('reconnecting');
+
     const delay = backoffDelay(attempt);
     attempt++;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (!closed) {
-        setStatus('reconnecting');
-        if (!closed) {
-          openSocket();
-        }
+        openSocket();
       }
     }, delay);
   }
