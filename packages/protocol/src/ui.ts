@@ -724,7 +724,18 @@ export function validateUIBlocks(input: unknown): UIValidationResult {
   const list = Array.isArray(input) ? input : [input];
   if (list.length === 0) return { ok: false, error: 'No UI blocks given.' };
   if (list.length > MAX_UI_TOP_LEVEL) return { ok: false, error: `At most ${MAX_UI_TOP_LEVEL} top-level blocks are allowed.` };
-  const parsed = z.array(UIBlockSchema).safeParse(list);
+  // Wrap safeParse: Zod's recursive UIBlockSchema parse can throw RangeError for
+  // deeply nested input before our own depth check runs. Convert to typed rejection.
+  const parseResult = (() => {
+    try {
+      return z.array(UIBlockSchema).safeParse(list);
+    } catch (e) {
+      if (e instanceof RangeError) return null;
+      throw e;
+    }
+  })();
+  if (parseResult === null) return { ok: false, error: `UI blocks may nest at most ${MAX_UI_DEPTH} levels deep.` };
+  const parsed = parseResult;
   if (!parsed.success) {
     return { ok: false, error: z.prettifyError(parsed.error), issues: parsed.error.issues };
   }
