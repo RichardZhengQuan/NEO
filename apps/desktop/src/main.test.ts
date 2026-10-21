@@ -1,4 +1,5 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
+import { ipcMain, shell } from 'electron';
 import { startServer } from '@neo/server';
 
 const electron = await vi.hoisted(async () => {
@@ -82,7 +83,7 @@ vi.mock('electron', () => ({
   MenuItem: vi.fn(),
   Notification: vi.fn(),
   nativeImage: { createFromBuffer: vi.fn(() => ({ setTemplateImage: vi.fn() })) },
-  shell: {},
+  shell: { openExternal: vi.fn() },
   Tray: electron.Tray,
 }));
 
@@ -171,6 +172,86 @@ describe('desktop window lifecycle', () => {
     expect(electron.BrowserWindow).toHaveBeenCalledTimes(2);
     const reopenedWindow = electron.BrowserWindow.mock.results[1]!.value;
     expect(reopenedWindow.loadURL).toHaveBeenCalledWith(serverUrl);
+  });
+});
+
+describe('neo:openExternal IPC handler', () => {
+  it('opens mailto: URLs from a same-origin sender', async () => {
+    const serverUrl = 'http://127.0.0.1:7777';
+    server.startServer.mockResolvedValueOnce({
+      url: serverUrl,
+      ownerToken: 'test-owner-token',
+      stop: server.stopServer,
+    });
+
+    const startupReady = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+    await import('./main.js');
+    await startupReady;
+
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([channel]) => channel === 'neo:openExternal',
+    )?.[1];
+    expect(handler).toBeTypeOf('function');
+    const event = { senderFrame: { url: serverUrl } } as Electron.IpcMainInvokeEvent;
+    await handler!(event, 'mailto:alice@example.com');
+
+    expect(shell.openExternal).toHaveBeenCalledExactlyOnceWith('mailto:alice@example.com');
+  });
+
+  it('opens tel: URLs from a same-origin sender', async () => {
+    const serverUrl = 'http://127.0.0.1:7777';
+    server.startServer.mockResolvedValueOnce({
+      url: serverUrl,
+      ownerToken: 'test-owner-token',
+      stop: server.stopServer,
+    });
+
+    const startupReady = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+    await import('./main.js');
+    await startupReady;
+
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([channel]) => channel === 'neo:openExternal',
+    )?.[1];
+    expect(handler).toBeTypeOf('function');
+    const event = { senderFrame: { url: serverUrl } } as Electron.IpcMainInvokeEvent;
+    await handler!(event, 'tel:+15551234567');
+
+    expect(shell.openExternal).toHaveBeenCalledExactlyOnceWith('tel:+15551234567');
+  });
+
+  it('rejects javascript: URLs from a same-origin sender', async () => {
+    const serverUrl = 'http://127.0.0.1:7777';
+    server.startServer.mockResolvedValueOnce({
+      url: serverUrl,
+      ownerToken: 'test-owner-token',
+      stop: server.stopServer,
+    });
+
+    const startupReady = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+    await import('./main.js');
+    await startupReady;
+
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([channel]) => channel === 'neo:openExternal',
+    )?.[1];
+    expect(handler).toBeTypeOf('function');
+    const event = { senderFrame: { url: serverUrl } } as Electron.IpcMainInvokeEvent;
+    await handler!(event, 'javascript:alert(1)');
+
+    expect(shell.openExternal).not.toHaveBeenCalled();
   });
 });
 

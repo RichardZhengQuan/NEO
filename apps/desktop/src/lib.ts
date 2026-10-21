@@ -28,13 +28,18 @@ export function resolveWebDir(appPath: string, resourcesPath: string, isPacked: 
 // ───────────────────────────── URL safety ─────────────────────────────
 
 /**
- * Only http and https URLs may be opened in an external browser.
+ * Only http, https, mailto, and tel URLs may be opened by an external handler.
  * Blocks javascript:, file:, neo:// (handled internally), and everything else.
  */
 export function isSafeExternalUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    return (
+      parsed.protocol === 'http:' ||
+      parsed.protocol === 'https:' ||
+      parsed.protocol === 'mailto:' ||
+      parsed.protocol === 'tel:'
+    );
   } catch {
     return false;
   }

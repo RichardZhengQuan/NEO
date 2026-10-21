@@ -38,6 +38,14 @@ describe('isSafeExternalUrl', () => {
     expect(isSafeExternalUrl('https://example.com/path?q=1')).toBe(true);
   });
 
+  it('accepts mailto: URLs', () => {
+    expect(isSafeExternalUrl('mailto:alice@example.com')).toBe(true);
+  });
+
+  it('accepts tel: URLs', () => {
+    expect(isSafeExternalUrl('tel:+15551234567')).toBe(true);
+  });
+
   it('rejects javascript: scheme', () => {
     expect(isSafeExternalUrl('javascript:alert(1)')).toBe(false);
   });
