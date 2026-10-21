@@ -158,6 +158,9 @@ function createWindow(serverUrl: string): void {
       mainWindow?.hide();
     }
   });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
 
   void mainWindow.loadURL(serverUrl);
 }
