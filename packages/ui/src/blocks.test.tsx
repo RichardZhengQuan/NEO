@@ -210,6 +210,13 @@ describe('formatted blocks', () => {
     expect(screen.getByText('—')).toBeTruthy();
   });
 
+  it('renders a task due date at the Unix epoch', () => {
+    const { container } = render(widget({ type: 'tasks', tasks: [{ id: 't1', title: 'Test', done: false, dueAt: 0 }] }));
+    const time = container.querySelector('time');
+    expect(time).toBeTruthy();
+    expect(time?.getAttribute('datetime')).toBe('1970-01-01T00:00:00.000Z');
+  });
+
   it('uses tasks timezone for due dates when the device timezone is behind UTC', () => {
     const DateTimeFormat = Intl.DateTimeFormat;
     const dateTimeFormatSpy = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (locales, options) {
