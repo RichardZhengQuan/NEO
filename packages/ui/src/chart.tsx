@@ -60,7 +60,11 @@ export function niceTicks(min: number, max: number, count = 4): number[] {
   const start = Math.floor(min / step) * step;
   const end = Math.ceil(max / step) * step;
   const out: number[] = [];
-  for (let v = start; v <= end + step / 2; v += step) out.push(Number(v.toPrecision(12)));
+  // Overflow can make both v and the end threshold Infinity; bound by index too.
+  for (let i = 0, v = start; i < count + 2 && v <= end + step / 2; i++, v += step) {
+    if (!Number.isFinite(v)) break;
+    out.push(Number(v.toPrecision(12)));
+  }
   return out;
 }
 
