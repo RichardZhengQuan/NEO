@@ -587,6 +587,10 @@ describe('recall', () => {
     // must taint B and exclude it from results; the bug would return B.
     expect(raceTriggered).toBe(true);
     expect(result.items.every(r => r.node.id !== nodeB.id)).toBe(true);
+    // Issue #539 spec: no via entry in any result pointing at I, and I's label
+    // never leaks through a result's reason string.
+    expect(result.items.every(r => r.via.every(v => v.nodeId !== nodeI.id))).toBe(true);
+    expect(result.items.every(r => !r.reason.includes('Intermediate I'))).toBe(true);
   });
 
   it('recall via entity links (spreading activation, no lexical overlap)', async () => {
