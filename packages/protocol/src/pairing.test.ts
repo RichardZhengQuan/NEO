@@ -39,6 +39,21 @@ describe('isLanAddress', () => {
   ])('still rejects invalid LAN address %s', (address) => {
     expect(isLanAddress(address)).toBe(false);
   });
+
+  it.each([
+    '256.256.256.256:7778',
+    '999.0.0.1:7778',
+  ])('rejects purely-numeric hostname that is not a valid IPv4 address: %s', (address) => {
+    expect(isLanAddress(address)).toBe(false);
+  });
+
+  it.each([
+    ['0.0.0.0:1', true],
+    ['mac.local:7778', true],
+    ['192.168.1.1:7778', true],
+  ])('preserves %s → %s', (address, expected) => {
+    expect(isLanAddress(address)).toBe(expected);
+  });
 });
 
 describe('buildPairingLink', () => {
