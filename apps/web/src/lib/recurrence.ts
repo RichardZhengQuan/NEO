@@ -31,9 +31,16 @@ export function describeRecurrence(r: RecurrenceInput | null | undefined, t: Tra
     case 'hourly':
       s = n === 1 ? t('recur.hourly') : t('recur.every_hours', { n });
       break;
-    case 'daily':
-      s = n === 1 ? t('recur.daily') : t('recur.every_days', { n });
+    case 'daily': {
+      const days = [...(r.byWeekday ?? [])].sort((a, b) => a - b);
+      if (days.length) {
+        const names = listFormat(days.map((d) => weekdayName(d, locale)), locale);
+        s = n === 1 ? t('recur.daily_on', { days: names }) : t('recur.every_days_on', { n, days: names });
+      } else {
+        s = n === 1 ? t('recur.daily') : t('recur.every_days', { n });
+      }
       break;
+    }
     case 'weekly': {
       const days = [...(r.byWeekday ?? [])].sort((a, b) => a - b);
       const weekdays = days.length === 5 && days.every((d, i) => d === i + 1);
