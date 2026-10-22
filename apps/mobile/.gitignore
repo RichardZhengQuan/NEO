@@ -1,0 +1,6 @@
+# Generated platform directories (created by cap add)
+# android/ is committed; ios/ is not committed yet
+ios/
+
+# Node.js
+node_modules/

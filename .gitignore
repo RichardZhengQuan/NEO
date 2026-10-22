@@ -19,9 +19,6 @@ coverage/
 # local NEO data (databases, keys, tokens)
 .neo-data/
 
-# generated native project — Android (not committed; run `npx cap add android`)
-apps/mobile/android/
-
 # backups of AGENTS.md and CLAUDE.md kept by agent tools
 .one-mind/
 

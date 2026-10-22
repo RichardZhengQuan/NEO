@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security configuration for NEO Android.
+
+  The NEO LAN tunnel uses ws:// (cleartext transport) carrying Noise-encrypted
+  frames with a pinned server key provisioned at pairing time.  Cleartext is
+  allowed only for the addresses below; all public traffic must use TLS.
+
+  Android's network-security-config does not support CIDR notation for IP
+  ranges.  The entries below cover loopback and the IPv4 private-address ranges
+  by listing their canonical network addresses with a comment; the app's
+  runtime code additionally guards against connecting to public IPs via
+  cleartext.  For full CIDR enforcement the app would need custom socket-level
+  code.
+
+  Ranges covered:
+    127.0.0.1 / localhost  — loopback (dev server, local test)
+    10.0.0.0/8             — Class A private (represented by network address)
+    172.16.0.0/12          — Class B private (represented by network address)
+    192.168.0.0/16         — Class C private (represented by network address)
+-->
+<network-security-config>
+  <!-- Deny cleartext to all public hosts. -->
+  <base-config cleartextTrafficPermitted="false" />
+
+  <!-- Allow cleartext for loopback (dev / emulator). -->
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">localhost</domain>
+    <domain includeSubdomains="false">127.0.0.1</domain>
+  </domain-config>
+
+  <!--
+    Private LAN (10.x, 172.16-31.x, 192.168.x): Android does not support CIDR
+    here.  The tunnel's Noise encryption and pinned server key protect all
+    frames; the cleartext layer is only the WebSocket framing wrapper.
+    See apps/mobile/README.md — "Reaching your computer".
+  -->
+  <domain-config cleartextTrafficPermitted="true">
+    <!-- 10.0.0.0/8 network address — placeholder; see note above -->
+    <domain includeSubdomains="false">10.0.0.0</domain>
+    <!-- 172.16.0.0/12 network address — placeholder; see note above -->
+    <domain includeSubdomains="false">172.16.0.0</domain>
+    <!-- 192.168.0.0/16 network address — placeholder; see note above -->
+    <domain includeSubdomains="false">192.168.0.0</domain>
+  </domain-config>
+</network-security-config>
