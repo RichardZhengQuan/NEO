@@ -66,11 +66,6 @@ The nightly lessons loop ([docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md)) adds entri
 - #15 named `feat/memory-net-3d` as the owner of `NetTab.tsx` and said the later merge would fold in the other's change. #16 did exactly that, with no conflict and no regression.
 - Seen 1× (2026-10-12).
 
-## A test that doesn't exercise the code under test is not a check: assert path execution, not just the output
-
-- On 2026-10-17, #115's first commit `9fa6638` cleared stored credentials when `PATCH /api/providers/:id` changed `baseUrl`, but its embedding-refresh test ran against a fixture whose adapter never made an embedding request, so the assertion that "the refresh does not send the old key" held with zero calls — a vacuous pass, not an incorrect oracle. Codex flagged it as P2 on the same head; `b263852` switched the fixture to `kind: 'openai-compatible'` and asserted `live.fetch.mock.calls.length > 0`, turning the test back into a real check that the fix was exercised.
-- Seen 1× (2026-10-17).
-
 ## When your fix reuses a shared "refresh" helper, check every field that helper writes
 
 - #118's first commit `8f0d200` reused `refreshEpisodePreview` from the delete paths to refresh the preview on parts-only updates. That helper also writes `last_message_at` from the newest message's `created_at`, so an edited-widget update would stomp the completion-clock value `TurnRunner.finish` had just set (`turn.ts:956–964`). `sendTimeline` reads `last_message_at` for episode gap and 24-hour continuity (`runtime.ts:189–212`), so the preview fix could rotate episodes early or lose context carry-over. Codex flagged it as P2 on the same head; `39b042e` split out `refreshEpisodePreviewOnly` that writes only `preview` and `updated_at`, left the delete paths on the full helper, and added a regression test asserting `last_message_at` stays at the completion-clock value after a parts patch. The pattern: a helper named "refresh X" writes more than X, and reusing it on a path that doesn't own those extra fields clobbers whatever another writer put there.
