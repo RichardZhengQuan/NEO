@@ -673,10 +673,14 @@ function Lightbox({ images, index, onClose, onIndex }: { images: { url: string; 
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation();
+        onClose();
+      }
       if (e.key === 'ArrowRight' && images.length > 1) onIndex((index + 1) % images.length);
       if (e.key === 'ArrowLeft' && images.length > 1) onIndex((index - 1 + images.length) % images.length);
       if (e.key === 'Tab') {
+        e.stopImmediatePropagation();
         const buttons = dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])');
         const first = buttons?.[0];
         const last = buttons?.[buttons.length - 1];
@@ -689,8 +693,9 @@ function Lightbox({ images, index, onClose, onIndex }: { images: { url: string; 
         }
       }
     };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    // Window capture runs before a surrounding Modal's document capture listener.
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [index, images.length, onClose, onIndex]);
   if (!img) return null;
   return (

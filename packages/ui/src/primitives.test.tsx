@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import type { ImageBlock } from '@neo/protocol';
+import { BlockRenderer } from './blocks.js';
 import { I18nProvider } from './i18n.js';
 import { Modal } from './primitives.js';
+
+vi.mock('./remote-image.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./remote-image.js')>(),
+  useRemoteImages: () => ({ status: 'show', hosts: [], allow: () => undefined }),
+}));
 
 afterEach(() => {
   cleanup();
@@ -52,6 +59,36 @@ describe('nested Modals', () => {
 
     expect(document.activeElement).toBe(end);
     expect(outerTrap).not.toHaveBeenCalled();
+  });
+});
+
+describe('Lightbox inside a Modal', () => {
+  it('closes only the Lightbox on Escape', () => {
+    const onClose = vi.fn();
+    const block: ImageBlock = {
+      type: 'image',
+      url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      alt: 'Preview image',
+    };
+    render(
+      <I18nProvider locale="en">
+        <Modal open={true} title="Image modal" onClose={onClose}>
+          <BlockRenderer block={block} />
+        </Modal>
+      </I18nProvider>,
+    );
+    const imageButton = screen.getByRole('button', { name: 'Preview image' });
+    fireEvent.click(imageButton);
+    const lightbox = screen.getByRole('dialog', { name: 'Preview image' });
+    expect(lightbox.classList.contains('neo-lightbox')).toBe(true);
+
+    fireEvent.keyDown(lightbox, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog', { name: 'Preview image' })).toBeNull();
+    expect(document.body.contains(lightbox)).toBe(false);
+    expect(screen.getByRole('button', { name: 'Preview image' })).toBe(imageButton);
+    expect(screen.getByRole('dialog', { name: 'Image modal' })).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 
