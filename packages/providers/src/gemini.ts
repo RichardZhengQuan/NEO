@@ -147,7 +147,13 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
         })
         .filter((v): v is Record<string, unknown> => v !== undefined && !isEmptyObjectSchema(v));
       if (sanitized.length) out['anyOf'] = sanitized;
-      if (typeof rest['description'] === 'string') out['description'] = rest['description'];
+      // Preserve wrapper-level keywords (title, description, nullable, minLength/maxLength,
+      // minimum/maximum, pattern, minItems/maxItems, minProperties/maxProperties). Validators
+      // ignore keywords that don't apply to the value's actual type, so these stay correct on
+      // the outer wrapper when the union mixes types.
+      for (const [key, value] of Object.entries(rest)) {
+        if (SCALAR_KEYS.has(key)) out[key] = value;
+      }
       return out;
     }
     type = nonNull[0];

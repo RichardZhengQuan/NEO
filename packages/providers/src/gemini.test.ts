@@ -183,6 +183,22 @@ describe('sanitizeGeminiSchema', () => {
     });
   });
 
+  it('preserves wrapper scalar constraints on a type-union (minLength, minimum)', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number'], minLength: 3, minimum: 10 })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      minLength: 3,
+      minimum: 10,
+    });
+  });
+
+  it('preserves wrapper nullable and title on a type-union', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number'], title: 'Foo', nullable: true })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      title: 'Foo',
+      nullable: true,
+    });
+  });
+
   it('keeps property names that look like keywords and survives recursive refs', () => {
     const schema = {
       type: 'object',
