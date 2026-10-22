@@ -478,6 +478,35 @@ describe('relay limits and lifecycle', () => {
     expect(relay.stats()).toMatchObject({ phones: 0, messages: 1, bytes: 4 });
   });
 
+  it('closes a phone sending empty binary messages after exhausting its byte tokens', async () => {
+    const burstBytes = 6;
+    const relay = await start({ clock: () => 1000, limits: { burstBytes, bytesPerSecond: 2 } });
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    mobile.socket.send(new Uint8Array(burstBytes));
+    expect((await server.inbox.frame()).payload).toHaveLength(burstBytes);
+    for (let i = 0; i < 10; i++) mobile.socket.send(new Uint8Array(0));
+    const frame = await server.inbox.frame();
+    expect(relay.stats()).toMatchObject({ phones: 0, messages: 1, bytes: burstBytes });
+    expect(frame.op).toBe(RelayOp.Close);
+    expect(await mobile.closed).toBe(TunnelCloseCode.RateLimited);
+  });
+
+  it('closes a phone receiving empty binary messages after exhausting its byte tokens', async () => {
+    const burstBytes = 6;
+    const relay = await start({ clock: () => 1000, limits: { burstBytes, bytesPerSecond: 2 } });
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    mobile.socket.send(new Uint8Array(burstBytes));
+    expect((await server.inbox.frame()).payload).toHaveLength(burstBytes);
+    for (let i = 0; i < 10; i++) {
+      server.socket.send(encodeRelayFrame({ op: RelayOp.Data, connection: mobile.connection, payload: new Uint8Array(0) }));
+    }
+    expect((await server.inbox.frame()).op).toBe(RelayOp.Close);
+    expect(await mobile.closed).toBe(TunnelCloseCode.RateLimited);
+    expect(relay.stats()).toMatchObject({ phones: 0, messages: 1, bytes: burstBytes });
+  });
+
   it('refills byte tokens at the configured sustained rate', async () => {
     let now = 1000;
     const relay = await start({ clock: () => now, limits: { burstBytes: 4, bytesPerSecond: 2 } });
