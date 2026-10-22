@@ -243,8 +243,21 @@ export class AgentRuntime implements AgentRuntimeApi {
       }
       if (pending.cancelled) throw new NeoError('cancelled', 'The turn was cancelled.');
       const recentContext = continuity(previous, settings.agent.contextTokenBudget - estimateMessageTokens(incoming()));
+      // On the second and subsequent private turns, `history.length > 0` so the `previous`
+      // logic above didn't find the origin normal episode. Locate it now so we can pass its
+      // messages as `previousHistory` and keep the normal-conversation prefix intact.
+      const originEpisode = offRecord && history.length > 0
+        ? this.conversations.list().filter((e) => !e.offRecord && !e.incognito && e.id !== current!.id)
+            .sort((a, b) => (b.startedAt ?? b.createdAt) - (a.startedAt ?? a.createdAt))[0] ?? null
+        : null;
+      const originMessages = originEpisode ? this.conversations.messages(originEpisode.id) : undefined;
       if (created) this.broadcast({ type: 'episode.started', episodeId: current.id, episode: episodeOf(current) });
-      return await this.beginTurn(current, parts, adapter, model, settings, { ...prepared, ...(recentContext ? { recentContext } : {}), timeline: true });
+      return await this.beginTurn(current, parts, adapter, model, settings, {
+        ...prepared,
+        ...(recentContext ? { recentContext } : {}),
+        ...(originMessages?.length ? { previousHistory: originMessages } : {}),
+        timeline: true,
+      });
     } catch (err) {
       if (created && !this.conversations.messages(created.id).length && !offRecordEpisode(this.offRecordState(), created.id)) this.conversations.delete(created.id);
       throw err;
@@ -260,7 +273,7 @@ export class AgentRuntime implements AgentRuntimeApi {
     adapter: ProviderAdapter,
     model: string,
     settings: NeoSettings,
-    context: Partial<Pick<TurnPlan, 'context' | 'recalled' | 'recentContext' | 'timeline'>> = {},
+    context: Partial<Pick<TurnPlan, 'context' | 'recalled' | 'recentContext' | 'timeline' | 'previousHistory'>> = {},
   ): Promise<TurnHandle> {
     if (this.busy.has(conv.id)) throw new NeoError('conflict', 'A turn is already running in this episode.');
 

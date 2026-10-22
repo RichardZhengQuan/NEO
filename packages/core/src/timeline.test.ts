@@ -324,6 +324,25 @@ describe('off-record lifecycle', () => {
     expect(h.memory.observeCalls).toHaveLength(2);
   });
 
+  it('carries the normal-episode prefix into the second and subsequent private turns', async () => {
+    const h = harness();
+    const normalText = 'normal episode anchor text for off-record prefix check';
+    await send(h, normalText);
+    // Advance past the 24-hour recentContext window so normalText can only reach the
+    // second private turn via previousHistory (not via the recentContext summary path).
+    h.advance(25 * HOUR);
+    await h.runtime.startOffRecord();
+    await send(h, 'first private turn', true);
+    // Confirm normalText is absent from the first turn (recentContext cutoff was exceeded)
+    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).not.toContain(normalText);
+    // Capture request count to verify the second send actually triggered a new model call
+    const requestsBefore = h.model.requests.length;
+    await send(h, 'second private turn', true);
+    expect(h.model.requests.length).toBe(requestsBefore + 1);
+    // The normal-episode messages must appear in the request sent to the model on the second turn
+    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).toContain(normalText);
+  });
+
   it('endOffRecord clears messageId on reminders created in the episode', async () => {
     const h = harness();
     const normal = await send(h, 'normal');
