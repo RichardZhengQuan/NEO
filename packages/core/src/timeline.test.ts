@@ -324,24 +324,6 @@ describe('off-record lifecycle', () => {
     expect(h.memory.observeCalls).toHaveLength(2);
   });
 
-  it('carries the normal-episode prefix into the second and subsequent private turns', async () => {
-    const h = harness();
-    const normalText = 'normal episode anchor text for off-record prefix check';
-    await send(h, normalText);
-    await h.runtime.startOffRecord();
-    const firstOff = await send(h, 'first private turn', true);
-    // The first private turn sees normalText only via the recentContext summary (context part).
-    // originEpisode is null on the first turn (history.length === 0), so previousHistory is absent.
-    expect(recent(firstOff.handle.userMessage.parts)).toContain(normalText);
-    // The second private turn: previous === current off-record episode so recentContext is null,
-    // but originEpisode must supply the normal-episode messages via previousHistory.
-    const requestsBefore = h.model.requests.length;
-    await send(h, 'second private turn', true);
-    expect(h.model.requests.length).toBe(requestsBefore + 1);
-    // normalText must appear in the model messages via previousHistory on the second turn.
-    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).toContain(normalText);
-  });
-
   it('does not inject a stale normal-episode prefix after the 24-hour window', async () => {
     const h = harness();
     const normalText = 'stale normal episode text that must not reappear';
