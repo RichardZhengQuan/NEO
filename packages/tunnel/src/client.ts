@@ -288,6 +288,8 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         if (bodyReader !== null) {
           void bodyReader.cancel(reason).catch(() => {});
           bodyReader = null;
+        } else {
+          void request.body?.cancel(reason).catch(() => undefined);
         }
       };
       const fail = (error: unknown) => {

@@ -256,6 +256,54 @@ describe('tunnel client response body budget', () => {
   });
 });
 
+describe('tunnel client upload abort body cancellation', () => {
+  it('cancels request.body when aborted before connectSession resolves', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    let cancelSpyResolve!: (reason: unknown) => void;
+    const cancelCalled = new Promise<unknown>((resolve) => { cancelSpyResolve = resolve; });
+    const body = new ReadableStream<Uint8Array>({
+      cancel(reason) { cancelSpyResolve(reason); },
+    });
+
+    const openChannel = vi.spyOn(channels, 'openChannel').mockReturnValue(new Promise(() => {}));
+    const dh = generateKeyPair();
+    class ImmediateSocket implements WebSocketLike {
+      readyState = 1;
+      binaryType = 'blob';
+      get bufferedAmount() { return 0; }
+      onopen: WebSocketLike['onopen'] = null;
+      onmessage: WebSocketLike['onmessage'] = null;
+      onclose: WebSocketLike['onclose'] = null;
+      onerror: WebSocketLike['onerror'] = null;
+      send() {}
+      close() { this.readyState = 3; }
+    }
+    const transport = createTunnelTransport({
+      route: { serverId: uploadServerId, publicKey: toBase64Url(dh.publicKey), lan: ['lan:7778'], relay: null },
+      WebSocket: ImmediateSocket,
+    });
+    cleanups.push(() => transport.close());
+
+    const abort = new AbortController();
+    const response = transport.fetch(`${transport.baseUrl}/api/upload`, {
+      method: 'POST', body, duplex: 'half', signal: abort.signal,
+    } as RequestInit);
+    void response.catch(() => {});
+
+    // Reach the stalled handshake before aborting, while no body reader exists.
+    await Promise.resolve();
+    expect(openChannel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
+    const reason = new DOMException('User abort', 'AbortError');
+    abort.abort(reason);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(await cancelCalled).toBe(reason);
+    await expect(response).rejects.toBe(reason);
+  });
+});
+
 describe('tunnel client upload backpressure', () => {
   it.each([1, 4])('waits for the queue to drain after body chunk %i before sending more body or RequestEnd', async (after) => {
     const { transport, client, handler } = await session();
