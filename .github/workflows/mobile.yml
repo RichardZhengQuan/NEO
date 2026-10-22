@@ -47,7 +47,7 @@ jobs:
         working-directory: apps/mobile
         run: |
           xcodebuild -project ios/App/App.xcodeproj \
-            -scheme App \
+            -scheme AppDoesNotExist \
             -sdk iphonesimulator -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
             -destination 'generic/platform=iOS Simulator' \
