@@ -963,11 +963,23 @@ describe('Off-record migration race', () => {
     // reducer sees a still-streaming assistant and creates `entry.turn`.
     const turnStarted = events.find((e) => e.type === 'turn.started');
     expect(turnStarted).toBeDefined();
-    const migrationCompletes = events.filter((e) => e.type === 'message.completed' && (e as { message: { id: string } }).message.id !== final.id).concat(
-      events.filter((e) => e.type === 'message.completed' && (e as { message: { id: string } }).message.id === final.id && (e as { message: { status: string } }).message.status === 'streaming')
-    );
+    // The migration emits two `message.completed` events: one for the
+    // original placeholder being frozen (its id is the original pre-migration
+    // id, which lives in events as a message.completed with status 'complete'
+    // and a conversationId equal to the original conv, not final.conversationId),
+    // and one for the newly-appended private continuation (status 'streaming',
+    // id === final.id, conversationId === offRecordState.episodeId). Assert
+    // both exist so the ordering loop below isn't vacuous.
+    type MessageCompleted = Extract<(typeof events)[number], { type: 'message.completed' }>;
+    const originalFreeze = events.find((e): e is MessageCompleted =>
+      e.type === 'message.completed' && e.message.conversationId === conv.id);
+    const continuationAppend = events.find((e): e is MessageCompleted =>
+      e.type === 'message.completed' && e.message.id === final.id && e.message.status === 'streaming');
+    expect(originalFreeze).toBeDefined();
+    expect(continuationAppend).toBeDefined();
     const indexOfStart = events.indexOf(turnStarted!);
-    for (const mc of migrationCompletes) expect(events.indexOf(mc)).toBeLessThan(indexOfStart);
+    expect(events.indexOf(originalFreeze!)).toBeLessThan(indexOfStart);
+    expect(events.indexOf(continuationAppend!)).toBeLessThan(indexOfStart);
     expect((turnStarted as { assistantMessageId: string }).assistantMessageId).toBe(final.id);
     expect((turnStarted as { conversationId: string }).conversationId).toBe(offRecordState.episodeId);
     expect((turnStarted as { episodeId: string }).episodeId).toBe(offRecordState.episodeId);
