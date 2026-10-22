@@ -225,7 +225,17 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       // Preserve the original occurrence time so markFired can distinguish a
       // snoozed redelivery from a true occurrence.  If the reminder is already
       // snoozed, keep the first snooze's anchor rather than overwriting it.
-      const snoozedDueAt = toNumOrNull(r.snoozed_due_at) ?? existing.dueAt;
+      const existingSnoozedDueAt = toNumOrNull(r.snoozed_due_at);
+      // Only mark as a snoozed redelivery when the reminder has already been delivered
+      // (lastFiredAt is set).  A pre-fire snooze just moves the due time; it must not
+      // set snoozed_due_at so that markFired treats the eventual delivery as a normal
+      // first occurrence rather than a redelivery, which would restore the original
+      // dueAt (now in the past) and cause a double notification.
+      const snoozedDueAt = existingSnoozedDueAt !== null
+        ? existingSnoozedDueAt
+        : existing.lastFiredAt !== null
+          ? existing.dueAt
+          : null;
       const updated: Reminder = { ...existing, dueAt, status: 'scheduled', updatedAt: now };
       db.prepare('UPDATE reminders SET due_at = ?, snoozed_due_at = ?, status = ?, updated_at = ? WHERE id = ?').run(dueAt, snoozedDueAt, 'scheduled', now, id);
       emit({ type: 'upsert', reminder: updated });

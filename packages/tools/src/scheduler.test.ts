@@ -109,6 +109,30 @@ describe('ReminderScheduler', () => {
     restarted.stop();
   });
 
+  it('fires a recurring reminder snoozed before its first delivery only once and advances the series', () => {
+    const mondayAtNine = START + (2 * 24 * 60 + 60) * MIN;
+    const tuesdayAtNine = mondayAtNine + 24 * 60 * MIN;
+    const store = makeStore();
+    const r = store.create({ title: 'daily', dueAt: mondayAtNine, recurrence: { freq: 'daily', count: 2 } });
+    const scheduler = createReminderScheduler({ reminders: store, clock: () => Date.now() });
+    const fired: ReminderFiring[] = [];
+    scheduler.onFire(firing => fired.push(firing));
+
+    vi.setSystemTime(mondayAtNine - 5 * MIN);
+    expect(store.snooze(r.id, 10).dueAt).toBe(mondayAtNine + 5 * MIN);
+    vi.setSystemTime(mondayAtNine + 5 * MIN);
+    expect(scheduler.tick()).toHaveLength(1);
+    expect(fired).toHaveLength(1);
+    expect(store.get(r.id)).toMatchObject({ firedCount: 1, dueAt: tuesdayAtNine, status: 'scheduled' });
+
+    for (const minutes of [6, 10, 60]) {
+      vi.setSystemTime(mondayAtNine + minutes * MIN);
+      expect(scheduler.tick()).toEqual([]);
+    }
+    expect(fired).toHaveLength(1);
+    expect(store.get(r.id)).toMatchObject({ firedCount: 1, dueAt: tuesdayAtNine });
+  });
+
   it('records and replays a snoozed recurring firing without consuming another occurrence', () => {
     const store = makeStore();
     const r = store.create({ title: 'daily', dueAt: START, recurrence: { freq: 'daily' } });
