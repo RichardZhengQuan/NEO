@@ -27,7 +27,7 @@ Check a package with `pnpm --filter <package> typecheck && pnpm --filter <packag
 | Web app | `apps/web` | [GENERATIVE_UI](docs/GENERATIVE_UI.md#rendering-guidelines-neoui) (Rendering guidelines). Look at the change in a browser at desktop and phone widths. | `@neo/web` |
 | CLI | `packages/cli` | [ARCHITECTURE](docs/ARCHITECTURE.md#deployment-modes) (Deployment modes) | `@neo/cli` |
 | Desktop app | `apps/desktop` | [DEPLOYMENT](docs/DEPLOYMENT.md#1-on-device-desktop-app) (On-device) | `@neo/desktop` |
-| Mobile app | `apps/mobile` | [apps/mobile/README.md](apps/mobile/README.md). The native projects aren't committed. | `@neo/mobile` |
+| Mobile app | `apps/mobile` | [apps/mobile/README.md](apps/mobile/README.md). The iOS and Android native projects are committed. | `@neo/mobile` |
 | Homepage | `site/` (static, no build) | [site/README.md](site/README.md). Look at it in a browser. | none |
 | CI | `.github/workflows/ci.yml` | CONTRIBUTING (Pull requests) | none |
 

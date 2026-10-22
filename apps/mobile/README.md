@@ -7,8 +7,10 @@ desktop app and PWA — no separate React code to maintain.
 ## Prerequisites
 
 - **Node.js ≥ 22.13** and **pnpm ≥ 11** (same as the rest of the monorepo)
-- **iOS**: macOS with Xcode ≥ 16, Xcode Command Line Tools, CocoaPods
-- **Android**: Android Studio ≥ Hedgehog, JDK 17
+- **iOS**: macOS with Xcode ≥ 26, Xcode Command Line Tools, CocoaPods
+- **Android**: Android Studio ≥ Otter (2025.2.1), JDK 21, Android SDK with
+  min API 26 (Android 8.0) available (set by Capacitor 8 and required by
+  `@capacitor/barcode-scanner`)
 
 ---
 
@@ -59,8 +61,8 @@ Both the **iOS project** (`apps/mobile/ios/`) and the **Android project**
 
 > **Installing the debug APK on your phone**
 >
-> Prerequisites: Android Studio ≥ Hedgehog, JDK 17, Android SDK, and `adb`
-> (part of Android platform-tools).
+> Prerequisites: Android Studio ≥ Otter (2025.2.1), JDK 21, Android SDK
+> (min API 26), and `adb` (part of Android platform-tools).
 >
 > ```bash
 > # 1. Build the web app (if you haven't already):
@@ -177,15 +179,18 @@ and the pinned server key protect everything inside it.
 #### Android — network security configuration
 
 `android/app/src/main/res/xml/network_security_config.xml` is committed.
-It denies cleartext by default and allows it only for `localhost`, `127.0.0.1`,
-and the canonical addresses of the three RFC-1918 private ranges (10.x,
-172.16-31.x, 192.168.x).  All relay and public-server traffic must use TLS.
+It denies cleartext for every host by default and permits ws:// against
+loopback (`localhost`, `127.0.0.1`) only.  Public and relay servers must
+use TLS.
 
-> **Note**: Android's `network-security-config` does not support CIDR notation.
-> The config lists the network-range addresses as placeholders and documents
-> the limitation in the file.  Full CIDR enforcement would require custom
-> socket-level code.  The tunnel's Noise encryption and pinned server key
-> provide the actual security for LAN connections.
+> **Known gap, tracked in #569**: Android's `network-security-config` does
+> not support CIDR, so a private-LAN address like `192.168.1.20` is not
+> permitted and the Noise LAN tunnel does not reach it from this config
+> alone.  Covering the private LAN requires either a socket-level CIDR
+> check or widening the base-config to allow cleartext (the Noise frame
+> encryption and pinned server key would then be the actual security).
+> Until that lands, Android LAN pairing is non-functional; a public NEO
+> over `wss://` works.
 
 `AndroidManifest.xml` already references the config:
 
@@ -196,9 +201,8 @@ and the canonical addresses of the three RFC-1918 private ranges (10.x,
 ```
 
 The Capacitor config enables `android.allowMixedContent` because its WebView
-origin is `https://localhost` while the private LAN address uses `ws://`.
-Cleartext permission applies only to the LAN transport; all frames inside the
-tunnel are end-to-end encrypted.  Direct public server connections use HTTPS.
+origin is `https://localhost` while the LAN tunnel would use `ws://`.  Direct
+public-server connections use HTTPS.
 
 ---
 

@@ -2,45 +2,29 @@
 <!--
   Network security configuration for NEO Android.
 
-  The NEO LAN tunnel uses ws:// (cleartext transport) carrying Noise-encrypted
-  frames with a pinned server key provisioned at pairing time.  Cleartext is
-  allowed only for the addresses below; all public traffic must use TLS.
+  base-config denies cleartext for every host; the loopback domain-config
+  allows ws:// against the dev server on 127.0.0.1 / localhost.
 
-  Android's network-security-config does not support CIDR notation for IP
-  ranges.  The entries below cover loopback and the IPv4 private-address ranges
-  by listing their canonical network addresses with a comment; the app's
-  runtime code additionally guards against connecting to public IPs via
-  cleartext.  For full CIDR enforcement the app would need custom socket-level
-  code.
+  Private-LAN cleartext is NOT configured here.  Android's
+  network-security-config does not support CIDR notation, and listing the
+  three RFC-1918 base addresses (10.0.0.0, 172.16.0.0, 192.168.0.0) as
+  domain-config entries is a placebo — Android's matcher is exact per host,
+  so an actual LAN address like 192.168.1.20 is still subject to the base
+  cleartext denial.  The NEO LAN tunnel (ws:// carrying Noise-encrypted
+  frames with a pinned server key) therefore does NOT work on Android from
+  this config alone; a public NEO over wss:// does.
 
-  Ranges covered:
-    127.0.0.1 / localhost  — loopback (dev server, local test)
-    10.0.0.0/8             — Class A private (represented by network address)
-    172.16.0.0/12          — Class B private (represented by network address)
-    192.168.0.0/16         — Class C private (represented by network address)
+  Covering the private LAN requires either a runtime CIDR check at the
+  socket layer or widening base-config to allow cleartext (the Noise tunnel
+  provides the actual security).  Tracked in #569.
 -->
 <network-security-config>
-  <!-- Deny cleartext to all public hosts. -->
+  <!-- Deny cleartext to every host by default. -->
   <base-config cleartextTrafficPermitted="false" />
 
-  <!-- Allow cleartext for loopback (dev / emulator). -->
+  <!-- Allow cleartext against loopback for the dev server and emulator. -->
   <domain-config cleartextTrafficPermitted="true">
     <domain includeSubdomains="false">localhost</domain>
     <domain includeSubdomains="false">127.0.0.1</domain>
-  </domain-config>
-
-  <!--
-    Private LAN (10.x, 172.16-31.x, 192.168.x): Android does not support CIDR
-    here.  The tunnel's Noise encryption and pinned server key protect all
-    frames; the cleartext layer is only the WebSocket framing wrapper.
-    See apps/mobile/README.md — "Reaching your computer".
-  -->
-  <domain-config cleartextTrafficPermitted="true">
-    <!-- 10.0.0.0/8 network address — placeholder; see note above -->
-    <domain includeSubdomains="false">10.0.0.0</domain>
-    <!-- 172.16.0.0/12 network address — placeholder; see note above -->
-    <domain includeSubdomains="false">172.16.0.0</domain>
-    <!-- 192.168.0.0/16 network address — placeholder; see note above -->
-    <domain includeSubdomains="false">192.168.0.0</domain>
   </domain-config>
 </network-security-config>
