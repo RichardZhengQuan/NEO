@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ChangeItemSchema,
+  CountdownBlockSchema,
   FORM_SUBMIT_ACTION_ID,
   MAX_UI_BLOCKS,
   NeoError,
+  ReminderBlockSchema,
+  ReminderFieldsSchema,
+  TaskFieldsSchema,
+  TasksBlockSchema,
   UI_ACTION_ID_PREFIX,
   UIBlockSchema,
   childBlocks,
@@ -360,5 +366,50 @@ describe('extractInlineUI — deep nesting guard', () => {
     expect(result.text).toBe('Before\n\nAfter');
     expect(result.blocks).toEqual([]);
     expect(result.errors).toEqual(['UI blocks may nest at most 8 levels deep.']);
+  });
+});
+
+describe('epoch-ms range guards', () => {
+  it('rejects CountdownBlock until outside ECMAScript Date range', () => {
+    expect(CountdownBlockSchema.safeParse({ type: 'countdown', label: 'x', until: 1e20 }).success).toBe(false);
+    expect(CountdownBlockSchema.safeParse({ type: 'countdown', label: 'x', until: -1e20 }).success).toBe(false);
+    expect(CountdownBlockSchema.safeParse({ type: 'countdown', label: 'x', until: Date.now() }).success).toBe(true);
+  });
+
+  it('rejects ReminderBlock dueAt outside ECMAScript Date range', () => {
+    const base = { type: 'reminder', reminderId: 'r1', title: 't', status: 'scheduled', dueAt: 0 };
+    expect(ReminderBlockSchema.safeParse({ ...base, dueAt: 1e20 }).success).toBe(false);
+    expect(ReminderBlockSchema.safeParse({ ...base, dueAt: -1e20 }).success).toBe(false);
+    expect(ReminderBlockSchema.safeParse({ ...base, dueAt: Date.now() }).success).toBe(true);
+  });
+
+  it('rejects TasksBlock task dueAt outside ECMAScript Date range', () => {
+    const task = { id: 't1', title: 'task', done: false, dueAt: 1e20 };
+    const base = { type: 'tasks', tasks: [task] };
+    expect(TasksBlockSchema.safeParse(base).success).toBe(false);
+    expect(TasksBlockSchema.safeParse({ ...base, tasks: [{ ...task, dueAt: -1e20 }] }).success).toBe(false);
+    expect(TasksBlockSchema.safeParse({ ...base, tasks: [{ ...task, dueAt: Date.now() }] }).success).toBe(true);
+    expect(TasksBlockSchema.safeParse({ ...base, tasks: [{ ...task, dueAt: null }] }).success).toBe(true);
+  });
+
+  it('rejects TaskFields dueAt outside ECMAScript Date range', () => {
+    expect(TaskFieldsSchema.safeParse({ dueAt: 1e20 }).success).toBe(false);
+    expect(TaskFieldsSchema.safeParse({ dueAt: -1e20 }).success).toBe(false);
+    expect(TaskFieldsSchema.safeParse({ dueAt: Date.now() }).success).toBe(true);
+    expect(TaskFieldsSchema.safeParse({ dueAt: null }).success).toBe(true);
+  });
+
+  it('rejects ReminderFields dueAt outside ECMAScript Date range', () => {
+    expect(ReminderFieldsSchema.safeParse({ dueAt: 1e20 }).success).toBe(false);
+    expect(ReminderFieldsSchema.safeParse({ dueAt: -1e20 }).success).toBe(false);
+    expect(ReminderFieldsSchema.safeParse({ dueAt: Date.now() }).success).toBe(true);
+    expect(ReminderFieldsSchema.safeParse({}).success).toBe(true);
+  });
+
+  it('rejects ChangeItem reminder.create dueAt outside ECMAScript Date range', () => {
+    const base = { id: 'change_1', kind: 'reminder.create', title: 't', dueAt: 0, creationKey: '6db776c6-5c30-4366-9628-f138b352c361' };
+    expect(ChangeItemSchema.safeParse({ ...base, dueAt: 1e20 }).success).toBe(false);
+    expect(ChangeItemSchema.safeParse({ ...base, dueAt: -1e20 }).success).toBe(false);
+    expect(ChangeItemSchema.safeParse({ ...base, dueAt: Date.now() }).success).toBe(true);
   });
 });
