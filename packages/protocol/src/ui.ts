@@ -280,7 +280,10 @@ export const TimelineBlockSchema = z.object({
       z.object({
         id: z.string().max(64).optional(),
         /** Epoch ms (rendered in the viewer's timezone) or a display string. */
-        time: z.union([z.number(), z.string().max(60)]),
+        time: z.union([
+          z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }),
+          z.string().max(60),
+        ]),
         title: z.string().max(300),
         description: z.string().max(1000).optional(),
         icon: IconSchema.optional(),
@@ -834,6 +837,7 @@ const TONE_PREFIX: Record<Tone, string> = {
 };
 
 function fmtTime(ms: number, timezone?: string): string {
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return '—';
   try {
     return new Date(ms).toLocaleString('en-US', {
       timeZone: timezone,
