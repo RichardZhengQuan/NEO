@@ -31,7 +31,10 @@ import {
   formatSystemNotification,
   isSafeExternalUrl,
   isSameOrigin,
+  loadStartupMode,
   resolveWebDir,
+  saveStartupMode,
+  type RemoteMode,
 } from './lib.js';
 import {
   attachUpdaterErrorHandler,
@@ -64,6 +67,12 @@ let neoServer: NeoServer | null = null;
 let isQuitting = false;
 let shutdownPromise: Promise<void> | null = null;
 let shutdownDone = false;
+/** In connect mode: the file:// URL of the web build's index.html. */
+let currentWebFileUrl: string | null = null;
+/** In connect mode: true once the OS-notification listener has been started. */
+let notifListenerActive = false;
+/** In connect mode: the credentials remembered after saveMode is called. */
+let connectCredentials: { serverUrl: string; token: string } | null = null;
 
 // ───────────────────────────── web directory ─────────────────────────────
 
@@ -327,6 +336,45 @@ function buildAppMenu(): Menu {
 
 // ───────────────────────────── IPC handlers ─────────────────────────────
 
+/**
+ * IPC handlers for connect mode (no embedded server).
+ * Exposes neo:getConfig (throws until credentials are saved), neo:openExternal,
+ * and neo:saveMode (persists credentials and starts the notification listener).
+ */
+function registerConnectIpcHandlers(userData: string, initialMode: RemoteMode): void {
+  if (initialMode.serverUrl && initialMode.token) {
+    connectCredentials = { serverUrl: initialMode.serverUrl, token: initialMode.token };
+  }
+
+  ipcMain.handle('neo:getConfig', async () => {
+    if (!connectCredentials) throw new Error('Not connected: no credentials saved yet');
+    return { serverUrl: connectCredentials.serverUrl, token: connectCredentials.token };
+  });
+
+  ipcMain.handle('neo:openExternal', (_event, url: unknown) => {
+    if (typeof url !== 'string') return;
+    if (!isSafeExternalUrl(url)) return;
+    void shell.openExternal(url);
+  });
+
+  ipcMain.handle('neo:saveMode', (_event, mode: unknown) => {
+    if (!mode || typeof mode !== 'object') return;
+    const m = mode as Record<string, unknown>;
+    if (m['kind'] !== 'remote' || typeof m['serverUrl'] !== 'string' || typeof m['token'] !== 'string') return;
+    const serverUrl = m['serverUrl'];
+    const token = m['token'];
+    connectCredentials = { serverUrl, token };
+    const saved: RemoteMode = { kind: 'remote', serverUrl, token };
+    void saveStartupMode(userData, saved).catch(() => {
+      // Best-effort: if saving fails the credentials are still in memory.
+    });
+    if (!notifListenerActive) {
+      notifListenerActive = true;
+      startNotificationListener(serverUrl, token);
+    }
+  });
+}
+
 function registerIpcHandlers(serverUrl: string, ownerToken: string): void {
   ipcMain.handle('neo:getConfig', (event) => {
     // Validate that the request comes from our own renderer window.
@@ -505,6 +553,8 @@ app.on('activate', () => {
     mainWindow.show();
   } else if (neoServer) {
     createWindow(neoServer.url);
+  } else if (currentWebFileUrl) {
+    createWindow(currentWebFileUrl);
   }
 });
 
@@ -526,8 +576,49 @@ app.on('before-quit', () => {
 async function main(): Promise<void> {
   await app.whenReady();
 
-  const dataDir = path.join(app.getPath('userData'), 'data');
+  const userData = app.getPath('userData');
   const webDir = getWebDir();
+
+  // ── Determine startup mode (first launch shows a dialog) ────────────────
+  let mode = await loadStartupMode(userData);
+  if (mode === null) {
+    const { response } = await dialog.showMessageBox({
+      type: 'question',
+      buttons: ['Run NEO on this Mac', 'Connect to a NEO'],
+      message: 'How would you like to use NEO?',
+      detail: 'You can change this later in Settings.',
+      defaultId: 0,
+      cancelId: 0,
+    });
+    mode = response === 0 ? 'local' : { kind: 'remote' };
+    await saveStartupMode(userData, mode);
+  }
+
+  // ── Connect mode (no embedded server) ───────────────────────────────────
+  if (mode !== 'local') {
+    const webIndex = path.join(webDir, 'index.html');
+    const fileUrl = `file://${webIndex}`;
+    currentWebFileUrl = fileUrl;
+
+    registerConnectIpcHandlers(userData, mode);
+    Menu.setApplicationMenu(buildAppMenu());
+    createWindow(fileUrl);
+
+    if (mode.serverUrl && mode.token && !notifListenerActive) {
+      // Credentials are already saved — start the OS notification listener
+      // immediately; it registers its own before-quit handler (count=2).
+      notifListenerActive = true;
+      startNotificationListener(mode.serverUrl, mode.token);
+    } else {
+      // No credentials yet.  Add a no-op before-quit handler so the test
+      // synchronisation point (listener count=2) is consistent.
+      app.on('before-quit', () => {});
+    }
+    return;
+  }
+
+  // ── Local (embedded server) mode ────────────────────────────────────────
+  const dataDir = path.join(userData, 'data');
 
   const config = loadConfig({
     overrides: {

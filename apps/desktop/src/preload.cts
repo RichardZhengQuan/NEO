@@ -22,6 +22,16 @@ export interface NeoDesktopApi {
    * Only http/https URLs are accepted; others are silently ignored.
    */
   openExternal(url: string): Promise<void>;
+  /**
+   * Persist the chosen remote mode so subsequent launches skip the dialog.
+   * Only available in connect mode.
+   */
+  saveMode?(mode: { kind: 'remote'; serverUrl: string; token: string; tunnel?: unknown }): Promise<void>;
+  /**
+   * Subscribe to incoming neo://pair?... deep links forwarded from the main
+   * process (macOS open-url / protocol handler). Returns an unsubscribe fn.
+   */
+  onPairLink?(callback: (url: string) => void): () => void;
 }
 
 const api: NeoDesktopApi = {
@@ -33,6 +43,16 @@ const api: NeoDesktopApi = {
 
   openExternal(url: string): Promise<void> {
     return ipcRenderer.invoke('neo:openExternal', url) as Promise<void>;
+  },
+
+  saveMode(mode: { kind: 'remote'; serverUrl: string; token: string; tunnel?: unknown }): Promise<void> {
+    return ipcRenderer.invoke('neo:saveMode', mode) as Promise<void>;
+  },
+
+  onPairLink(callback: (url: string) => void): () => void {
+    const listener = (_event: unknown, url: string) => callback(url);
+    ipcRenderer.on('neo:pairLink', listener as Parameters<typeof ipcRenderer.on>[1]);
+    return () => ipcRenderer.removeListener('neo:pairLink', listener as Parameters<typeof ipcRenderer.on>[1]);
   },
 };
 

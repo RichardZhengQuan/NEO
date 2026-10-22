@@ -1,7 +1,7 @@
 /**
  * Connecting to a server and leaving it.
  */
-import { bootstrapConnection, browserBootstrapDeps, clearCredentials, createServerClient, refreshTunnelRoute, saveCredentials, type ConnectionSource, type Credentials } from '../connection.js';
+import { bootstrapConnection, browserBootstrapDeps, clearCredentials, createServerClient, refreshTunnelRoute, saveCredentials, saveDesktopMode, type ConnectionSource, type Credentials } from '../connection.js';
 import type { NeoClient } from '@neo/client';
 import { httpStatus } from '../lib/errors.js';
 import { currentSessionEpoch, isCurrentSession, loadProviders, setSettings, showConnect, startSession, useSession } from '../state/session.js';
@@ -19,6 +19,7 @@ export async function connectWith(credentials: Credentials, source: ConnectionSo
     setSettings(settings);
     useSession.setState({ health, phase: 'ready' });
     if (source !== 'desktop') saveCredentials(credentials);
+    void saveDesktopMode(credentials);
     refreshRoute(credentials, client, nextEpoch);
     void loadProviders().catch(() => undefined);
     return;
@@ -31,6 +32,7 @@ export async function connectWith(credentials: Credentials, source: ConnectionSo
     setSettings(settings);
     useSession.setState({ health, phase: 'ready' });
     if (source !== 'desktop') saveCredentials(credentials);
+    void saveDesktopMode(credentials);
     refreshRoute(credentials, client, epoch);
     void loadProviders().catch(() => undefined);
   } catch (err) {

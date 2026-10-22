@@ -38,6 +38,10 @@ export function createElectronBridge(desktop: NeoDesktopBridge): PlatformBridge 
       // The main process notifies; nothing to schedule here.
     },
 
+    watchPairLinks(onLink) {
+      return desktop.watchPairLinks?.(onLink) ?? (() => {});
+    },
+
     init(ctx: PlatformContext) {
       // Notification clicks are routed by the main process by setting the hash.
       const onFocus = () => ctx.onResume();

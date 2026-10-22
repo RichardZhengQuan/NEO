@@ -4,7 +4,8 @@
  */
 import { deflateSync } from 'node:zlib';
 import * as path from 'node:path';
-import type { Notification, ReminderFiring } from '@neo/protocol';
+import { readFile, writeFile } from 'node:fs/promises';
+import type { Notification, ReminderFiring, TunnelRoute } from '@neo/protocol';
 
 // ───────────────────────────── web directory ─────────────────────────────
 
@@ -208,4 +209,42 @@ export function createTrayIconPng(): Buffer {
     pngChunk('IDAT', compressed),
     pngChunk('IEND', Buffer.alloc(0)),
   ]);
+}
+
+// ───────────────────────────── startup mode ─────────────────────────────
+
+export interface RemoteMode {
+  kind: 'remote';
+  serverUrl?: string;
+  token?: string;
+  tunnel?: TunnelRoute | null;
+}
+
+export type StartupMode = 'local' | RemoteMode;
+
+export function parseStartupMode(raw: string): StartupMode | null {
+  try {
+    const data: unknown = JSON.parse(raw);
+    if (data === 'local') return 'local';
+    if (data !== null && typeof data === 'object' && (data as Record<string, unknown>).kind === 'remote') {
+      const d = data as Partial<RemoteMode>;
+      const result: RemoteMode = { kind: 'remote' };
+      if (typeof d.serverUrl === 'string') result.serverUrl = d.serverUrl;
+      if (typeof d.token === 'string') result.token = d.token;
+      if (d.tunnel !== undefined) result.tunnel = d.tunnel as TunnelRoute | null;
+      return result;
+    }
+    return null;
+  } catch { return null; }
+}
+
+export async function loadStartupMode(userData: string): Promise<StartupMode | null> {
+  try {
+    const raw = await readFile(path.join(userData, 'startup-mode.json'), 'utf8');
+    return parseStartupMode(raw);
+  } catch { return null; }
+}
+
+export async function saveStartupMode(userData: string, mode: StartupMode): Promise<void> {
+  await writeFile(path.join(userData, 'startup-mode.json'), JSON.stringify(mode), 'utf8');
 }

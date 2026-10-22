@@ -315,12 +315,38 @@ export interface NeoDesktopBridge {
   getConfig(): Promise<{ serverUrl: string; token: string }>;
   platform: string;
   openExternal(url: string): Promise<void> | void;
+  /**
+   * Persist the chosen remote mode so subsequent launches skip the dialog.
+   * Only present in connect mode.
+   */
+  saveMode?(mode: { kind: 'remote'; serverUrl: string; token: string; tunnel?: TunnelRoute | null }): Promise<void>;
+  /**
+   * Subscribe to incoming neo://pair?... deep links forwarded from the main
+   * process. Returns an unsubscribe function.
+   */
+  watchPairLinks?(onLink: (url: string) => void): () => void;
 }
 
 declare global {
   interface Window {
     neoDesktop?: NeoDesktopBridge;
   }
+}
+
+/**
+ * Persist the desktop remote-mode credentials so the next launch skips the
+ * "Run on this Mac / Connect" dialog. No-op when not running in Electron
+ * connect mode (local desktop or browser).
+ */
+export async function saveDesktopMode(credentials: Credentials): Promise<void> {
+  const desktop = typeof window !== 'undefined' ? window.neoDesktop : undefined;
+  if (!desktop?.saveMode) return;
+  await desktop.saveMode({
+    kind: 'remote',
+    serverUrl: credentials.serverUrl,
+    token: credentials.token,
+    tunnel: credentials.tunnel ?? null,
+  });
 }
 
 export function browserBootstrapDeps(): BootstrapDeps {

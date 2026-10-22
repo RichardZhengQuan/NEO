@@ -3,11 +3,20 @@ import { ipcMain, shell } from 'electron';
 import { startServer } from '@neo/server';
 
 // Mock node:fs/promises so catch-up state persistence doesn't touch disk.
+// Default: startup-mode.json → 'local' (so existing tests don't trigger the dialog).
+const ENOENT = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
 const fsMock = vi.hoisted(() => ({
-  readFile: vi.fn<(p: string, enc: string) => Promise<string>>().mockRejectedValue(new Error('ENOENT')),
+  readFile: vi.fn<(p: string, enc: string) => Promise<string>>().mockImplementation((p: string) => {
+    if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify('local'));
+    return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+  }),
   writeFile: vi.fn<(p: string, d: string, enc: string) => Promise<void>>().mockResolvedValue(undefined),
 }));
 vi.mock('node:fs/promises', () => fsMock);
+
+const dialogMock = vi.hoisted(() => ({
+  showMessageBox: vi.fn().mockResolvedValue({ response: 0, checkboxChecked: false }),
+}));
 
 const electron = await vi.hoisted(async () => {
   const { EventEmitter } = await import('node:events');
@@ -98,7 +107,7 @@ vi.mock('electron', () => {
   return {
     app: electron.app,
     BrowserWindow: electron.BrowserWindow,
-    dialog: {},
+    dialog: { showMessageBox: dialogMock.showMessageBox },
     ipcMain: { handle: vi.fn() },
     Menu: { buildFromTemplate: vi.fn(), setApplicationMenu: vi.fn() },
     MenuItem: vi.fn(),
@@ -144,10 +153,14 @@ afterEach(() => {
   vi.resetModules();
   electron.app.removeAllListeners();
   clientMock.onStatus = null;
-  // Reset fs mock to default (no persisted state).
-  fsMock.readFile.mockRejectedValue(new Error('ENOENT'));
-  fsMock.writeFile.mockResolvedValue(undefined);
   clientMock.onEvent = null;
+  // Reset fsMock: startup-mode.json → 'local', everything else → ENOENT.
+  fsMock.readFile.mockImplementation((p: string) => {
+    if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify('local'));
+    return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+  });
+  fsMock.writeFile.mockResolvedValue(undefined);
+  dialogMock.showMessageBox.mockResolvedValue({ response: 0, checkboxChecked: false });
 });
 
 describe('desktop startup failure', () => {
@@ -512,7 +525,12 @@ describe('startup reminder catch-up', () => {
     const firedAt = Date.now() - 5_000; // fired 5 s ago
     const lastRunAt = firedAt + 1_000;  // previous process completed catch-up 1 s after firing
     // Simulate persisted state from the previous process run.
-    fsMock.readFile.mockResolvedValueOnce(JSON.stringify({ lastRunAt }));
+    // Override the default to serve both startup-mode and persisted catch-up state.
+    fsMock.readFile.mockImplementation((p: string) => {
+      if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify('local'));
+      if (p.endsWith('reminder-catchup.json')) return Promise.resolve(JSON.stringify({ lastRunAt }));
+      return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    });
 
     const overdueReminder = {
       id: 'r-restart-dup',
@@ -665,5 +683,171 @@ describe('startup reminder catch-up', () => {
     const writeArgs = fsMock.writeFile.mock.calls[fsMock.writeFile.mock.calls.length - 1]!;
     const written = JSON.parse(writeArgs[1] as string) as { lastRunAt: number };
     expect(written.lastRunAt).toBeGreaterThanOrEqual(beforeFire);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Helper: wait until the 2nd before-quit listener is registered (connect mode
+// startup is complete — no embedded server, so only 2 handlers are added).
+// ──────────────────────────────────────────────────────────────────────────────
+function connectModeReady(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    electron.app.on('newListener', (event: string) => {
+      if (event === 'before-quit' && electron.app.listenerCount(event) === 1) resolve();
+    });
+  });
+}
+
+describe('desktop connect mode', () => {
+  it('shows a dialog on first launch and enters connect mode when the user chooses "Connect to a NEO"', async () => {
+    // First launch: no startup-mode.json on disk.
+    fsMock.readFile.mockRejectedValue(ENOENT);
+    // User picks "Connect to a NEO" (response === 1).
+    dialogMock.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false });
+
+    const ready = connectModeReady();
+    await import('./main.js');
+    await ready;
+
+    // Must not have started the embedded server.
+    expect(startServer).not.toHaveBeenCalled();
+    // Dialog must have appeared once.
+    expect(dialogMock.showMessageBox).toHaveBeenCalledTimes(1);
+    // The window must load a file:// URL (web build served from disk).
+    const win = electron.BrowserWindow.mock.results[0]?.value;
+    expect(win?.loadURL).toHaveBeenCalledWith(expect.stringContaining('file://'));
+    // The chosen mode must be persisted.
+    expect(fsMock.writeFile).toHaveBeenCalledWith(
+      expect.stringContaining('startup-mode.json'),
+      JSON.stringify({ kind: 'remote' }),
+      'utf8',
+    );
+  });
+
+  it('shows no dialog and enters connect mode when startup-mode.json holds remote credentials', async () => {
+    const remoteMode = { kind: 'remote', serverUrl: 'https://neo.example.com', token: 'tok123' };
+    fsMock.readFile.mockImplementation((p: string) => {
+      if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify(remoteMode));
+      return Promise.reject(ENOENT);
+    });
+
+    const ready = connectModeReady();
+    await import('./main.js');
+    await ready;
+
+    expect(startServer).not.toHaveBeenCalled();
+    expect(dialogMock.showMessageBox).not.toHaveBeenCalled();
+    const win = electron.BrowserWindow.mock.results[0]?.value;
+    expect(win?.loadURL).toHaveBeenCalledWith(expect.stringContaining('file://'));
+    // Notification listener started with stored credentials (NeoClient.connect was called).
+    expect(clientMock.onStatus).not.toBeNull();
+  });
+
+  it('neo:getConfig throws in connect mode before saveMode is called', async () => {
+    fsMock.readFile.mockImplementation((p: string) => {
+      if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify({ kind: 'remote' }));
+      return Promise.reject(ENOENT);
+    });
+
+    const ready = connectModeReady();
+    await import('./main.js');
+    await ready;
+
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([ch]) => ch === 'neo:getConfig',
+    )?.[1];
+    expect(handler).toBeTypeOf('function');
+    // Should reject — no credentials yet.
+    await expect(handler!({} as Electron.IpcMainInvokeEvent)).rejects.toThrow();
+  });
+
+  it('neo:saveMode persists credentials and starts the notification listener', async () => {
+    fsMock.readFile.mockImplementation((p: string) => {
+      if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify({ kind: 'remote' }));
+      return Promise.reject(ENOENT);
+    });
+
+    const ready = connectModeReady();
+    await import('./main.js');
+    await ready;
+
+    // Before saveMode: notification listener not active.
+    expect(clientMock.onStatus).toBeNull();
+
+    const saveModeHandler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([ch]) => ch === 'neo:saveMode',
+    )?.[1];
+    expect(saveModeHandler).toBeTypeOf('function');
+    await saveModeHandler!({} as Electron.IpcMainInvokeEvent, {
+      kind: 'remote',
+      serverUrl: 'https://neo.example.com',
+      token: 'tok456',
+    });
+
+    // Credentials must have been written to disk.
+    expect(fsMock.writeFile).toHaveBeenCalledWith(
+      expect.stringContaining('startup-mode.json'),
+      JSON.stringify({ kind: 'remote', serverUrl: 'https://neo.example.com', token: 'tok456' }),
+      'utf8',
+    );
+    // Notification listener must have been started.
+    expect(clientMock.onStatus).not.toBeNull();
+  });
+
+  it('neo:getConfig returns credentials after saveMode is called', async () => {
+    fsMock.readFile.mockImplementation((p: string) => {
+      if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify({ kind: 'remote' }));
+      return Promise.reject(ENOENT);
+    });
+
+    const ready = connectModeReady();
+    await import('./main.js');
+    await ready;
+
+    const saveModeHandler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([ch]) => ch === 'neo:saveMode',
+    )?.[1];
+    await saveModeHandler!({} as Electron.IpcMainInvokeEvent, {
+      kind: 'remote',
+      serverUrl: 'https://neo.example.com',
+      token: 'tok789',
+    });
+
+    const getConfigHandler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([ch]) => ch === 'neo:getConfig',
+    )?.[1];
+    const result = await getConfigHandler!({} as Electron.IpcMainInvokeEvent);
+    expect(result).toEqual({ serverUrl: 'https://neo.example.com', token: 'tok789' });
+  });
+
+  it('first launch: choosing "Run NEO on this Mac" uses local mode (existing behaviour)', async () => {
+    // First launch: no startup-mode.json on disk.
+    fsMock.readFile.mockRejectedValue(ENOENT);
+    // User picks "Run NEO on this Mac" (response === 0).
+    dialogMock.showMessageBox.mockResolvedValueOnce({ response: 0, checkboxChecked: false });
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7790',
+      ownerToken: 'local-tok',
+      stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    });
+
+    const localReady = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+    await import('./main.js');
+    await localReady;
+
+    expect(startServer).toHaveBeenCalledTimes(1);
+    expect(dialogMock.showMessageBox).toHaveBeenCalledTimes(1);
+    // Saved 'local' to disk.
+    expect(fsMock.writeFile).toHaveBeenCalledWith(
+      expect.stringContaining('startup-mode.json'),
+      JSON.stringify('local'),
+      'utf8',
+    );
+    const win = electron.BrowserWindow.mock.results[0]?.value;
+    expect(win?.loadURL).toHaveBeenCalledWith('http://127.0.0.1:7790');
   });
 });
