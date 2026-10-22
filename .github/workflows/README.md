@@ -4,6 +4,10 @@
 
 Runs typecheck, test, and build on pull requests and pushes to `main`.
 
+## mobile.yml
+
+Builds the iOS app unsigned for the simulator on pull requests and pushes to `main` that touch mobile-related paths or the workflow itself. The exact iOS build command comes from [apps/mobile/README.md](../../apps/mobile/README.md).
+
 ## release-desktop.yml
 
 To cut a macOS release:
