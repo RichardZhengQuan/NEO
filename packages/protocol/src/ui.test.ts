@@ -9,6 +9,7 @@ import {
   ReminderFieldsSchema,
   TaskFieldsSchema,
   TasksBlockSchema,
+  TimelineBlockSchema,
   UI_ACTION_ID_PREFIX,
   UIBlockSchema,
   childBlocks,
@@ -370,6 +371,30 @@ describe('extractInlineUI — deep nesting guard', () => {
 });
 
 describe('epoch-ms range guards', () => {
+  it('rejects TimelineBlock item time outside ECMAScript Date range', () => {
+    const base = (time: number | string) => ({ type: 'timeline', items: [{ time, title: 'x' }] });
+    for (const time of [1e20, -1e20, 8.64e15 + 1, -8.64e15 - 1, NaN, Infinity, -Infinity]) {
+      expect(TimelineBlockSchema.safeParse(base(time)).success).toBe(false);
+    }
+    for (const time of [0, Date.now(), 8.64e15, -8.64e15, 'tomorrow']) {
+      expect(TimelineBlockSchema.safeParse(base(time)).success).toBe(true);
+    }
+  });
+
+  it('uiBlockToText does not throw on TimelineBlock item time outside ECMAScript Date range', () => {
+    for (const time of [1e20, -1e20, 8.64e15 + 1, -8.64e15 - 1, NaN, Infinity, -Infinity]) {
+      // Bypass validation to cover stored or hand-built blocks with invalid times.
+      const block: UIBlock = { type: 'timeline', items: [{ time, title: 'x' }] };
+      expect(() => uiBlockToText(block)).not.toThrow();
+      expect(uiBlockToText(block)).toBe('  — — x');
+    }
+  });
+
+  it('uiBlockToText keeps the ISO fallback for an in-range time with an invalid timezone', () => {
+    const block: UIBlock = { type: 'countdown', label: 'x', until: 0, timezone: 'Not/A_Zone' };
+    expect(uiBlockToText(block)).toBe('⏳ x — 1970-01-01T00:00:00.000Z');
+  });
+
   it('rejects CountdownBlock until outside ECMAScript Date range', () => {
     expect(CountdownBlockSchema.safeParse({ type: 'countdown', label: 'x', until: 1e20 }).success).toBe(false);
     expect(CountdownBlockSchema.safeParse({ type: 'countdown', label: 'x', until: -1e20 }).success).toBe(false);
