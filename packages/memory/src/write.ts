@@ -712,11 +712,13 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
         ctx.logger.warn('memory: related-memory lookup failed', { error: String(err) });
         return [];
       });
+      // Reload written nodes from the DB: their sensitivity may have changed during the await gap above.
+      const freshWritten = written.map((n) => getNode(ctx.db, n.id) ?? n);
       const related = [
-        ...written.filter((n) => allowSensitive || n.sensitivity === 'normal').map(asRelated),
+        ...freshWritten.filter((n) => allowSensitive || n.sensitivity === 'normal').map(asRelated),
         ...recalled.filter((m) => !writtenIds.has(m.node.id)),
       ];
-      const input = buildExtractionInput({ userText, assistantText, related, policy, date: new Date(now).toISOString().slice(0, 10) });
+      const input = buildExtractionInput({ userText, assistantText, related, policy, allowSensitive, date: new Date(now).toISOString().slice(0, 10) });
       plan = await llmExtract(llm.model, llm.name, input);
       if (!plan) ctx.logger.warn('memory: extraction reply was not usable; using the offline extractor');
     } catch (err) {

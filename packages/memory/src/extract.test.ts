@@ -26,6 +26,7 @@ describe('extractMemories validUntil guard', () => {
       assistantText: 'I will remember that.',
       related: [],
       policy: { allowedKinds: ['fact'] },
+      allowSensitive: true,
       date: '2026-10-22',
     });
 

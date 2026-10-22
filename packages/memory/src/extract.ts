@@ -357,10 +357,12 @@ export function buildExtractionInput(input: {
   assistantText: string;
   related: RecalledMemory[];
   policy: Pick<MemoryPolicy, 'allowedKinds'>;
+  /** When false (cloud model without sendSensitiveToCloud), sensitive memories are filtered out before the payload is built. */
+  allowSensitive: boolean;
   date: string;
 }): string {
   const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
-  const related = input.related.slice(0, 10);
+  const related = input.related.filter((m) => input.allowSensitive || m.node.sensitivity === 'normal').slice(0, 10);
   const sections = [
     related.length
       ? `Existing related memories (id | kind | label | content):\n${related.map((m) => `- ${m.node.id} | ${m.node.kind} | ${oneLine(m.node.label)} | ${oneLine(m.node.content).slice(0, 500)}`).join('\n')}`

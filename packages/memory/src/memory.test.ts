@@ -1546,6 +1546,108 @@ describe('observe: policy is rechecked before writing (F11)', () => {
   });
 });
 
+// ─── F12: stale sensitivity during extraction input assembly ──────────────────
+
+describe('observe: remembered node turned sensitive before extraction payload is built (stale sensitivity, cloud)', () => {
+  it('excludes the node from the extraction input when it becomes sensitive during related-memory recall', async () => {
+    const db = openNeoDatabase(':memory:');
+    const hashing = new HashingEmbedder(256);
+
+    const DISTINCTIVE = 'stale-sensitivity-distinctive-content-marker-xyz';
+    const QUERY_TEXT = 'stale-sensitivity-recall-gate-query-distinctive-xyz';
+
+    // Gate: pause inside the embedder when it sees the recall query text.
+    // deps.related(userText, ...) → runRecall → querySpaces → embedder.embed([userText])
+    let entered!: () => void;
+    let release!: () => void;
+    const recallEmbedStarted = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const embedder = {
+      id: hashing.id, dimensions: hashing.dimensions, isLocal: true,
+      async embed(texts: string[]) {
+        if (texts.some((t) => t.includes(QUERY_TEXT))) {
+          entered();
+          await gate;
+        }
+        return hashing.embed(texts);
+      },
+    };
+
+    // Cloud LLM (isLocal: false) so allowSensitive = false.
+    // Captures the extraction input (the user message content sent to the model).
+    let capturedInput = '';
+    const cloudLLM: ChatModel = {
+      async *chat(req: ChatRequest): AsyncIterable<ChatStreamEvent> {
+        const userPart = req.messages.find((m) => m.role === 'user');
+        if (userPart) {
+          const first = userPart.parts[0];
+          if (first?.type === 'text') capturedInput = first.text;
+        }
+        yield { type: 'text', text: JSON.stringify({ episode: null, memories: [], links: [] }) };
+        yield { type: 'done', stopReason: 'end' };
+      },
+    };
+
+    const svc = createMemoryService({
+      db,
+      embedder,
+      llm: () => ({ model: cloudLLM, name: 'cloud', isLocal: false }),
+      logger: silentLogger,
+    });
+
+    try {
+      // Pre-create a normal memory node.
+      const node = await svc.remember({ kind: 'fact', label: 'Stale sensitivity test node', content: DISTINCTIVE, importance: 0.5 });
+      expect(node.sensitivity).toBe('normal');
+
+      // Build a turn whose assistant message includes a remember tool result for the node.
+      const now = 1_000_000_000_000;
+      const convId = 'conv_stale_test';
+      const turn: ObservedTurn = {
+        conversationId: convId,
+        userMessage: {
+          id: newId('msg', now),
+          conversationId: convId,
+          role: 'user',
+          parts: [{ type: 'text', text: QUERY_TEXT }],
+          createdAt: now,
+          status: 'complete',
+        },
+        assistantMessage: {
+          id: newId('msg', now + 1),
+          conversationId: convId,
+          role: 'assistant',
+          parts: [
+            { type: 'text', text: 'Noted.' },
+            { type: 'tool_result', toolCallId: 'tc_stale', name: 'remember', output: { id: node.id }, sensitive: false },
+          ],
+          createdAt: now + 1,
+          status: 'complete',
+        },
+        now,
+      };
+
+      const observation = svc.observe(turn);
+
+      // Wait until recall embedding starts (inside deps.related).
+      await recallEmbedStarted;
+
+      // Mark the node sensitive while recall is paused.
+      await svc.update(node.id, { sensitivity: 'sensitive' });
+
+      // Release the gate — recall embedding continues and the extraction call is made.
+      release();
+      await observation;
+
+      // The cloud extraction payload must not contain the distinctive content string.
+      expect(capturedInput).not.toContain(DISTINCTIVE);
+    } finally {
+      release(); // no-op if already released
+      db.close();
+    }
+  });
+});
+
 describe('observe: private replay metadata protects cloud extraction (F02)', () => {
   it.each(['user', 'assistant', 'tool_result'] as const)('keeps a flagged %s on the device without a surviving source memory', async (flag) => {
     const db = openNeoDatabase(':memory:');
