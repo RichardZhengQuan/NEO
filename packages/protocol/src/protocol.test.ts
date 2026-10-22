@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   ContentPartSchema,
   DEFAULT_SETTINGS,
+  MemoryNodePatchSchema,
   MemoryPolicySchema,
   NeoConfigSchema,
   NeoSettingsSchema,
@@ -13,6 +14,7 @@ import {
   ForgetBySourceRequestSchema,
   OffRecordStateSchema,
   RecurrenceSchema,
+  RememberInputSchema,
   ReminderInputSchema,
   ReminderPatchSchema,
   StartOffRecordRequestSchema,
@@ -445,6 +447,20 @@ describe('misc helpers', () => {
     expect(TaskPatchSchema.safeParse({ dueAt: -1e20 }).success).toBe(false);
     expect(TaskPatchSchema.safeParse({ dueAt: Date.now() }).success).toBe(true);
     expect(TaskPatchSchema.safeParse({}).success).toBe(true);
+  });
+
+  it('rejects RememberInput validUntil outside the ECMAScript Date range', () => {
+    expect(RememberInputSchema.safeParse({ label: 'x', content: 'y', validUntil: 1e20 }).success).toBe(false);
+    expect(RememberInputSchema.safeParse({ label: 'x', content: 'y', validUntil: -1e20 }).success).toBe(false);
+    expect(RememberInputSchema.safeParse({ label: 'x', content: 'y', validUntil: Date.now() }).success).toBe(true);
+    expect(RememberInputSchema.safeParse({ label: 'x', content: 'y', validUntil: null }).success).toBe(true);
+  });
+
+  it('rejects MemoryNodePatch validUntil outside the ECMAScript Date range', () => {
+    expect(MemoryNodePatchSchema.safeParse({ validUntil: 1e20 }).success).toBe(false);
+    expect(MemoryNodePatchSchema.safeParse({ validUntil: -1e20 }).success).toBe(false);
+    expect(MemoryNodePatchSchema.safeParse({ validUntil: Date.now() }).success).toBe(true);
+    expect(MemoryNodePatchSchema.safeParse({ validUntil: null }).success).toBe(true);
   });
 
   it('normalizes errors', () => {

@@ -315,7 +315,7 @@ export const CountdownBlockSchema = z.object({
   type: z.literal('countdown'),
   label: z.string().max(200),
   /** Epoch ms. */
-  until: z.number(),
+  until: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }),
   timezone: z.string().max(64).optional(),
   doneText: z.string().max(200).optional(),
 });
@@ -327,7 +327,7 @@ export const ReminderBlockSchema = z.object({
   reminderId: z.string().min(1).max(64),
   title: z.string().max(300),
   notes: z.string().max(5000).optional(),
-  dueAt: z.number(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }),
   timezone: z.string().max(64).optional(),
   recurrenceText: z.string().max(200).optional(),
   status: z.enum(['scheduled', 'fired', 'completed', 'cancelled']),
@@ -346,7 +346,7 @@ export const TasksBlockSchema = z.object({
         id: z.string().min(1).max(64),
         title: z.string().max(500),
         done: z.boolean(),
-        dueAt: z.number().nullable().optional(),
+        dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }).nullable().optional(),
         priority: z.number().int().min(0).max(3).optional(),
       }),
     )
@@ -354,7 +354,7 @@ export const TasksBlockSchema = z.object({
 });
 
 export const TaskFieldsSchema = z.object({
-  dueAt: z.number().nullable().optional(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }).nullable().optional(),
   title: z.string().min(1).max(1000).optional(),
   priority: z.number().int().min(0).max(3).optional(),
   done: z.boolean().optional(),
@@ -362,7 +362,7 @@ export const TaskFieldsSchema = z.object({
 export type TaskFields = z.infer<typeof TaskFieldsSchema>;
 
 export const ReminderFieldsSchema = z.object({
-  dueAt: z.number().optional(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }).optional(),
   title: z.string().min(1).max(500).optional(),
   timezone: z.string().optional(),
 }).strict();
@@ -396,7 +396,7 @@ export const ChangeItemSchema = z.discriminatedUnion('kind', [
     ...changeItemBase,
     kind: z.literal('reminder.create'),
     title: z.string().min(1).max(500),
-    dueAt: z.number(),
+    dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }),
     timezone: z.string().max(64).optional(),
     notes: z.string().max(5000).optional(),
     creationKey: z.uuid(),
