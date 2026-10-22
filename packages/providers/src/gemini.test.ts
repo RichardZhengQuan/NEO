@@ -146,6 +146,19 @@ describe('sanitizeGeminiSchema', () => {
     });
   });
 
+  it('preserves all non-null types in a type-union array', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number'] })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+    });
+  });
+
+  it('preserves all non-null types and sets nullable when null is in the type-union array', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number', 'null'] })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      nullable: true,
+    });
+  });
+
   it('keeps property names that look like keywords and survives recursive refs', () => {
     const schema = {
       type: 'object',
