@@ -97,6 +97,8 @@ class FakeConversationStore implements ConversationStore {
       updatedAt: now,
       model: input?.model ?? null,
       incognito: input?.incognito ?? false,
+      offRecord: input?.offRecord ?? input?.incognito ?? false,
+      ephemeral: input?.ephemeral ?? false,
       pinned: false,
       archived: false,
       systemPrompt: null,
@@ -323,13 +325,26 @@ class FakeMemoryService implements MemoryService {
   public recallCalls: RecallQuery[] = [];
   public observeCalls: ObservedTurn[] = [];
   private _recallResult: RecalledMemory[] = [];
+  private _recallGate: Promise<void> | undefined;
 
   setRecallItems(items: RecalledMemory[]) {
     this._recallResult = items;
   }
 
+  gateRecall(): { gate: Promise<void>; release: () => void } {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    this._recallGate = gate;
+    return { gate, release };
+  }
+
   async recall(query: RecallQuery): Promise<RecallResult> {
     this.recallCalls.push(query);
+    if (this._recallGate) {
+      const gate = this._recallGate;
+      this._recallGate = undefined;
+      await gate;
+    }
     return { items: this._recallResult, tookMs: 0, seeds: 0, considered: 0 };
   }
 
@@ -911,6 +926,81 @@ describe('Frozen system prompt + toolset', () => {
     const contextPart = handle.userMessage.parts.find((p) => p.type === 'context');
     expect(contextPart).toBeDefined();
   });
+});
+
+describe('Off-record migration race', () => {
+  it('migrates an in-flight send() to the off-record episode when startOffRecord() races recall', async () => {
+    const { providers, runtime, conv, memory, conversations } = makeEnv();
+    const { release } = memory.gateRecall();
+    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Private reply')));
+
+    const handlePromise = runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Hi' }] });
+
+    // send() reaches recall synchronously, and the gate holds it before persistence.
+    expect(memory.recallCalls).toHaveLength(1);
+    expect(conversations.messages(conv.id)).toEqual([]);
+    expect(providers.fakeAdapter.requests).toEqual([]);
+    const offRecordState = await runtime.startOffRecord();
+    release();
+
+    const handle = await handlePromise;
+    const events = await collectEvents(handle.events);
+    const final = await handle.done;
+
+    // Migration keeps the original placeholder and writes the reply to a new continuation.
+    const assistantMessage = conversations.getMessage(final.id);
+    expect(assistantMessage?.conversationId).toBe(offRecordState.episodeId);
+    expect(assistantMessage?.episodeId).toBe(offRecordState.episodeId);
+    expect(assistantMessage?.parts).toEqual([{ type: 'text', text: 'Private reply' }]);
+    expect(conversations.messages(conv.id).flatMap((message) => message.parts))
+      .not.toContainEqual({ type: 'text', text: 'Private reply' });
+    expect(memory.observeCalls).toEqual([]);
+
+    // #584 Codex Finding 2: when a migration was queued during recall, the
+    // emitted `turn.started` must come AFTER the migration's two
+    // `message.completed` events and must reference the continuation message
+    // id (not the original, which is already complete), so the web timeline
+    // reducer sees a still-streaming assistant and creates `entry.turn`.
+    const turnStarted = events.find((e) => e.type === 'turn.started');
+    expect(turnStarted).toBeDefined();
+    // The migration emits two `message.completed` events: one for the
+    // original placeholder being frozen (its id is the original pre-migration
+    // id, which lives in events as a message.completed with status 'complete'
+    // and a conversationId equal to the original conv, not final.conversationId),
+    // and one for the newly-appended private continuation (status 'streaming',
+    // id === final.id, conversationId === offRecordState.episodeId). Assert
+    // both exist so the ordering loop below isn't vacuous.
+    type MessageCompleted = Extract<(typeof events)[number], { type: 'message.completed' }>;
+    const originalFreeze = events.find((e): e is MessageCompleted =>
+      e.type === 'message.completed' && e.message.conversationId === conv.id);
+    const continuationAppend = events.find((e): e is MessageCompleted =>
+      e.type === 'message.completed' && e.message.id === final.id && e.message.status === 'streaming');
+    expect(originalFreeze).toBeDefined();
+    expect(continuationAppend).toBeDefined();
+    const indexOfStart = events.indexOf(turnStarted!);
+    expect(events.indexOf(originalFreeze!)).toBeLessThan(indexOfStart);
+    expect(events.indexOf(continuationAppend!)).toBeLessThan(indexOfStart);
+    expect((turnStarted as { assistantMessageId: string }).assistantMessageId).toBe(final.id);
+    expect((turnStarted as { conversationId: string }).conversationId).toBe(offRecordState.episodeId);
+    expect((turnStarted as { episodeId: string }).episodeId).toBe(offRecordState.episodeId);
+
+    // Replaying the migration must also release the original conversation reservation.
+    await runtime.endOffRecord();
+    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Normal reply')));
+    const next = await runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Back' }] });
+    await collectEvents(next.events);
+    expect((await next.done).conversationId).toBe(conv.id);
+  });
+
+  // NOTE: Codex Finding 1 on PR #584 (a race where endOffRecord deletes the
+  // ephemeral episode out from under a pending migration) is architecturally
+  // addressed in `beginTurn()` by registering the pending-initialization
+  // promise in `turnDone` BEFORE awaiting recall. The in-process
+  // `FakeConversationStore` does not enforce episode existence on
+  // `appendMessage`, so the race window does not open under fake-store timing
+  // (verified empirically). A direct `storage/*.test.ts` regression that
+  // asserts "continuation append throws if destination episode is deleted
+  // mid-flight" is tracked separately — see the PR body.
 });
 
 describe('conversation.lastMessageAt', () => {

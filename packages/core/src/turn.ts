@@ -186,6 +186,15 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
     conversations.update(conversationId, { systemPrompt, toolset });
   }
 
+  // Queue migrations during recall until the runner can apply them.
+  const pendingOffRecordEpisodes: Conversation[] = [];
+  record.enterOffRecord = (episode) => {
+    if (conv.ephemeral || pendingOffRecordEpisodes.length) return;
+    pendingOffRecordEpisodes.push(episode);
+    // The runtime moves the busy reservation as soon as this callback returns.
+    record.conversationId = episode.id;
+  };
+
   // 2. Recall.
   const allowSensitive = adapter.isLocal || settings.memory.sendSensitiveToCloud;
   let prepared: { context: ContentPart; recalled: RecalledMemory[] };
@@ -265,7 +274,11 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
   });
 
   record.enterOffRecord = (episode) => runner.enterOffRecord(episode);
-  runner.emit({ type: 'turn.started', conversationId, turnId, userMessage, assistantMessageId: assistantMessage.id, model: modelRef });
+  for (const episode of pendingOffRecordEpisodes) runner.enterOffRecord(episode);
+  // After any queued migration, `turn.started` must reference the current (possibly
+  // moved) assistant message and episode so the web timeline reducer finds a
+  // still-streaming placeholder and creates `entry.turn` (see #584).
+  runner.emitTurnStarted(userMessage, modelRef);
   if (recalled.length) {
     runner.emit({
       type: 'memory.recalled',
@@ -414,7 +427,8 @@ class TurnRunner {
     this.init = init;
     this.logger = init.logger;
     this.signal = init.plan.record.controller.signal;
-    this.conversationId = init.plan.record.conversationId;
+    // A queued migration may have moved the reservation ahead of the stored messages.
+    this.conversationId = init.assistantMessage.conversationId;
     this.turnId = init.plan.record.turnId;
     this.messageId = init.assistantMessage.id;
     this.privateTurn = (init.plan.conversation.offRecord ?? init.plan.conversation.incognito) || services.conversations.offRecordState().active;
@@ -425,6 +439,11 @@ class TurnRunner {
     this.done = new Promise<Message>((resolve) => {
       this.resolveDone = resolve;
     });
+  }
+
+  /** Emit `turn.started` using the runner's current (possibly post-migration) ids. */
+  emitTurnStarted(userMessage: Message, model: ModelRef): void {
+    this.emit({ type: 'turn.started', conversationId: this.conversationId, turnId: this.turnId, userMessage, assistantMessageId: this.messageId, model });
   }
 
   enterOffRecord(episode: Conversation): void {

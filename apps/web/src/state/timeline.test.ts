@@ -60,6 +60,55 @@ describe('reduceTimeline', () => {
     expect(s.messages).toHaveLength(2);
   });
 
+  it('turn.started after a queued off-record migration references the streaming continuation (regression for #584 Codex Finding 2)', () => {
+    // The runtime emits events in this order when startOffRecord() races recall
+    // and the migration is queued: `message.completed` for the frozen original
+    // placeholder, `message.completed` for the newly-appended private
+    // continuation, then `turn.started` referencing the CONTINUATION message
+    // and the private episode. The reducer must create `entry.turn` pointing at
+    // the still-streaming continuation.
+    const privateEpisode = 'conv_private';
+    const continuationId = 'msg_cont';
+    const originalComplete: Message = { id: A, episodeId: C, conversationId: C, role: 'assistant', parts: [{ type: 'text', text: 'public text' }], createdAt: 100, status: 'complete', turnId: T };
+    const continuation: Message = { id: continuationId, episodeId: privateEpisode, conversationId: privateEpisode, role: 'assistant', parts: [], createdAt: 110, status: 'streaming', turnId: T };
+    const startedAfterMigration: AgentEvent = { type: 'turn.started', episodeId: privateEpisode, conversationId: privateEpisode, turnId: T, userMessage, assistantMessageId: continuationId, model: { provider: 'test', model: 'neo-test' } };
+
+    const s = run([
+      { type: 'message.completed', episodeId: C, conversationId: C, turnId: T, message: originalComplete },
+      { type: 'message.completed', episodeId: privateEpisode, conversationId: privateEpisode, turnId: T, message: continuation },
+      startedAfterMigration,
+    ]);
+
+    // entry.turn must point at the still-streaming continuation so the composer
+    // keeps its streaming chrome (not at the completed original placeholder).
+    expect(s.turn).toMatchObject({ turnId: T, assistantMessageId: continuationId, userMessageId: 'msg_u' });
+    expect(s.messages.find((m) => m.id === continuationId)?.status).toBe('streaming');
+  });
+
+  it('turn.started referencing the ORIGINAL completed placeholder (pre-fix event order) fails to set entry.turn — red check for #584 Codex Finding 2', () => {
+    // Before the fix (packages/core/src/turn.ts), the migration replayed
+    // BEFORE turn.started, and turn.started referenced the ORIGINAL assistant
+    // message id — which was already marked complete by the migration's first
+    // message.completed. The reducer saw `existing && existing.status !==
+    // 'streaming'` and returned early, so entry.turn was never created. This
+    // test pins that failure mode so the fix doesn't regress.
+    const privateEpisode = 'conv_private';
+    const continuationId = 'msg_cont';
+    const originalComplete: Message = { id: A, episodeId: C, conversationId: C, role: 'assistant', parts: [{ type: 'text', text: 'public text' }], createdAt: 100, status: 'complete', turnId: T };
+    const continuation: Message = { id: continuationId, episodeId: privateEpisode, conversationId: privateEpisode, role: 'assistant', parts: [], createdAt: 110, status: 'streaming', turnId: T };
+    const startedWithOriginalId: AgentEvent = { type: 'turn.started', episodeId: privateEpisode, conversationId: C, turnId: T, userMessage, assistantMessageId: A, model: { provider: 'test', model: 'neo-test' } };
+
+    const s = run([
+      { type: 'message.completed', episodeId: C, conversationId: C, turnId: T, message: originalComplete },
+      { type: 'message.completed', episodeId: privateEpisode, conversationId: privateEpisode, turnId: T, message: continuation },
+      startedWithOriginalId,
+    ]);
+
+    // The buggy event shape leaves entry.turn null (the composer loses its
+    // streaming UI state); the fixed emit order avoids this.
+    expect(s.turn).toBeNull();
+  });
+
   it('coalesces text deltas into the last text part', () => {
     const s = run([
       started,
