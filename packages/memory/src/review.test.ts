@@ -799,6 +799,23 @@ describe('consolidation', () => {
     } finally { db.close(); }
   });
 
+  it('keeps episodes unconsolidated when facts is an object', async () => {
+    const { model, requests } = scriptedLLM({
+      consolidate: () => '{"summary":null,"facts":{"kind":"fact","label":"Hiking","content":"The user likes hiking"}}',
+    });
+    const { svc, db, tickDays } = setup({ llm: model });
+    try {
+      const [e1, e2] = await twoHikingEpisodes(svc);
+      tickDays(1);
+      const report = await svc.consolidate({ force: true });
+      expect(requests).toHaveLength(1);
+      expect(count(db, `SELECT COUNT(*) n FROM memory_nodes WHERE kind IN ('summary','fact','preference','skill','goal')`)).toBe(0);
+      expect((await svc.get(e1.id))!.node.consolidatedAt ?? null).toBeNull();
+      expect((await svc.get(e2.id))!.node.consolidatedAt ?? null).toBeNull();
+      expect(report.episodesConsolidated).toBe(0);
+    } finally { db.close(); }
+  });
+
   it('marks source episodes consolidated when the reply is a well-formed empty abstraction', async () => {
     const { model, requests } = scriptedLLM({ consolidate: () => '{"summary":null,"facts":[]}' });
     const { svc, db, tickDays } = setup({ llm: model });

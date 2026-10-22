@@ -82,6 +82,7 @@ export function parseAbstraction(reply: string): { summary: Summary | null; fact
     summary = parsed.data;
   }
   const rawFacts = raw['facts'];
+  if (rawFacts !== undefined && rawFacts !== null && !Array.isArray(rawFacts)) return null;
   const facts: Fact[] = [];
   if (Array.isArray(rawFacts)) {
     for (const f of rawFacts as unknown[]) {

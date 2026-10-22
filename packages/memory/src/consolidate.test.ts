@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ChatModel, ChatRequest, ChatStreamEvent, MemoryKind } from '@neo/protocol';
 import { DEFAULT_MEMORY_POLICY, silentLogger } from '@neo/protocol';
 import { openNeoDatabase } from '@neo/storage';
+import { parseAbstraction } from './consolidate.js';
 import { createMemoryService, HashingEmbedder } from './index.js';
 
 const T0 = 1_700_000_000_000;
@@ -54,6 +55,12 @@ const abstraction = JSON.stringify({
     { kind: 'skill', label: 'Trail navigation', content: 'The user can navigate hiking trails', importance: 0.6 },
     { kind: 'goal', label: 'Weekend hikes', content: 'The user plans to hike every weekend', importance: 0.6 },
   ],
+});
+
+describe('parseAbstraction', () => {
+  it('rejects a reply when facts is an object', () => {
+    expect(parseAbstraction('{"summary":null,"facts":{"kind":"fact","label":"X","content":"Y"}}')).toBeNull();
+  });
 });
 
 describe('consolidation provenance', () => {
