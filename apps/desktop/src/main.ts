@@ -447,12 +447,18 @@ function startNotificationListener(serverUrl: string, ownerToken: string): void 
               listenStartAt - STARTUP_CATCH_UP_WINDOW_MS,
             );
             const { items } = await client.reminders.list({ lastFiredAtFrom: windowStart });
+            if (!ElectronNotification.isSupported()) {
+              // Can't show notifications, but still record progress so the
+              // catch-up window advances and stale reminders don't re-fire
+              // if notifications are later enabled.
+              savePersistedState(Date.now());
+              return;
+            }
             for (const reminder of items) {
               if (
                 reminder.lastFiredAt !== null &&
                 !notifiedIds.has(reminder.id)
               ) {
-                if (!ElectronNotification.isSupported()) return;
                 const firing = {
                   reminder,
                   occurrenceAt: reminder.lastFiredAt,
