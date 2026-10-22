@@ -90,7 +90,10 @@ export function isLanAddress(value: string): boolean {
       return false;
     }
   }
-  return IPV4.test(host) || HOSTNAME.test(host);
+  // A purely-numeric dotted string (e.g. 256.256.256.256) is only valid if it
+  // also passes the IPV4 byte-range check. HOSTNAME allows such strings because
+  // [A-Za-z0-9] is a superset of the IPv4 alphabet, so guard the HOSTNAME path.
+  return IPV4.test(host) || (HOSTNAME.test(host) && !/^[\d.]+$/.test(host));
 }
 
 function httpUrl(value: string | null): string | null {
