@@ -26,6 +26,37 @@ describe('card icons', () => {
   });
 });
 
+describe('ChangeDetails: reminder.create', () => {
+  it('ChangeDetails falls back to the reminder.create item timezone when the block has none', () => {
+    const block: ChangesBlock = {
+      type: 'changes',
+      items: [{
+        id: 'c1', kind: 'reminder.create', title: 'Call Dr. Lee',
+        dueAt: Date.parse('2026-10-23T01:00:00Z'),
+        timezone: 'Asia/Tokyo',
+        creationKey: '00000000-0000-4000-8000-000000000000',
+      }],
+    };
+    const { getByText } = render(widget(block));
+    // 01:00 UTC → 10:00 Tokyo
+    expect(getByText(/10:00/)).toBeTruthy();
+  });
+
+  it('ChangeDetails shows reminder.create notes', () => {
+    const block: ChangesBlock = {
+      type: 'changes', timezone: 'UTC',
+      items: [{
+        id: 'c1', kind: 'reminder.create', title: 'Call Dr. Lee',
+        dueAt: Date.parse('2026-10-23T09:00:00Z'),
+        notes: 'Ask for the blood test results',
+        creationKey: '00000000-0000-4000-8000-000000000000',
+      }],
+    };
+    const { getByText } = render(widget(block));
+    expect(getByText('Ask for the blood test results')).toBeTruthy();
+  });
+});
+
 describe('ChangeDetails: reminder.update timezone', () => {
   it('renders a timezone-only reminder update with the from and to zones in the approval card', () => {
     const block: ChangesBlock = {
@@ -118,6 +149,25 @@ describe('memory status', () => {
 });
 
 describe('formatted blocks', () => {
+  it('uses tasks timezone for due dates when the device timezone is behind UTC', () => {
+    const DateTimeFormat = Intl.DateTimeFormat;
+    const dateTimeFormatSpy = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (locales, options) {
+      return new DateTimeFormat(locales, { ...options, timeZone: options?.timeZone ?? 'America/New_York' });
+    });
+    try {
+      const dueAt = Date.parse('2025-01-01T00:30:00Z');
+      expect(new Intl.DateTimeFormat('en', { dateStyle: 'short' }).format(dueAt)).toBe('12/31/24');
+
+      const { container } = render(widget({ type: 'tasks', timezone: 'Asia/Tokyo', tasks: [{ id: 'task_1', title: 'Buy milk', done: false, dueAt }] }));
+      const time = container.querySelector('time');
+      expect(time?.textContent).toBe('1/1/25');
+      expect(time?.textContent).not.toContain('12/31/24');
+      expect(time?.getAttribute('datetime')).toBe('2025-01-01T00:30:00.000Z');
+    } finally {
+      dateTimeFormatSpy.mockRestore();
+    }
+  });
+
   it('uses countdown timezone for the visible date and timer label', () => {
     vi.useFakeTimers();
     vi.setSystemTime('2026-10-13T00:00:00Z');

@@ -228,7 +228,7 @@ export class NeoClientImpl {
   // ─── Reminders ────────────────────────────────────────────────────────────
 
   readonly reminders = {
-    list: (q?: { status?: ReminderStatus[]; from?: number; to?: number; limit?: number }) =>
+    list: (q?: { status?: ReminderStatus[]; from?: number; to?: number; limit?: number; lastFiredAtFrom?: number }) =>
       this.req<ListResponse<Reminder>>('GET', '/reminders', { query: q as Record<string, unknown> }),
 
     get: (id: string) => this.req<Reminder>('GET', `/reminders/${encodeURIComponent(id)}`),

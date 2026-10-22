@@ -1137,7 +1137,7 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
                       <Icon name="flag" size={12} />
                     </span>
                   ) : null}
-                  {task.dueAt ? <time dateTime={new Date(task.dueAt).toISOString()}>{formatDate(task.dueAt, locale, undefined, 'short')}</time> : null}
+                  {task.dueAt ? <time dateTime={new Date(task.dueAt).toISOString()}>{formatDate(task.dueAt, locale, block.timezone, 'short')}</time> : null}
                 </span>
               </li>
             );
@@ -1153,7 +1153,12 @@ function ChangeDetails({ item, timezone }: { item: ChangeItem; timezone?: string
   const locale = useLocale();
   const time = (dueAt: number | null | undefined) => dueAt == null ? t('block.changes_no_due') : formatDateTime(dueAt, locale, timezone);
   const priority = (value: number | undefined) => value ? t(`task.priority_${value}`) : t('block.changes_no_priority');
-  if (item.kind === 'reminder.create') return <div className="neo-change__details">{time(item.dueAt)}</div>;
+  if (item.kind === 'reminder.create') return (
+    <div className="neo-change__details">
+      {formatDateTime(item.dueAt, locale, timezone ?? item.timezone)}
+      {item.notes && <p>{item.notes}</p>}
+    </div>
+  );
   return (
     <div className="neo-change__details">
       {item.after.dueAt !== undefined && <p>{t('block.changes_due', { from: time(item.before.dueAt), to: time(item.after.dueAt) })}</p>}
