@@ -268,7 +268,10 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
 
   record.enterOffRecord = (episode) => runner.enterOffRecord(episode);
   for (const episode of pendingOffRecordEpisodes) runner.enterOffRecord(episode);
-  runner.emit({ type: 'turn.started', conversationId, turnId, userMessage, assistantMessageId: assistantMessage.id, model: modelRef });
+  // After any queued migration, `turn.started` must reference the current (possibly
+  // moved) assistant message and episode so the web timeline reducer finds a
+  // still-streaming placeholder and creates `entry.turn` (see #584).
+  runner.emitTurnStarted(userMessage, modelRef);
   if (recalled.length) {
     runner.emit({
       type: 'memory.recalled',
@@ -428,6 +431,11 @@ class TurnRunner {
     this.done = new Promise<Message>((resolve) => {
       this.resolveDone = resolve;
     });
+  }
+
+  /** Emit `turn.started` using the runner's current (possibly post-migration) ids. */
+  emitTurnStarted(userMessage: Message, model: ModelRef): void {
+    this.emit({ type: 'turn.started', conversationId: this.conversationId, turnId: this.turnId, userMessage, assistantMessageId: this.messageId, model });
   }
 
   enterOffRecord(episode: Conversation): void {

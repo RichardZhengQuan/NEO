@@ -279,10 +279,16 @@ export class AgentRuntime implements AgentRuntimeApi {
       const searchMode = this.searchMode(settings, adapter, model);
       this.episodeSearchModes.set(conv.id, searchMode);
       if (conv.searchMode !== searchMode) this.conversations.update(conv.id, { searchMode });
-      const handle = await startTurn(this.services, { record, conversation: conv, parts, adapter, model, settings, searchMode, release, ...context });
-      this.turnDone.set(record.turnId, handle.done);
-      void handle.done.then(() => this.turnDone.delete(record.turnId));
-      return handle;
+      // Register the pending-initialization promise in turnDone BEFORE awaiting
+      // recall. Otherwise a startOffRecord/endOffRecord pair that races recall
+      // leaves turnDone empty when endOffRecord's waitForTurns() runs, which
+      // can delete the ephemeral episode out from under a queued migration
+      // (see PR #584, Codex Finding 1).
+      const pendingInit = startTurn(this.services, { record, conversation: conv, parts, adapter, model, settings, searchMode, release, ...context });
+      const pendingDone: Promise<Message> = pendingInit.then((h) => h.done).catch(() => undefined as unknown as Message);
+      this.turnDone.set(record.turnId, pendingDone);
+      void pendingDone.finally(() => this.turnDone.delete(record.turnId));
+      return await pendingInit;
     } catch (err) {
       release();
       throw err;

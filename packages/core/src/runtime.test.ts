@@ -944,7 +944,7 @@ describe('Off-record migration race', () => {
     release();
 
     const handle = await handlePromise;
-    await collectEvents(handle.events);
+    const events = await collectEvents(handle.events);
     const final = await handle.done;
 
     // Migration keeps the original placeholder and writes the reply to a new continuation.
@@ -956,6 +956,22 @@ describe('Off-record migration race', () => {
       .not.toContainEqual({ type: 'text', text: 'Private reply' });
     expect(memory.observeCalls).toEqual([]);
 
+    // #584 Codex Finding 2: when a migration was queued during recall, the
+    // emitted `turn.started` must come AFTER the migration's two
+    // `message.completed` events and must reference the continuation message
+    // id (not the original, which is already complete), so the web timeline
+    // reducer sees a still-streaming assistant and creates `entry.turn`.
+    const turnStarted = events.find((e) => e.type === 'turn.started');
+    expect(turnStarted).toBeDefined();
+    const migrationCompletes = events.filter((e) => e.type === 'message.completed' && (e as { message: { id: string } }).message.id !== final.id).concat(
+      events.filter((e) => e.type === 'message.completed' && (e as { message: { id: string } }).message.id === final.id && (e as { message: { status: string } }).message.status === 'streaming')
+    );
+    const indexOfStart = events.indexOf(turnStarted!);
+    for (const mc of migrationCompletes) expect(events.indexOf(mc)).toBeLessThan(indexOfStart);
+    expect((turnStarted as { assistantMessageId: string }).assistantMessageId).toBe(final.id);
+    expect((turnStarted as { conversationId: string }).conversationId).toBe(offRecordState.episodeId);
+    expect((turnStarted as { episodeId: string }).episodeId).toBe(offRecordState.episodeId);
+
     // Replaying the migration must also release the original conversation reservation.
     await runtime.endOffRecord();
     providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Normal reply')));
@@ -963,6 +979,16 @@ describe('Off-record migration race', () => {
     await collectEvents(next.events);
     expect((await next.done).conversationId).toBe(conv.id);
   });
+
+  // NOTE: Codex Finding 1 on PR #584 (a race where endOffRecord deletes the
+  // ephemeral episode out from under a pending migration) is architecturally
+  // addressed in `beginTurn()` by registering the pending-initialization
+  // promise in `turnDone` BEFORE awaiting recall. The in-process
+  // `FakeConversationStore` does not enforce episode existence on
+  // `appendMessage`, so the race window does not open under fake-store timing
+  // (verified empirically). A direct `storage/*.test.ts` regression that
+  // asserts "continuation append throws if destination episode is deleted
+  // mid-flight" is tracked separately — see the PR body.
 });
 
 describe('conversation.lastMessageAt', () => {
