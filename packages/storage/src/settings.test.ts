@@ -110,6 +110,34 @@ describe('settingsStore rollback safety', () => {
     expect(settings.get()).toMatchObject({ theme: 'light', locale: 'zh' });
   });
 
+  it('delivers the latest committed snapshot to every listener when a listener calls update() reentantly', () => {
+    db = openNeoDatabase(':memory:');
+    const settings = createSettingsStore(db);
+    settings.update({ theme: 'light', locale: 'en' });
+
+    const bSnapshots: ReturnType<typeof settings.get>[] = [];
+
+    // Listener A: on the first call, reverts theme back to 'light'.
+    let aCallCount = 0;
+    settings.onChange((next) => {
+      if (aCallCount++ === 0 && next.theme === 'dark') {
+        settings.update({ theme: 'light' });
+      }
+    });
+
+    // Listener B (registered after A): records every snapshot it receives.
+    settings.onChange((next) => {
+      bSnapshots.push(next);
+    });
+
+    settings.update({ theme: 'dark', locale: 'zh' });
+
+    // The last value B received must equal what settings.get() returns.
+    expect(bSnapshots.length).toBeGreaterThan(0);
+    expect(bSnapshots[bSnapshots.length - 1]).toEqual(settings.get());
+    expect(settings.get()).toMatchObject({ theme: 'light', locale: 'zh' });
+  });
+
   it('discards a rolled-back savepoint while publishing parent and later sibling updates', () => {
     db = openNeoDatabase(':memory:');
     const settings = createSettingsStore(db);
