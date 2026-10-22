@@ -276,7 +276,7 @@ export async function runUiAction(
       if (!quietWidget && (!/^((?:__neo:)?task\.toggle|(?:__neo:)?reminder\.|(?:__neo:)?memory\.)/.test(input.action.id) || res.summary)) {
         pushToast({ tone: 'success', title: res.summary ?? t('chat.action_done'), icon: 'check-circle' });
       }
-      if (input.action.id.startsWith('memory.') || (input.action.kind === 'tool' && /memory|forget|remember/.test(input.action.tool))) {
+      if (input.action.id.startsWith(UI_ACTION_ID_PREFIX + 'memory.') || (input.action.kind === 'tool' && /memory|forget|remember/.test(input.action.tool))) {
         bumpMemoryVersion();
       }
       return;

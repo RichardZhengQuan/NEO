@@ -14,7 +14,9 @@ import { appDictionaries } from '../i18n.js';
 import { applyTimelineEvent, emptyEntry, resetTimeline, useTimeline } from '../state/timeline.js';
 import { startSession, useSession } from '../state/session.js';
 import { useToasts } from '../state/notifications.js';
+import { useData } from '../state/data.js';
 import { applyTurnResponse, composeBody, retryTurn, sendMessage, cancelTurn, endTimelineOffRecord, setOffRecord, deleteMessage, deleteRange, respondToConfirmation, runUiAction, UiActionCancelled } from './timeline.js';
+import { UI_ACTION_ID_PREFIX, widgetActionId } from '@neo/protocol';
 
 const t = createTranslator('en', buildMessages('en', appDictionaries));
 
@@ -102,6 +104,33 @@ describe('runUiAction with server confirmation', () => {
     await runUiAction(client, input, t, ask);
     expect(ask).not.toHaveBeenCalled();
     expect(uiAction).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runUiAction memory version bump by widget id (#524)', () => {
+  // A memory widget whose tool name is NOT caught by /memory|forget|remember/
+  // must still bump memoryVersion via the id-prefix branch of the guard: the
+  // prefix changed from the bare `memory.` to `__neo:memory.`, so the id
+  // branch has to be prefix-aware or memory screens stop refreshing on tools
+  // like pin_memory or archive_memory.
+  const toolWithoutMemoryKeyword = 'pin_item' as const;
+  const memoryAction = (id: string): UIAction =>
+    ({ id, kind: 'tool', tool: toolWithoutMemoryKeyword, label: 'Pin', input: { id: 'mem_1' } });
+
+  it('a prefixed memory widget id bumps memoryVersion even when the tool name does not match the keyword regex', async () => {
+    const before = useData.getState().memoryVersion;
+    const { client } = fakeClient([done]);
+    const id = widgetActionId.memoryForget('mem_1').replace('memory.forget', 'memory.pin');
+    expect(id.startsWith(UI_ACTION_ID_PREFIX + 'memory.')).toBe(true);
+    await runUiAction(client, { messageId: 'msg_1', uiId: 'ui_1', action: memoryAction(id) }, t, async () => true);
+    expect(useData.getState().memoryVersion).toBe(before + 1);
+  });
+
+  it('a bare "memory." id does NOT bump memoryVersion (guard is prefix-only)', async () => {
+    const before = useData.getState().memoryVersion;
+    const { client } = fakeClient([done]);
+    await runUiAction(client, { messageId: 'msg_1', uiId: 'ui_1', action: memoryAction('memory.forget:mem_1') }, t, async () => true);
+    expect(useData.getState().memoryVersion).toBe(before);
   });
 });
 
