@@ -1,10 +1,38 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from '@testing-library/react';
 import type { ChartBlock } from '@neo/protocol';
-import { ChartRenderer } from './chart.js';
+import { ChartRenderer, niceTicks } from './chart.js';
 import { I18nProvider } from './i18n.js';
 
 afterEach(cleanup);
+
+describe('niceTicks', () => {
+  it.each([
+    { domain: 'positive maximum', min: 0, max: Number.MAX_VALUE },
+    { domain: 'negative maximum', min: -Number.MAX_VALUE, max: 0 },
+    { domain: 'both maxima', min: -Number.MAX_VALUE, max: Number.MAX_VALUE },
+    { domain: 'upper half of the positive range', min: Number.MAX_VALUE / 2, max: Number.MAX_VALUE },
+  ])('returns bounded, finite ticks for $domain', ({ min, max }) => {
+    const original = Number.prototype.toPrecision;
+    // Exercise the real loop, but fail immediately if its accumulator overflows
+    // instead of letting the regression hang the test process or exhaust memory.
+    const precision = vi.spyOn(Number.prototype, 'toPrecision').mockImplementation(function (this: number, digits?: number) {
+      expect(Number.isFinite(this.valueOf())).toBe(true);
+      return original.call(this, digits);
+    });
+    try {
+      const ticks = niceTicks(min, max);
+      expect(ticks.length).toBeLessThanOrEqual(4 + 2);
+      expect(ticks.every(Number.isFinite)).toBe(true);
+      if (min >= 0) {
+        expect(ticks.length).toBeGreaterThan(0);
+        expect(precision).toHaveBeenCalled();
+      }
+    } finally {
+      precision.mockRestore();
+    }
+  });
+});
 
 describe('stacked area charts', () => {
   it.each([
