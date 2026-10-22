@@ -128,7 +128,63 @@ describe('reminder state', () => {
   });
 });
 
+describe('task state', () => {
+  it.each(['__proto__', 'constructor', 'toString'])('TasksRenderer treats the reserved id %s as a normal, isolated task', (id) => {
+    render(widget({ type: 'tasks', tasks: [{ id, title: 'Work', done: false }] }));
+    expect(screen.getByText(/0 of 1 done/i)).toBeTruthy();
+  });
+});
+
+describe('accordion reserved ids', () => {
+  // These tests render a "seed" item first so the retained-state map is initialised
+  // without an own property for the reserved id.  When we rerender with an additional
+  // item whose id is a reserved Object-prototype key, the map still has no own property
+  // for it, so open[id] on origin/main returns the inherited prototype value — a truthy
+  // function for 'constructor'/'toString' and Object.prototype for '__proto__' — and
+  // incorrectly renders the new item as expanded.  The hasOwnProperty guard fixes this.
+  it.each(['__proto__', 'constructor', 'toString'])(
+    'AccordionRenderer does not expand a dynamically-added item whose id %s has no own entry in the open-state map',
+    (id) => {
+      const seed = { id: 'seed', title: 'Seed', open: false, children: [] as { type: 'text'; text: string }[] };
+      const { rerender } = render(widget({ type: 'accordion', items: [seed] }));
+      // The open-state map is now { seed: false } — no own property for the reserved id.
+      const reserved = { id, title: 'Reserved', open: false, children: [{ type: 'text' as const, text: 'Must stay hidden' }] };
+      rerender(widget({ type: 'accordion', items: [seed, reserved] }));
+      const button = screen.getByRole('button', { name: 'Reserved' });
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(screen.queryByText('Must stay hidden')).toBeNull();
+    }
+  );
+});
+
+describe('changes reserved ids', () => {
+  // The ChangesRenderer uses Object.fromEntries for initial state and spread+computed
+  // keys for updates; both create own properties, so no Object.prototype method can
+  // leak in as a boolean substitute through DOM-observable behaviour.  The
+  // hasOwnProperty guard is defensive type-correctness.  We test the static invariant:
+  // an item whose id is a reserved key and whose status is 'pending' is selected and
+  // counted in the Apply button from the moment the block is rendered.
+  it.each(['__proto__', 'constructor', 'toString'])(
+    'ChangesRenderer counts an item with reserved id %s as pending and renders its checkbox as checked',
+    (id) => {
+      const block: import('@neo/protocol').ChangesBlock = {
+        type: 'changes',
+        items: [{ id, kind: 'task.update', taskId: 'task_1', title: 'Work', status: 'pending', before: { done: false }, after: { done: true } }],
+      };
+      render(widget(block, undefined, vi.fn()));
+      const checkbox = screen.getByRole('checkbox', { name: 'Work' }) as HTMLInputElement;
+      expect(checkbox.checked).toBe(true);
+      expect(screen.getByRole('button', { name: 'Apply 1 change' })).toBeTruthy();
+    }
+  );
+});
+
 describe('memory status', () => {
+  it('MemoryRenderer shows a Forget control for an active node with id "__proto__"', () => {
+    render(widget({ type: 'memory', nodes: [{ id: '__proto__', kind: 'fact', label: 'Likes tea', content: 'Likes tea', status: 'active' }] }, undefined, () => undefined));
+    expect(screen.getByRole('button', { name: /forget/i })).toBeTruthy();
+  });
+
   it('keeps a stored forgotten node resolved after remount despite stale live data', async () => {
     const block: UIBlock = { type: 'memory', nodes: [{ id: 'mem_1', kind: 'fact', label: 'Likes tea', status: 'active' }] };
     const onAction = vi.fn(async () => undefined);
@@ -149,6 +205,11 @@ describe('memory status', () => {
 });
 
 describe('formatted blocks', () => {
+  it('TableRenderer renders "—" for a column keyed "toString" with no row value', () => {
+    render(widget({ type: 'table', columns: [{ key: 'toString', label: 'Signature' }], rows: [{}] }));
+    expect(screen.getByText('—')).toBeTruthy();
+  });
+
   it('uses tasks timezone for due dates when the device timezone is behind UTC', () => {
     const DateTimeFormat = Intl.DateTimeFormat;
     const dateTimeFormatSpy = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (locales, options) {
