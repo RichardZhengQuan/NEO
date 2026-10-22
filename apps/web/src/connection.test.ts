@@ -237,6 +237,13 @@ describe('normalizeServerUrl', () => {
     ['https://neo.example.com/api', 'https://neo.example.com'],
     ['192.168.1.20:7777', 'http://192.168.1.20:7777'],
     ['localhost:7777', 'http://localhost:7777'],
+    ['nas.local.', 'http://nas.local.'],
+    ['nas.local./api', 'http://nas.local.'],
+    ['localhost.', 'http://localhost.'],
+    ['api.localhost.', 'http://api.localhost.'],
+    ['nas.lan', 'http://nas.lan'],
+    ['nas.lan.', 'http://nas.lan.'],
+    ['nas.lan./api', 'http://nas.lan.'],
     ['http://127.0.0.1:7777/api/', 'http://127.0.0.1:7777'],
     ['https://host/neo/', 'https://host/neo'],
   ])('%s → %s', (input, out) => {
