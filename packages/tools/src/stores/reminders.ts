@@ -332,10 +332,15 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
           }
         } else {
           const firedCount = existing.firedCount + 1;
+          const anchorAt = toNum(r.anchor_at);
           // Advance past both the occurrence and the firing time, so a long downtime
           // collapses every missed occurrence into this one firing.
+          // Also advance past the anchor: a pre-fire snooze can fire before the anchor
+          // (e.g. snooze to 08:10 on a 09:00 anchor).  Without the anchor in the max,
+          // nextOccurrence(afterMs=08:10) returns anchorMs=09:00 (the same occurrence),
+          // which gets consumed as a second firing and silently drops a series occurrence.
           const nextDueAt = existing.recurrence
-            ? nextOccurrence(existing.recurrence, toNum(r.anchor_at), Math.max(firedAt, existing.dueAt), existing.timezone, firedCount)
+            ? nextOccurrence(existing.recurrence, anchorAt, Math.max(firedAt, existing.dueAt, anchorAt), existing.timezone, firedCount)
             : null;
           const reminder: Reminder = {
             ...existing,
