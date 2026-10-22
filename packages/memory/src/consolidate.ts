@@ -411,10 +411,20 @@ async function abstractEpisodes(
   let learned = 0;
   for (const cluster of due) {
     if (signal?.aborted) break;
-    const sensitive = cluster.episodes.some((e) => e.sensitivity === 'sensitive');
+    // Earlier clusters yield while awaiting their replies, so the snapshot may be stale.
+    const freshEpisodes = cluster.episodes.map((ep) => getNode(db, ep.id)).filter((e): e is MemoryNode => e !== null);
+    if (freshEpisodes.length !== cluster.episodes.length) {
+      ctx.logger.warn('memory: source episode was forgotten; skipping abstraction');
+      continue;
+    }
+    const sensitiveLive = freshEpisodes.some((e) => e.sensitivity === 'sensitive');
+    if (sensitiveLive && !allowSensitive) {
+      ctx.logger.warn('memory: episode became sensitive before cloud request; cluster skipped');
+      continue;
+    }
     const user = [
       `Allowed memory kinds: ${policy.allowedKinds.join(', ')}`,
-      `Episodes:\n${cluster.episodes.map((e) => `- [${new Date(e.createdAt).toISOString().slice(0, 10)}] ${e.label}: ${e.content.replace(/\s+/g, ' ').slice(0, 600)}`).join('\n')}`,
+      `Episodes:\n${freshEpisodes.map((e) => `- [${new Date(e.createdAt).toISOString().slice(0, 10)}] ${e.label}: ${e.content.replace(/\s+/g, ' ').slice(0, 600)}`).join('\n')}`,
     ].join('\n\n');
     let parsed: ReturnType<typeof parseAbstraction> = null;
     try {
@@ -433,8 +443,15 @@ async function abstractEpisodes(
     const summary = parsed.summary && allowed.has('summary') && !refused(parsed.summary.label, parsed.summary.content) ? parsed.summary : null;
     const facts = parsed.facts.filter((f) => allowed.has(f.kind) && !refused(f.label, f.content, ...(f.entities ?? [])));
     const items: { kind: MemoryKind; label: string; content: string; importance: number; sensitive: boolean; entities: string[] }[] = [];
-    if (summary) items.push({ kind: 'summary', label: summary.label, content: summary.content, importance: summary.importance ?? 0.5, sensitive, entities: [] });
-    for (const f of facts) items.push({ kind: f.kind, label: f.label, content: f.content, importance: f.importance ?? 0.5, sensitive: sensitive || f.sensitivity === 'sensitive', entities: f.entities ?? [] });
+    if (summary) items.push({ kind: 'summary', label: summary.label, content: summary.content, importance: summary.importance ?? 0.5, sensitive: sensitiveLive, entities: [] });
+    for (const f of facts) items.push({ kind: f.kind, label: f.label, content: f.content, importance: f.importance ?? 0.5, sensitive: sensitiveLive || f.sensitivity === 'sensitive', entities: f.entities ?? [] });
+
+    // After the cloud call: if a source episode flipped to sensitive while we
+    // were waiting, upgrade every derived item so the sensitive content can't
+    // leave the device via a non-sensitive abstraction.
+    const episodesAfter = cluster.episodes.map((ep) => getNode(db, ep.id));
+    const sensitiveAfter = episodesAfter.some((e) => e?.sensitivity === 'sensitive');
+    if (sensitiveAfter && !sensitiveLive) items.forEach((it) => { it.sensitive = true; });
 
     // A well-formed empty reply ({summary:null,facts:[]} the prompt explicitly allows)
     // or a reply whose items were all filtered by policy / refused() still marks the
