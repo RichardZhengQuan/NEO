@@ -64,7 +64,7 @@ export const AVATAR_CSS = `
 @keyframes neo-av-ping{0%,100%{transform:scale(1)}50%{transform:scale(.82)}}
 @keyframes neo-av-dot{0%,55%,100%{transform:translateY(0);opacity:.4}25%{transform:translateY(-1.8px);opacity:1}}
 
-.neo-av--still *{animation:none!important}
+.neo-av--still *{animation:none!important;transition:none!important}
 @media (prefers-reduced-motion:reduce){.neo-av *{animation:none!important;transition:none!important}}
 .neo-av--still[data-state=speaking] .neo-av-flap-half{opacity:1}
 @media (prefers-reduced-motion:reduce){.neo-av[data-state=speaking] .neo-av-flap-half{opacity:1}}

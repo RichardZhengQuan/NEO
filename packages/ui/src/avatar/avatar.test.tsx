@@ -103,6 +103,10 @@ describe('NeoAvatar', () => {
     expect(root.style.width).toBe('28px');
   });
 
+  it('still-pose disables transitions as well as animations', () => {
+    expect(AVATAR_CSS).toContain('.neo-av--still *{animation:none!important;transition:none!important}');
+  });
+
   it('shows a half-open mouth for flap avatars while speaking with motion off', () => {
     const { container } = render(
       <NeoAvatar avatar={{ kind: 'boy', bg: '#EEE2DF' }} state="speaking" animated={false} />,
