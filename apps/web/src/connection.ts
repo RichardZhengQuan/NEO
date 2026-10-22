@@ -14,7 +14,7 @@
  *
  * Everything external is injected so the order is unit-tested.
  */
-import { MAX_PAIRING_LAN_ADDRESSES, ServerIdSchema, TunnelPublicKeySchema, isLanAddress, parsePairingLink, parsePairingUrl, type Device, type HealthResponse, type PairingLink, type TunnelRoute } from '@neo/protocol';
+import { MAX_PAIRING_LAN_ADDRESSES, ServerIdSchema, TunnelPublicKeySchema, isLanAddress, isLocalUrl, parsePairingLink, parsePairingUrl, type Device, type HealthResponse, type PairingLink, type TunnelRoute } from '@neo/protocol';
 import { NeoClient, type NeoClientOptions } from '@neo/client';
 import { createTunnelTransport, tunnelBaseUrl, type TunnelTransport } from '@neo/tunnel';
 import { STORAGE_KEYS, readJson, writeJson } from './lib/storage.js';
@@ -73,7 +73,7 @@ export function normalizeServerUrl(input: string): string | null {
   if (!s) return null;
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
     const host = s.split('/')[0]!.split(':')[0]!;
-    const local = host === 'localhost' || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || host.endsWith('.local');
+    const local = isLocalUrl(`http://${host}`);
     s = `${local ? 'http' : 'https'}://${s}`;
   }
   try {
