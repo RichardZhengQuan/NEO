@@ -785,6 +785,20 @@ describe('consolidation', () => {
     expect((await svc.get(e1.id))!.node.consolidatedAt ?? null).toBeNull();
   });
 
+  it('keeps episodes unconsolidated when a malformed summary produces no items', async () => {
+    const { model, requests } = scriptedLLM({ consolidate: () => '{"summary":"oops"}' });
+    const { svc, db, tickDays } = setup({ llm: model });
+    try {
+      const [e1, e2] = await twoHikingEpisodes(svc);
+      tickDays(1);
+      await svc.consolidate({ force: true });
+      expect(requests).toHaveLength(1);
+      expect(count(db, `SELECT COUNT(*) n FROM memory_nodes WHERE kind IN ('summary','fact','preference','skill','goal')`)).toBe(0);
+      expect((await svc.get(e1.id))!.node.consolidatedAt ?? null).toBeNull();
+      expect((await svc.get(e2.id))!.node.consolidatedAt ?? null).toBeNull();
+    } finally { db.close(); }
+  });
+
   it('retries previously-faded episodes on the next run when the model becomes usable', async () => {
     let attempts = 0;
     const { model } = scriptedLLM({

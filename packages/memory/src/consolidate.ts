@@ -424,6 +424,10 @@ async function abstractEpisodes(
     const items: { kind: MemoryKind; label: string; content: string; importance: number; sensitive: boolean; entities: string[] }[] = [];
     if (summary) items.push({ kind: 'summary', label: summary.label, content: summary.content, importance: summary.importance ?? 0.5, sensitive, entities: [] });
     for (const f of facts) items.push({ kind: f.kind, label: f.label, content: f.content, importance: f.importance ?? 0.5, sensitive: sensitive || f.sensitivity === 'sensitive', entities: f.entities ?? [] });
+    if (items.length === 0) {
+      ctx.logger.warn('memory: episode abstraction reply produced no items; episodes will be retried');
+      continue;
+    }
 
     // Sensitive knowledge is embedded on the device only.
     const onDevice = items.map((it) => ctx.keepLocal({ sensitivity: it.sensitive ? 'sensitive' : 'normal' }));
