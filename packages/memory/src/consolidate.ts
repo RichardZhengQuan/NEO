@@ -301,7 +301,13 @@ async function mergeEntities(ctx: MemoryContext, now: number, report: Consolidat
       const from = b.label;
       const mergedId = b.id;
       db.transaction(() => {
-        a = mergeEntity(ctx, a, b, now);
+        // Re-read both rows so a mid-batch sensitivity flip (or any
+        // other concurrent write during yieldToEventLoop) is not
+        // overwritten by the stale snapshot.
+        const freshA = getNode(db, a.id);
+        const freshB = getNode(db, b.id);
+        if (!freshA || freshA.status !== 'active' || !freshB || freshB.status !== 'active') return;
+        a = mergeEntity(ctx, freshA, freshB, now);
       });
       gone.add(b.id);
       ctx.vectors.drop(b.id);

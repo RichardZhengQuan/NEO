@@ -4,7 +4,7 @@
  * Offline and deterministic: in-memory SQLite, injected clock, HashingEmbedder,
  * scripted fake LLMs.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   ChatModel,
   ChatRequest,
@@ -194,6 +194,62 @@ describe('privacy: sensitive memories', () => {
     expect(survivor).not.toBeNull();
     expect(survivor!.node.sensitivity).toBe('sensitive');
     expect(survivor!.node.content).toContain('HIV clinic');
+  });
+
+  it('consolidation does not overwrite a sensitivity flip that lands during a merge yield', async () => {
+    // The yield cadence in mergeEntities is i % 25 === 24 (yieldToEventLoop fires
+    // before `let a = entities[i]` so `a` would be assigned from the stale snapshot).
+    // With 26 entities all inserted before the run, discoverLinks has 26 changedIds
+    // and yields at n=9 and n=19.  mergeEntities yields at i=24.  Total: 3 yields;
+    // the 3rd is the critical one where the merge of entities[24] and entities[25]
+    // is about to start.
+    const { svc } = setup();
+
+    // 24 unique entities — none will be merged.
+    for (let i = 0; i < 24; i++) {
+      await svc.remember({ kind: 'entity', label: `UniqueEntity${i}`, content: `Unique content ${i}`, source: { by: 'user' } });
+    }
+    // Entities at indices 24 and 25 share a canonical name → they will be merged.
+    // The lower-rowid entity (inserted 25th) becomes the survivor.
+    const surviving = await svc.remember({ kind: 'entity', label: 'SharedName', content: 'First occurrence', source: { by: 'user' } });
+    await svc.remember({ kind: 'entity', label: 'SharedName', content: 'Second occurrence', source: { by: 'user' } });
+
+    // Verify: not sensitive at the start.
+    expect((await svc.get(surviving.id))!.node.sensitivity).not.toBe('sensitive');
+
+    vi.useFakeTimers();
+    try {
+      const consolidationDone = svc.consolidate({ force: true });
+
+      // Fire one pending fake-timer and drain the microtask queue so the
+      // consolidation continuation runs to its next await.
+      const fireOneYield = async () => {
+        vi.runOnlyPendingTimers();
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+      };
+
+      // Fire the two discoverLinks yields (at n=9 and n=19).
+      await fireOneYield();
+      await fireOneYield();
+
+      // The consolidation is now blocked at the mergeEntities yield (i=24),
+      // before `let a = entities[24]` is assigned from the stale snapshot.
+      // Flip the surviving entity to sensitive while the merge is paused.
+      await svc.update(surviving.id, { sensitivity: 'sensitive' });
+
+      // Release the mergeEntities yield and let the merge transaction commit.
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+      await consolidationDone;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const result = await svc.get(surviving.id);
+    expect(result).not.toBeNull();
+    // With the fix: freshA is re-read inside the transaction → sensitivity preserved.
+    // Without the fix: stale snapshot used → sensitivity overwritten with null/normal.
+    expect(result!.node.sensitivity).toBe('sensitive');
   });
 });
 
