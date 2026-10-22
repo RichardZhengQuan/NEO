@@ -816,7 +816,8 @@ describe('desktop connect mode', () => {
     const getConfigHandler = vi.mocked(ipcMain.handle).mock.calls.find(
       ([ch]) => ch === 'neo:getConfig',
     )?.[1];
-    const result = await getConfigHandler!({} as Electron.IpcMainInvokeEvent);
+    const fileEvent = { senderFrame: { url: 'file:///path/to/index.html' } } as Electron.IpcMainInvokeEvent;
+    const result = await getConfigHandler!(fileEvent);
     expect(result).toEqual({ serverUrl: 'https://neo.example.com', token: 'tok789' });
   });
 

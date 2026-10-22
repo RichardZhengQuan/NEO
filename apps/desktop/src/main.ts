@@ -73,6 +73,11 @@ let currentWebFileUrl: string | null = null;
 let notifListenerActive = false;
 /** In connect mode: the credentials remembered after saveMode is called. */
 let connectCredentials: { serverUrl: string; token: string } | null = null;
+/**
+ * A neo://pair?... URL that arrived via open-url before the window was ready.
+ * Delivered to the renderer once it is created.
+ */
+let pendingPairUrl: string | null = null;
 
 // ───────────────────────────── web directory ─────────────────────────────
 
@@ -142,6 +147,11 @@ function createWindow(serverUrl: string): void {
   // Show only when the renderer signals it is ready to avoid a flash of blank white.
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    // Deliver any pairing link that arrived before the window existed.
+    if (pendingPairUrl) {
+      mainWindow?.webContents.send('neo:pairLink', pendingPairUrl);
+      pendingPairUrl = null;
+    }
   });
 
   // Block or redirect navigation events.
@@ -346,12 +356,20 @@ function registerConnectIpcHandlers(userData: string, initialMode: RemoteMode): 
     connectCredentials = { serverUrl: initialMode.serverUrl, token: initialMode.token };
   }
 
-  ipcMain.handle('neo:getConfig', async () => {
+  ipcMain.handle('neo:getConfig', async (event) => {
+    const senderUrl = event.senderFrame?.url ?? '';
+    if (!senderUrl.startsWith('file://')) {
+      throw new Error('Unauthorized sender');
+    }
     if (!connectCredentials) throw new Error('Not connected: no credentials saved yet');
     return { serverUrl: connectCredentials.serverUrl, token: connectCredentials.token };
   });
 
-  ipcMain.handle('neo:openExternal', (_event, url: unknown) => {
+  ipcMain.handle('neo:openExternal', (event, url: unknown) => {
+    const senderUrl = event.senderFrame?.url ?? '';
+    if (!senderUrl.startsWith('file://')) {
+      throw new Error('Unauthorized sender');
+    }
     if (typeof url !== 'string') return;
     if (!isSafeExternalUrl(url)) return;
     void shell.openExternal(url);
@@ -548,6 +566,21 @@ app.on('second-instance', () => {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
+  }
+});
+
+// macOS: handle neo://pair?... deep links (the custom URL scheme must be
+// registered in the app's Info.plist via electron-builder's protocols config).
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  if (!url.startsWith('neo://pair')) return;
+  if (mainWindow) {
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send('neo:pairLink', url);
+  } else {
+    // Window not yet created (app launched via the URL); queue for delivery.
+    pendingPairUrl = url;
   }
 });
 
