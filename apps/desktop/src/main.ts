@@ -394,6 +394,10 @@ function registerIpcHandlers(serverUrl: string, ownerToken: string): void {
     if (!isSafeExternalUrl(url)) return;
     void shell.openExternal(url);
   });
+
+  // In local mode, saveMode is a no-op: credentials are already baked in at
+  // server start and there is no startup-mode.json to update.
+  ipcMain.handle('neo:saveMode', () => undefined);
 }
 
 // ───────────────────────────── OS notifications ─────────────────────────────

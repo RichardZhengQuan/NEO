@@ -31,7 +31,7 @@ export interface NeoDesktopApi {
    * Subscribe to incoming neo://pair?... deep links forwarded from the main
    * process (macOS open-url / protocol handler). Returns an unsubscribe fn.
    */
-  onPairLink?(callback: (url: string) => void): () => void;
+  watchPairLinks?(callback: (url: string) => void): () => void;
 }
 
 const api: NeoDesktopApi = {
@@ -49,7 +49,7 @@ const api: NeoDesktopApi = {
     return ipcRenderer.invoke('neo:saveMode', mode) as Promise<void>;
   },
 
-  onPairLink(callback: (url: string) => void): () => void {
+  watchPairLinks(callback: (url: string) => void): () => void {
     const listener = (_event: unknown, url: string) => callback(url);
     ipcRenderer.on('neo:pairLink', listener as Parameters<typeof ipcRenderer.on>[1]);
     return () => ipcRenderer.removeListener('neo:pairLink', listener as Parameters<typeof ipcRenderer.on>[1]);
