@@ -131,15 +131,30 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
     const nonNull = type.filter((t) => t !== 'null');
     if (nonNull.length < type.length) out['nullable'] = true;
     if (nonNull.length > 1) {
-      // Multiple non-null types: convert to anyOf so no branch is dropped.
+      // Distribute sibling constraints to the types they apply to inside anyOf.
       const { type: _t, ...rest } = node;
       const sanitized = nonNull
-        .map((t) => sanitizeNode({ type: t }, defs, refStack))
+        .map((t) => {
+          const branch: Record<string, unknown> = { type: t };
+          if (t === 'object') {
+            if (rest['properties'] !== undefined) branch['properties'] = rest['properties'];
+            if (rest['required'] !== undefined) branch['required'] = rest['required'];
+            if (rest['additionalProperties'] !== undefined) branch['additionalProperties'] = rest['additionalProperties'];
+          } else if (t === 'array') {
+            if (rest['items'] !== undefined) branch['items'] = rest['items'];
+          }
+          return sanitizeNode(branch, defs, refStack);
+        })
         .filter((v): v is Record<string, unknown> => v !== undefined && !isEmptyObjectSchema(v));
-      const base = sanitizeNode(rest, defs, refStack) ?? {};
-      if (sanitized.length) base['anyOf'] = sanitized;
-      if (nonNull.length < type.length) base['nullable'] = true;
-      return base;
+      if (sanitized.length) out['anyOf'] = sanitized;
+      // Preserve wrapper-level keywords (title, description, nullable, minLength/maxLength,
+      // minimum/maximum, pattern, minItems/maxItems, minProperties/maxProperties). Validators
+      // ignore keywords that don't apply to the value's actual type, so these stay correct on
+      // the outer wrapper when the union mixes types.
+      for (const [key, value] of Object.entries(rest)) {
+        if (SCALAR_KEYS.has(key)) out[key] = value;
+      }
+      return out;
     }
     type = nonNull[0];
   }

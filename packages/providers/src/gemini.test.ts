@@ -159,6 +159,46 @@ describe('sanitizeGeminiSchema', () => {
     });
   });
 
+  it('preserves sibling constraints in object/string type-union', () => {
+    const out = sanitizeGeminiSchema({
+      type: ['object', 'string'],
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    });
+    expect(out).toEqual({
+      anyOf: [
+        { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+        { type: 'string' },
+      ],
+    });
+  });
+
+  it('preserves sibling items in array/string type-union', () => {
+    const out = sanitizeGeminiSchema({ type: ['array', 'string'], items: { type: 'number' } });
+    expect(out).toEqual({
+      anyOf: [
+        { type: 'array', items: { type: 'number' } },
+        { type: 'string' },
+      ],
+    });
+  });
+
+  it('preserves wrapper scalar constraints on a type-union (minLength, minimum)', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number'], minLength: 3, minimum: 10 })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      minLength: 3,
+      minimum: 10,
+    });
+  });
+
+  it('preserves wrapper nullable and title on a type-union', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number'], title: 'Foo', nullable: true })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      title: 'Foo',
+      nullable: true,
+    });
+  });
+
   it('keeps property names that look like keywords and survives recursive refs', () => {
     const schema = {
       type: 'object',
