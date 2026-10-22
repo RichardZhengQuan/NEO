@@ -74,13 +74,24 @@ type Fact = z.infer<typeof FactSchema>;
 export function parseAbstraction(reply: string): { summary: Summary | null; facts: Fact[] } | null {
   const raw = parseLenientJson(reply);
   if (!raw || !('summary' in raw || Array.isArray(raw['facts']))) return null;
-  const summary = raw['summary'] ? SummarySchema.safeParse(raw['summary']) : null;
-  const facts: Fact[] = [];
-  for (const f of Array.isArray(raw['facts']) ? (raw['facts'] as unknown[]) : []) {
-    const parsed = FactSchema.safeParse(f);
-    if (parsed.success) facts.push(parsed.data);
+  const rawSummary = raw['summary'];
+  let summary: Summary | null = null;
+  if (rawSummary != null) {
+    const parsed = SummarySchema.safeParse(rawSummary);
+    if (!parsed.success) return null;
+    summary = parsed.data;
   }
-  return { summary: summary?.success ? summary.data : null, facts };
+  const rawFacts = raw['facts'];
+  if (rawFacts !== undefined && rawFacts !== null && !Array.isArray(rawFacts)) return null;
+  const facts: Fact[] = [];
+  if (Array.isArray(rawFacts)) {
+    for (const f of rawFacts as unknown[]) {
+      const parsed = FactSchema.safeParse(f);
+      if (parsed.success) facts.push(parsed.data);
+    }
+    if (rawFacts.length > 0 && facts.length === 0) return null;
+  }
+  return { summary, facts };
 }
 
 // ─────────────────────────────── helpers ────────────────────────────────
@@ -424,11 +435,12 @@ async function abstractEpisodes(
     const items: { kind: MemoryKind; label: string; content: string; importance: number; sensitive: boolean; entities: string[] }[] = [];
     if (summary) items.push({ kind: 'summary', label: summary.label, content: summary.content, importance: summary.importance ?? 0.5, sensitive, entities: [] });
     for (const f of facts) items.push({ kind: f.kind, label: f.label, content: f.content, importance: f.importance ?? 0.5, sensitive: sensitive || f.sensitivity === 'sensitive', entities: f.entities ?? [] });
-    if (items.length === 0) {
-      ctx.logger.warn('memory: episode abstraction reply produced no items; episodes will be retried');
-      continue;
-    }
 
+    // A well-formed empty reply ({summary:null,facts:[]} the prompt explicitly allows)
+    // or a reply whose items were all filtered by policy / refused() still marks the
+    // source episodes consolidated: the model has looked at the cluster and said there
+    // was nothing lasting worth keeping. Only a malformed reply skips the mark loop,
+    // and parseAbstraction already returns null for that.
     // Sensitive knowledge is embedded on the device only.
     const onDevice = items.map((it) => ctx.keepLocal({ sensitivity: it.sensitive ? 'sensitive' : 'normal' }));
     const vecs = await embedTexts(ctx, items.map((it) => nodeEmbedText(it.kind, it.label, it.content, [])), onDevice);
