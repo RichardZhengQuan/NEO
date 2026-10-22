@@ -159,6 +159,30 @@ describe('sanitizeGeminiSchema', () => {
     });
   });
 
+  it('preserves sibling constraints in object/string type-union', () => {
+    const out = sanitizeGeminiSchema({
+      type: ['object', 'string'],
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    });
+    expect(out).toEqual({
+      anyOf: [
+        { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+        { type: 'string' },
+      ],
+    });
+  });
+
+  it('preserves sibling items in array/string type-union', () => {
+    const out = sanitizeGeminiSchema({ type: ['array', 'string'], items: { type: 'number' } });
+    expect(out).toEqual({
+      anyOf: [
+        { type: 'array', items: { type: 'number' } },
+        { type: 'string' },
+      ],
+    });
+  });
+
   it('keeps property names that look like keywords and survives recursive refs', () => {
     const schema = {
       type: 'object',
