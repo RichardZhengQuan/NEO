@@ -328,18 +328,68 @@ describe('off-record lifecycle', () => {
     const h = harness();
     const normalText = 'normal episode anchor text for off-record prefix check';
     await send(h, normalText);
-    // Advance past the 24-hour recentContext window so normalText can only reach the
-    // second private turn via previousHistory (not via the recentContext summary path).
-    h.advance(25 * HOUR);
     await h.runtime.startOffRecord();
-    await send(h, 'first private turn', true);
-    // Confirm normalText is absent from the first turn (recentContext cutoff was exceeded)
-    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).not.toContain(normalText);
-    // Capture request count to verify the second send actually triggered a new model call
+    const firstOff = await send(h, 'first private turn', true);
+    // The first private turn sees normalText only via the recentContext summary (context part).
+    // originEpisode is null on the first turn (history.length === 0), so previousHistory is absent.
+    expect(recent(firstOff.handle.userMessage.parts)).toContain(normalText);
+    // The second private turn: previous === current off-record episode so recentContext is null,
+    // but originEpisode must supply the normal-episode messages via previousHistory.
     const requestsBefore = h.model.requests.length;
     await send(h, 'second private turn', true);
     expect(h.model.requests.length).toBe(requestsBefore + 1);
-    // The normal-episode messages must appear in the request sent to the model on the second turn
+    // normalText must appear in the model messages via previousHistory on the second turn.
+    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).toContain(normalText);
+  });
+
+  it('does not inject a stale normal-episode prefix after the 24-hour window', async () => {
+    const h = harness();
+    const normalText = 'stale normal episode text that must not reappear';
+    await send(h, normalText);
+    // Advance past the 24-hour window; both recentContext and originEpisode must expire.
+    h.advance(25 * HOUR);
+    await h.runtime.startOffRecord();
+    await send(h, 'first private turn', true);
+    // recentContext expired: normalText absent from the first turn.
+    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).not.toContain(normalText);
+    await send(h, 'second private turn', true);
+    // originEpisode also expired: normalText must be absent from the second turn as well.
+    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).not.toContain(normalText);
+  });
+
+  it('carries the normal-episode prefix into the second private turn when startOffRecord was called mid-stream', async () => {
+    const local = new ScriptedAdapter({ id: 'local', isLocal: true });
+    const h = harness({ adapters: [local] });
+    const normalText = 'normal anchor text for migration prefix test';
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    local.script(async function* () {
+      yield ev.text('partial');
+      await gate;
+      yield ev.done();
+    });
+
+    let seenDelta!: () => void;
+    const sawDelta = new Promise<void>((r) => { seenDelta = r; });
+    const unsub = h.runtime.subscribe((e) => { if (e.type === 'text.delta') seenDelta(); });
+    const normalHandle = await h.runtime.sendTimeline({ parts: userText(normalText) });
+    await sawDelta;
+    unsub();
+
+    // startOffRecord() called while the normal turn is still in progress (migration scenario).
+    await h.runtime.startOffRecord();
+    release();
+    await normalHandle.done;
+
+    // After migration the off-record episode already holds the assistant continuation,
+    // so history.length > 0 for the first user-sent private turn. Both it and the second
+    // must carry the normal-episode prefix via originEpisode/previousHistory.
+    await send(h, 'first private turn', true);
+    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).toContain(normalText);
+    const requestsBefore = h.model.requests.length;
+    await send(h, 'second private turn', true);
+    expect(h.model.requests.length).toBe(requestsBefore + 1);
     expect(JSON.stringify(h.model.requests.at(-1)!.messages)).toContain(normalText);
   });
 
