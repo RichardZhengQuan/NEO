@@ -112,9 +112,26 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
       const inner = sanitizeNode({ ...(isPlainObject(nonNull[0]) ? nonNull[0] : {}), ...rest }, defs, refStack);
       return inner && nullable ? { ...inner, nullable: true } : inner;
     }
-    const out = sanitizeNode(rest, defs, refStack) ?? {};
+    // Do not call sanitizeNode on rest as the wrapper — that infers type:'object' from
+    // sibling `properties`, which then conflicts with the alternatives.
+    // Instead: put only scalar keywords on the wrapper, and distribute type-specific
+    // sibling constraints (properties/required/items) into each matching branch.
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(rest)) {
+      if (SCALAR_KEYS.has(key)) out[key] = value;
+    }
     const sanitized = nonNull
-      .map((v) => sanitizeNode(v, defs, refStack))
+      .map((v) => {
+        const alt: Record<string, unknown> = isPlainObject(v) ? { ...v } : {};
+        const altType = typeof alt['type'] === 'string' ? alt['type'] : (isPlainObject(alt['properties']) ? 'object' : undefined);
+        if (altType === 'object') {
+          if (rest['properties'] !== undefined && alt['properties'] === undefined) alt['properties'] = rest['properties'];
+          if (rest['required'] !== undefined && alt['required'] === undefined) alt['required'] = rest['required'];
+        } else if (altType === 'array') {
+          if (rest['items'] !== undefined && alt['items'] === undefined) alt['items'] = rest['items'];
+        }
+        return sanitizeNode(alt, defs, refStack);
+      })
       .filter((v): v is Record<string, unknown> => v !== undefined && !isEmptyObjectSchema(v));
     if (sanitized.length) out['anyOf'] = sanitized;
     if (nullable) out['nullable'] = true;

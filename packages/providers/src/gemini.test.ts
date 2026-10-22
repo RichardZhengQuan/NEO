@@ -238,6 +238,21 @@ describe('sanitizeGeminiSchema', () => {
     const out = sanitizeGeminiSchema({ type: 'array' });
     expect(out).toEqual({ type: 'array', items: { type: 'object' } });
   });
+
+  it('distributes sibling properties/required into the object branch of a multi-alternative anyOf without adding a top-level type', () => {
+    const schema = {
+      anyOf: [{ type: 'object' }, { type: 'string' }],
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    };
+    const out = sanitizeGeminiSchema(schema);
+    expect(out).toEqual({
+      anyOf: [
+        { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+        { type: 'string' },
+      ],
+    });
+  });
 });
 
 // ── Built-in tool schema coverage ──────────────────────────────────────────────
