@@ -104,6 +104,60 @@ describe('targeted reminder actions', () => {
   });
 });
 
+describe('widget action id prefix security', () => {
+  const widgets: {
+    verb: string;
+    targetId: string;
+    actionId: (id: string) => string;
+    block: (id: string) => UIBlock;
+    tool: string;
+    input: (id: string) => Record<string, unknown>;
+  }[] = [
+    {
+      verb: 'task.toggle', targetId: 't1', actionId: widgetActionId.taskToggle,
+      block: (id) => ({ type: 'tasks', tasks: [{ id, title: 'Task', done: false }] }),
+      tool: 'update_task', input: (id) => ({ id, done: true }),
+    },
+    {
+      verb: 'memory.forget', targetId: 'm1', actionId: widgetActionId.memoryForget,
+      block: (id) => ({ type: 'memory', nodes: [{ id, kind: 'fact', label: 'Memory' }] }),
+      tool: 'forget', input: (id) => ({ ids: [id] }),
+    },
+    {
+      verb: 'change.apply', targetId: 'chg_1', actionId: widgetActionId.changeApply,
+      block: (id) => ({ type: 'changes', items: [{ id, kind: 'task.update', taskId: 't1', title: 'Task', before: { done: false }, after: { done: true } }] }),
+      tool: 'apply_change', input: (id) => ({ item: { id, kind: 'task.update', taskId: 't1', title: 'Task', before: { done: false }, after: { done: true } } }),
+    },
+  ];
+
+  describe.each(widgets)('$verb', ({ verb, targetId, actionId, block, tool, input }) => {
+    it.each(['event', 'message'] as const)('does not reroute a bare %s action to a widget tool', (kind) => {
+      const bareId = `${verb}:${targetId}`;
+      const root: UIBlock = { type: 'stack', children: [
+        { type: 'buttons', actions: [kind === 'event'
+          ? { id: bareId, label: 'Continue', kind }
+          : { id: bareId, label: 'Continue', kind, text: 'Continue' }] },
+        block(targetId),
+      ] };
+      expect(resolveWidgetAction(root, bareId)).toBeNull();
+      expect(resolveWidgetAction(root, actionId(targetId))).toMatchObject({
+        id: `${UI_ACTION_ID_PREFIX}${verb}:${targetId}`, kind: 'tool', tool, input: input(targetId),
+      });
+    });
+
+    it.each(['id:with:colons', 'id / % ✓', 'id%3Aencoded'])('prefixes and URL-encodes the target id %s', (id) => {
+      const encodedId = actionId(id);
+      expect(encodedId).toBe(`${UI_ACTION_ID_PREFIX}${verb}:${encodeURIComponent(id)}`);
+      expect(encodedId.slice(`${UI_ACTION_ID_PREFIX}${verb}:`.length)).not.toContain(':');
+      expect(resolveWidgetAction(block(id), encodedId)).toMatchObject({ kind: 'tool', tool, input: input(id) });
+    });
+
+    it.each(['%', '%E0%A4%A'])('rejects malformed URL-encoded target %s', (id) => {
+      expect(resolveWidgetAction(block(id), `${UI_ACTION_ID_PREFIX}${verb}:${id}`)).toBeNull();
+    });
+  });
+});
+
 describe('UI block targeting keys', () => {
   it('uses explicit ids when present and tree paths otherwise', () => {
     expect(uiBlockKey(form, [])).toBe('path:root');

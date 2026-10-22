@@ -50,12 +50,24 @@ describe('patchWidgetBlock changes', () => {
   it('refuses fabricated apply_change actions and reserved ids outside a changes widget', () => {
     const buttons: UIBlock = { type: 'buttons', actions: [
       { id: 'fabricated', label: 'Apply', kind: 'tool', tool: 'apply_change', input: { item } },
-      { id: 'change.apply:chg_1', label: 'Apply', kind: 'tool', tool: 'update_task', input: { id: 'task_1', done: true } },
+      { id: widgetActionId.changeApply('chg_1'), label: 'Apply', kind: 'tool', tool: 'update_task', input: { id: 'task_1', done: true } },
     ] };
     expect(resolveStoredAction(buttons, 'fabricated')).toBeNull();
     expect(resolveStoredAction(buttons, 'change.apply:chg_1')).toBeNull();
-    expect(resolveStoredAction(changes, 'change.apply:chg_1')?.action).toMatchObject({ tool: 'apply_change', input: { item } });
+    expect(resolveStoredAction(buttons, widgetActionId.changeApply('chg_1'))).toBeNull();
+    expect(resolveStoredAction(changes, widgetActionId.changeApply('chg_1'))?.action).toMatchObject({ tool: 'apply_change', input: { item } });
   });
+
+  it.each(['event', 'message'] as const)('preserves a bare change.apply %s action beside a changes widget', (kind) => {
+    const action = kind === 'event'
+      ? { id: 'change.apply:chg_1', label: 'Continue', kind }
+      : { id: 'change.apply:chg_1', label: 'Continue', kind, text: 'Continue' };
+    const block: UIBlock = { type: 'stack', children: [changes, { type: 'buttons', actions: [action] }] };
+    expect(resolveStoredAction(block, action.id)).toEqual({ action });
+    expect(resolveStoredAction(block, widgetActionId.changeApply('chg_1'))?.action)
+      .toMatchObject({ kind: 'tool', tool: 'apply_change', input: { item } });
+  });
+
   it('marks applied items and patches task widgets in the same nested tree', () => {
     const block: UIBlock = { type: 'card', children: [changes, { type: 'tasks', tasks: [{ id: 'task_1', title: 'Dentist', done: false }] }] };
     expect(patchWidgetBlock(block, { change: { id: item.id, status: 'applied' }, task: { id: 'task_1', title: 'Dentist', done: true } }))

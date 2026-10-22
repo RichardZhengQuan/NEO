@@ -402,7 +402,7 @@ describe('block actions', () => {
     wrap(<BlockRenderer block={{ type: 'tasks', tasks: [{ id: 'task_9', title: 'Water plants', done: false }] }} uiId="ui_t" onAction={onAction} />);
     fireEvent.click(screen.getByLabelText('Water plants'));
     await waitFor(() => expect(calls).toHaveLength(1));
-    expect(calls[0]!.action.id).toBe('task.toggle:task_9');
+    expect(calls[0]!.action.id).toBe(widgetActionId.taskToggle('task_9'));
     expect(calls[0]!.values).toEqual({ done: true });
     expect((screen.getByLabelText('Water plants') as HTMLInputElement).checked).toBe(true);
   });
@@ -478,7 +478,7 @@ describe('block actions', () => {
     );
     fireEvent.click(screen.getByText('Forget'));
     expect(await screen.findByText('Forgotten')).toBeTruthy();
-    expect(calls.map((c) => c.action.id)).toEqual(['memory.forget:mem_c']);
+    expect(calls.map((c) => c.action.id)).toEqual([widgetActionId.memoryForget('mem_c')]);
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
   });

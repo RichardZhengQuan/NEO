@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AgentRuntime } from './runtime.js';
 import { z } from 'zod';
-import { estimateMessageTokens, NeoError, type ContentPart, type Message, type ToolDefinition } from '@neo/protocol';
+import { estimateMessageTokens, NeoError, widgetActionId, type ContentPart, type Message, type ToolDefinition } from '@neo/protocol';
 import { collect, deferred, ev, harness, memoryNode, recalled, ScriptedAdapter, settle, standardTools, until, userText, waitsForAbort, type Harness } from './fakes.test-utils.js';
 
 const MINUTE = 60_000;
@@ -603,7 +603,7 @@ describe('authoritative off-record state', () => {
     const source = stored(h, h.conv.id, 'task');
     h.conversations.updateMessage(source.id, { parts: [{ type: 'ui', id: 'ui_private_task', block: { type: 'tasks', tasks: [{ id: 'task_private', title: 'Task', done: false }] } }] });
     const original = h.conversations.getMessage(source.id)!;
-    const input = { messageId: source.id, uiId: 'ui_private_task', actionId: 'task.toggle:task_private' };
+    const input = { messageId: source.id, uiId: 'ui_private_task', actionId: widgetActionId.taskToggle('task_private') };
     const result = await h.runtime.handleTimelineUiAction(input);
     if (result.kind !== 'confirm') throw new Error('Expected confirmation');
     const state = await h.runtime.startOffRecord();

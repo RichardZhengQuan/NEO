@@ -477,6 +477,7 @@ describe('widget actions', () => {
     expect(resolveWidgetAction(tasks, widgetActionId.taskToggle('task_1'))).toMatchObject({ kind: 'tool', tool: 'update_task', input: { id: 'task_1', done: true } });
     expect(resolveWidgetAction(tasks, widgetActionId.taskToggle('task_1'), { done: false })).toMatchObject({ input: { done: false } });
     expect(resolveWidgetAction(tasks, widgetActionId.taskToggle('task_other'))).toBeNull();
+    expect(resolveWidgetAction(tasks, 'task.toggle:task_1')).toBeNull();
     const card: UIBlock = {
       type: 'card',
       children: [{ type: 'reminder', reminderId: 'rem_1', title: 'Water', dueAt: 0, status: 'fired' }],
@@ -486,6 +487,7 @@ describe('widget actions', () => {
     const mem: UIBlock = { type: 'memory', nodes: [{ id: 'mem_1', kind: 'fact', label: 'x' }] };
     expect(resolveWidgetAction(mem, widgetActionId.memoryForget('mem_1'))).toMatchObject({ tool: 'forget', confirm: expect.any(String) });
     expect(resolveWidgetAction(mem, widgetActionId.memoryForget('mem_2'))).toBeNull();
+    expect(resolveWidgetAction(mem, 'memory.forget:mem_1')).toBeNull();
   });
 });
 

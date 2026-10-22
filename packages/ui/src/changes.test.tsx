@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ChangesBlock, UIAction } from '@neo/protocol';
+import { widgetActionId } from '@neo/protocol';
 import { BlockRenderer, type OnUIAction } from './blocks.js';
 import { I18nProvider } from './i18n.js';
 import { createRetainedStateStore, RetainedStateProvider } from './retained-state.js';
@@ -67,9 +68,9 @@ describe('changes widget', () => {
     await act(async () => completions[2]!());
     expect(await screen.findByRole('status', { name: '' })).toBeTruthy();
     expect(screen.getByText('All changes applied')).toBeTruthy();
-    expect(onAction.mock.calls.map(([action]) => (action as UIAction).id)).toEqual(['change.apply:chg_one', 'change.apply:chg_two', 'change.apply:chg_three']);
+    expect(onAction.mock.calls.map(([action]) => (action as UIAction).id)).toEqual([widgetActionId.changeApply('chg_one'), widgetActionId.changeApply('chg_two'), widgetActionId.changeApply('chg_three')]);
     expect(onAction.mock.calls[0]).toEqual([
-      { id: 'change.apply:chg_one', kind: 'tool', tool: 'apply_change', label: 'Apply change', input: {} },
+      { id: widgetActionId.changeApply('chg_one'), kind: 'tool', tool: 'apply_change', label: 'Apply change', input: {} },
       { uiId: 'ui_changes' },
     ]);
     expect(screen.queryByRole('checkbox')).toBeNull();
@@ -85,7 +86,7 @@ describe('changes widget', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply 1 change' }));
     await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Call mom' })).toBeNull());
     expect(onAction).toHaveBeenCalledTimes(1);
-    expect(onAction.mock.calls[0]![0]).toMatchObject({ id: 'change.apply:chg_two' });
+    expect(onAction.mock.calls[0]![0]).toMatchObject({ id: widgetActionId.changeApply('chg_two') });
     expect((screen.getByRole('checkbox', { name: 'Dentist' }) as HTMLInputElement).checked).toBe(false);
     expect(screen.queryByText('All changes applied')).toBeNull();
     expect((screen.getByRole('button', { name: 'Apply 0 changes' }) as HTMLButtonElement).disabled).toBe(true);
@@ -94,7 +95,7 @@ describe('changes widget', () => {
   it('shows the item error and retries only failed selections after partial success', async () => {
     let failed = false;
     const onAction = vi.fn(async (action: UIAction) => {
-      if (action.id === 'change.apply:chg_two' && !failed) { failed = true; throw new Error('The reminder changed. Ask for a fresh plan.'); }
+      if (action.id === widgetActionId.changeApply('chg_two') && !failed) { failed = true; throw new Error('The reminder changed. Ask for a fresh plan.'); }
     });
     render(view(changes(), onAction));
     fireEvent.click(screen.getByRole('button', { name: 'Apply 3 changes' }));
@@ -104,7 +105,7 @@ describe('changes widget', () => {
     expect(screen.getAllByText('Applied')).toHaveLength(2);
     fireEvent.click(screen.getByRole('button', { name: 'Retry 1' }));
     expect(await screen.findByText('All changes applied')).toBeTruthy();
-    expect(onAction.mock.calls.map(([action]) => action.id)).toEqual(['change.apply:chg_one', 'change.apply:chg_two', 'change.apply:chg_three', 'change.apply:chg_two']);
+    expect(onAction.mock.calls.map(([action]) => action.id)).toEqual([widgetActionId.changeApply('chg_one'), widgetActionId.changeApply('chg_two'), widgetActionId.changeApply('chg_three'), widgetActionId.changeApply('chg_two')]);
     expect(screen.queryByText('The reminder changed. Ask for a fresh plan.')).toBeNull();
   });
 

@@ -13,6 +13,7 @@ import {
   NeoError,
   toChatMessages,
   toolSpec,
+  widgetActionId,
   type AgentEvent,
   type ChatStreamEvent,
   type ContentPart,
@@ -1095,7 +1096,7 @@ describe('handleUiAction', () => {
   it('resolves widget actions against the stored block and patches the stored widget', async () => {
     const { h, message, byType } = await widgetHarness();
     const tasksUi = byType('tasks');
-    const r = await h.runtime.handleUiAction({ conversationId: h.conv.id, messageId: message.id, uiId: tasksUi.id, actionId: 'task.toggle:task_1' });
+    const r = await h.runtime.handleUiAction({ conversationId: h.conv.id, messageId: message.id, uiId: tasksUi.id, actionId: widgetActionId.taskToggle('task_1') });
     expect(r).toMatchObject({ kind: 'tool', result: { output: { task: { id: 'task_1', done: true } } } });
     const storedTasks = partsOf(h, message.id).find((p) => p.type === 'ui' && p.id === tasksUi.id) as UIPart;
     expect(storedTasks.block).toMatchObject({ type: 'tasks', tasks: [{ id: 'task_1', done: true }] });
@@ -1108,7 +1109,7 @@ describe('handleUiAction', () => {
     expect(storedCard.block).toMatchObject({ type: 'card', children: [{ type: 'reminder', dueAt: EPOCH + 600_000 }] });
 
     // Items the stored block does not show are rejected.
-    await expect(h.runtime.handleUiAction({ conversationId: h.conv.id, messageId: message.id, uiId: tasksUi.id, actionId: 'task.toggle:task_999' })).rejects.toMatchObject({
+    await expect(h.runtime.handleUiAction({ conversationId: h.conv.id, messageId: message.id, uiId: tasksUi.id, actionId: widgetActionId.taskToggle('task_999') })).rejects.toMatchObject({
       code: 'not_found',
     });
   });
