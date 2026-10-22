@@ -130,6 +130,17 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
   if (Array.isArray(type)) {
     const nonNull = type.filter((t) => t !== 'null');
     if (nonNull.length < type.length) out['nullable'] = true;
+    if (nonNull.length > 1) {
+      // Multiple non-null types: convert to anyOf so no branch is dropped.
+      const { type: _t, ...rest } = node;
+      const sanitized = nonNull
+        .map((t) => sanitizeNode({ type: t }, defs, refStack))
+        .filter((v): v is Record<string, unknown> => v !== undefined && !isEmptyObjectSchema(v));
+      const base = sanitizeNode(rest, defs, refStack) ?? {};
+      if (sanitized.length) base['anyOf'] = sanitized;
+      if (nonNull.length < type.length) base['nullable'] = true;
+      return base;
+    }
     type = nonNull[0];
   }
   if (typeof type !== 'string') {
