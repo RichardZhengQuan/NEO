@@ -12,7 +12,12 @@ import {
   EpisodeSchema,
   ForgetBySourceRequestSchema,
   OffRecordStateSchema,
+  RecurrenceSchema,
+  ReminderInputSchema,
+  ReminderPatchSchema,
   StartOffRecordRequestSchema,
+  TaskInputSchema,
+  TaskPatchSchema,
   EndOffRecordResponseSchema,
   TimelineOffRecordEventSchema,
   SendMessageRequestSchema,
@@ -399,6 +404,47 @@ describe('misc helpers', () => {
   it('describeRecurrence includes weekday restrictions on daily recurrences', () => {
     expect(describeRecurrence({ freq: 'daily', byWeekday: [1, 2, 3, 4, 5] })).toBe('every day on Mon, Tue, Wed, Thu, Fri');
     expect(describeRecurrence({ freq: 'daily', interval: 2, byWeekday: [1, 3, 5] })).toBe('every 2 days on Mon, Wed, Fri');
+  });
+
+  it('rejects recurrence cutoffs outside the ECMAScript Date range', () => {
+    const parsed = RecurrenceSchema.safeParse({ freq: 'daily', until: 1e20 });
+    expect(parsed.success).toBe(false);
+    const negative = RecurrenceSchema.safeParse({ freq: 'daily', until: -1e20 });
+    expect(negative.success).toBe(false);
+  });
+
+  it('describeRecurrence does not crash for any value accepted by RecurrenceSchema', () => {
+    for (const until of [-8.64e15, -1, 0, 1, 8.64e15]) {
+      expect(() => describeRecurrence({ freq: 'daily', until })).not.toThrow();
+    }
+  });
+
+  it('rejects ReminderInput dueAt outside the ECMAScript Date range', () => {
+    const base = { title: 'test', dueAt: 1e20, timezone: 'UTC' };
+    expect(ReminderInputSchema.safeParse(base).success).toBe(false);
+    expect(ReminderInputSchema.safeParse({ ...base, dueAt: -1e20 }).success).toBe(false);
+    expect(ReminderInputSchema.safeParse({ ...base, dueAt: Date.now() }).success).toBe(true);
+  });
+
+  it('rejects ReminderPatch dueAt outside the ECMAScript Date range', () => {
+    expect(ReminderPatchSchema.safeParse({ dueAt: 1e20 }).success).toBe(false);
+    expect(ReminderPatchSchema.safeParse({ dueAt: -1e20 }).success).toBe(false);
+    expect(ReminderPatchSchema.safeParse({ dueAt: Date.now() }).success).toBe(true);
+    expect(ReminderPatchSchema.safeParse({}).success).toBe(true);
+  });
+
+  it('rejects TaskInput dueAt outside the ECMAScript Date range', () => {
+    expect(TaskInputSchema.safeParse({ title: 'x', dueAt: 1e20 }).success).toBe(false);
+    expect(TaskInputSchema.safeParse({ title: 'x', dueAt: -1e20 }).success).toBe(false);
+    expect(TaskInputSchema.safeParse({ title: 'x', dueAt: null }).success).toBe(true);
+    expect(TaskInputSchema.safeParse({ title: 'x', dueAt: Date.now() }).success).toBe(true);
+  });
+
+  it('rejects TaskPatch dueAt outside the ECMAScript Date range', () => {
+    expect(TaskPatchSchema.safeParse({ dueAt: 1e20 }).success).toBe(false);
+    expect(TaskPatchSchema.safeParse({ dueAt: -1e20 }).success).toBe(false);
+    expect(TaskPatchSchema.safeParse({ dueAt: Date.now() }).success).toBe(true);
+    expect(TaskPatchSchema.safeParse({}).success).toBe(true);
   });
 
   it('normalizes errors', () => {

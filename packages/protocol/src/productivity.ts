@@ -17,7 +17,7 @@ export const RecurrenceSchema = z.object({
   /** Stop after this many occurrences in total. */
   count: z.number().int().min(1).optional(),
   /** Stop after this instant (epoch ms). */
-  until: z.number().optional(),
+  until: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15).optional(),
 });
 export type Recurrence = z.infer<typeof RecurrenceSchema>;
 export type RecurrenceInput = z.input<typeof RecurrenceSchema>;
@@ -47,7 +47,7 @@ export type Reminder = z.infer<typeof ReminderSchema>;
 export const ReminderInputSchema = z.object({
   title: z.string().min(1).max(500),
   notes: z.string().max(5000).nullable().optional(),
-  dueAt: z.number(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15),
   timezone: z.string().optional(),
   recurrence: RecurrenceSchema.nullable().optional(),
   messageId: z.string().nullable().optional(),
@@ -58,7 +58,7 @@ export type ReminderInput = z.input<typeof ReminderInputSchema>;
 export const ReminderPatchSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   notes: z.string().max(5000).nullable().optional(),
-  dueAt: z.number().optional(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15).optional(),
   timezone: z.string().optional(),
   recurrence: RecurrenceSchema.nullable().optional(),
   status: ReminderStatusSchema.optional(),
@@ -103,7 +103,7 @@ export const TaskInputSchema = z.object({
   title: z.string().min(1).max(1000),
   listId: z.string().optional(),
   notes: z.string().max(10_000).nullable().optional(),
-  dueAt: z.number().nullable().optional(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15).nullable().optional(),
   priority: z.number().int().min(0).max(3).optional(),
   tags: z.array(z.string().max(60)).max(20).optional(),
   parentId: z.string().nullable().optional(),
