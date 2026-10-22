@@ -97,6 +97,8 @@ class FakeConversationStore implements ConversationStore {
       updatedAt: now,
       model: input?.model ?? null,
       incognito: input?.incognito ?? false,
+      offRecord: input?.offRecord ?? input?.incognito ?? false,
+      ephemeral: input?.ephemeral ?? false,
       pinned: false,
       archived: false,
       systemPrompt: null,
@@ -323,13 +325,26 @@ class FakeMemoryService implements MemoryService {
   public recallCalls: RecallQuery[] = [];
   public observeCalls: ObservedTurn[] = [];
   private _recallResult: RecalledMemory[] = [];
+  private _recallGate: Promise<void> | undefined;
 
   setRecallItems(items: RecalledMemory[]) {
     this._recallResult = items;
   }
 
+  gateRecall(): { gate: Promise<void>; release: () => void } {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    this._recallGate = gate;
+    return { gate, release };
+  }
+
   async recall(query: RecallQuery): Promise<RecallResult> {
     this.recallCalls.push(query);
+    if (this._recallGate) {
+      const gate = this._recallGate;
+      this._recallGate = undefined;
+      await gate;
+    }
     return { items: this._recallResult, tookMs: 0, seeds: 0, considered: 0 };
   }
 
@@ -910,6 +925,43 @@ describe('Frozen system prompt + toolset', () => {
     // so we check the stored message, not the provider's chat messages).
     const contextPart = handle.userMessage.parts.find((p) => p.type === 'context');
     expect(contextPart).toBeDefined();
+  });
+});
+
+describe('Off-record migration race', () => {
+  it('migrates an in-flight send() to the off-record episode when startOffRecord() races recall', async () => {
+    const { providers, runtime, conv, memory, conversations } = makeEnv();
+    const { release } = memory.gateRecall();
+    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Private reply')));
+
+    const handlePromise = runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Hi' }] });
+
+    // send() reaches recall synchronously, and the gate holds it before persistence.
+    expect(memory.recallCalls).toHaveLength(1);
+    expect(conversations.messages(conv.id)).toEqual([]);
+    expect(providers.fakeAdapter.requests).toEqual([]);
+    const offRecordState = await runtime.startOffRecord();
+    release();
+
+    const handle = await handlePromise;
+    await collectEvents(handle.events);
+    const final = await handle.done;
+
+    // Migration keeps the original placeholder and writes the reply to a new continuation.
+    const assistantMessage = conversations.getMessage(final.id);
+    expect(assistantMessage?.conversationId).toBe(offRecordState.episodeId);
+    expect(assistantMessage?.episodeId).toBe(offRecordState.episodeId);
+    expect(assistantMessage?.parts).toEqual([{ type: 'text', text: 'Private reply' }]);
+    expect(conversations.messages(conv.id).flatMap((message) => message.parts))
+      .not.toContainEqual({ type: 'text', text: 'Private reply' });
+    expect(memory.observeCalls).toEqual([]);
+
+    // Replaying the migration must also release the original conversation reservation.
+    await runtime.endOffRecord();
+    providers.fakeAdapter.addScript(() => asyncOf(...simpleText('Normal reply')));
+    const next = await runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Back' }] });
+    await collectEvents(next.events);
+    expect((await next.done).conversationId).toBe(conv.id);
   });
 });
 

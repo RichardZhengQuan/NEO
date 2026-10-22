@@ -172,6 +172,15 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
     conversations.update(conversationId, { systemPrompt, toolset });
   }
 
+  // Queue migrations during recall until the runner can apply them.
+  const pendingOffRecordEpisodes: Conversation[] = [];
+  record.enterOffRecord = (episode) => {
+    if (conv.ephemeral || pendingOffRecordEpisodes.length) return;
+    pendingOffRecordEpisodes.push(episode);
+    // The runtime moves the busy reservation as soon as this callback returns.
+    record.conversationId = episode.id;
+  };
+
   // 2. Recall.
   const allowSensitive = adapter.isLocal || settings.memory.sendSensitiveToCloud;
   const prepared = plan.context && plan.recalled
@@ -228,6 +237,7 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
   });
 
   record.enterOffRecord = (episode) => runner.enterOffRecord(episode);
+  for (const episode of pendingOffRecordEpisodes) runner.enterOffRecord(episode);
   runner.emit({ type: 'turn.started', conversationId, turnId, userMessage, assistantMessageId: assistantMessage.id, model: modelRef });
   if (recalled.length) {
     runner.emit({
@@ -372,7 +382,8 @@ class TurnRunner {
     this.init = init;
     this.logger = init.logger;
     this.signal = init.plan.record.controller.signal;
-    this.conversationId = init.plan.record.conversationId;
+    // A queued migration may have moved the reservation ahead of the stored messages.
+    this.conversationId = init.assistantMessage.conversationId;
     this.turnId = init.plan.record.turnId;
     this.messageId = init.assistantMessage.id;
     this.privateTurn = (init.plan.conversation.offRecord ?? init.plan.conversation.incognito) || services.conversations.offRecordState().active;
