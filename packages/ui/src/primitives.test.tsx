@@ -15,6 +15,28 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('Modal without focusable controls', () => {
+  it.each([false, true])('prevents Tab from escaping the dialog (shift: %s)', (shiftKey) => {
+    render(
+      <I18nProvider locale="en">
+        <button>Outside control</button>
+        <Modal open={true} title="Text-only modal" onClose={vi.fn()} hideClose>
+          Plain text content
+        </Modal>
+      </I18nProvider>,
+    );
+    const dialog = screen.getByRole('dialog', { name: 'Text-only modal' });
+    expect(document.activeElement).toBe(dialog);
+    const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+
+    fireEvent(document, event);
+
+    // jsdom does not perform default Tab navigation, so check cancellation too.
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(dialog);
+  });
+});
+
 function nestedModals() {
   const onOuterClose = vi.fn();
   const onInnerClose = vi.fn();

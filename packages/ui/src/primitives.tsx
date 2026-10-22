@@ -642,17 +642,29 @@ export function Modal(props: {
   hideClose?: boolean;
   /** Clicking the backdrop closes the dialog (default true). */
   dismissable?: boolean;
+  /**
+   * Element to restore focus to when the dialog closes. When provided, Modal
+   * uses this instead of reading `document.activeElement` at mount time — which
+   * would capture the autoFocused child rather than the original opener.
+   */
+  restoreFocus?: HTMLElement | null;
 }): ReactElement | null {
   const t = useT();
-  const { open, onClose, title, children, footer, size = 'md', hideClose, dismissable = true } = props;
+  const { open, onClose, title, children, footer, size = 'md', hideClose, dismissable = true, restoreFocus } = props;
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  // When a restoreFocus element is passed, prefer it over document.activeElement.
+  // Capturing document.activeElement inside the effect is too late: React's
+  // autoFocus runs during the commit phase, before effects fire, so the focused
+  // element at that point is already the autoFocused child, not the opener.
+  const restoreFocusRef = useRef(restoreFocus ?? null);
+  restoreFocusRef.current = restoreFocus ?? null;
 
   useEffect(() => {
     if (!open) return;
-    const previous = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+    const previous = restoreFocusRef.current ?? (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null);
     const el = dialogRef.current;
     if (el) {
       const preferred = props.initialFocus ? el.querySelector<HTMLElement>(props.initialFocus) : null;
@@ -662,11 +674,15 @@ export function Modal(props: {
     }
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // stopImmediatePropagation prevents a second Modal listener (registered
+        // earlier, i.e. an outer/parent Modal) from also firing on the same
+        // event — avoiding a double-close when Modals are nested.
         e.stopImmediatePropagation();
         onCloseRef.current();
         return;
       }
       if (e.key !== 'Tab' || !dialogRef.current) return;
+      // Prevent outer Modal listeners from also processing this Tab keystroke.
       e.stopImmediatePropagation();
       const items = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
       if (items.length === 0) {
