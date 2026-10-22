@@ -560,6 +560,54 @@ describe('startup reminder catch-up', () => {
     );
   });
 
+  it('persists catch-up window floor even when ElectronNotification.isSupported() is false', async () => {
+    const overdueReminder = {
+      id: 'r-unsupported-1',
+      title: 'Check voicemail',
+      notes: null,
+      dueAt: Date.now() - 60 * 60 * 1000,
+      status: 'fired',
+      firedCount: 1,
+      lastFiredAt: Date.now(),
+      messageId: null,
+    };
+    clientMock.remindersList.mockResolvedValueOnce({ items: [overdueReminder] });
+
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7782',
+      ownerToken: 'owner-tok-unsupported',
+      stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    });
+
+    const startupDone = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+
+    await import('./main.js');
+    await startupDone;
+
+    const { Notification } = await import('electron');
+    // isSupported() defaults to false in the mock — no spy override.
+    // This simulates a machine where notifications are not supported.
+
+    const beforeCatchup = Date.now();
+    clientMock.onStatus?.('open');
+    await flushCatchup();
+
+    // No notification should have been shown (notifications unsupported).
+    expect(Notification).not.toHaveBeenCalled();
+
+    // savePersistedState must have been called despite isSupported() === false,
+    // so the catch-up floor advances and stale reminders do not re-fire if
+    // notification support is later granted.
+    expect(fsMock.writeFile).toHaveBeenCalled();
+    const writeArgs = fsMock.writeFile.mock.calls[fsMock.writeFile.mock.calls.length - 1]!;
+    const written = JSON.parse(writeArgs[1] as string) as { lastRunAt: number };
+    expect(written.lastRunAt).toBeGreaterThanOrEqual(beforeCatchup);
+  });
+
   it('persists state on live WS delivery so restart within catch-up window does not re-fire', async () => {
     // A reminder delivered live via WS (not through catch-up) must advance the
     // persisted lastRunAt floor.  Without this fix a restart within the 60-second
