@@ -674,11 +674,16 @@ export function Modal(props: {
     }
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key === 'Escape') {
-        e.stopPropagation();
+        // stopImmediatePropagation prevents a second Modal listener (registered
+        // earlier, i.e. an outer/parent Modal) from also firing on the same
+        // event — avoiding a double-close when Modals are nested.
+        e.stopImmediatePropagation();
         onCloseRef.current();
         return;
       }
       if (e.key !== 'Tab' || !dialogRef.current) return;
+      // Prevent outer Modal listeners from also processing this Tab keystroke.
+      e.stopImmediatePropagation();
       const items = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
       if (items.length === 0) return;
       const first = items[0]!;
