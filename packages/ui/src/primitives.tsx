@@ -669,7 +669,10 @@ export function Modal(props: {
       if (e.key !== 'Tab' || !dialogRef.current) return;
       e.stopImmediatePropagation();
       const items = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
-      if (items.length === 0) return;
+      if (items.length === 0) {
+        e.preventDefault();
+        return;
+      }
       const first = items[0]!;
       const last = items[items.length - 1]!;
       if (e.shiftKey && document.activeElement === first) {
