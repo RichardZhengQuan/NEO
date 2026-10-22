@@ -799,6 +799,28 @@ describe('consolidation', () => {
     } finally { db.close(); }
   });
 
+  it('marks source episodes consolidated when the reply is a well-formed empty abstraction', async () => {
+    const { model, requests } = scriptedLLM({ consolidate: () => '{"summary":null,"facts":[]}' });
+    const { svc, db, tickDays } = setup({ llm: model });
+    try {
+      const [e1, e2] = await twoHikingEpisodes(svc);
+      tickDays(1);
+      const report = await svc.consolidate({ force: true });
+      // No knowledge nodes were derived (the cluster had nothing lasting), but the model's
+      // explicit {summary:null,facts:[]} reply must still mark the source episodes
+      // consolidated — otherwise the oldest-20 queue in abstractEpisodes keeps picking the
+      // same clusters forever, re-paying for the same model call every run.
+      expect(requests).toHaveLength(1);
+      expect(count(db, `SELECT COUNT(*) n FROM memory_nodes WHERE kind IN ('summary','fact','preference','skill','goal')`)).toBe(0);
+      expect((await svc.get(e1.id))!.node.consolidatedAt).not.toBeNull();
+      expect((await svc.get(e2.id))!.node.consolidatedAt).not.toBeNull();
+      expect(report.episodesConsolidated).toBe(2);
+      // Replaying the same consolidation window must not re-ask the model about these episodes.
+      await svc.consolidate({ force: true });
+      expect(requests).toHaveLength(1);
+    } finally { db.close(); }
+  });
+
   it('retries previously-faded episodes on the next run when the model becomes usable', async () => {
     let attempts = 0;
     const { model } = scriptedLLM({
