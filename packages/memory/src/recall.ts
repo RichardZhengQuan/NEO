@@ -375,16 +375,26 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   // so a cloud caller never sees a memory that was only recalled because
   // spreading traversed a now-disallowed memory.
   const nonStyleIds = reachable.filter((id) => !styleIds.has(id));
-  if (nonStyleIds.length) {
+  const nonStyleIdSet = new Set(nonStyleIds);
+  // Sub-threshold nodes (A[id] < minScore) that appear as back-pointer sources
+  // in `best` were never placed in `reachable`, so they were never checked against
+  // candidateWhere.  A race between the embedding await (line ~234) and a concurrent
+  // DB write can flip their eligibility; include them in the freshness check so the
+  // cascade actually reaches every tainted destination.
+  const subThresholdFromIds = [...best.values()]
+    .map((b) => b.from)
+    .filter((id) => !seeds.has(id) && !nonStyleIdSet.has(id));
+  const checkIds = [...new Set([...nonStyleIds, ...subThresholdFromIds])];
+  if (checkIds.length) {
     const freshWhere = candidateWhere(query, now);
-    const eligibleRows = chunked(nonStyleIds, (ph, chunk) =>
+    const eligibleRows = chunked(checkIds, (ph, chunk) =>
       db
         .prepare(`SELECT id FROM memory_nodes WHERE id IN (${ph}) AND ${freshWhere.sql}`)
         .all(...chunk, ...freshWhere.params) as { id: string }[],
     );
     const eligibleIds = new Set(eligibleRows.map((row) => row.id));
     const tainted = new Set<string>();
-    for (const id of nonStyleIds) if (!eligibleIds.has(id)) tainted.add(id);
+    for (const id of checkIds) if (!eligibleIds.has(id)) tainted.add(id);
     let frontier: Set<string> = tainted;
     while (frontier.size) {
       const next = new Set<string>();
