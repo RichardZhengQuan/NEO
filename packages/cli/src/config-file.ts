@@ -2,10 +2,12 @@
  * Config file reading and writing for `neo init`.
  * Injectable prompt functions so the logic can be unit-tested without stdin.
  */
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { NeoError, PROVIDER_PRESETS, type ProviderKind, type NeoConfig } from '@neo/protocol';
+import { parsePort } from './args.js';
 
 export type PromptFn = (question: string, options?: { secret?: boolean; choices?: string[] }) => Promise<string>;
 
@@ -115,7 +117,11 @@ export async function runInitWizard(prompt: PromptFn): Promise<InitAnswers> {
     const hostInput = await prompt(`\nBind host [0.0.0.0]`);
     host = hostInput.trim() || '0.0.0.0';
     const portInput = await prompt(`\nPort [7777]`);
-    port = parseInt(portInput.trim() || '7777', 10);
+    const parsedPort = parsePort(portInput.trim() || '7777');
+    if (typeof parsedPort !== 'number') {
+      throw new NeoError('bad_request', parsedPort.error);
+    }
+    port = parsedPort;
   }
 
   return { providerKind, apiKey, baseUrl, defaultModel, mode, host, port };
@@ -128,6 +134,7 @@ export async function runInitWizard(prompt: PromptFn): Promise<InitAnswers> {
 export function writeInitConfig(dataDir: string, answers: InitAnswers, configPath?: string): void {
   const resolvedDir = expandHome(dataDir);
   fs.mkdirSync(resolvedDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(resolvedDir, 0o700);
 
   const cfgPath = configPath ?? path.join(resolvedDir, 'config.json');
 
@@ -160,8 +167,38 @@ export function writeInitConfig(dataDir: string, answers: InitAnswers, configPat
       host: answers.host,
       port: answers.port,
     };
+  } else {
+    config['server'] = {
+      ...((existing as Record<string, unknown>)['server'] as Record<string, unknown> | undefined ?? {}),
+      host: '127.0.0.1',
+      port: 7777,
+    };
   }
 
   const json = JSON.stringify(config, null, 2);
-  fs.writeFileSync(cfgPath, json, { encoding: 'utf8', mode: 0o600 });
+  // Write to a temp file at 0o600 then rename atomically so the secret is
+  // never visible at a permissive mode — even briefly.  A plain writeFileSync
+  // + chmodSync leaves two windows: (1) an open fd held before our write
+  // retains access after the chmod, and (2) a crash between the two calls
+  // leaves the file at the world-readable mode.  renameSync is atomic on
+  // POSIX: the target either has the old content or the new 0o600 content.
+  const tmpPath = path.join(path.dirname(cfgPath), `.neo-config-tmp-${crypto.randomBytes(8).toString('hex')}`);
+  let tmpFd: number | null = null;
+  let tmpCreated = false;
+  try {
+    tmpFd = fs.openSync(tmpPath, 'wx', 0o600);
+    tmpCreated = true;
+    fs.writeSync(tmpFd, json, 0, 'utf8');
+    fs.closeSync(tmpFd);
+    tmpFd = null;
+    fs.renameSync(tmpPath, cfgPath);
+  } catch (err) {
+    if (tmpFd !== null) {
+      try { fs.closeSync(tmpFd); } catch { /* ignore */ }
+    }
+    if (tmpCreated) {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore cleanup error */ }
+    }
+    throw err;
+  }
 }

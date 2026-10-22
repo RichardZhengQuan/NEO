@@ -9,7 +9,8 @@
  *   no reconnect after close() or 4401
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet, type ToolUseEvent } from './index.js';
+import { NeoClient, NeoApiError, readEventStream, type ListResponse, type TimelineSearchHit, type TimelineSearchSnippet, type ToolUseEvent, type Task, type Reminder, type Note, type MemoryNodeDetail } from './index.js';
+import { apiRequest } from './http.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fake fetch helpers
@@ -201,6 +202,204 @@ describe('NeoApiError mapping', () => {
     const apiErr = err as NeoApiError;
     expect(apiErr.code).toBe('timeout');
   });
+
+  it('maps body-stall timeout to timeout code', async () => {
+    vi.useFakeTimers();
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const stallingFetch = async (_: unknown, init?: RequestInit): Promise<Response> => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller;
+          controller.enqueue(new TextEncoder().encode('{"ok":'));
+          // Body left open — never closes on its own.
+        },
+      });
+      // When the signal fires, cancel the stream so the body read rejects.
+      const signal = (init as RequestInit | undefined)?.signal;
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          streamController.error(signal.reason);
+        }, { once: true });
+      }
+      return new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    const client = new NeoClient({
+      baseUrl: 'http://localhost:7777',
+      token: 'tok',
+      fetch: stallingFetch as typeof fetch,
+      timeoutMs: 10,
+    });
+
+    let outcome: 'pending' | 'resolved' | NeoApiError = 'pending';
+    client.health().then(
+      () => { outcome = 'resolved'; },
+      (e: unknown) => { outcome = e as NeoApiError; },
+    );
+
+    // Headers arrived; body is stalled. Timer has NOT fired yet.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outcome).toBe('pending');
+
+    // Advance past the 10 ms deadline.
+    await vi.advanceTimersByTimeAsync(11);
+
+    expect(outcome).toBeInstanceOf(NeoApiError);
+    const apiErr = outcome as unknown as NeoApiError;
+    expect(apiErr.code).toBe('timeout');
+    expect(apiErr.httpStatus).toBe(504);
+    expect(apiErr.retryable).toBe(true);
+
+    // Tear-down: close the stream to prevent dangling handles.
+    try { streamController.close(); } catch { /* already errored */ }
+    vi.useRealTimers();
+  });
+
+  it('maps error-body stall timeout to timeout code', async () => {
+    vi.useFakeTimers();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    try {
+      const stallingFetch = async (_: unknown, init?: RequestInit): Promise<Response> => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+            controller.enqueue(new TextEncoder().encode('{"code":'));
+          },
+        });
+        const signal = init?.signal;
+        signal?.addEventListener('abort', () => {
+          streamController?.error(signal.reason);
+        }, { once: true });
+        return new Response(stream, { status: 503 });
+      };
+      const client = new NeoClient({
+        baseUrl: 'http://localhost:7777',
+        token: 'tok',
+        fetch: stallingFetch as typeof fetch,
+        timeoutMs: 10,
+      });
+      let outcome: unknown = 'pending';
+      const result = client.health().then(
+        (value) => { outcome = value; },
+        (err: unknown) => { outcome = err; },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBe('pending');
+      await vi.advanceTimersByTimeAsync(11);
+
+      expect(outcome).toBeInstanceOf(NeoApiError);
+      expect(outcome).toMatchObject({
+        code: 'timeout',
+        message: 'Request timed out.',
+        httpStatus: 504,
+        retryable: true,
+      });
+      await result;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      streamController?.error(new DOMException('Cleanup', 'AbortError'));
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([200, 503])('preserves caller AbortError during a %i body read', async (status) => {
+    vi.useFakeTimers();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    try {
+      const stallingFetch = async (_: unknown, init?: RequestInit): Promise<Response> => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+            controller.enqueue(new TextEncoder().encode('{"ok":'));
+          },
+        });
+        const signal = init?.signal;
+        signal?.addEventListener('abort', () => {
+          streamController?.error(signal.reason);
+        }, { once: true });
+        return new Response(stream, { status });
+      };
+      const controller = new AbortController();
+      const result = apiRequest({
+        baseUrl: 'http://localhost:7777',
+        token: 'tok',
+        fetch: stallingFetch as typeof fetch,
+        timeoutMs: 10,
+      }, { path: '/health', signal: controller.signal }).catch((err: unknown) => err);
+
+      // Deliver headers and start the body read before the caller aborts.
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      const err = await result;
+
+      expect(err).toBe(controller.signal.reason);
+      expect(err).toMatchObject({ name: 'AbortError' });
+      expect(err).not.toBeInstanceOf(NeoApiError);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      streamController?.error(new DOMException('Cleanup', 'AbortError'));
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves a pre-classified NeoApiError thrown by fetch in the request path', async () => {
+    const injected = new NeoApiError(403, { code: 'forbidden', message: 'Owner only', details: { reason: 'owner_only' }, retryable: false });
+    const throwFetch = async (): Promise<Response> => { throw injected; };
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: throwFetch as typeof fetch });
+    const err = await client.health().catch((e: unknown) => e);
+    expect(err).toBe(injected);
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.httpStatus).toBe(403);
+    expect(apiErr.code).toBe('forbidden');
+    expect(apiErr.retryable).toBe(false);
+  });
+
+  it('preserves a pre-classified NeoApiError thrown by fetch in the stream path', async () => {
+    const injected = new NeoApiError(403, { code: 'forbidden', message: 'Owner only', details: { reason: 'owner_only' }, retryable: false });
+    const throwFetch = async (): Promise<Response> => { throw injected; };
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: throwFetch as typeof fetch });
+    const err = await (async () => {
+      for await (const _ of client.timeline.stream({ text: 'hello' })) { /* drain */ }
+    })().catch((e: unknown) => e);
+    expect(err).toBe(injected);
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.httpStatus).toBe(403);
+    expect(apiErr.code).toBe('forbidden');
+    expect(apiErr.retryable).toBe(false);
+  });
+
+  it('propagates AbortError from stream error-body read instead of wrapping as HTTP 503', async () => {
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const abortCtrl = new AbortController();
+    const stallingFetch = async (_: unknown, init?: RequestInit): Promise<Response> => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          streamController = ctrl;
+          // Partial JSON — stalls response.json().
+          ctrl.enqueue(new TextEncoder().encode('{"code":'));
+        },
+      });
+      const sig = (init as RequestInit | undefined)?.signal;
+      sig?.addEventListener('abort', () => { streamController?.error(sig.reason); }, { once: true });
+      return new Response(stream, { status: 503 });
+    };
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: stallingFetch as typeof fetch });
+    const resultP = (async () => {
+      for await (const _ of client.timeline.stream({ text: 'hi' }, abortCtrl.signal)) { /* drain */ }
+    })().catch((e: unknown) => e);
+    // Yield so the fetch resolves and response.json() starts reading.
+    await Promise.resolve();
+    abortCtrl.abort();
+    const err = await resultP;
+    expect(err).toMatchObject({ name: 'AbortError' });
+    expect(err).not.toBeInstanceOf(NeoApiError);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,12 +494,127 @@ describe('timeline routes', () => {
 
   it('streams timeline events with episode ids', async () => {
     const event = { type: 'text.delta', episodeId: 'ep', conversationId: 'ep', turnId: 't', messageId: 'm', text: 'hello' };
-    const { client, requests } = makeClient([{ status: 200, body: `event: text.delta\ndata: ${JSON.stringify(event)}\n\n` }]);
+    const { client, requests } = makeClient([{ status: 200, body: `event: text.delta\ndata: ${JSON.stringify(event)}\n\n`, headers: { 'content-type': 'text/event-stream' } }]);
     const events = [];
     for await (const item of client.timeline.stream({ text: 'hello' })) events.push(item);
     expect(events).toEqual([event]);
     expect(requests[0]!.url).toContain('/api/timeline/messages');
     expect(requests[0]!.headers.accept).toBe('text/event-stream');
+  });
+});
+
+describe('timeline.stream', () => {
+  it('cancels response body when content-type is not text/event-stream', async () => {
+    const cancelFn = vi.fn().mockResolvedValue(undefined);
+    const stream = new ReadableStream({ start(c) { c.close(); } });
+    Object.defineProperty(stream, 'cancel', { value: cancelFn, writable: true });
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    let err: unknown;
+    try {
+      for await (const _ of client.timeline.stream({ text: 'hi' })) { /* drain */ }
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NeoApiError);
+    expect((err as NeoApiError).code).toBe('bad_upstream');
+    expect(cancelFn).toHaveBeenCalledOnce();
+  });
+
+  it('throws bad_upstream when response content-type is text/html', async () => {
+    const { fetchFn, requests } = makeFetch([{
+      status: 200,
+      body: '<html>Frontend fallback</html>',
+      headers: { 'content-type': 'text/html' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    const events = [];
+    let err: unknown;
+    try {
+      for await (const item of client.timeline.stream({ text: 'hi' })) events.push(item);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.code).toBe('bad_upstream');
+    expect(apiErr.message).toBe('Expected text/event-stream, got text/html');
+    expect(apiErr.httpStatus).toBe(502);
+    expect(apiErr.retryable).toBe(true);
+    expect(events).toEqual([]);
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toContain('/api/timeline/messages');
+    expect(requests[0]!.body).toEqual({ text: 'hi' });
+  });
+
+  it('accepts mixed-case text/event-stream', async () => {
+    const event = { type: 'text.delta', episodeId: 'ep', conversationId: 'ep', turnId: 't', messageId: 'm', text: 'hi' };
+    const { fetchFn } = makeFetch([{
+      status: 200,
+      body: `event: text.delta\ndata: ${JSON.stringify(event)}\n\n`,
+      headers: { 'content-type': 'Text/Event-Stream' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    const events = [];
+    for await (const item of client.timeline.stream({ text: 'hi' })) events.push(item);
+    expect(events).toEqual([event]);
+  });
+
+  it('accepts text/event-stream with charset parameter', async () => {
+    const event = { type: 'text.delta', episodeId: 'ep', conversationId: 'ep', turnId: 't', messageId: 'm', text: 'hi' };
+    const { fetchFn } = makeFetch([{
+      status: 200,
+      body: `event: text.delta\ndata: ${JSON.stringify(event)}\n\n`,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    const events = [];
+    for await (const item of client.timeline.stream({ text: 'hi' })) events.push(item);
+    expect(events).toEqual([event]);
+  });
+
+  it('throws bad_upstream on prefix lookalike text/event-streaming', async () => {
+    const { fetchFn } = makeFetch([{
+      status: 200,
+      body: '<html>Not SSE</html>',
+      headers: { 'content-type': 'text/event-streaming' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    const events = [];
+    let err: unknown;
+    try {
+      for await (const item of client.timeline.stream({ text: 'hi' })) events.push(item);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NeoApiError);
+    const apiErr = err as NeoApiError;
+    expect(apiErr.code).toBe('bad_upstream');
+    expect(apiErr.message).toBe('Expected text/event-stream, got text/event-streaming');
+    expect(events).toEqual([]);
+  });
+
+  it('throws bad_upstream on prefix lookalike text/event-stream+json', async () => {
+    const { fetchFn } = makeFetch([{
+      status: 200,
+      body: '{"not":"sse"}',
+      headers: { 'content-type': 'text/event-stream+json' },
+    }]);
+    const client = new NeoClient({ baseUrl: 'http://localhost:7777', token: 'tok', fetch: fetchFn as typeof fetch });
+    let err: unknown;
+    try {
+      for await (const _ of client.timeline.stream({ text: 'hi' })) { /* drain */ }
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NeoApiError);
+    expect((err as NeoApiError).code).toBe('bad_upstream');
   });
 });
 
@@ -317,6 +631,13 @@ describe('confirmations routes', () => {
     expect(requests[0]!.method).toBe('POST');
     expect(requests[0]!.url).toContain('/api/confirmations/tc-1');
     expect((requests[0]!.body as { approve: boolean }).approve).toBe(true);
+  });
+
+  it('respond: uses an encoded toolCallId when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { ok: true } }]);
+    await client.confirmations.respond('tc/with?reserved#id', { approve: false });
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/confirmations/tc%2Fwith%3Freserved%23id');
   });
 });
 
@@ -414,6 +735,43 @@ describe('memory routes', () => {
     expect(requests[0]!.url).toContain('/api/memory/journal');
     expect(requests[0]!.url).toContain('limit=5');
   });
+
+  it('get: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const detail: MemoryNodeDetail = {
+      node: {
+        id: 'mem/with?reserved#id', kind: 'fact', label: 'test', content: 'test content',
+        aliases: [], tags: [], importance: 1, confidence: 1, stability: 30, accessCount: 0,
+        lastAccessedAt: null, createdAt: 50, updatedAt: 50, status: 'active', pinned: false,
+        sensitivity: 'normal', source: { by: 'user' },
+      },
+      retention: 1, edges: [], neighbors: [], history: [],
+    };
+    const { client, requests } = makeClient([{ status: 200, body: detail }]);
+    await client.memory.get(detail.node.id);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/mem%2Fwith%3Freserved%23id');
+  });
+
+  it('update: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'mem/with?reserved#id' } }]);
+    await client.memory.update('mem/with?reserved#id', { label: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/mem%2Fwith%3Freserved%23id');
+  });
+
+  it('delete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { deleted: 1 } }]);
+    await client.memory.delete('mem/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/mem%2Fwith%3Freserved%23id');
+  });
+
+  it('unlink: uses an encoded edge ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { ok: true } }]);
+    await client.memory.unlink('edge/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/memory/links/edge%2Fwith%3Freserved%23id');
+  });
 });
 
 describe('reminders routes', () => {
@@ -444,6 +802,46 @@ describe('reminders routes', () => {
     await client.reminders.complete('r1');
     expect(requests[0]!.url).toContain('/api/reminders/r1/complete');
   });
+
+  it('get: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const reminder: Reminder = {
+      id: 'rem/with?reserved#id', title: 'Call dentist', notes: null, dueAt: 1800000000000,
+      timezone: 'UTC', recurrence: null, status: 'scheduled', firedCount: 0,
+      lastFiredAt: null, messageId: null, createdAt: 50, updatedAt: 50,
+    };
+    const { client, requests } = makeClient([{ status: 200, body: reminder }]);
+    await client.reminders.get(reminder.id);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id');
+  });
+
+  it('update: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'rem/with?reserved#id' } }]);
+    await client.reminders.update('rem/with?reserved#id', { title: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id');
+  });
+
+  it('delete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.reminders.delete('rem/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id');
+  });
+
+  it('snooze: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'rem/with?reserved#id' } }]);
+    await client.reminders.snooze('rem/with?reserved#id', 15);
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id/snooze');
+  });
+
+  it('complete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'rem/with?reserved#id' } }]);
+    await client.reminders.complete('rem/with?reserved#id');
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/reminders/rem%2Fwith%3Freserved%23id/complete');
+  });
 });
 
 describe('tasks routes', () => {
@@ -467,12 +865,52 @@ describe('tasks routes', () => {
     expect(requests[0]!.url).toContain('/api/task-lists/tl1');
   });
 
+  it('updateList: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'tl/with?reserved#id' } }]);
+    await client.tasks.updateList('tl/with?reserved#id', { name: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/task-lists/tl%2Fwith%3Freserved%23id');
+  });
+
+  it('deleteList: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.tasks.deleteList('tl/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/task-lists/tl%2Fwith%3Freserved%23id');
+  });
+
   it('list: GET /api/tasks', async () => {
     const { client, requests } = makeClient([{ status: 200, body: { items: [] } }]);
     await client.tasks.list({ done: false, query: 'groceries' });
     expect(requests[0]!.url).toContain('/api/tasks');
     expect(requests[0]!.url).toContain('done=false');
     expect(requests[0]!.url).toContain('query=groceries');
+  });
+
+  it('get: returns the typed task using an encoded ID and a single read-only request', async () => {
+    const task: Task = {
+      id: 'task/with?reserved#characters', listId: 'list_inbox', title: 'Prepare proposal', notes: null,
+      done: true, doneAt: 100, dueAt: 200, priority: 3, tags: ['work'], order: 0, parentId: null,
+      createdAt: 50, updatedAt: 100,
+    };
+    const { client, requests } = makeClient([{ status: 200, body: task }]);
+    const result: Task = await client.tasks.get(task.id);
+    expect(result).toEqual(task);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/tasks/task%2Fwith%3Freserved%23characters');
+    expect(requests[0]!.body).toBeUndefined();
+    expect(requests[0]!.headers['authorization']).toBe('Bearer test-token');
+  });
+
+  it('get: preserves the missing-task error without attempting a mutation', async () => {
+    const { client, requests } = makeClient([{ status: 404, body: { code: 'not_found', message: 'Task not found', retryable: false } }]);
+    await expect(client.tasks.get('missing')).rejects.toMatchObject({
+      name: 'NeoApiError', code: 'not_found', httpStatus: 404, retryable: false,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.body).toBeUndefined();
   });
 
   it('create: POST /api/tasks', async () => {
@@ -485,6 +923,20 @@ describe('tasks routes', () => {
     const { client, requests } = makeClient([{ status: 204, body: null }]);
     await client.tasks.delete('task1');
     expect(requests[0]!.method).toBe('DELETE');
+  });
+
+  it('update: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'task/with?reserved#characters' } }]);
+    await client.tasks.update('task/with?reserved#characters', { title: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/tasks/task%2Fwith%3Freserved%23characters');
+  });
+
+  it('delete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.tasks.delete('task/with?reserved#characters');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/tasks/task%2Fwith%3Freserved%23characters');
   });
 });
 
@@ -506,6 +958,31 @@ describe('notes routes', () => {
     const { client, requests } = makeClient([{ status: 204, body: null }]);
     await client.notes.delete('n1');
     expect(requests[0]!.method).toBe('DELETE');
+  });
+
+  it('get: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const note: Note = {
+      id: 'note/with?reserved#id', title: 'My note', content: '# heading', tags: [], pinned: false,
+      createdAt: 50, updatedAt: 50,
+    };
+    const { client, requests } = makeClient([{ status: 200, body: note }]);
+    await client.notes.get(note.id);
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/notes/note%2Fwith%3Freserved%23id');
+  });
+
+  it('update: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'note/with?reserved#id' } }]);
+    await client.notes.update('note/with?reserved#id', { title: 'updated' });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/notes/note%2Fwith%3Freserved%23id');
+  });
+
+  it('delete: uses an encoded ID when the id contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.notes.delete('note/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/notes/note%2Fwith%3Freserved%23id');
   });
 });
 
@@ -595,6 +1072,34 @@ describe('providers routes', () => {
     expect(requests[0]!.url).toContain('/api/providers/test');
     expect((requests[0]!.body as { kind: string }).kind).toBe('openai');
   });
+
+  it('update: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { id: 'prov/with?reserved#id' } }]);
+    await client.providers.update('prov/with?reserved#id', { enabled: false });
+    expect(requests[0]!.method).toBe('PATCH');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/providers/prov%2Fwith%3Freserved%23id');
+  });
+
+  it('delete: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.providers.delete('prov/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/providers/prov%2Fwith%3Freserved%23id');
+  });
+
+  it('models: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { items: [] } }]);
+    await client.providers.models('prov/with?reserved#id');
+    expect(requests[0]!.method).toBe('GET');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/providers/prov%2Fwith%3Freserved%23id/models');
+  });
+
+  it('test: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { ok: true } }]);
+    await client.providers.test('prov/with?reserved#id');
+    expect(requests[0]!.method).toBe('POST');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/providers/prov%2Fwith%3Freserved%23id/test');
+  });
 });
 
 describe('settings routes', () => {
@@ -625,6 +1130,13 @@ describe('tools routes', () => {
     expect(requests[0]!.url).toContain('/api/tools/web_fetch/permission');
     expect((requests[0]!.body as { permission: string }).permission).toBe('auto');
   });
+
+  it('setPermission: uses an encoded name when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 200, body: { name: 'tool/with?reserved#name' } }]);
+    await client.tools.setPermission('tool/with?reserved#name', 'auto');
+    expect(requests[0]!.method).toBe('PUT');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/tools/tool%2Fwith%3Freserved%23name/permission');
+  });
 });
 
 describe('devices routes', () => {
@@ -647,6 +1159,13 @@ describe('devices routes', () => {
     await client.devices.revoke('dev-1');
     expect(requests[0]!.method).toBe('DELETE');
     expect(requests[0]!.url).toContain('/api/devices/dev-1');
+  });
+
+  it('revoke: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.devices.revoke('dev/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/devices/dev%2Fwith%3Freserved%23id');
   });
 });
 
@@ -696,6 +1215,13 @@ describe('pairing routes', () => {
     expect(await client.pairing.cancel('pair-1')).toBeUndefined();
     expect(requests[0]!.method).toBe('DELETE');
     expect(requests[0]!.url).toBe('http://localhost:7777/api/pairing/pair-1');
+  });
+
+  it('cancel: uses an encoded ID when it contains reserved URI characters', async () => {
+    const { client, requests } = makeClient([{ status: 204, body: null }]);
+    await client.pairing.cancel('pair/with?reserved#id');
+    expect(requests[0]!.method).toBe('DELETE');
+    expect(requests[0]!.url).toBe('http://localhost:7777/api/pairing/pair%2Fwith%3Freserved%23id');
   });
 
   it('claim: POST /api/pairing/claim without a token', async () => {
@@ -776,6 +1302,55 @@ describe('readEventStream SSE parsing', () => {
     const events = await collectEvents(response);
     expect(events).toHaveLength(1);
     expect(events[0]).toEqual(event);
+  });
+
+  it('propagates reader.read() errors as iterator rejections', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        controller = streamController;
+      },
+    });
+    const response = new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    const iterator = readEventStream(response)[Symbol.asyncIterator]();
+    const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'a' };
+
+    controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+
+    const failure = new TypeError('network drop');
+    controller.error(failure);
+    const next = iterator.next();
+    await expect(next).rejects.toMatchObject({ name: 'NeoError', code: 'stream_read_failed' });
+    const err = await next.catch((e: unknown) => e);
+    expect((err as Error).cause).toBe(failure);
+  });
+
+  it('wraps reader.read() errors as NeoError(stream_read_failed)', async () => {
+    const failure = new TypeError('network drop');
+    const event = { type: 'text.delta', episodeId: 'c1', conversationId: 'c1', turnId: 't1', messageId: 'm1', text: 'a' };
+    let sent = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) {
+          sent = true;
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+        } else {
+          controller.error(failure);
+        }
+      },
+    }, { highWaterMark: 0 });
+    const response = new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    const collected = collectEvents(response);
+
+    await expect(collected).rejects.toMatchObject({
+      name: 'NeoError',
+      code: 'stream_read_failed',
+      retryable: true,
+    });
+    const err = await collected.catch((e: unknown) => e);
+    expect((err as Error).cause).toBe(failure);
   });
 
   it('handles CRLF line endings', async () => {
@@ -1127,6 +1702,28 @@ describe('connect() WebSocket', () => {
     vi.advanceTimersByTime(60_000);
     expect(instances).toHaveLength(1); // No reconnect.
     conn.close();
+  });
+
+  it('status becomes closed and onStatus is called when reconnect:false and unexpected close', () => {
+    vi.useFakeTimers();
+    const statuses: string[] = [];
+    const client = makeWsClient();
+    const conn = client.connect({
+      onEvent: () => {},
+      onStatus: (s) => statuses.push(s),
+      reconnect: false,
+    });
+    const ws = instances[0]!;
+
+    ws.simulateOpen();
+    ws.simulateMessage({ type: 'ready', serverVersion: '0.1.0', seq: 0 });
+    expect(conn.status).toBe('open');
+
+    ws.simulateClose(1006, 'network error');
+
+    expect(conn.status).toBe('closed');
+    expect(statuses).toContain('closed');
+    expect(instances).toHaveLength(1); // Still no reconnect.
   });
 
   it('resubscribes after reconnect', () => {

@@ -40,6 +40,7 @@ export async function* abortable<T>(source: AsyncIterable<T>, signal: AbortSigna
   let finished = false;
   try {
     for (;;) {
+      if (signal.aborted) throw cancelledError();
       const result = await raceAbort(iterator.next(), signal);
       if (result.done) {
         finished = true;

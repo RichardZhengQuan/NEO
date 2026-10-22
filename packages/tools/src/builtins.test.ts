@@ -69,7 +69,7 @@ function fakeMemory(opts: { recall?: boolean } = {}) {
     },
     async findForForget(query: string, limit?: number) {
       calls.push({ method: 'findForForget', args: { query, limit } });
-      return [...nodes.values()].filter((m) => m.content.toLowerCase().includes(query.toLowerCase()));
+      return [...nodes.values()].filter((m) => m.content.toLowerCase().includes(query.toLowerCase())).slice(0, limit ?? 20);
     },
     async get(id: string) {
       const m = nodes.get(id);
@@ -108,7 +108,7 @@ describe('catalogue', () => {
   it('has every documented tool with the documented risk, permission and flags', () => {
     const { registry } = setup({}, { provider: 'searxng', baseUrl: 'http://127.0.0.1:8888' });
     const expected: Record<string, [string, string]> = {
-      get_datetime: ['read', 'auto'], calculate: ['read', 'auto'],
+      get_datetime: ['read', 'auto'], calculate: ['read', 'auto'], propose_changes: ['read', 'auto'], apply_change: ['write', 'auto'],
       create_reminder: ['write', 'auto'], list_reminders: ['read', 'auto'], update_reminder: ['write', 'auto'],
       snooze_reminder: ['write', 'auto'], complete_reminder: ['write', 'auto'], cancel_reminder: ['write', 'auto'],
       create_task: ['write', 'auto'], list_tasks: ['read', 'auto'], update_task: ['write', 'auto'], delete_task: ['dangerous', 'confirm'],
@@ -123,7 +123,7 @@ describe('catalogue', () => {
       expect([t.risk, t.defaultPermission], t.name).toEqual(expected[t.name]);
       expect(t.description.length, t.name).toBeGreaterThan(60);
       if (t.risk === 'dangerous') expect(typeof t.describeCall, t.name).toBe('function');
-      expect(Boolean(t.uiOnly), t.name).toBe(false);
+      expect(Boolean(t.uiOnly), t.name).toBe(t.name === 'apply_change');
       expect(Boolean(t.untrustedOutput), t.name).toBe(t.name === 'web_fetch' || t.name === 'web_search');
     }
   });
@@ -234,6 +234,13 @@ describe('task tools', () => {
     // Case-insensitive reuse, no duplicate list
     await t.run('create_task', { title: 'Eggs', list: 'groceries' });
     expect(t.stores.tasks.lists().filter((l) => l.name.toLowerCase() === 'groceries')).toHaveLength(1);
+  });
+
+  it('create_task: a bad due date leaves lists unchanged', async () => {
+    const res = await t.run('create_task', { title: 'Buy milk', list: 'Groceries', due: 'not a date' });
+    expect(res.isError).toBe(true);
+    expect(t.stores.tasks.lists()).toHaveLength(1);
+    expect(t.stores.tasks.list()).toEqual([]);
   });
 
   it('the widget always contains the task just created, even in a long list', async () => {
@@ -410,6 +417,61 @@ describe('memory tools', () => {
     expect((await t.run('forget', { ids: [id] }, { origin: 'ui' })).output).toMatchObject({ forgotten: ['Tea'] });
   });
 
+  it('forget by query honours "everything matching" when more than 20 memories match', async () => {
+    const t = setup();
+    for (let i = 0; i < 21; i++) {
+      await t.run('remember', { content: `old job meeting ${i}`, label: `old job ${i}` });
+    }
+    expect(t.registry.get('forget')!.describeCall!({ query: 'old job' })).toBe('Forget everything matching “old job”');
+    const res = await t.run('forget', { query: 'old job' });
+    expect(res.isError).toBeFalsy();
+    expect((res.output as { forgotten: string[] }).forgotten).toHaveLength(21);
+    expect((res.output as { ids: string[] }).ids).toHaveLength(21);
+    expect(res.summary).toBe('Forgot 21 memories');
+    expect(t.mem.nodes.size).toBe(0);
+  });
+
+  it('forget by query bounds the transcript sample while deleting all 150 matches', async () => {
+    const t = setup();
+    for (let i = 0; i < 150; i++) {
+      await t.run('remember', { content: `old job meeting ${i}`, label: `old-${i}` });
+    }
+    expect(t.mem.nodes.size).toBe(150);
+    const found = [...t.mem.nodes.values()];
+    const res = await t.run('forget', { query: 'old job' });
+    expect(res.isError).toBeFalsy();
+    const output = res.output as { forgotten: string[]; ids: string[]; totalForgotten: number; truncated: boolean };
+    expect(output.forgotten).toHaveLength(100);
+    expect(output.ids).toHaveLength(100);
+    expect(output.forgotten).toEqual(found.slice(0, 100).map(n => n.label));
+    expect(output.ids).toEqual(found.slice(0, 100).map(n => n.id));
+    expect(output.totalForgotten).toBe(150);
+    expect(output.truncated).toBe(true);
+    expect(res.summary).toBe('Forgot 150 memories');
+    expect(t.mem.calls.filter(c => c.method === 'findForForget')).toEqual([
+      { method: 'findForForget', args: { query: 'old job', limit: 10_000 } },
+    ]);
+    expect(t.mem.calls.filter(c => c.method === 'forget')).toEqual([
+      { method: 'forget', args: found.map(n => n.id) },
+    ]);
+    expect(t.mem.nodes.size).toBe(0);
+  });
+
+  it('forget by query keeps the existing output shape at 100 matches and for no matches', async () => {
+    const t = setup();
+    for (let i = 0; i < 100; i++) {
+      await t.run('remember', { content: `old job meeting ${i}`, label: `old-${i}` });
+    }
+    const found = [...t.mem.nodes.values()];
+    const res = await t.run('forget', { query: 'old job' });
+    expect(res.isError).toBeFalsy();
+    expect(res.output).toEqual({ forgotten: found.map(n => n.label), ids: found.map(n => n.id) });
+    expect(res.summary).toBe('Forgot 100 memories');
+    expect(t.mem.nodes.size).toBe(0);
+    const empty = await t.run('forget', { query: 'old job' });
+    expect(empty.output).toEqual({ forgotten: [], note: 'No memories match “old job”.' });
+    expect(empty.summary).toBe('Nothing to forget');
+  });
 
 });
 

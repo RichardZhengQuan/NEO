@@ -181,7 +181,7 @@ export function estimateMessageTokens(msg: Message): number {
         n += estimateTokens(typeof p.output === 'string' ? p.output : JSON.stringify(p.output ?? null)) + 10;
         break;
       case 'ui_event':
-        n += 40;
+        n += estimateTokens(describeUiEvent(p));
         break;
       case 'ui':
         break;

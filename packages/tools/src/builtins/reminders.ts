@@ -5,15 +5,8 @@
 import { z } from 'zod';
 import { NeoError, RecurrenceSchema, defineTool, describeRecurrence, type ProductivityStores, type Reminder, type ReminderPatch, type ReminderStatus, type UIBlock } from '@neo/protocol';
 import type { Clock } from '@neo/protocol';
-import { parseDateTime } from '../time.js';
 import { clip, friendlyTime, localIso, weekdayName } from './format.js';
-
-/** Times this far in the past are rejected (they would fire immediately as "missed"). */
-const PAST_TOLERANCE_MS = 60_000;
-
-const WHEN_HELP =
-  'When to fire: a phrase like "in 10 minutes", "in 2 hours", "tomorrow 9am", "tonight", "friday 14:00", "today 18:30", ' +
-  'an ISO time ("2026-10-12T09:00", local time when there is no offset) or epoch ms.';
+import { parseFuture, WHEN_HELP } from './future.js';
 
 const RecurrenceInput = RecurrenceSchema.describe(
   'Repeat rule. freq: hourly|daily|weekly|monthly|yearly; interval (every N periods, default 1); byWeekday (0=Sunday … 6=Saturday, ' +
@@ -42,6 +35,7 @@ export function reminderBlock(r: Reminder): UIBlock {
     type: 'reminder',
     reminderId: r.id,
     title: clip(r.title, 300),
+    ...(r.notes !== null ? { notes: r.notes } : {}),
     dueAt: r.dueAt,
     timezone: r.timezone,
     ...(r.recurrence ? { recurrenceText: clip(describeRecurrence(r.recurrence), 200) } : {}),
@@ -52,13 +46,6 @@ export function reminderBlock(r: Reminder): UIBlock {
 export function createReminderTools(stores: ProductivityStores, _clock?: Clock) {
   const { reminders } = stores;
 
-  const parseFuture = (when: string | number, now: number, timezone: string): number => {
-    const dueAt = parseDateTime(when, now, timezone);
-    if (dueAt < now - PAST_TOLERANCE_MS) {
-      throw new NeoError('bad_request', `That time (${localIso(dueAt, timezone)} ${timezone}) is in the past; it is now ${localIso(now, timezone)}. Pick a future time.`);
-    }
-    return dueAt;
-  };
   const mustGet = (id: string): Reminder => {
     const r = reminders.get(id);
     if (!r) throw new NeoError('not_found', `No reminder with id "${id}". Use list_reminders to find it.`);
@@ -112,23 +99,16 @@ export function createReminderTools(stores: ProductivityStores, _clock?: Clock) 
     }),
     risk: 'read',
     defaultPermission: 'auto',
-    async execute(input, ctx) {
+    async execute(input) {
       const status = input.status ?? 'upcoming';
       const filter: Record<typeof status, ReminderStatus[] | undefined> = { upcoming: ['scheduled'], fired: ['fired'], completed: ['completed'], all: undefined };
-      const list = reminders.list({ status: filter[status], limit: input.limit ?? 20 });
-      const ui: UIBlock[] = [
-        {
-          type: 'list',
-          title: status === 'upcoming' ? 'Upcoming reminders' : status === 'all' ? 'Reminders' : `${status[0]!.toUpperCase()}${status.slice(1)} reminders`,
-          items: list.map((r) => ({
-            id: r.id,
-            title: clip(r.title, 300),
-            subtitle: clip(`${friendlyTime(r.dueAt, r.timezone, ctx.locale)}${r.recurrence ? ` · ${describeRecurrence(r.recurrence)}` : ''}`, 1000),
-            meta: r.status,
-            icon: r.recurrence ? 'repeat' : 'bell',
-          })),
-        },
-      ];
+      const userLimit = input.limit ?? 20
+      const fetched = reminders.list({ status: filter[status], limit: userLimit + 1 })
+      const truncated = fetched.length > userLimit
+      const list = truncated ? fetched.slice(0, userLimit) : fetched
+      const ui = list.slice(0, 10).map(reminderBlock)
+      if (truncated) ui.push({ type: 'link', url: 'neo://reminders', title: 'Show all reminders' })
+      else if (list.length > 10) ui.push({ type: 'link', url: 'neo://reminders', title: `Show all ${list.length} reminders` })
       return {
         output: { reminders: list.map(reminderOutput), total: list.length },
         ui,

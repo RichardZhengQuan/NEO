@@ -31,6 +31,7 @@ import {
   type OffRecordState,
   type ProviderAdapter,
   type ProviderRegistry,
+  type ReminderStore,
   type SendInput,
   type SendTimelineInput,
   type SettingsStore,
@@ -54,6 +55,7 @@ import { describeUiToolCall, findUiPart, patchWidgetBlock, resolveStoredAction, 
 
 export interface AgentRuntimeDeps {
   conversations: ConversationStore;
+  reminders?: ReminderStore;
   settings: SettingsStore;
   providers: ProviderRegistry;
   memory: MemoryService;
@@ -79,6 +81,7 @@ interface UiApproval {
 
 export class AgentRuntime implements AgentRuntimeApi {
   private readonly conversations: ConversationStore;
+  private readonly reminders: ReminderStore | undefined;
   private readonly settingsStore: SettingsStore;
   private readonly providers: ProviderRegistry;
   private readonly memory: MemoryService;
@@ -98,7 +101,7 @@ export class AgentRuntime implements AgentRuntimeApi {
   private readonly turns = new Map<string, TurnRecord>();
   private readonly turnDone = new Map<string, Promise<Message>>();
   private readonly uiTools = new Map<AbortController, { done: Promise<void>; enterOffRecord(): void; tool: string }>();
-  private pendingTimeline: { done: Promise<void>; resolve(): void; cancelled: boolean; offRecord: boolean } | undefined;
+  private pendingTimeline: { done: Promise<void>; resolve(): void; cancelled: boolean; offRecord: boolean; controller: AbortController } | undefined;
   private mutatingTimeline = false;
   private privateEpoch = 0;
   /** conversationId → turnId of the turn holding it (reserved synchronously in send()). */
@@ -109,6 +112,7 @@ export class AgentRuntime implements AgentRuntimeApi {
 
   constructor(deps: AgentRuntimeDeps) {
     this.conversations = deps.conversations;
+    this.reminders = deps.reminders;
     this.settingsStore = deps.settings;
     this.providers = deps.providers;
     this.memory = deps.memory;
@@ -129,6 +133,11 @@ export class AgentRuntime implements AgentRuntimeApi {
       logger: this.logger,
       clock: this.clock,
       broadcast: (event) => this.broadcast(event),
+      patchConversationWidgets: (conversationId, result) => {
+        for (const message of this.conversations.messages(conversationId)) {
+          this.patchWidgets(message, result);
+        }
+      },
     };
     this.settingsStore.onChange((settings) => {
       this.configureSearchTool(settings);
@@ -164,7 +173,7 @@ export class AgentRuntime implements AgentRuntimeApi {
     if (input.offRecord === true && !this.offRecordState().active) this.enterOffRecord();
     const settings = this.settingsStore.get();
     let resolve!: () => void;
-    const pending = { done: new Promise<void>((done) => { resolve = done; }), resolve: () => resolve(), cancelled: false, offRecord: this.offRecordState().active };
+    const pending = { done: new Promise<void>((done) => { resolve = done; }), resolve: () => resolve(), cancelled: false, offRecord: this.offRecordState().active, controller: new AbortController() };
     this.pendingTimeline = pending;
     let created: Conversation | undefined;
     try {
@@ -183,7 +192,11 @@ export class AgentRuntime implements AgentRuntimeApi {
       const now = this.clock();
       const lastAt = current?.lastMessageAt ?? history.at(-1)?.createdAt;
       const gap = lastAt !== undefined && lastAt !== null && now - lastAt >= settings.timeline.episodeGapMinutes * 60_000;
-      const previousSearchMode = current && (this.episodeSearchModes.get(current.id) ?? (current.toolset?.includes('web_search') ? 'engine' : 'off'));
+      const previousSearchMode = current && (
+        this.episodeSearchModes.get(current.id) ??
+        current.searchMode ??
+        (current.toolset?.includes('web_search') ? 'engine' : 'off')
+      );
       const searchChanged = current?.toolset !== null && previousSearchMode !== searchMode;
       if (current && (gap || searchChanged || (current.offRecord ?? current.incognito) !== offRecord)) {
         this.conversations.closeEpisode(current.id);
@@ -205,7 +218,7 @@ export class AgentRuntime implements AgentRuntimeApi {
       };
       const recalledHistory = history.length ? history : previous && !(previous.offRecord ?? previous.incognito) ? this.conversations.messages(previous.id) : [];
       const preview = history.length > 0;
-      let prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive, preview ? false : undefined);
+      let prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive, preview ? false : undefined, pending.controller.signal);
       if (pending.cancelled) throw new NeoError('cancelled', 'The turn was cancelled.');
       const incoming = (): Message => ({
         id: '', conversationId: current!.id, role: 'user', status: 'complete', createdAt: now,
@@ -218,14 +231,14 @@ export class AgentRuntime implements AgentRuntimeApi {
         current = created;
         if (offRecord) this.conversations.setOffRecordState({ ...this.offRecordState(), episodeId: current.id });
         history = [];
-        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive);
+        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive, undefined, pending.controller.signal);
       };
       if (exceedsBudget()) {
         await breakForBudget();
       } else if (preview && !offRecord) {
         // The budget preview cannot strengthen memories. Recall once against the final
         // episode, so its own summary exclusion and reinforcement have the right source.
-        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive);
+        prepared = await prepareTurnContext(this.services, current, settings, parts, recalledHistory, allowSensitive, undefined, pending.controller.signal);
         if (exceedsBudget()) await breakForBudget();
       }
       if (pending.cancelled) throw new NeoError('cancelled', 'The turn was cancelled.');
@@ -265,6 +278,7 @@ export class AgentRuntime implements AgentRuntimeApi {
     try {
       const searchMode = this.searchMode(settings, adapter, model);
       this.episodeSearchModes.set(conv.id, searchMode);
+      if (conv.searchMode !== searchMode) this.conversations.update(conv.id, { searchMode });
       const handle = await startTurn(this.services, { record, conversation: conv, parts, adapter, model, settings, searchMode, release, ...context });
       this.turnDone.set(record.turnId, handle.done);
       void handle.done.then(() => this.turnDone.delete(record.turnId));
@@ -339,6 +353,7 @@ export class AgentRuntime implements AgentRuntimeApi {
     let cancelled = false;
     if (this.pendingTimeline) {
       this.pendingTimeline.cancelled = true;
+      this.pendingTimeline.controller.abort();
       cancelled = true;
     }
     for (const id of this.turns.keys()) cancelled = this.cancel(id) || cancelled;
@@ -366,7 +381,10 @@ export class AgentRuntime implements AgentRuntimeApi {
     this.mutatingTimeline = true;
     try {
       if (this.pendingTimeline) {
-        if (cancelNormalPreflight || this.pendingTimeline.offRecord) this.pendingTimeline.cancelled = true;
+        if (cancelNormalPreflight || this.pendingTimeline.offRecord) {
+          this.pendingTimeline.cancelled = true;
+          this.pendingTimeline.controller.abort();
+        }
         await this.pendingTimeline.done;
       }
       return await mutation();
@@ -453,7 +471,9 @@ export class AgentRuntime implements AgentRuntimeApi {
 
   private deleteOffRecord(before: number): number {
     const episodes = this.conversations.offRecordEpisodes(before);
+    const messageIds = episodes.flatMap((episode) => this.conversations.messages(episode.id).map((message) => message.id));
     const deleted = this.conversations.purgeOffRecord(before);
+    if (messageIds.length) this.reminders?.clearMessageLinks(messageIds);
     for (const episode of episodes) this.broadcast({ type: 'conversation.deleted', conversationId: episode.id, episodeId: episode.id });
     return deleted;
   }

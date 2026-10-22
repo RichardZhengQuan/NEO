@@ -38,6 +38,8 @@ export interface NeoDatabase {
   prepare(sql: string): StatementSync;
   /** Run `fn` atomically. Nested calls use savepoints. Re-throws after rolling back. */
   transaction<T>(fn: () => T): T;
+  /** Run after the outermost commit, or immediately when outside a transaction. */
+  afterCommit(fn: () => void): void;
   close(): void;
 }
 
@@ -53,6 +55,7 @@ export function openDatabase(path: string): NeoDatabase {
   }
   const cache = new Map<string, StatementSync>();
   let depth = 0;
+  const commitStack: (() => void)[][] = [];
 
   const db: NeoDatabase = {
     raw,
@@ -67,19 +70,47 @@ export function openDatabase(path: string): NeoDatabase {
       return stmt;
     },
     transaction<T>(fn: () => T): T {
-      const savepoint = `sp_${depth}`;
-      raw.exec(depth === 0 ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepoint}`);
+      const entryDepth = depth;
+      const outer = entryDepth === 0;
+      const savepoint = `sp_${entryDepth}`;
+      raw.exec(outer ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepoint}`);
+      commitStack.push([]);
       depth++;
+      let levelCallbacks: (() => void)[] | undefined;
       try {
         const result = fn();
-        depth--;
-        raw.exec(depth === 0 ? 'COMMIT' : `RELEASE ${savepoint}`);
+        raw.exec(outer ? 'COMMIT' : `RELEASE ${savepoint}`);
+        const level = commitStack.pop()!;
+        if (outer) levelCallbacks = level;
+        else commitStack[commitStack.length - 1]!.push(...level);
         return result;
       } catch (err) {
-        depth--;
-        raw.exec(depth === 0 ? 'ROLLBACK' : `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
+        commitStack.pop();
+        try {
+          raw.exec(outer ? 'ROLLBACK' : `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
+        } catch (cleanupErr) {
+          throw new AggregateError([err, cleanupErr], 'transaction cleanup failed', { cause: err });
+        }
         throw err;
+      } finally {
+        depth = entryDepth;
+        if (levelCallbacks) {
+          let firstErr: unknown;
+          let hasErr = false;
+          for (const cb of levelCallbacks) {
+            try {
+              cb();
+            } catch (err) {
+              if (!hasErr) { firstErr = err; hasErr = true; }
+            }
+          }
+          if (hasErr) throw firstErr;
+        }
       }
+    },
+    afterCommit(fn) {
+      if (depth === 0) fn();
+      else commitStack[commitStack.length - 1]!.push(fn);
     },
     close() {
       cache.clear();
@@ -162,8 +193,11 @@ export function blobToVector(blob: Uint8Array): Float32Array {
 /** Escape user text for an FTS5 MATCH: every token quoted, OR-ed. Returns null for empty input. */
 export function ftsQuery(text: string): string | null {
   const tokens = text
+    .normalize('NFC')
     .toLowerCase()
-    .split(/[^\p{L}\p{N}_]+/u)
+    .split(/[^\p{L}\p{N}_\p{M}]+/u)
+    // Fold the dot introduced by lowercasing İ while preserving other marks.
+    .map((t) => t.replace(/i\u0307/g, 'i'))
     .filter((t) => t.length > 1)
     .slice(0, 32);
   if (!tokens.length) return null;

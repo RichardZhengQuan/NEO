@@ -85,8 +85,9 @@ export const systemClock: Clock = () => Date.now();
 
 export interface ConversationListQuery {
   limit?: number;
-  /** Return conversations updated strictly before this time (pagination). */
+  /** Cursor updatedAt; beforePinned must accompany it for correct composite pagination. */
   before?: number;
+  beforePinned?: boolean;
   archived?: boolean;
   query?: string;
 }
@@ -101,7 +102,7 @@ export interface NewConversation {
 }
 
 export type ConversationPatch = Partial<
-  Pick<Conversation, 'title' | 'model' | 'pinned' | 'archived' | 'systemPrompt' | 'toolset' | 'lastMessageAt' | 'preview' | 'closedAt'>
+  Pick<Conversation, 'title' | 'model' | 'pinned' | 'archived' | 'systemPrompt' | 'toolset' | 'lastMessageAt' | 'preview' | 'closedAt' | 'searchMode'>
 >;
 
 export type MessagePatch = Partial<Pick<Message, 'parts' | 'status' | 'error' | 'usage' | 'model' | 'sensitive'>>;
@@ -114,7 +115,7 @@ export interface ConversationStore {
   /** Deletes the conversation and all its messages. */
   delete(id: string): boolean;
   /** Oldest → newest. `before` is a message createdAt for pagination; `limit` keeps the newest N. */
-  messages(conversationId: string, options?: { limit?: number; before?: number }): Message[];
+  messages(conversationId: string, options?: { limit?: number; before?: number; beforeId?: string }): Message[];
   getMessage(id: string): Message | null;
   /** Inserts the message and bumps the conversation's updatedAt/lastMessageAt/preview. */
   appendMessage(message: Message): Message;
@@ -173,6 +174,8 @@ export interface ReminderListQuery {
   from?: number;
   to?: number;
   limit?: number;
+  /** Filter to reminders whose last_fired_at >= this timestamp (ms). */
+  lastFiredAtFrom?: number;
 }
 
 export interface ReminderStore {
@@ -185,11 +188,28 @@ export interface ReminderStore {
   complete(id: string): Reminder;
   /** Scheduled reminders with dueAt <= now, oldest first. */
   due(now: number): Reminder[];
-  /** The scheduled reminder with the smallest dueAt. */
-  nextDue(): Reminder | null;
+  /** The scheduled reminder with the smallest dueAt, excluding the given ids. */
+  nextDue(excludeIds?: ReadonlySet<string>): Reminder | null;
   /** Record a firing: advances recurring reminders or marks one-shots 'fired'. */
-  markFired(id: string, firedAt: number): ReminderFiring;
+  markFired(id: string, firedAt: number, missed?: boolean): ReminderFiring;
   onChange(listener: (event: { type: 'upsert'; reminder: Reminder } | { type: 'delete'; id: string }) => void): () => void;
+  /**
+   * Set messageId to null for every reminder whose messageId is in the given set.
+   * Called by the server's delete route after messages are removed.
+   */
+  clearMessageLinks(messageIds: string[]): void;
+  /**
+   * Return every pending_firings row that has not yet been acknowledged.
+   * A pending firing is written atomically with markFired so it survives
+   * a crash between markFired and the downstream notification write.
+   * On re-delivery (scheduler start), each row is re-emitted to onFire listeners.
+   */
+  pendingFirings?(): ReminderFiring[];
+  /**
+   * Remove one pending_firings row after the downstream notification succeeds.
+   * Idempotent: calling it twice for the same id is harmless.
+   */
+  clearPendingFiring?(id: string): void;
 }
 
 export interface TaskListQuery {

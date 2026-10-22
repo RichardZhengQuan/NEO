@@ -7,12 +7,12 @@
  * Pure read: reinforcement is applied by the caller (write.ts).
  */
 import type { EdgeType, Embedder, MemoryKind, MemoryNode, RecallQuery, RecallResult, RecalledMemory } from '@neo/protocol';
-import { SELF_MEMORY_ID } from '@neo/protocol';
+import { NeoError, SELF_MEMORY_ID } from '@neo/protocol';
 import { fromJson, toNum, type SqlValue } from '@neo/storage';
 import { MEMORY_CONSTANTS } from './constants.js';
 import { ASSISTANT_STYLE_TAG } from './assistant-style.js';
 import type { MemoryContext } from './context.js';
-import { getNodes } from './db-helpers.js';
+import { chunked, getNodes } from './db-helpers.js';
 import { containsTerm, estimateTokens, hasCJK, isBroadSelfQuery, normalizeText, recallTerms, wordMatchExpression } from './text.js';
 import { dot, effectiveEdgeWeight, normalized, retention } from './utils.js';
 import { sameSpace } from './vectors.js';
@@ -95,7 +95,7 @@ async function querySpaces(ctx: MemoryContext, query: RecallQuery, text: string,
   const embedIn = async (embedder: Embedder, withContext: boolean) => {
     try {
       const ctxText = withContext ? context : '';
-      const vectors = await embedder.embed(ctxText ? [text, ctxText] : [text]);
+      const vectors = await embedder.embed(ctxText ? [text, ctxText] : [text], query.signal);
       const t = vectors[0] ? normalized(vectors[0]) : null;
       if (!t) return;
       const c = ctxText && vectors[1] ? normalized(vectors[1]) : null;
@@ -195,6 +195,7 @@ function seedReason(source: SeedSource, node: MemoryNode): string {
 }
 
 export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<RecallOutcome> {
+  if (query.signal?.aborted) throw new NeoError('cancelled', 'Memory recall was cancelled.');
   const started = performance.now();
   const { db } = ctx;
   const policy = ctx.policy();
@@ -231,6 +232,7 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
 
   // Vector: top seedTopK with sim ≥ floor, a₀ = (sim − floor) / (1 − floor).
   const spaces = text ? await querySpaces(ctx, query, text, (query.context ?? '').trim()) : new Map<string, QuerySpace>();
+  if (query.signal?.aborted) throw new NeoError('cancelled', 'Memory recall was cancelled.');
   if (spaces.size) {
     const main = ctx.vectors.all(ctx.embedder.id);
     const onDevice = ctx.localEmbedder !== ctx.embedder ? ctx.vectors.all(ctx.localEmbedder.id) : null;
@@ -367,6 +369,49 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   const minScore = policy.minScore;
   const reachable = [...A.entries()].filter(([id, a]) => styleIds.has(id) || (a * C.pinnedBoost >= minScore && !allStyleIds.has(id))).map(([id]) => id);
   const nodes = new Map(getNodes(db, reachable).map((n) => [n.id, n]));
+  // Writes may have changed eligibility while the query embedding was in flight.
+  // Drop ineligible nodes and cascade taint through `best`: any node whose
+  // single strongest contribution came from an ineligible one is also removed,
+  // so a cloud caller never sees a memory that was only recalled because
+  // spreading traversed a now-disallowed memory.
+  const nonStyleIds = reachable.filter((id) => !styleIds.has(id));
+  const nonStyleIdSet = new Set(nonStyleIds);
+  // Sub-threshold nodes (A[id] < minScore) that appear as back-pointer sources
+  // in `best` were never placed in `reachable`, so they were never checked against
+  // candidateWhere.  A race between the embedding await (line ~234) and a concurrent
+  // DB write can flip their eligibility; include them in the freshness check so the
+  // cascade actually reaches every tainted destination.
+  const subThresholdFromIds = [...best.values()]
+    .map((b) => b.from)
+    .filter((id) => !seeds.has(id) && !nonStyleIdSet.has(id));
+  const checkIds = [...new Set([...nonStyleIds, ...subThresholdFromIds])];
+  if (checkIds.length) {
+    const freshWhere = candidateWhere(query, now);
+    const eligibleRows = chunked(checkIds, (ph, chunk) =>
+      db
+        .prepare(`SELECT id FROM memory_nodes WHERE id IN (${ph}) AND ${freshWhere.sql}`)
+        .all(...chunk, ...freshWhere.params) as { id: string }[],
+    );
+    const eligibleIds = new Set(eligibleRows.map((row) => row.id));
+    const tainted = new Set<string>();
+    for (const id of checkIds) if (!eligibleIds.has(id)) tainted.add(id);
+    let frontier: Set<string> = tainted;
+    while (frontier.size) {
+      const next = new Set<string>();
+      for (const [id, entry] of best) {
+        if (!tainted.has(id) && frontier.has(entry.from)) {
+          tainted.add(id);
+          next.add(id);
+        }
+      }
+      frontier = next;
+    }
+    for (const id of tainted) {
+      nodes.delete(id);
+      A.delete(id);
+      best.delete(id);
+    }
+  }
   const scored: { node: MemoryNode; score: number; R: number }[] = [];
   for (const node of nodes.values()) {
     const R = retention(node, now);

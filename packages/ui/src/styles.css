@@ -2379,7 +2379,8 @@
     overflow-wrap: anywhere;
   }
   .neo-widget[data-state='completed'] .neo-widget__title,
-  .neo-widget[data-state='cancelled'] .neo-widget__title {
+  .neo-widget[data-state='cancelled'] .neo-widget__title,
+  .neo-widget[data-state='deleted'] .neo-widget__title {
     color: var(--neo-text-muted);
     text-decoration: line-through;
   }
@@ -2396,6 +2397,17 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
+  }
+  .neo-widget__notes {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    margin: 0.375rem 0 0;
+    font-size: 0.8125rem;
+    color: var(--neo-text-muted);
   }
   .neo-task-list {
     display: flex;
@@ -2437,6 +2449,74 @@
     flex-shrink: 0;
     font-size: 0.75rem;
     color: var(--neo-text-muted);
+  }
+  .neo-changes__note {
+    margin: 0.25rem 0 0;
+    overflow-wrap: anywhere;
+  }
+  .neo-changes__list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .neo-change {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.625rem;
+    padding: 0.75rem 0;
+    border-top: 1px solid var(--neo-border);
+  }
+  .neo-change:first-child {
+    padding-top: 0.125rem;
+    border-top: 0;
+  }
+  .neo-change__check {
+    flex-shrink: 0;
+    margin-top: 0.125rem;
+    color: var(--neo-tone-success-text);
+  }
+  .neo-change__main {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .neo-change__title {
+    display: block;
+    margin: 0;
+    font-size: 0.9063rem;
+    font-weight: 550;
+    color: var(--neo-text);
+  }
+  label.neo-change__title {
+    cursor: pointer;
+  }
+  .neo-change__kind {
+    display: block;
+    margin-top: 0.125rem;
+    font-size: 0.6875rem;
+    color: var(--neo-text-muted);
+  }
+  .neo-change__details {
+    margin-top: 0.375rem;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    color: var(--neo-text-muted);
+  }
+  .neo-change__details p {
+    margin: 0;
+  }
+  .neo-change__status {
+    font-size: 0.75rem;
+  }
+  .neo-change__status > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-top: 0.375rem;
+  }
+  .neo-change__applied {
+    font-size: 0.8125rem;
+    color: var(--neo-tone-success-text);
   }
   .neo-priority {
     display: inline-flex;

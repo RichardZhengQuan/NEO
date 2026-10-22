@@ -10,6 +10,8 @@ export class EventHub {
   private _seq = 0;
   private _buffer: EventEnvelope[] = [];
   private _listeners = new Set<(e: EventEnvelope) => void>();
+  private _publishing = false;
+  private _outbox: EventEnvelope[] = [];
 
   constructor(private readonly clock: Clock = systemClock) {}
 
@@ -19,12 +21,27 @@ export class EventHub {
     if (this._buffer.length > BUFFER_SIZE) {
       this._buffer.shift();
     }
-    for (const listener of [...this._listeners]) {
-      try {
-        listener(envelope);
-      } catch {
-        // ignore listener errors
+    if (this._publishing) {
+      this._outbox.push(envelope);
+      return envelope;
+    }
+    this._publishing = true;
+    try {
+      let current: EventEnvelope | undefined = envelope;
+      // Read the growing outbox by index so reentrant fan-out stays linear.
+      for (let i = 0; current; i++) {
+        for (const listener of [...this._listeners]) {
+          try {
+            listener(current);
+          } catch {
+            // ignore listener errors
+          }
+        }
+        current = this._outbox[i]
       }
+    } finally {
+      this._outbox.length = 0
+      this._publishing = false;
     }
     return envelope;
   }

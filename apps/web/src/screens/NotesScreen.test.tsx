@@ -14,13 +14,14 @@ import { startSession } from '../state/session.js';
 // ── module mocks ──────────────────────────────────────────────────────────────
 
 const mockUpdate = vi.fn();
+const mockDelete = vi.fn();
 const mockNotesList = vi.fn().mockResolvedValue({ items: [] });
 vi.mock('../state/session.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../state/session.js')>();
   return {
     ...actual,
     requireClient: () => ({
-      notes: { update: mockUpdate, list: mockNotesList, delete: vi.fn().mockResolvedValue(undefined) },
+      notes: { update: mockUpdate, list: mockNotesList, delete: mockDelete },
     }),
   };
 });
@@ -75,6 +76,8 @@ async function renderEditor(note: Note) {
 beforeEach(() => {
   vi.useFakeTimers();
   mockUpdate.mockReset();
+  mockDelete.mockReset();
+  mockDelete.mockResolvedValue(undefined);
   mockNotesList.mockResolvedValue({ items: [] });
   upsertedNotes.length = 0;
   useData.setState({
@@ -82,6 +85,7 @@ beforeEach(() => {
     notesLoaded: false,
     reminders: {},
     remindersLoaded: false,
+    remindersComplete: false,
     tasks: {},
     taskLists: [],
     tasksLoaded: false,
@@ -100,6 +104,75 @@ afterEach(() => {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 describe('NoteEditor autosave', () => {
+  it('after a failed delete, re-saves unsaved content (pending timer)', async () => {
+    const serverNote = makeNote({ content: 'Keep this content', updatedAt: 2000 });
+    const { unmount } = await renderEditor(makeNote());
+    const textarea = screen.getByRole('textbox', { name: /content/i });
+    fireEvent.change(textarea, { target: { value: 'Keep this content' } });
+
+    // Delete before the 700ms debounce fires: failure must recover the save.
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mockDelete.mockRejectedValueOnce(new Error('network'));
+    mockUpdate.mockResolvedValueOnce(serverNote);
+    expect(mockUpdate).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /delete/i })); });
+
+    expect(mockDelete).toHaveBeenCalledWith('note_1');
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).toHaveBeenCalledWith('note_1', expect.objectContaining({ content: 'Keep this content' }));
+    expect(upsertedNotes).toHaveLength(1);
+    expect(upsertedNotes[0]).toEqual(serverNote);
+    expect(screen.getByRole('status').textContent).toMatch(/\bsaved\b/i);
+    confirm.mockRestore();
+    unmount();
+  });
+
+  it('after a failed delete, re-saves content whose in-flight save result was suppressed', async () => {
+    const serverNote = makeNote({ content: 'Keep this content', updatedAt: 2000 });
+    let resolveSave!: (n: Note) => void;
+    let rejectDelete!: (e: Error) => void;
+    mockUpdate.mockReturnValueOnce(new Promise<Note>((resolve) => { resolveSave = resolve; }));
+    mockUpdate.mockResolvedValueOnce(serverNote);
+    mockDelete.mockReturnValueOnce(new Promise<void>((_resolve, reject) => { rejectDelete = reject; }));
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const { unmount } = await renderEditor(makeNote());
+    const textarea = screen.getByRole('textbox', { name: /content/i });
+    fireEvent.change(textarea, { target: { value: 'Keep this content' } });
+    await act(() => vi.advanceTimersByTimeAsync(700));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /delete/i })); });
+    expect(mockDelete).toHaveBeenCalledWith('note_1');
+
+    // The first save resolves during deletion, so its result cannot be applied.
+    await act(async () => { resolveSave(serverNote); });
+    expect(upsertedNotes).toEqual([]);
+    expect(screen.getByRole('status').textContent).toMatch(/saving/i);
+    await act(async () => { rejectDelete(new Error('network')); });
+
+    expect(mockUpdate).toHaveBeenCalledTimes(2);
+    expect(mockUpdate).toHaveBeenLastCalledWith('note_1', expect.objectContaining({ content: 'Keep this content' }));
+    expect(upsertedNotes).toEqual([serverNote]);
+    expect(screen.getByRole('status').textContent).toMatch(/\bsaved\b/i);
+    confirm.mockRestore();
+    unmount();
+  });
+
+  it('does not save pending content after a successful delete', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const { unmount } = await renderEditor(makeNote());
+    const textarea = screen.getByRole('textbox', { name: /content/i });
+    fireEvent.change(textarea, { target: { value: 'Delete this content' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /delete/i })); });
+
+    expect(mockDelete).toHaveBeenCalledTimes(1);
+    expect(mockDelete).toHaveBeenCalledWith('note_1');
+    expect(useData.getState().notes.note_1).toBeUndefined();
+    unmount();
+    await act(() => vi.advanceTimersByTimeAsync(700));
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(upsertedNotes).toEqual([]);
+    confirm.mockRestore();
+  });
+
   it('marks the editor saved when a flush completes without concurrent edits', async () => {
     const note = makeNote();
     const serverNote = makeNote({ content: 'Hello', updatedAt: 2000 });

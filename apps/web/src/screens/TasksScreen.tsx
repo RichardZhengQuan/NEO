@@ -59,6 +59,20 @@ function TaskDetails({ task, lists, onClose }: { task: Task; lists: TaskList[]; 
   const tz = useSession((s) => s.settings?.timezone);
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? '');
+  const serverTitleRef = useRef(task.title);
+  const serverNotesRef = useRef(task.notes ?? '');
+  useEffect(() => {
+    const prev = serverTitleRef.current;
+    serverTitleRef.current = task.title;
+    // Only resync if the user hasn't edited this field since last server sync.
+    // Functional setter reads current state; avoids stale-closure without deps.
+    setTitle((curr) => (curr === prev ? task.title : curr));
+  }, [task.title]);
+  useEffect(() => {
+    const prev = serverNotesRef.current;
+    serverNotesRef.current = task.notes ?? '';
+    setNotes((curr) => (curr === prev ? task.notes ?? '' : curr));
+  }, [task.notes]);
   const save = (patch: Parameters<typeof patchTask>[1]) => void patchTask(task, patch, t);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', padding: '0.25rem 0 0.5rem 2rem' }}>
@@ -114,6 +128,7 @@ function TaskDetails({ task, lists, onClose }: { task: Task; lists: TaskList[]; 
 function TaskRow({ task, subtasks, lists, expanded, onToggleExpand, highlight }: { task: Task; subtasks: Task[]; lists: TaskList[]; expanded: boolean; onToggleExpand: () => void; highlight: boolean }): ReactElement {
   const t = useT();
   const locale = useLocale();
+  const tz = useSession((s) => s.settings?.timezone);
   const ref = useRef<HTMLLIElement>(null);
   const overdue = !task.done && task.dueAt !== null && task.dueAt < Date.now();
   useEffect(() => {
@@ -137,7 +152,7 @@ function TaskRow({ task, subtasks, lists, expanded, onToggleExpand, highlight }:
               )}
               {task.dueAt && (
                 <span style={overdue ? { color: 'var(--neo-tone-danger-text)', fontWeight: 600 } : undefined}>
-                  <Icon name="calendar" size={12} /> {formatDate(task.dueAt, locale, undefined, 'medium')}
+                  <Icon name="calendar" size={12} /> {formatDate(task.dueAt, locale, tz, 'medium')}
                 </span>
               )}
               {task.notes && <Icon name="file-text" size={12} label={t('tasks.has_notes')} />}
@@ -286,7 +301,7 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
       <PageHeader
         title={desktop ? t('nav.tasks') : listName(current, t)}
         actions={
-          current && current.id !== INBOX_LIST_ID ? (
+          current && current.id !== INBOX_LIST_ID && (
             <Menu
               label={t('tasks.list_actions')}
               items={[
@@ -294,7 +309,7 @@ export function TasksScreen({ listId, taskId }: { listId?: string; taskId?: stri
                 { label: t('tasks.delete_list'), icon: 'trash', danger: true, onSelect: () => void deleteList(current) },
               ]}
             />
-          ) : undefined
+          )
         }
       />
       <div style={{ display: 'flex', flex: 1, minHeight: 0, flexDirection: desktop ? 'row' : 'column' }}>

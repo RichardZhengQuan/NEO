@@ -5,7 +5,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { NeoClient } from '@neo/client';
 import type { MemoryExport } from '@neo/protocol';
-import { bold, cyan, dim, green } from '../ansi.js';
+import { bold, cyan, dim, green, stripModelText } from '../ansi.js';
 import { resolveDataDir, readToken } from '../config-file.js';
 
 export interface MemoryOptions {
@@ -91,7 +91,7 @@ async function doConsolidate(client: NeoClient): Promise<void> {
   process.stdout.write(`  Archived: ${report.archived}  Episodes: ${report.episodesConsolidated}  Facts: ${report.factsCreated}  Entities merged: ${report.entitiesMerged}\n`);
   if (report.notes?.length) {
     for (const note of report.notes.slice(0, 5)) {
-      process.stdout.write(dim(`  • ${note}\n`));
+      process.stdout.write(dim(`  • ${stripModelText(note)}\n`));
     }
   }
   process.stdout.write('\n');

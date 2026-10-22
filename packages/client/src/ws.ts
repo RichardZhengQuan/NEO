@@ -71,7 +71,7 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
   function schedulePing() {
     clearPing();
     pingTimer = setTimeout(() => {
-      if (ws?.readyState === WebSocket.OPEN) {
+      if (ws?.readyState === ctx.WebSocketCtor.OPEN) {
         const msg: WsClientMessage = { type: 'ping', id: String(Date.now()) };
         ws.send(JSON.stringify(msg));
       }
@@ -80,7 +80,7 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
   }
 
   function send(msg: WsClientMessage) {
-    if (ws?.readyState === WebSocket.OPEN) {
+    if (ws?.readyState === ctx.WebSocketCtor.OPEN) {
       ws.send(JSON.stringify(msg));
     }
   }
@@ -89,12 +89,15 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
     if (closed || !reconnect) return;
     if (reconnectTimer !== null) return; // already scheduled
 
+    setStatus('reconnecting');
+    // The onStatus callback may have called close(), check again before scheduling.
+    if (closed) return;
+
     const delay = backoffDelay(attempt);
     attempt++;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (!closed) {
-        setStatus('reconnecting');
         openSocket();
       }
     }, delay);
@@ -108,7 +111,11 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
     try {
       ws = new ctx.WebSocketCtor(wsUrl);
     } catch (err) {
-      scheduleReconnect();
+      if (closed || !reconnect) {
+        setStatus('closed');
+      } else {
+        scheduleReconnect();
+      }
       return;
     }
 
@@ -146,7 +153,9 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
         attempt = 0; // Reset backoff on successful connect.
         lastSeq = msg.seq;
         setStatus('open');
-        schedulePing();
+        if (!closed) {
+          schedulePing();
+        }
 
         // Send subscription after reconnect.
         const subMsg: WsClientMessage = { type: 'subscribe', conversations: currentConversations };
@@ -195,7 +204,11 @@ export function createConnection(ctx: WsContext, opts: ConnectOptions): EventCon
         return;
       }
 
-      // Unexpected close — reconnect with backoff.
+      // Unexpected close — close if reconnect is disabled, otherwise reconnect with backoff.
+      if (!reconnect) {
+        setStatus('closed');
+        return;
+      }
       scheduleReconnect();
     };
 

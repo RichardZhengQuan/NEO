@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { ChatRequest, ChatStreamEvent, ChatModel, ObservedTurn, RememberInput, ToolDefinition } from '@neo/protocol';
-import { silentLogger, newId, DEFAULT_MEMORY_POLICY } from '@neo/protocol';
+import { silentLogger, newId, DEFAULT_MEMORY_POLICY, NeoError, SELF_MEMORY_ID } from '@neo/protocol';
 import { openNeoDatabase } from '@neo/storage';
 import {
   createMemoryService,
@@ -219,6 +219,70 @@ describe('heuristicExtract', () => {
   });
 });
 
+describe('observe: duplicate-label heuristic candidates keep sensitivity (regression for #112)', () => {
+  it('keeps the allergy local and recalls it only when sensitive memories are allowed', async () => {
+    const db = openNeoDatabase(':memory:');
+    const hashing = new HashingEmbedder(256);
+    const cloudCalls: string[] = [];
+    const cloud = {
+      id: hashing.id, dimensions: hashing.dimensions, isLocal: false as const,
+      async embed(texts: string[]) { cloudCalls.push(...texts); return hashing.embed(texts); },
+    };
+    const { clock } = makeClock();
+    const svc = createMemoryService({ db, embedder: cloud, llm: () => null, clock, logger: silentLogger });
+
+    await svc.observe(makeTurn("Remember that I'm allergic to penicillin.", 'Noted.'));
+
+    expect(cloudCalls.every((t) => !t.includes('allergic to penicillin'))).toBe(true);
+    expect((await svc.recall({ text: 'allergic to penicillin', limit: 10, reinforce: false, allowSensitive: false })).items.every((r) => r.node.sensitivity !== 'sensitive')).toBe(true);
+    expect((await svc.recall({ text: 'allergic to penicillin', limit: 10, reinforce: false, allowSensitive: true })).items.some((r) => r.node.sensitivity === 'sensitive' && /allergic/.test(r.node.content))).toBe(true);
+    db.close();
+  });
+});
+
+describe('observe: duplicate-content health facts keep sensitivity (regression for #436)', () => {
+  it.each([
+    'Please remember that I have diabetes.',
+    "Please remember that I've diabetes.",
+    'Please remember that I have been diagnosed with diabetes.',
+    "Please remember that I've been diagnosed with diabetes.",
+    'Please remember that I have been treated for diabetes.',
+    "Please remember that I've been treated for diabetes.",
+    // Lowercase pronoun: regression for the Codex P2 on head 22ef0e3.
+    'i have diabetes.',
+    "i've been diagnosed with diabetes.",
+    "i've been treated for diabetes.",
+  ])('keeps diabetes out of cloud embeddings and non-sensitive recall for "%s"', async (text) => {
+    const db = openNeoDatabase(':memory:');
+    const hashing = new HashingEmbedder(256);
+    const cloudCalls: string[] = [];
+    const cloud = {
+      id: hashing.id, dimensions: hashing.dimensions, isLocal: false as const,
+      async embed(texts: string[]) {
+        cloudCalls.push(...texts);
+        // Hashing has no health semantics: make the query relevant so recall must filter the fact.
+        return hashing.embed(texts.map((t) => t === 'health conditions' ? 'The user has diabetes.' : t));
+      },
+    };
+    const { clock } = makeClock();
+    const svc = createMemoryService({ db, embedder: cloud, llm: () => null, clock, logger: silentLogger });
+
+    try {
+      await svc.remember({ kind: 'fact', label: 'Favorite color', content: 'The user likes blue.' });
+      await svc.observe(makeTurn(text, 'Noted.'));
+      const recalled = await svc.recall({ text: 'health conditions', limit: 10, reinforce: false, allowSensitive: false });
+
+      expect(cloudCalls.some((t) => t.length > 0)).toBe(true);
+      expect(cloudCalls).toContain('health conditions');
+      expect.soft(cloudCalls.every((t) => !/diabetes/i.test(t))).toBe(true);
+      expect.soft(recalled.items.every((r) => !/diabetes/i.test(r.node.content))).toBe(true);
+      expect((await svc.graph({ limit: 10 })).nodes.some((n) => n.label === 'Health: diabetes' && n.sensitivity === 'sensitive')).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 // ─── parseLenientJson ────────────────────────────────────────────────────────
 
 describe('parseLenientJson', () => {
@@ -311,6 +375,24 @@ describe('link / unlink', () => {
     const g = await svc.graph({ centerId: a.id, depth: 1, limit: 10 });
     const edge = g.edges.find(e => (e.from === a.id && e.to === b.id) || (e.from === b.id && e.to === a.id));
     expect(edge).toBeUndefined();
+  });
+
+  it.each(['from', 'to'] as const)('refuses to unlink an edge with the self node as its %s endpoint', async (endpoint) => {
+    const { svc, db } = makeTestService();
+    try {
+      const node = await svc.remember({ kind: 'fact', label: 'Tea', content: 'The user likes tea', importance: 0.5 });
+      const edge = endpoint === 'from'
+        ? await svc.link(SELF_MEMORY_ID, node.id, 'related', 0.8)
+        : (await svc.get(node.id))!.edges.find(e => e.to === SELF_MEMORY_ID)!;
+      expect(edge[endpoint]).toBe(SELF_MEMORY_ID);
+
+      const result = svc.unlink(edge.id);
+      await expect(result).rejects.toBeInstanceOf(NeoError);
+      await expect(result).rejects.toMatchObject({ code: 'bad_request' });
+      expect((await svc.get(node.id))!.edges).toContainEqual(edge);
+    } finally {
+      db.close();
+    }
   });
 });
 
@@ -427,6 +509,88 @@ describe('recall', () => {
 
     const result = await svc.recall({ text: 'diabetes condition', limit: 10, reinforce: false, allowSensitive: true });
     expect(result.items.some(r => r.node.sensitivity === 'sensitive')).toBe(true);
+  });
+
+  it('sub-threshold best.from that becomes sensitive poisons its reachable destination', async () => {
+    // Topology (all edges 'related', no direct S→B edge):
+    //   S  = seed (content = query text, A[S] = 1.0)
+    //   fan_S = sqrt(5) = 2.236  (S has 5 neighbours: I, X1, X2, X3, X4)
+    //
+    //   S→I  w=0.50  → A[I]  = 0.50×0.5/2.236 = 0.112  < minScore 0.15  (sub-threshold)
+    //   S→X1 w=0.70  → A[X1] = 0.70×0.5/2.236 = 0.156  ≥ 0.15
+    //   S→X2 w=0.70  → A[X2] = 0.156  (same)
+    //   S→X3 w=0.70  → A[X3] = 0.156  (same)
+    //   S→X4 w=0.70  → A[X4] = 0.156  (same)
+    //
+    //   At hop 1 each of X1–X4 and I spread to B (fan = sqrt(2) = 1.414):
+    //     c(Xi→B) = 0.156 × 0.7 × 0.5 / 1.414 = 0.0387
+    //     c(I →B) = 0.112 × 1.0 × 0.5 / 1.414 = 0.0396   ← strictly largest
+    //   → best[B].from = I  (the sub-threshold node)
+    //   → A[B] = 4×0.0387 + 0.0396 = 0.194 ≥ 0.15
+    //   → score_B = A[B] × strength ≥ 0.15 (importance=1.0 ensures strength ≥ 0.9)
+    //
+    // A wrapper embedder sets I's sensitivity to 'sensitive' on its first embed()
+    // call, simulating the race between the async embedding await and a DB write.
+    // Bug (no fix): I is never in nonStyleIds → never queried → never tainted →
+    //   B passes the cascade and is returned (with via chain leaking I's label).
+    // Fix:          I is added to checkIds → fails eligibility → B is tainted →
+    //   B is deleted from nodes and absent from results.
+    const { svc, db } = makeTestService();
+
+    const queryText = 'recall-subthreshold-poison-seed-' + Math.random().toString(36).slice(2);
+    const nodeS  = await svc.remember({ kind: 'fact', label: 'Seed S',         content: queryText,                           importance: 0.5 });
+    const nodeI  = await svc.remember({ kind: 'fact', label: 'Intermediate I', content: 'sub-threshold-intermediate-zqxwvu', importance: 0.5 });
+    const nodeX1 = await svc.remember({ kind: 'fact', label: 'Bridge X1',      content: 'bridge-node-x1-tsrqpo',             importance: 0.5 });
+    const nodeX2 = await svc.remember({ kind: 'fact', label: 'Bridge X2',      content: 'bridge-node-x2-nmlkji',             importance: 0.5 });
+    const nodeX3 = await svc.remember({ kind: 'fact', label: 'Bridge X3',      content: 'bridge-node-x3-hgfedcb',            importance: 0.5 });
+    const nodeX4 = await svc.remember({ kind: 'fact', label: 'Bridge X4',      content: 'bridge-node-x4-zyxwvut',            importance: 0.5 });
+    // importance=1.0 ensures score = A[B] × strength ≥ 0.194 × 0.90 = 0.175 ≥ 0.15
+    const nodeB  = await svc.remember({ kind: 'fact', label: 'Destination B',  content: 'destination-node-b-srqpon',         importance: 1.0 });
+
+    await svc.link(nodeS.id,  nodeI.id,  'related', 0.5);
+    await svc.link(nodeS.id,  nodeX1.id, 'related', 0.7);
+    await svc.link(nodeS.id,  nodeX2.id, 'related', 0.7);
+    await svc.link(nodeS.id,  nodeX3.id, 'related', 0.7);
+    await svc.link(nodeS.id,  nodeX4.id, 'related', 0.7);
+    await svc.link(nodeI.id,  nodeB.id,  'related', 1.0);
+    await svc.link(nodeX1.id, nodeB.id,  'related', 0.7);
+    await svc.link(nodeX2.id, nodeB.id,  'related', 0.7);
+    await svc.link(nodeX3.id, nodeB.id,  'related', 0.7);
+    await svc.link(nodeX4.id, nodeB.id,  'related', 0.7);
+
+    // First confirm B IS reachable before the race: verify the topology is correct.
+    {
+      const baseline = await svc.recall({ text: queryText, limit: 20, reinforce: false, allowSensitive: false });
+      expect(baseline.items.some(r => r.node.id === nodeB.id)).toBe(true);
+    }
+
+    // Wrapper embedder: flip I to sensitive on the first embed() call,
+    // simulating a concurrent write that races with the async embedding gap.
+    const inner = new HashingEmbedder(256);
+    let raceTriggered = false;
+    const racingEmbedder = {
+      id: inner.id,
+      dimensions: inner.dimensions,
+      async embed(texts: string[], _signal?: AbortSignal) {
+        if (!raceTriggered) {
+          raceTriggered = true;
+          db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(nodeI.id);
+        }
+        return inner.embed(texts);
+      },
+    };
+    svc.setEmbedder(racingEmbedder);
+
+    const result = await svc.recall({ text: queryText, limit: 20, reinforce: false, allowSensitive: false });
+
+    // The race condition fired: I is now sensitive.  best[B].from = I, so the fix
+    // must taint B and exclude it from results; the bug would return B.
+    expect(raceTriggered).toBe(true);
+    expect(result.items.every(r => r.node.id !== nodeB.id)).toBe(true);
+    // Issue #539 spec: no via entry in any result pointing at I, and I's label
+    // never leaks through a result's reason string.
+    expect(result.items.every(r => r.via.every(v => v.nodeId !== nodeI.id))).toBe(true);
+    expect(result.items.every(r => !r.reason.includes('Intermediate I'))).toBe(true);
   });
 
   it('recall via entity links (spreading activation, no lexical overlap)', async () => {
@@ -1138,6 +1302,35 @@ describe('consolidation detailed', () => {
 // ─── observe() detailed behaviors ─────────────────────────────────────────
 
 describe('observe() detailed', () => {
+
+  it.each(['supersede', 'update'] as const)('does not persist credential-bearing %s reasons in metadata', async (op) => {
+    const { svc: initialSvc, db, clock } = makeTestService();
+    const oldNode = await initialSvc.remember({ kind: 'fact', label: 'Router location', content: 'The router is in the hallway' });
+    const response = JSON.stringify({
+      episode: null,
+      memories: [
+        { op, id: oldNode.id, kind: 'fact', label: 'Router location', content: 'The router is in the study', reason: 'password: hunter2' },
+      ],
+      links: [],
+    });
+    const svc = createMemoryService({
+      db,
+      embedder: new HashingEmbedder(256),
+      llm: () => ({ model: makeFakeLLM(response), name: 'fake', isLocal: true }),
+      clock,
+      logger: silentLogger,
+    });
+
+    const result = await svc.observe(makeTurn('The router is in the study.', 'Thanks for the update.'));
+    const { items } = await svc.search({ kinds: ['fact'] });
+    expect(items).toHaveLength(1);
+    expect(items[0]!.metadata?.['reason'] ?? '').not.toContain('hunter2');
+    expect(items[0]!.id).toBe(oldNode.id);
+    expect(items[0]!.content).toBe(oldNode.content);
+    expect(result.created).toHaveLength(0);
+    expect(result.updated).toHaveLength(0);
+    expect(result.superseded).toHaveLength(0);
+  });
 
   it('credential-like content (sk-abc...) is never stored even when LLM extracts it', async () => {
     const credentialResponse = JSON.stringify({

@@ -25,6 +25,7 @@ import type {
 import { Icon } from './icons.js';
 import { Markdown } from './markdown.js';
 import { BlockList, type LiveData, type OnUIAction } from './blocks.js';
+import { RetainedStateScope } from './retained-state.js';
 import { useT, type TranslateFn } from './i18n.js';
 import { Badge, Button, IconButton, Spinner, type Tone } from './primitives.js';
 import { useConfirm, type ConfirmOptions } from './confirm.js';
@@ -108,7 +109,7 @@ export function ConfirmationCard({
   assistantName = 'NEO',
 }: {
   confirmation: ToolConfirmation;
-  onDecision: (decision: ConfirmationDecision) => void | Promise<void>;
+  onDecision?: (decision: ConfirmationDecision) => void | Promise<void>;
   /** Persona name for the heading ("Nova wants to do this"). */
   assistantName?: string;
 }): ReactElement {
@@ -117,6 +118,7 @@ export function ConfirmationCard({
   const [showInput, setShowInput] = useState(false);
   const left = useCountdown(confirmation.expiresAt);
   const decide = async (kind: 'approve' | 'always' | 'deny') => {
+    if (!onDecision) return;
     setBusy(kind);
     try {
       await onDecision(kind === 'deny' ? { approve: false } : kind === 'always' ? { approve: true, always: true } : { approve: true });
@@ -157,13 +159,13 @@ export function ConfirmationCard({
         </div>
       )}
       <div className="neo-confirm__actions">
-        <Button variant="primary" size="sm" icon="check" loading={busy === 'approve'} disabled={busy !== null} onClick={() => void decide('approve')}>
+        <Button variant="primary" size="sm" icon="check" loading={busy === 'approve'} disabled={busy !== null || !onDecision} onClick={() => void decide('approve')}>
           {t('common.approve')}
         </Button>
-        <Button variant="secondary" size="sm" loading={busy === 'always'} disabled={busy !== null} onClick={() => void decide('always')}>
+        <Button variant="secondary" size="sm" loading={busy === 'always'} disabled={busy !== null || !onDecision} onClick={() => void decide('always')}>
           {t('common.always_allow')}
         </Button>
-        <Button variant="ghost" size="sm" loading={busy === 'deny'} disabled={busy !== null} onClick={() => void decide('deny')}>
+        <Button variant="ghost" size="sm" loading={busy === 'deny'} disabled={busy !== null || !onDecision} onClick={() => void decide('deny')}>
           {t('common.deny')}
         </Button>
       </div>
@@ -357,12 +359,14 @@ export function MessageView(props: MessageViewProps): ReactElement {
   const t = useT();
   const [copied, setCopied] = useState(false);
 
-  const onAction: OnUIAction = (action, ctx) => {
-    if (!onUiAction || !ctx.uiId) return;
-    const input: { messageId: string; uiId: string; action: UIAction; values?: Record<string, unknown> } = { messageId: message.id, uiId: ctx.uiId, action };
-    if (ctx.values) input.values = ctx.values;
-    return onUiAction(input);
-  };
+  const onAction: OnUIAction | undefined = onUiAction
+    ? (action, ctx) => {
+        if (!ctx.uiId) return;
+        const input: { messageId: string; uiId: string; action: UIAction; values?: Record<string, unknown> } = { messageId: message.id, uiId: ctx.uiId, action };
+        if (ctx.values) input.values = ctx.values;
+        return onUiAction(input);
+      }
+    : undefined;
 
   const parts: ContentPart[] = useMemo(() => message.parts.filter((p) => p.type !== 'context'), [message.parts]);
   const plainText = useMemo(() => parts.filter((p) => p.type === 'text').map((p) => (p as { text: string }).text).join('\n\n').trim(), [parts]);
@@ -418,7 +422,7 @@ export function MessageView(props: MessageViewProps): ReactElement {
   // Placed next to their tool chip by tool call id (this message's own first:
   // provider call ids can repeat across turns); answered by `id`.
   const confirmationFor = new Map<string, ToolConfirmation>();
-  for (const c of confirmations) {
+  for (const c of confirmations.filter((c) => c.messageId === message.id)) {
     if (!confirmationFor.has(c.toolCallId) || c.messageId === message.id) confirmationFor.set(c.toolCallId, c);
   }
   const shownConfirmations = new Set<string>();
@@ -441,7 +445,7 @@ export function MessageView(props: MessageViewProps): ReactElement {
         items.push({ key: `c${part.id}`, node: <ToolChip call={part} result={result} status={status} /> });
         if (confirmation) {
           shownConfirmations.add(confirmation.id);
-          items.push({ key: `k${confirmation.id}`, node: <ConfirmationCard confirmation={confirmation} assistantName={assistantName} onDecision={(d) => onConfirm?.(confirmation.id, d, confirmation)} /> });
+          items.push({ key: `k${confirmation.id}`, node: <ConfirmationCard confirmation={confirmation} assistantName={assistantName} onDecision={onConfirm ? (d) => onConfirm(confirmation.id, d, confirmation) : undefined} /> });
         }
         break;
       }
@@ -452,7 +456,17 @@ export function MessageView(props: MessageViewProps): ReactElement {
         }
         break;
       case 'ui':
-        items.push({ key: `u${part.id}`, node: <BlockList blocks={[part.block]} uiId={part.id} onAction={onAction} live={live} /> });
+        items.push({ key: `u${part.id}`, node: (
+          <RetainedStateScope scope="messages">
+            <RetainedStateScope scope={message.id}>
+              <RetainedStateScope scope="ui">
+                <RetainedStateScope scope={part.id}>
+                  <BlockList blocks={[part.block]} uiId={part.id} onAction={onAction} live={live} />
+                </RetainedStateScope>
+              </RetainedStateScope>
+            </RetainedStateScope>
+          </RetainedStateScope>
+        ) });
         break;
       case 'image': {
         const src = imageSrc(part);
@@ -467,7 +481,7 @@ export function MessageView(props: MessageViewProps): ReactElement {
   // Confirmations that arrived before their tool_call part.
   for (const c of confirmations) {
     if (!shownConfirmations.has(c.id) && c.messageId === message.id) {
-      items.push({ key: `k${c.id}`, node: <ConfirmationCard confirmation={c} assistantName={assistantName} onDecision={(d) => onConfirm?.(c.id, d, c)} /> });
+      items.push({ key: `k${c.id}`, node: <ConfirmationCard confirmation={c} assistantName={assistantName} onDecision={onConfirm ? (d) => onConfirm(c.id, d, c) : undefined} /> });
     }
   }
 

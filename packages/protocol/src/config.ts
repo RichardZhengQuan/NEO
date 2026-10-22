@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { ModelRefSchema } from './content.js';
 import { AiSettingsSchema, type SearchEngine } from './ai.js';
 import { MemoryPolicySchema } from './memory.js';
+import { isLanAddress } from './pairing.js';
 import { ProviderConfigSchema } from './providers.js';
 import { PermissionLevelSchema } from './tools.js';
 import { DEFAULT_TUNNEL_PORT } from './tunnel.js';
@@ -167,7 +168,7 @@ export const NeoConfigSchema = z.object({
       /** Kept stable because phones remember the address from the QR code. 0 = any free port. */
       port: z.number().int().min(0).max(65535).default(DEFAULT_TUNNEL_PORT),
       /** host:port addresses to advertise instead of the detected ones (Docker, port forwarding). */
-      advertise: z.array(z.string()).default([]),
+      advertise: z.array(z.string().refine(isLanAddress, { message: 'Each tunnel.advertise entry must be a host:port address' })).default([]),
       /** Default relay (ws(s)://…). Empty until the NEO project runs a public relay; anyone can self-host one. */
       relayUrl: z.string().default(''),
     })

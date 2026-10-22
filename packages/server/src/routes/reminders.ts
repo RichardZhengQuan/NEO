@@ -18,6 +18,7 @@ export function registerReminders(app: Hono, services: NeoServices): void {
     const q = validateQuery(c, z.object({
       status: queryList(ReminderStatusSchema).optional(),
       from: queryNumber.optional(), to: queryNumber.optional(), limit: queryLimit.optional(),
+      lastFiredAtFrom: queryNumber.optional(),
     }));
     const items = reminders.list(q);
     return c.json({ items });

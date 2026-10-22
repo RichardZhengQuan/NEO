@@ -178,6 +178,50 @@ export const toolsMigrations: Migration[] = [
       }
     },
   },
+  {
+    version: 7,
+    name: 'reminder_creation_keys',
+    up: `
+      ALTER TABLE reminders ADD COLUMN creation_key TEXT;
+      ALTER TABLE reminders ADD COLUMN creation_fingerprint TEXT;
+      CREATE UNIQUE INDEX idx_reminders_creation_key ON reminders(creation_key) WHERE creation_key IS NOT NULL;
+    `,
+  },
+  {
+    version: 8,
+    name: 'deleted_reminder_creation_keys',
+    up: `
+      CREATE TABLE reminder_creation_tombstones (
+        creation_key TEXT PRIMARY KEY,
+        deleted_at INTEGER NOT NULL
+      );
+    `,
+  },
+  {
+    version: 9,
+    name: 'reminder_snoozed_due_at',
+    up: `ALTER TABLE reminders ADD COLUMN snoozed_due_at INTEGER;`,
+  },
+  {
+    version: 10,
+    name: 'pending_firings',
+    up: `
+      CREATE TABLE pending_firings (
+        id TEXT PRIMARY KEY,
+        reminder_id TEXT NOT NULL,
+        occurrence_at INTEGER NOT NULL,
+        fired_at INTEGER NOT NULL,
+        missed INTEGER NOT NULL DEFAULT 0,
+        next_due_at INTEGER,
+        created_at INTEGER NOT NULL
+      );
+    `,
+  },
+  {
+    version: 11,
+    name: 'pending_firings_fired_count',
+    up: `ALTER TABLE pending_firings ADD COLUMN fired_count INTEGER;`,
+  },
 ];
 
 export function createProductivityStores(

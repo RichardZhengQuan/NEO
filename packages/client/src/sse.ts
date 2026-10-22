@@ -4,7 +4,7 @@
  * readEventStream parses a text/event-stream response body into AgentEvents,
  * handling chunk boundaries, CRLF, multi-line data fields, and comment lines.
  */
-import type { AgentEvent } from '@neo/protocol';
+import { NeoError, type AgentEvent } from '@neo/protocol';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -44,16 +44,13 @@ export async function* readEventStream(
     }
   };
 
-  // If the caller provides an AbortSignal, cancel the reader when it fires.
-  if (signal) {
-    if (signal.aborted) {
-      cleanup();
-      return;
-    }
-    signal.addEventListener('abort', cleanup, { once: true });
-  }
-
   try {
+    // If the caller provides an AbortSignal, cancel the reader when it fires.
+    if (signal) {
+      if (signal.aborted) return;
+      signal.addEventListener('abort', cleanup, { once: true });
+    }
+
     while (true) {
       if (signal?.aborted) break;
 
@@ -61,8 +58,9 @@ export async function* readEventStream(
       let value: Uint8Array | undefined;
       try {
         ({ done, value } = await reader.read());
-      } catch {
-        break;
+      } catch (err) {
+        if (signal?.aborted) break;
+        throw new NeoError('stream_read_failed', 'The response body failed mid-stream.', { retryable: true, cause: err });
       }
 
       if (done) break;
@@ -99,6 +97,7 @@ export async function* readEventStream(
             if (trimmed) {
               try {
                 const event = JSON.parse(trimmed) as AgentEvent;
+                if (signal?.aborted) break;
                 yield event;
               } catch {
                 // Ignore malformed JSON events.
@@ -139,7 +138,9 @@ export async function* readEventStream(
     if (signal) {
       signal.removeEventListener('abort', cleanup);
     }
+    cleanup();
+    reader.releaseLock();
     // Flush decoder.
-    decoder.decode(new Uint8Array(0));
+    if (!signal?.aborted) decoder.decode(new Uint8Array(0));
   }
 }

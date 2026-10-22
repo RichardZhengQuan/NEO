@@ -105,4 +105,37 @@ describe('LAN listener', () => {
     expect(listener.sessions()).toBe(1);
     await close(accepted);
   });
+
+  it('destroys sockets rejected for wrong path without waiting for peer FIN', async () => {
+    const listener = await start();
+    const raw = createConnection({ host: '127.0.0.1', port: listener.port, allowHalfOpen: true });
+    raw.on('error', () => {});
+    try {
+      await once(raw, 'connect');
+      const response = once(raw, 'data');
+      // Send an upgrade request to the wrong path; the peer deliberately keeps its write side open.
+      raw.write(`GET /wrong-path HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${Buffer.alloc(16).toString('base64')}\r\n\r\n`);
+      expect((await response)[0].toString()).toContain('404 Not Found');
+      // The peer deliberately leaves its write side open after the refusal.
+      expect(raw.writableEnded).toBe(false);
+      expect(listener.sessions()).toBe(0);
+      // Shutdown must not stall waiting for the half-open socket.
+      await listener.close();
+    } finally { raw.destroy(); }
+  });
+
+  it('destroys sockets rejected during shutdown without waiting for peer FIN', async () => {
+    const listener = await start();
+    const raw = createConnection({ host: '127.0.0.1', port: listener.port, allowHalfOpen: true });
+    raw.on('error', () => {});
+    try {
+      await once(raw, 'connect');
+      // Start shutdown (sets closing = true) then send the correct upgrade path.
+      // The server must reject it and not stall on the half-open peer.
+      const closing = listener.close();
+      raw.write(`GET /v1/tunnel HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${Buffer.alloc(16).toString('base64')}\r\n\r\n`);
+      await closing;
+      expect(listener.sessions()).toBe(0);
+    } finally { raw.destroy(); }
+  });
 });

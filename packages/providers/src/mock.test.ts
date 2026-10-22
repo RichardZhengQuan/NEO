@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collectChat, validateUIBlocks, wrapUntrusted } from '@neo/protocol';
+import { NeoError, collectChat, validateUIBlocks, wrapUntrusted } from '@neo/protocol';
 import type { ChatMessage, ChatRequest, ProviderAdapter, ToolSpec } from '@neo/protocol';
 import { createProvider } from './index.js';
 import { MockProvider } from './mock.js';
@@ -136,6 +136,20 @@ describe('MockProvider', () => {
     expect(calls.map((c) => c.id)).toHaveLength(3);
     expect(new Set(calls.map((c) => c.id)).size).toBe(3);
     expect(calls[2]!.id).toBe('given');
+  });
+
+  it('abort after the first tool call rejects before yielding the second', async () => {
+    const ac = new AbortController();
+    const p = new MockProvider({ id: 'test-mock', kind: 'mock', enabled: true }, {
+      mockScript: () => ({ toolCalls: [{ id: 'call_1', name: 'a', input: {} }, { id: 'call_2', name: 'b', input: {} }] }),
+    });
+    const iterator = p.chat({ ...turn('x'), signal: ac.signal })[Symbol.asyncIterator]();
+    expect(await iterator.next()).toEqual({ done: false, value: { type: 'tool_call', id: 'call_1', name: 'a', input: {} } });
+    ac.abort();
+
+    const pending = iterator.next();
+    await expect(pending).rejects.toBeInstanceOf(NeoError);
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
   });
 
   it('abort during delayMs ends promptly with cancelled', async () => {

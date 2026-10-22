@@ -18,7 +18,7 @@ import type {
   UiActionResponse,
   UserInputPart,
 } from '@neo/protocol';
-import { NeoError, textOf } from '@neo/protocol';
+import { NeoError, UI_ACTION_ID_PREFIX, textOf } from '@neo/protocol';
 import { copyText, type ConfirmFn, type TranslateFn } from '@neo/ui';
 import { errorCode, errorMessage, httpStatus } from '../lib/errors.js';
 import { navigate } from '../router.js';
@@ -170,8 +170,13 @@ export async function cancelTurn(client: NeoClient, t: TranslateFn): Promise<voi
 export async function retryTurn(client: NeoClient, assistant: Message, t: TranslateFn): Promise<void> {
   const messages = useTimeline.getState().messages;
   const idx = messages.findIndex((m) => m.id === assistant.id);
-  const user = [...messages.slice(0, idx)].reverse().find((m) => m.role === 'user' && (m.episodeId ?? m.conversationId) === (assistant.episodeId ?? assistant.conversationId));
-  if (!user) return;
+  const user = [...messages.slice(0, idx)].reverse().find(
+    (m) => m.role === 'user' && (m.episodeId ?? m.conversationId) === (assistant.episodeId ?? assistant.conversationId) && (assistant.turnId == null || m.turnId === assistant.turnId),
+  );
+  if (!user) {
+    pushToast({ tone: 'warning', title: t('chat.retry_unavailable') });
+    return;
+  }
   const text = textOf(user.parts);
   const images = user.parts.filter((p): p is Extract<UserInputPart, { type: 'image' }> => p.type === 'image');
   if (!text.trim() && !images.length) {
@@ -255,20 +260,23 @@ export async function runUiAction(
     }
   }
 
+  const quietWidget = input.action.id.startsWith(UI_ACTION_ID_PREFIX + 'change.apply:');
   switch (res.kind) {
     case 'turn':
       applyTurnResponse(res);
       return;
     case 'tool':
       if (res.isError) {
-        pushToast({ tone: 'error', title: res.summary ?? t('chat.action_failed') });
-        throw new Error(res.summary ?? 'tool failed');
+        const error = typeof res.output === 'object' && res.output !== null && 'error' in res.output && typeof res.output.error === 'string' ? res.output.error : undefined;
+        // The changes widget shows each item's result in its own row.
+        if (!quietWidget) pushToast({ tone: 'error', title: error ?? res.summary ?? t('chat.action_failed') });
+        throw new Error(error ?? res.summary ?? 'tool failed');
       }
       // Quiet success for live widgets (the widget itself updates); others get a confirmation.
-      if (!/^(task\.toggle|reminder\.|memory\.)/.test(input.action.id) || res.summary) {
+      if (!quietWidget && (!/^((?:__neo:)?task\.toggle|(?:__neo:)?reminder\.|(?:__neo:)?memory\.)/.test(input.action.id) || res.summary)) {
         pushToast({ tone: 'success', title: res.summary ?? t('chat.action_done'), icon: 'check-circle' });
       }
-      if (input.action.id.startsWith('memory.') || (input.action.kind === 'tool' && /memory|forget|remember/.test(input.action.tool))) {
+      if (input.action.id.startsWith(UI_ACTION_ID_PREFIX + 'memory.') || (input.action.kind === 'tool' && /memory|forget|remember/.test(input.action.tool))) {
         bumpMemoryVersion();
       }
       return;

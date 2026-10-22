@@ -31,9 +31,16 @@ export function describeRecurrence(r: RecurrenceInput | null | undefined, t: Tra
     case 'hourly':
       s = n === 1 ? t('recur.hourly') : t('recur.every_hours', { n });
       break;
-    case 'daily':
-      s = n === 1 ? t('recur.daily') : t('recur.every_days', { n });
+    case 'daily': {
+      const days = [...(r.byWeekday ?? [])].sort((a, b) => a - b);
+      if (days.length) {
+        const names = listFormat(days.map((d) => weekdayName(d, locale)), locale);
+        s = n === 1 ? t('recur.daily_on', { days: names }) : t('recur.every_days_on', { n, days: names });
+      } else {
+        s = n === 1 ? t('recur.daily') : t('recur.every_days', { n });
+      }
       break;
+    }
     case 'weekly': {
       const days = [...(r.byWeekday ?? [])].sort((a, b) => a - b);
       const weekdays = days.length === 5 && days.every((d, i) => d === i + 1);
@@ -95,4 +102,26 @@ export function recurrenceFor(preset: RepeatPreset, opts: { interval?: number; w
     case 'yearly':
       return { freq: 'yearly', interval };
   }
+}
+
+/**
+ * Overlay editable recurrence fields while preserving the original frequency,
+ * end conditions, daily weekday filters, monthly days and the interval hidden
+ * by the weekdays preset. Call only while the preset is unchanged.
+ * Pass `generated = null` when the user set the preset to 'none'.
+ */
+export function preserveRecurrence(original: RecurrenceInput | null | undefined, generated: RecurrenceInput | null): RecurrenceInput | null {
+  if (!generated) return null;
+  if (!original) return generated;
+  const r: RecurrenceInput = { ...generated };
+  // Restore original freq when presetOf was lossy (e.g. hourly→daily).
+  if (original.freq !== generated.freq) r.freq = original.freq;
+  // Restore unexposed end conditions.
+  if (original.count !== undefined) r.count = original.count;
+  if (original.until !== undefined) r.until = original.until;
+  // Restore filters and intervals the current preset cannot expose.
+  if (original.byWeekday?.length && r.freq === 'daily') r.byWeekday = [...original.byWeekday];
+  if (presetOf(original) === 'weekdays') r.interval = original.interval ?? 1;
+  if (original.byMonthDay?.length && r.freq === 'monthly') r.byMonthDay = [...original.byMonthDay];
+  return r;
 }

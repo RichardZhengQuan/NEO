@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AgentRuntime } from './runtime.js';
 import { z } from 'zod';
-import { estimateMessageTokens, type ContentPart, type Message, type ToolDefinition } from '@neo/protocol';
+import { estimateMessageTokens, NeoError, widgetActionId, type ContentPart, type Message, type ToolDefinition } from '@neo/protocol';
 import { collect, deferred, ev, harness, memoryNode, recalled, ScriptedAdapter, settle, standardTools, until, userText, waitsForAbort, type Harness } from './fakes.test-utils.js';
 
 const MINUTE = 60_000;
@@ -110,6 +110,78 @@ describe('timeline episode selection', () => {
     await h.runtime.waitForIdle();
     expect(h.conversations.list()).toEqual([]);
   });
+
+  it('cancels pending recall without waiting for its gate and releases the timeline', async () => {
+    const h = harness();
+    const gate = deferred();
+    h.memory.recallGate = gate.promise;
+    const pending = h.runtime.sendTimeline({ parts: userText('cancel stalled recall') });
+    const cancelled = pending.catch((err: unknown) => err);
+    expect(h.memory.recallCalls).toHaveLength(1);
+    expect(h.runtime.cancelTimeline()).toBe(true);
+    await settle();
+    const error = await Promise.race([cancelled, Promise.resolve('pending')]);
+    expect.soft(error).toBeInstanceOf(NeoError);
+    expect.soft(error).toMatchObject({ code: 'cancelled' });
+    const idle = h.runtime.waitForIdle().then(() => true);
+    await settle();
+    expect.soft(await Promise.race([idle, Promise.resolve(false)])).toBe(true);
+    h.memory.recallGate = null;
+    const next = h.runtime.sendTimeline({ parts: userText('try again') });
+    await expect(next).resolves.toHaveProperty('turnId');
+    await (await next).done;
+  });
+
+  it.each(['budget rotation', 'reinforcement'] as const)('cancels pending %s recall without waiting for its gate', async (phase) => {
+    const h = harness({ settings: { agent: { contextTokenBudget: 2000 } } });
+    await send(h, 'first');
+    if (phase === 'budget rotation') stored(h, h.conv.id, 'x'.repeat(8000));
+    const gate = deferred();
+    const recall = h.memory.recall.bind(h.memory);
+    const calls = h.memory.recallCalls.length;
+    h.memory.recall = (query) => {
+      if (h.memory.recallCalls.length === calls + 1) h.memory.recallGate = gate.promise;
+      return recall(query);
+    };
+    const pending = h.runtime.sendTimeline({ parts: userText('cancel later recall') });
+    const cancelled = pending.catch((err: unknown) => err);
+    await settle();
+    expect(h.memory.recallCalls).toHaveLength(calls + 2);
+    expect(h.runtime.cancelTimeline()).toBe(true);
+    await settle();
+    const error = await Promise.race([cancelled, Promise.resolve('pending')]);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'cancelled' });
+    const idle = h.runtime.waitForIdle().then(() => true);
+    await settle();
+    expect(await Promise.race([idle, Promise.resolve(false)])).toBe(true);
+  });
+
+  it('cancels pending recall even when memory ignores its signal', async () => {
+    const h = harness();
+    const gate = deferred();
+    h.memory.recall = async () => {
+      await gate.promise;
+      return { items: [], tookMs: 0, seeds: 0, considered: 0 };
+    };
+    const pending = h.runtime.sendTimeline({ parts: userText('cancel unresponsive memory') });
+    const cancelled = pending.catch((err: unknown) => err);
+    expect(h.runtime.cancelTimeline()).toBe(true);
+    await settle();
+    const error = await Promise.race([cancelled, Promise.resolve('pending')]);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'cancelled' });
+    const idle = h.runtime.waitForIdle().then(() => true);
+    await settle();
+    expect(await Promise.race([idle, Promise.resolve(false)])).toBe(true);
+  });
+
+  it('propagates cancelled recall errors without persisting either message', async () => {
+    const h = harness();
+    h.memory.recallError = new NeoError('cancelled', 'Recall was cancelled.');
+    await expect(h.runtime.sendTimeline({ parts: userText('cancelled recall') })).rejects.toMatchObject({ code: 'cancelled' });
+    expect(h.conversations.messages(h.conv.id)).toEqual([]);
+  });
 });
 
 describe('episode continuity', () => {
@@ -190,6 +262,45 @@ describe('episode continuity', () => {
 });
 
 describe('off-record lifecycle', () => {
+  it('carries the sensitive flag onto the public prefix when going off-record mid-stream', async () => {
+    const local = new ScriptedAdapter({ id: 'local', isLocal: true });
+    const cloud = new ScriptedAdapter({ id: 'cloud' });
+    const h = harness({ adapters: [local, cloud] });
+    stored(h, h.conv.id, 'orchid memory', h.clock() - HOUR, true);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    local.script(async function* () {
+      yield ev.text('The code is orchid-729');
+      await gate;
+      yield ev.done();
+    });
+
+    let seenDelta!: () => void;
+    const sawDelta = new Promise<void>((r) => { seenDelta = r; });
+    const off = h.runtime.subscribe((e) => { if (e.type === 'text.delta') seenDelta(); });
+    const handle = await h.runtime.sendTimeline({ parts: userText('what is the code?') });
+    const originalEpisodeId = handle.episodeId;
+    const originalMessageId = handle.assistantMessageId;
+    await sawDelta;
+    off();
+
+    await h.runtime.startOffRecord();
+    release();
+    await handle.done;
+
+    const persisted = h.conversations.getMessage(originalMessageId);
+    expect(persisted).not.toBeNull();
+    expect(persisted!.conversationId).toBe(originalEpisodeId);
+    expect.soft(persisted!.sensitive).toBe(true);
+
+    await h.runtime.endOffRecord();
+    h.advance(HOUR + 2);
+    h.settings.update({ ai: { capabilities: { text: { provider: 'cloud', model: 'cloud-model' } } } });
+    await send(h, 'now what did I say earlier?');
+    expect(JSON.stringify(cloud.requests.at(-1)!.messages)).not.toContain('orchid-729');
+  });
+
   it('breaks on each toggle, allows recall without reinforcement, skips observation and deletes ephemeral history on exit', async () => {
     const h = harness();
     const normal = await send(h, 'normal context');
@@ -211,6 +322,19 @@ describe('off-record lifecycle', () => {
     expect(h.conversations.get(normal.handle.episodeId)).not.toBeNull();
     await settle();
     expect(h.memory.observeCalls).toHaveLength(2);
+  });
+
+  it('endOffRecord clears messageId on reminders created in the episode', async () => {
+    const h = harness();
+    const normal = await send(h, 'normal');
+    const normalReminder = h.reminders.plant({ id: 'rem-normal', title: 'Keep the normal link', messageId: normal.message.id });
+    const off = await send(h, 'private', true);
+    const reminder = h.reminders.plant({ id: 'rem-private', title: 'Keep this reminder', messageId: off.message.id });
+    await h.runtime.endOffRecord();
+    expect(h.conversations.getMessage(off.message.id)).toBeNull();
+    expect(h.reminders.get(reminder.id)?.messageId).toBeNull();
+    expect(h.reminders.get(reminder.id)).toEqual({ ...reminder, messageId: null });
+    expect(h.reminders.get(normalReminder.id)).toEqual(normalReminder);
   });
 
   it('removes every ephemeral off-record episode on exit, including an automatic gap break', async () => {
@@ -278,9 +402,13 @@ describe('off-record lifecycle', () => {
     const h = harness();
     const legacy = h.conversations.create({ incognito: true, closedAt: h.clock() });
     const old = await send(h, 'old private', true);
+    const oldReminder = h.reminders.plant({ id: 'rem-old', title: 'Older reminder', messageId: old.message.id });
     h.advance(12 * HOUR + 1);
     const fresh = await send(h, 'fresh private', true);
+    const freshReminder = h.reminders.plant({ id: 'rem-fresh', title: 'Newer reminder', messageId: fresh.message.id });
     expect(await h.runtime.purgeOffRecord(h.clock() - 12 * HOUR)).toBe(2);
+    expect(h.reminders.get(oldReminder.id)).toEqual({ ...oldReminder, messageId: null });
+    expect(h.reminders.get(freshReminder.id)).toEqual({ ...freshReminder, messageId: null });
     expect(h.conversations.get(old.handle.episodeId)).toBeNull();
     expect(h.events).toContainEqual({ type: 'conversation.deleted', conversationId: old.handle.episodeId, episodeId: old.handle.episodeId });
     expect(h.conversations.get(fresh.handle.episodeId)).toBeNull();
@@ -475,7 +603,7 @@ describe('authoritative off-record state', () => {
     const source = stored(h, h.conv.id, 'task');
     h.conversations.updateMessage(source.id, { parts: [{ type: 'ui', id: 'ui_private_task', block: { type: 'tasks', tasks: [{ id: 'task_private', title: 'Task', done: false }] } }] });
     const original = h.conversations.getMessage(source.id)!;
-    const input = { messageId: source.id, uiId: 'ui_private_task', actionId: 'task.toggle:task_private' };
+    const input = { messageId: source.id, uiId: 'ui_private_task', actionId: widgetActionId.taskToggle('task_private') };
     const result = await h.runtime.handleTimelineUiAction(input);
     if (result.kind !== 'confirm') throw new Error('Expected confirmation');
     const state = await h.runtime.startOffRecord();
@@ -593,6 +721,21 @@ describe('timeline UI actions', () => {
 });
 
 describe('timeline mutation boundary', () => {
+  it('cancels stalled preflight recall before entering the mutation', async () => {
+    const h = harness();
+    const gate = deferred();
+    h.memory.recallGate = gate.promise;
+    const pending = h.runtime.sendTimeline({ parts: userText('will be cancelled') });
+    const cancelled = pending.catch((err: unknown) => err);
+    const mutation = h.runtime.mutateTimeline(async () => {
+      expect(h.conversations.messages(h.conv.id)).toEqual([]);
+      return 'deleted';
+    });
+    await settle();
+    expect.soft(await Promise.race([cancelled, Promise.resolve('pending')])).toMatchObject({ code: 'cancelled' });
+    expect(await Promise.race([mutation, Promise.resolve('pending')])).toBe('deleted');
+  });
+
   it('cancels pending preflight, waits for it, and blocks sends until the mutation releases', async () => {
     const h = harness();
     const recallGate = deferred();

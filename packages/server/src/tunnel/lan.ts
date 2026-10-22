@@ -82,7 +82,10 @@ export async function startLanListener(options: {
 
   server.on('upgrade', (request, socket, head) => {
     if (closing || request.url !== TUNNEL_LAN_PATH) {
-      socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      const timeout = setTimeout(() => socket.destroy(), 250);
+      timeout.unref();
+      socket.once('close', () => clearTimeout(timeout));
+      socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n', () => socket.destroy());
       return;
     }
     const ip = request.socket.remoteAddress ?? 'unknown';

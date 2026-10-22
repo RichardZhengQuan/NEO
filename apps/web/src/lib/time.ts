@@ -66,6 +66,10 @@ export function instantOf(year: number, month: number, day: number, hour: number
   for (let i = 0; i < 2; i++) {
     const next = naive - offsetAt(guess, timeZone);
     if (next === guess) break;
+    if (i === 1) {
+      // Spring-forward gap: loop oscillated. Resolve forward by picking the later instant.
+      return Math.max(guess, next);
+    }
     guess = next;
   }
   return guess;

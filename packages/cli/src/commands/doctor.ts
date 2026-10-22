@@ -1,10 +1,11 @@
 /**
  * `neo doctor` — system health check.
  */
-import { NeoClient } from '@neo/client';
+import { NeoApiError, NeoClient } from '@neo/client';
 import { bold, cyan, dim, green, red, yellow } from '../ansi.js';
 import { resolveDataDir, readToken } from '../config-file.js';
 import type { NeoConfig } from '@neo/protocol';
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loadConfig } from '@neo/server';
@@ -55,11 +56,27 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
   let dataDirMsg = '';
   try {
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    const testFile = path.join(dataDir, '.neo-doctor-test');
-    fs.writeFileSync(testFile, 'test');
-    fs.unlinkSync(testFile);
-    dataDirOk = true;
-    dataDirMsg = dataDir;
+    const testFile = path.join(dataDir, `.neo-doctor-test-${crypto.randomBytes(8).toString('hex')}`);
+    let testCreated = false;
+    let testFd: number | undefined;
+    try {
+      testFd = fs.openSync(testFile, 'wx', 0o600);
+      testCreated = true;
+      fs.writeSync(testFd, 'test');
+      fs.closeSync(testFd);
+      testFd = undefined;
+      dataDirOk = true;
+      dataDirMsg = dataDir;
+    } catch (e) {
+      dataDirMsg = `${dataDir} — ${String(e)}`;
+    } finally {
+      if (testFd !== undefined) {
+        try { fs.closeSync(testFd); } catch { /* ignore */ }
+      }
+      if (testCreated) {
+        try { fs.unlinkSync(testFile); } catch { /* ignore */ }
+      }
+    }
   } catch (e) {
     dataDirMsg = `${dataDir} — ${String(e)}`;
   }
@@ -123,8 +140,16 @@ export async function runDoctor(opts: DoctorOptions): Promise<void> {
           }
         }
       }
-    } catch {
-      // skip provider checks if listing fails
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const is404 = e instanceof NeoApiError ? e.httpStatus === 404 : /\b404\b/.test(msg);
+      checks.push({
+        name: 'Providers',
+        status: is404 ? 'warn' : 'fail',
+        message: is404
+          ? 'provider list unavailable (older server?)'
+          : `provider list failed — ${msg}`,
+      });
     }
   } else if (!configuredProviders.some(p => p.enabled && p.kind !== 'mock')) {
     checks.push({ name: 'Providers', status: 'warn', message: 'no AI provider configured (connect an AI in Settings → AI or run `neo init`)' });

@@ -301,6 +301,7 @@
       const showFocused = keyboardFocus && focused === node;
       const front = Math.sin(theta) >= 0 || showFocused;
       const showHovered = hovered === node;
+      const lifted = showFocused || (!front && showHovered);
       const x = originX + ellipse.x + ellipse.rx * Math.cos(theta);
       let y = ellipse.y + ellipse.ry * Math.sin(theta);
       if (showFocused && focusedPortraitMinY !== null) {
@@ -309,7 +310,7 @@
       }
       node.style.transform = `translate3d(${x.toFixed(2)}px, ${(originY + y).toFixed(2)}px, 0) translate(-50%, -50%) scale(${front ? 1 : showHovered ? 0.9 : 0.8})`;
       node.style.opacity = front || showHovered ? '1' : '.6';
-      node.style.zIndex = showFocused ? '4' : front ? '3' : '1';
+      node.style.zIndex = lifted ? '4' : front ? '3' : '1';
     });
   }
 

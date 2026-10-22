@@ -131,6 +131,19 @@ describe('writeInitConfig', () => {
     expect(fs.existsSync(cfgPath)).toBe(true);
   });
 
+  it('writeInitConfig does not follow a symlink at the old predictable tmp path', () => {
+    if (process.platform === 'win32') return;
+    const sentinelPath = path.join(tmpDir, 'sentinel.txt');
+    const sentinelContent = 'sentinel-content';
+    fs.writeFileSync(sentinelPath, sentinelContent, { mode: 0o644 });
+    const symlinkPath = path.join(tmpDir, `.neo-config-tmp-${process.pid}`);
+    fs.symlinkSync(sentinelPath, symlinkPath);
+
+    writeInitConfig(tmpDir, baseAnswers);
+
+    expect(fs.readFileSync(sentinelPath, 'utf8')).toBe(sentinelContent);
+  });
+
   it('config.json contains expected fields', () => {
     writeInitConfig(tmpDir, baseAnswers);
     const cfgPath = path.join(tmpDir, 'config.json');
@@ -163,12 +176,61 @@ describe('writeInitConfig', () => {
     expect(server.port).toBe(9000);
   });
 
+  it('switching server configuration to local restores the loopback bind', () => {
+    const cfgPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({ mode: 'server', server: { host: '0.0.0.0', port: 9000 } }));
+    writeInitConfig(tmpDir, baseAnswers);
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    expect(cfg['mode']).toBe('local');
+    const server = cfg['server'] as { host: string; port: number };
+    expect(server.host).toBe('127.0.0.1');
+    expect(server.port).toBe(7777);
+  });
+
+  it('switching server configuration to local preserves non-bind server fields', () => {
+    const cfgPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({
+      mode: 'server',
+      server: { host: '0.0.0.0', port: 9000, authToken: 'tok-abc', webDir: '/srv/web' },
+    }));
+    writeInitConfig(tmpDir, baseAnswers);
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    const server = cfg['server'] as { host: string; port: number; authToken: string; webDir: string };
+    expect(server.host).toBe('127.0.0.1');
+    expect(server.port).toBe(7777);
+    expect(server.authToken).toBe('tok-abc');
+    expect(server.webDir).toBe('/srv/web');
+  });
+
   it('merges with existing config when file already exists', () => {
     const cfgPath = path.join(tmpDir, 'config.json');
     fs.writeFileSync(cfgPath, JSON.stringify({ customField: 'preserved', mode: 'local' }));
     writeInitConfig(tmpDir, baseAnswers);
     const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
     expect(cfg['customField']).toBe('preserved');
+  });
+
+  it('writeInitConfig forces mode 0o600 on an existing config file', () => {
+    if (process.platform === 'win32') return;
+    fs.chmodSync(tmpDir, 0o755);
+    const cfgPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(cfgPath, '{}', { mode: 0o644 });
+    fs.chmodSync(cfgPath, 0o644);
+    writeInitConfig(tmpDir, baseAnswers);
+    // This test must fail before the fix
+    expect(fs.statSync(cfgPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('writeInitConfig forces mode 0o700 on an existing data directory', () => {
+    if (process.platform === 'win32') return;
+    fs.chmodSync(tmpDir, 0o755);
+    const dataDir = path.join(tmpDir, 'data');
+    const resolvedDataDir = expandHome(dataDir);
+    fs.mkdirSync(resolvedDataDir, { mode: 0o755 });
+    fs.chmodSync(resolvedDataDir, 0o755);
+    writeInitConfig(dataDir, baseAnswers);
+    // This test must fail before the fix
+    expect(fs.statSync(resolvedDataDir).mode & 0o777).toBe(0o700);
   });
 
   it('writes to custom configPath when provided', () => {
@@ -245,6 +307,58 @@ describe('runInitWizard', () => {
     expect(answers.mode).toBe('server');
     expect(answers.host).toBe('0.0.0.0');
     expect(answers.port).toBe(9000);
+  });
+
+  it('throws on non-numeric port in server mode', async () => {
+    const responses = ['0', 'server', '', 'abc'];
+    await expect(runInitWizard(async () => responses.shift() ?? '')).rejects.toMatchObject({
+      code: 'bad_request', message: 'Invalid port: abc',
+    });
+  });
+
+  it('throws on out-of-range port in server mode', async () => {
+    const responses = ['0', 'server', '', '99999'];
+    await expect(runInitWizard(async () => responses.shift() ?? '')).rejects.toMatchObject({
+      code: 'bad_request', message: 'Invalid port: 99999',
+    });
+  });
+
+  it.each(['7777junk', '1e4', '-1', '65536', '8080.5', '+8080', '0x1f90', '8080 90'])(
+    'throws on invalid decimal port %j in server mode', async (input) => {
+      const responses = ['0', 'server', '', input];
+      await expect(runInitWizard(async () => responses.shift() ?? '')).rejects.toMatchObject({
+        code: 'bad_request', message: `Invalid port: ${input}`,
+      });
+    },
+  );
+
+  it('never writes port: null to config', async () => {
+    const tmpDir = makeTempDir();
+    try {
+      const responses = ['0', 'server', '', 'abc'];
+      const init = async () => {
+        const answers = await runInitWizard(async () => responses.shift() ?? '');
+        writeInitConfig(tmpDir, answers);
+      };
+      await expect(init()).rejects.toMatchObject({ code: 'bad_request' });
+      expect(fs.existsSync(path.join(tmpDir, 'config.json'))).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([['0', 0], ['65535', 65535], [' 8080 ', 8080], ['008080', 8080]] as const)(
+    'accepts decimal port %j in server mode', async (input, port) => {
+      const responses = ['0', 'server', '', input];
+      const answers = await runInitWizard(async () => responses.shift() ?? '');
+      expect(answers.port).toBe(port);
+    },
+  );
+
+  it.each(['', '   '])('uses the default port for blank input %j in server mode', async (input) => {
+    const responses = ['0', 'server', '', input];
+    const answers = await runInitWizard(async () => responses.shift() ?? '');
+    expect(answers.port).toBe(7777);
   });
 
   it('uses default model when empty string entered', async () => {

@@ -19,6 +19,14 @@ coverage/
 # local NEO data (databases, keys, tokens)
 .neo-data/
 
-# generated native projects (run `npx cap add ios|android`)
-apps/mobile/ios/
+# generated native project — Android (not committed; run `npx cap add android`)
 apps/mobile/android/
+
+# backups of AGENTS.md and CLAUDE.md kept by agent tools
+.one-mind/
+
+# OneMind-managed (owned by the OneMind Claude app's Mind Sync; do not edit)
+# CLAUDE.md is tracked and intentionally kept in the repo as a stub (it imports
+# AGENTS.md and LESSONS.md); OneMind manages a marked section inside it rather
+# than owning the whole file.
+/onemind/

@@ -47,6 +47,10 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
   const retryAfter = new Map<string, number>();
   /** Set when the store itself failed; arm() waits at least this long. */
   let storeFailedUntil = 0;
+  /** True once pending firings from before the last crash have been re-delivered. */
+  let pendingFiringsReplayed = false;
+  /** Earliest time tick() may retry pendingFirings() after a failure. */
+  let pendingFiringsRetryAt = 0;
 
   const clearTimer = () => {
     if (timer !== null) {
@@ -58,7 +62,12 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
   const emit = (firing: ReminderFiring) => {
     for (const listener of [...listeners]) {
       try {
-        listener(firing);
+        const result = listener(firing);
+        if (result != null && typeof (result as { catch?: unknown }).catch === 'function') {
+          (result as Promise<void>).catch(err => {
+            logger.error('reminder onFire listener failed', { reminderId: firing.reminder.id, error: String(err) });
+          });
+        }
       } catch (err) {
         logger.error('reminder onFire listener failed', { reminderId: firing.reminder.id, error: String(err) });
       }
@@ -72,6 +81,27 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
     const now = at ?? clock();
     const firings: ReminderFiring[] = [];
     try {
+      // Retry pending firings replay if the startup attempt failed.
+      // pendingFiringsRetryAt ensures we respect the backoff and do not re-attempt
+      // in the same synchronous tick that start() triggers immediately after the failure.
+      if (!pendingFiringsReplayed && reminders.pendingFirings && now >= pendingFiringsRetryAt) {
+        try {
+          const pending = reminders.pendingFirings();
+          pendingFiringsReplayed = true;
+          for (const firing of pending) {
+            try {
+              emit(firing);
+            } catch (err) {
+              logger.error('reminder pending firing re-delivery failed', { reminderId: firing.reminder.id, error: String(err) });
+            }
+          }
+        } catch (err) {
+          pendingFiringsRetryAt = clock() + failureBackoffMs;
+          storeFailedUntil = clock() + failureBackoffMs;
+          logger.error('reminder pending firing re-delivery failed', { error: String(err) });
+          // Fall through to due() — a different query may still work.
+        }
+      }
       let due;
       try {
         due = reminders.due(now);
@@ -90,9 +120,10 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
           // Re-read: an earlier listener in this batch may have snoozed, completed or deleted it.
           const current = reminders.get(candidate.id);
           if (!current || current.status !== 'scheduled' || current.dueAt > now) continue;
-          const firing = reminders.markFired(current.id, now);
+          const missed = now - current.dueAt > graceMs;
+          const firing = reminders.markFired(current.id, now, missed);
           retryAfter.delete(current.id);
-          const final: ReminderFiring = { ...firing, missed: now - firing.occurrenceAt > graceMs };
+          const final: ReminderFiring = { ...firing, missed };
           firings.push(final);
           emit(final);
         } catch (err) {
@@ -111,17 +142,19 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
     clearTimer();
     if (!started) return;
     const now = clock();
-    let delay = maxTimerMs;
+    let nextDeadline = Infinity;
     try {
-      const next = reminders.nextDue();
-      if (next) {
-        const retry = retryAfter.get(next.id);
-        delay = Math.max(0, Math.max(next.dueAt, retry ?? 0) - now);
+      const retryIds = retryAfter.size > 0 ? new Set(retryAfter.keys()) : undefined;
+      const next = reminders.nextDue(retryIds);
+      if (next && !(retryIds?.has(next.id))) nextDeadline = Math.min(nextDeadline, next.dueAt);
+      for (const retryAt of retryAfter.values()) {
+        nextDeadline = Math.min(nextDeadline, retryAt);
       }
     } catch (err) {
       storeFailedUntil = now + failureBackoffMs;
       logger.error('reminder scheduler could not read the next reminder', { error: String(err) });
     }
+    let delay = nextDeadline === Infinity ? maxTimerMs : Math.max(0, nextDeadline - now);
     if (storeFailedUntil > now) delay = Math.max(delay, storeFailedUntil - now);
     timer = setTimeout(onTimer, Math.min(delay, maxTimerMs));
     (timer as { unref?: () => void }).unref?.();
@@ -153,6 +186,28 @@ export function createReminderScheduler(options: SchedulerOptions): ReminderSche
       if (started) return;
       started = true;
       unsubscribe = reminders.onChange(() => reschedule());
+      // Re-deliver any firings committed before the last crash but not yet acknowledged.
+      pendingFiringsReplayed = false;
+      pendingFiringsRetryAt = 0;
+      if (reminders.pendingFirings) {
+        try {
+          const pending = reminders.pendingFirings();
+          pendingFiringsReplayed = true;
+          for (const firing of pending) {
+            try {
+              emit(firing);
+            } catch (err) {
+              logger.error('reminder pending firing re-delivery failed', { reminderId: firing.reminder.id, error: String(err) });
+            }
+          }
+        } catch (err) {
+          logger.error('reminder pending firing re-delivery failed', { error: String(err) });
+          pendingFiringsRetryAt = clock() + failureBackoffMs;
+          storeFailedUntil = clock() + failureBackoffMs; // arm() delays until retry is due
+        }
+      } else {
+        pendingFiringsReplayed = true;
+      }
       tick(clock()); // catch-up; re-arms when done
     },
 

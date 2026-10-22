@@ -54,7 +54,7 @@ beforeEach(() => {
   useTimeline.setState(emptyEntry(), true);
   sessionStorage.clear();
   useData.setState({
-    reminders: {}, remindersLoaded: false,
+    reminders: {}, reminderDeletions: {}, remindersLoaded: false, remindersComplete: false,
     tasks: {}, taskLists: [], tasksLoaded: false,
     notes: {}, notesLoaded: false,
     memoryVersion: 0,
@@ -88,7 +88,7 @@ describe('startSession cache reset (F10)', () => {
       episodes: { conv_a1: { ...makeEpisode('conv_a1'), episodeId: 'conv_a1' } },
       loaded: true,
     });
-    useData.setState((s) => ({ ...s, notes: { note_a1: makeNote('note_a1', 'Server A note') }, notesLoaded: true }));
+    useData.setState((s) => ({ ...s, reminderDeletions: { rem_a1: true }, notes: { note_a1: makeNote('note_a1', 'Server A note') }, notesLoaded: true }));
 
     // Switch to server B.
     startSession({ serverUrl: 'https://server-b.example', token: 'tok_b' }, 'manual');
@@ -98,6 +98,7 @@ describe('startSession cache reset (F10)', () => {
     expect(convState.loaded).toBe(false);
 
     const dataState = useData.getState();
+    expect(dataState.reminderDeletions).toEqual({});
     expect(dataState.notes).toEqual({});
     expect(dataState.notesLoaded).toBe(false);
   });
@@ -170,6 +171,52 @@ function deferred<T>() {
 }
 
 const providers: ProvidersResponse = { items: [], defaultModel: null };
+
+describe('updateSettings partial revert on failure', () => {
+  it('preserves a newer successful save when an older save of another field fails', async () => {
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
+    useSession.setState({ settings: DEFAULT_SETTINGS });
+    const response = deferred<typeof DEFAULT_SETTINGS>();
+    vi.mocked(a.settings.update).mockReturnValueOnce(response.promise);
+    const olderSave = updateSettings({ theme: 'dark' });
+
+    vi.mocked(a.settings.update).mockReturnValueOnce(Promise.resolve<typeof DEFAULT_SETTINGS>({
+      ...DEFAULT_SETTINGS, theme: 'dark', timezone: 'Asia/Singapore',
+    }));
+    const newerSave = updateSettings({ timezone: 'Asia/Singapore' });
+    await newerSave;
+    expect(useSession.getState().settings).toMatchObject({ theme: 'dark', timezone: 'Asia/Singapore' });
+
+    const error = new Error('Theme save failed');
+    response.reject(error);
+    await expect(olderSave).rejects.toBe(error);
+    expect(useSession.getState().settings).toMatchObject({ theme: 'system', timezone: 'Asia/Singapore' });
+  });
+
+  it('reverts only the nested leaf that failed, not the entire nested object', async () => {
+    const a = startSession({ serverUrl: 'https://a.example', token: 'a' }, 'manual');
+    useSession.setState({ settings: DEFAULT_SETTINGS });
+    // Default: memory.recall=true, memory.recallLimit=12
+
+    // Older in-flight save: turns recall off
+    const recallResponse = deferred<typeof DEFAULT_SETTINGS>();
+    vi.mocked(a.settings.update).mockReturnValueOnce(recallResponse.promise);
+    const olderSave = updateSettings({ memory: { recall: false } });
+
+    // Newer save succeeds immediately: changes recallLimit to 5
+    vi.mocked(a.settings.update).mockReturnValueOnce(Promise.resolve<typeof DEFAULT_SETTINGS>({
+      ...DEFAULT_SETTINGS, memory: { ...DEFAULT_SETTINGS.memory, recall: false, recallLimit: 5 },
+    }));
+    await updateSettings({ memory: { recallLimit: 5 } });
+    expect(useSession.getState().settings).toMatchObject({ memory: { recall: false, recallLimit: 5 } });
+
+    // Now the older recall save fails: only recall should revert, not recallLimit
+    const error = new Error('Recall save failed');
+    recallResponse.reject(error);
+    await expect(olderSave).rejects.toBe(error);
+    expect(useSession.getState().settings).toMatchObject({ memory: { recall: true, recallLimit: 5 } });
+  });
+});
 
 describe('session-scoped async work', () => {
   it('resets provider/settings/model caches, drawer and server toasts', () => {

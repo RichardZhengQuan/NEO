@@ -60,6 +60,10 @@ function getWebAppHint(mode: string): string {
 async function readSecret(rl: readline.Interface, question: string): Promise<string> {
   // Write the question manually so we control the newline
   process.stdout.write(`  ${question}: `);
+  const keypressListeners = process.stdin.rawListeners('keypress') as ((...args: unknown[]) => void)[];
+  rl.pause();
+  // Pausing the stream alone leaves readline's echoing keypress listener attached.
+  for (const listener of keypressListeners) process.stdin.removeListener('keypress', listener);
   process.stdin.setRawMode(true);
 
   return new Promise<string>((resolve) => {
@@ -70,6 +74,25 @@ async function readSecret(rl: readline.Interface, question: string): Promise<str
           process.stdout.write('\n');
           process.stdin.removeListener('data', handler);
           process.stdin.setRawMode(false);
+          rl.resume();
+          for (const listener of keypressListeners) process.stdin.on('keypress', listener);
+          resolve(value);
+          return;
+        }
+        if (byte === 3) { // Ctrl-C
+          process.stdin.removeListener('data', handler);
+          process.stdin.setRawMode(false);
+          rl.resume();
+          for (const listener of keypressListeners) process.stdin.on('keypress', listener);
+          process.kill(process.pid, 'SIGINT');
+          return;
+        }
+        if (byte === 4) { // Ctrl-D (EOT) — treat as submit with whatever has been typed so far
+          process.stdout.write('\n');
+          process.stdin.removeListener('data', handler);
+          process.stdin.setRawMode(false);
+          rl.resume();
+          for (const listener of keypressListeners) process.stdin.on('keypress', listener);
           resolve(value);
           return;
         }
@@ -83,5 +106,6 @@ async function readSecret(rl: readline.Interface, question: string): Promise<str
       }
     };
     process.stdin.on('data', handler);
+    process.stdin.resume();
   });
 }

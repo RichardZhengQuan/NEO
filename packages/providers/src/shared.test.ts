@@ -36,6 +36,14 @@ describe('parseSSE edge cases', () => {
     await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
   });
 
+  it('abort stops yielding buffered events in the current chunk', async () => {
+    const ac = new AbortController();
+    const it = parseSSE(byteStream(['data: one\n\ndata: two\n\n']), ac.signal)[Symbol.asyncIterator]();
+    expect((await it.next()).value).toEqual({ data: 'one' });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
   it('leaving the loop early cancels the body', async () => {
     let cancelled = false;
     const body = new ReadableStream<Uint8Array>({

@@ -8,9 +8,12 @@ import { z } from 'zod';
 import {
   DEFAULT_SETTINGS,
   FORM_SUBMIT_ACTION_ID,
+  MAX_UI_BLOCKS,
+  MAX_UI_TOP_LEVEL,
   NeoError,
   toChatMessages,
   toolSpec,
+  widgetActionId,
   type AgentEvent,
   type ChatStreamEvent,
   type ContentPart,
@@ -254,6 +257,57 @@ describe('model resolution', () => {
     expect(t.message.parts.find((p) => p.type === 'text')).toEqual({ type: 'text', text: 'Saved.' });
     expect(uiParts(t.message)[0]!.block).toEqual({ type: 'callout', tone: 'success', text: 'Saved!' });
     expect(replayLikeClient(t.events, t.message.id)).toEqual(t.message.parts);
+  });
+
+  it('drops all inline-ui blocks when two text parts in one step together exceed MAX_UI_BLOCKS', async () => {
+    // Each text part has a fence with 4 stacks × (1 + 60 children) = 244 blocks per part.
+    // 244 ≤ 300 so each part individually passes; combined 488 > 300 so the cross-part
+    // aggregate check must fire and discard all ui blocks.
+    // A reasoning delta between the two text events forces the second to start a new text part.
+    const makeInlineFence = (): string => {
+      const stacks = Array.from({ length: 4 }, () => ({
+        type: 'stack',
+        children: Array.from({ length: 60 }, (_, i) => ({ type: 'text', text: `item ${i}` })),
+      }));
+      return '```neo-ui\n' + JSON.stringify(stacks) + '\n```';
+    };
+    const bigFence = makeInlineFence(); // 4 × (1 stack + 60 text children) = 244 blocks per part
+    const h = harness({ adapters: [new ScriptedAdapter({ caps: { tools: false, reasoning: true } })] });
+    h.model.script([
+      ev.text(`Part one.\n${bigFence}\n`),
+      ev.reasoning('thinking'),             // adds a reasoning part → breaks text coalescing
+      ev.text(`Part two.\n${bigFence}\n`),  // starts a second, separate text part
+      ev.done(),
+    ]);
+    const t = await runTurn(h, 'go');
+    // Cross-part aggregate must fire: no ui parts on the message.
+    expect(uiParts(t.message).length).toBe(0);
+    // Text parts should retain their original fence text (fences not stripped when blocks are dropped).
+    expect(t.message.parts.filter((p) => p.type === 'text').length).toBeGreaterThan(0);
+  });
+
+  it('drops all inline-ui blocks when two text parts together exceed MAX_UI_TOP_LEVEL top-level blocks', async () => {
+    // Each text part has a fence with (MAX_UI_TOP_LEVEL / 2 + 1) top-level text blocks.
+    // Each part individually passes the per-part check (≤ MAX_UI_TOP_LEVEL), but combined
+    // the total top-level count exceeds MAX_UI_TOP_LEVEL, so the cross-part aggregate must fire.
+    const halfPlusOne = Math.floor(MAX_UI_TOP_LEVEL / 2) + 1; // 26 for MAX_UI_TOP_LEVEL=50
+    const makeFence = (): string => {
+      const blocks = Array.from({ length: halfPlusOne }, (_, i) => ({ type: 'text', text: `item ${i}` }));
+      return '```neo-ui\n' + JSON.stringify(blocks) + '\n```';
+    };
+    const fence = makeFence();
+    const h = harness({ adapters: [new ScriptedAdapter({ caps: { tools: false, reasoning: true } })] });
+    h.model.script([
+      ev.text(`Part one.\n${fence}\n`),
+      ev.reasoning('thinking'),             // adds a reasoning part → breaks text coalescing
+      ev.text(`Part two.\n${fence}\n`),     // starts a second, separate text part
+      ev.done(),
+    ]);
+    const t = await runTurn(h, 'go');
+    // Combined top-level count = halfPlusOne * 2 > MAX_UI_TOP_LEVEL: drop all ui blocks.
+    expect(uiParts(t.message).length).toBe(0);
+    // Text parts should retain their original fence text.
+    expect(t.message.parts.filter((p) => p.type === 'text').length).toBeGreaterThan(0);
   });
 });
 
@@ -843,6 +897,52 @@ describe('memory', () => {
     await until(() => h.warnings.some((w) => w.msg.includes('observe')));
     expect(t.message.status).toBe('complete');
   });
+
+  it('patches stored memory widgets after a chat-turn forget', async () => {
+    const forgotTool: ToolDefinition = {
+      name: 'forget',
+      title: 'Forget memories',
+      description: 'Forget memories.',
+      inputSchema: z.object({ ids: z.array(z.string()).optional() }),
+      risk: 'dangerous' as const,
+      defaultPermission: 'auto' as const,
+      async execute() {
+        return { output: { forgotten: ['Likes tea'], ids: ['mem_1'] }, summary: 'Forgot 1 memory' };
+      },
+    };
+    const h = harness({ tools: [...standardTools(), forgotTool] });
+
+    // Seed a prior message that contains a memory block
+    const node = { id: 'mem_1', kind: 'fact' as const, label: 'Likes tea', status: 'active' as const };
+    const prior = h.conversations.appendMessage({
+      id: 'msg_prior',
+      conversationId: h.conv.id,
+      turnId: 'turn_prior',
+      role: 'assistant' as const,
+      status: 'complete' as const,
+      createdAt: h.clock(),
+      parts: [{ type: 'ui' as const, id: 'ui_mem', block: { type: 'memory' as const, nodes: [node] } }],
+    });
+
+    // Run a turn where the model calls forget
+    h.model.script(
+      [ev.call('f1', 'forget', { ids: ['mem_1'] }), ev.done('tool_use')],
+      [ev.text('Done.'), ev.done()],
+    );
+    const { message } = await runTurn(h, 'forget that');
+
+    // The prior message's memory block must now show the node as forgotten
+    const reloaded = h.conversations.getMessage(prior.id)!;
+    const memPart = reloaded.parts.find((p): p is UIPart => p.type === 'ui' && p.id === 'ui_mem');
+    expect(memPart?.block).toMatchObject({ type: 'memory', nodes: [{ id: 'mem_1', status: 'forgotten' }] });
+
+    // part.added events must have been broadcast for the prior message
+    const patches = h.events.filter((e) => e.type === 'part.added' && e.messageId === prior.id);
+    expect(patches).toHaveLength(1);
+
+    // The current turn's assistant message is not affected
+    expect(h.conversations.getMessage(message.id)).toBeDefined();
+  });
 });
 
 // ───────────────────────────── 8. unused titles ─────────────────────────────
@@ -996,7 +1096,7 @@ describe('handleUiAction', () => {
   it('resolves widget actions against the stored block and patches the stored widget', async () => {
     const { h, message, byType } = await widgetHarness();
     const tasksUi = byType('tasks');
-    const r = await h.runtime.handleUiAction({ conversationId: h.conv.id, messageId: message.id, uiId: tasksUi.id, actionId: 'task.toggle:task_1' });
+    const r = await h.runtime.handleUiAction({ conversationId: h.conv.id, messageId: message.id, uiId: tasksUi.id, actionId: widgetActionId.taskToggle('task_1') });
     expect(r).toMatchObject({ kind: 'tool', result: { output: { task: { id: 'task_1', done: true } } } });
     const storedTasks = partsOf(h, message.id).find((p) => p.type === 'ui' && p.id === tasksUi.id) as UIPart;
     expect(storedTasks.block).toMatchObject({ type: 'tasks', tasks: [{ id: 'task_1', done: true }] });
@@ -1009,7 +1109,7 @@ describe('handleUiAction', () => {
     expect(storedCard.block).toMatchObject({ type: 'card', children: [{ type: 'reminder', dueAt: EPOCH + 600_000 }] });
 
     // Items the stored block does not show are rejected.
-    await expect(h.runtime.handleUiAction({ conversationId: h.conv.id, messageId: message.id, uiId: tasksUi.id, actionId: 'task.toggle:task_999' })).rejects.toMatchObject({
+    await expect(h.runtime.handleUiAction({ conversationId: h.conv.id, messageId: message.id, uiId: tasksUi.id, actionId: widgetActionId.taskToggle('task_999') })).rejects.toMatchObject({
       code: 'not_found',
     });
   });

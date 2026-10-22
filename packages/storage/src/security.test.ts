@@ -46,6 +46,38 @@ describe('device credential security', () => {
     expect(listener).toHaveBeenCalledTimes(1);
     unsubscribe();
   });
+
+  it('revoke under outer-transaction rollback does not notify', () => {
+    db = openNeoDatabase(':memory:');
+    const devices = createDeviceStore(db);
+    const { device, token } = devices.create({ name: 'phone', platform: 'ios' });
+    const notifications: string[] = [];
+    devices.onRevoke((id) => notifications.push(id));
+    try {
+      db.transaction(() => {
+        devices.revoke(device.id);
+        throw new Error('abort');
+      });
+    } catch {}
+    expect(notifications).toEqual([]);
+    expect(devices.verify(token)).toBeTruthy();
+  });
+
+  it('replaceOwner under outer-transaction rollback does not notify', () => {
+    db = openNeoDatabase(':memory:');
+    const devices = createDeviceStore(db);
+    devices.create({ name: 'owner', platform: 'other', owner: true, token: 'owner-token' });
+    const notifications: string[] = [];
+    devices.onRevoke((id) => notifications.push(id));
+    try {
+      db.transaction(() => {
+        devices.replaceOwner('new-owner-token');
+        throw new Error('abort');
+      });
+    } catch {}
+    expect(notifications).toEqual([]);
+    expect(devices.verify('owner-token')).toBeTruthy();
+  });
 });
 
 describe('provider custom header security', () => {

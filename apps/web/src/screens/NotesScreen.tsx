@@ -135,6 +135,13 @@ function NoteEditor({ note, onBack }: { note: Note; onBack?: () => void }): Reac
     } catch (err) {
       deleted.current = false;
       pushToast({ tone: 'error', title: errorMessage(err, t) });
+      // Re-queue any unsaved content: the pre-delete timer cancel and pending.current
+      // reset may have discarded a pending save, or an in-flight save's result was
+      // suppressed because deleted.current was true when it resolved.
+      if (savedRev.current !== revRef.current) {
+        if (alive.current) setState('dirty');
+        void flush();
+      }
     }
   };
 

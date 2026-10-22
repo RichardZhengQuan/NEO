@@ -14,11 +14,24 @@ NEO supports three deployment topologies:
 
 The **NEO desktop app** embeds the server.  No separate installation is needed.
 
-1. Download the installer for your platform from the releases page.
-2. Launch NEO.  The app starts an embedded server on a random localhost port
-   and opens the web UI in a native window.
-3. On first launch the onboarding wizard guides you through adding an AI
-   provider and configuring memory settings.
+1. Go to this repository's [GitHub Releases](https://github.com/RichardZhengQuan/NEO/releases)
+   and download `NEO-<version>-arm64.dmg` (Apple Silicon) or
+   `NEO-<version>-x64.dmg` (Intel) for the latest Mac release.
+2. Open the dmg and drag `NEO.app` into **Applications**.
+3. On first launch, right-click `NEO.app` in **Applications** → **Open** →
+   **Open** in the Gatekeeper dialog. This is required because the app is not
+   yet signed; subsequent launches don't need it. Alternatively, run this in
+   Terminal before launching:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/NEO.app
+   ```
+
+4. The app starts an embedded server on a random localhost port and opens
+   the web UI in a native window. The onboarding wizard then guides you
+   through adding an AI provider and configuring memory settings.
+
+Packaged Windows and Linux builds are planned but not shipped yet; macOS is the only platform on the Releases page today.
 
 Data is stored in the platform userData directory:
 
@@ -37,6 +50,22 @@ pnpm install && pnpm build
 node packages/cli/dist/index.js serve      # or link it once: (cd packages/cli && pnpm link --global) && neo serve
 # Open http://127.0.0.1:7777 in your browser.
 ```
+
+### Updates
+
+The desktop app checks this repository's GitHub Releases for updates on launch
+in packaged builds only. Development builds skip the automatic check.
+Pre-release GitHub Releases are skipped by default (`allowPrerelease` is `false`).
+
+When a newer release is available, NEO downloads it in the background and
+shows a system notification when the download is ready. The update installs
+when NEO next quits.
+
+**Help → Check for updates…** triggers a manual check and shows the result
+in a dialog: `Downloading NEO <version>…`, `NEO is up to date.`, or an error
+(`Could not check for updates: <detail>`).
+
+There is currently no user-facing toggle to disable the auto-updater.
 
 ---
 
@@ -474,9 +503,10 @@ limits in milliseconds.
 | `RELAY_BYTES_PER_SECOND` | `4194304` | Combined per-phone sustained traffic in both directions (4 MiB/s) |
 | `RELAY_BURST_BYTES` | `16777216` | Per-phone token-bucket burst (16 MiB) |
 | `RELAY_MAX_BUFFERED_BYTES` | `8388608` | Destination queue cap (8 MiB) |
-| `RELAY_REGISTRATION_TIMEOUT_MS` | `10000` | Time to answer the registration challenge |
-| `RELAY_PHONE_IDLE_TIMEOUT_MS` | `120000` | Maximum inactivity in both directions |
-| `RELAY_HEARTBEAT_INTERVAL_MS` | `30000` | Server ping interval; missed pong terminates the socket |
+| `RELAY_REGISTRATION_TIMEOUT_MS` | `10000` | Time to answer the registration challenge. Capped at `2147483647` (Node's `setTimeout` range); larger values fail startup |
+| `RELAY_PHONE_IDLE_TIMEOUT_MS` | `120000` | Maximum inactivity in both directions. Capped at `2147483647`; larger values fail startup |
+| `RELAY_HEARTBEAT_INTERVAL_MS` | `30000` | Server ping interval; missed pong terminates the socket. Capped at `2147483647`; larger values fail startup |
+| `RELAY_CLOSE_TIMEOUT_MS` | `250` | Deadline for a half-open peer to finish closing before `ws.terminate()` is called (also the refused-upgrade raw-socket destroy deadline). Capped at `2147483647`; larger values fail startup |
 
 Each Noise message is capped at 65,535 bytes (plus the five-byte server relay
 header). The relay disconnects phones that exceed the byte-rate bucket or

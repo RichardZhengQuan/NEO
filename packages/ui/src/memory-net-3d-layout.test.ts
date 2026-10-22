@@ -105,6 +105,32 @@ describe('memory net time scale', () => {
     if (unit === 'month') expect(ticks.every((tick) => new Date(tick.at).getUTCDate() === 1)).toBe(true);
   });
 
+  it.each([
+    ['day', '2026-01-07T12:00:00Z', 7],
+    ['week', '2026-01-07T12:00:00Z', 60],
+    ['month', '2026-01-15T12:00:00Z', 180],
+  ] as const)('starts %s ticks within the displayed range after an intraday oldest memory', (unit, oldest, days) => {
+    const oldestAt = at(oldest);
+    const times = Array.from({ length: days + 1 }, (_, index) => oldestAt + index * DAY);
+    const scale = createMemoryTimeScale(times);
+    const ticks = generateMemoryTimeTicks(scale);
+    expect(ticks.length).toBeGreaterThan(0);
+    expect(ticks.every((tick) => tick.unit === unit)).toBe(true);
+    expect(ticks.every((tick) => tick.at >= scale.oldestAt)).toBe(true);
+    expect(ticks[0]!.y).toBeGreaterThan(scale.minY);
+  });
+
+  it.each([
+    ['day', '2026-01-07T00:00:00Z', 7],
+    ['week', '2026-01-05T00:00:00Z', 60],
+    ['month', '2026-01-01T00:00:00Z', 180],
+  ] as const)('keeps a %s tick exactly on the oldest calendar boundary', (unit, oldest, days) => {
+    const oldestAt = at(oldest);
+    const scale = createMemoryTimeScale([oldestAt, oldestAt + days * DAY]);
+    const ticks = generateMemoryTimeTicks(scale);
+    expect(ticks[0]).toEqual({ at: scale.oldestAt, y: scale.minY, unit });
+  });
+
   it('does not stack unreadable calendar ticks inside a long compressed gap', () => {
     const scale = createMemoryTimeScale([start, start + 3650 * DAY]);
     const ticks = generateMemoryTimeTicks(scale);

@@ -227,7 +227,7 @@ describe('avatar orbits', () => {
     expect(targets.map(angle)).not.toEqual(start);
   });
 
-  it('lifts a hovered back-half portrait without changing its visual depth', () => {
+  it('lifts a hovered back-half portrait without changing its orbit depth', () => {
     render(<Harness />);
     advanceFrame(0);
     advanceFrame(21000);
@@ -237,6 +237,7 @@ describe('avatar orbits', () => {
     expect(node.dataset.orbitLifted).toBe('false');
     expect(node.style.opacity).toBe('0.6');
     expect(node.style.transform).toContain('scale(0.8)');
+    expect(Number(node.style.zIndex)).toBeLessThan(2);
     const originalAngle = angle(target);
     fireEvent.pointerEnter(node);
     expect(node.dataset.orbitLifted).toBe('true');
@@ -244,7 +245,7 @@ describe('avatar orbits', () => {
     expect(target.dataset.orbitDepth).toBe('back');
     expect(node.style.opacity).toBe('1');
     expect(node.style.transform).toContain('scale(0.9)');
-    expect(node.style.zIndex).toBe('1');
+    expect(Number(node.style.zIndex)).toBeGreaterThan(2); // Above the figure layer.
     expect(picker().dataset.orbitPaused).toBe('true');
     advance(1000);
     expect(angle(target)).toBe(originalAngle);
@@ -253,6 +254,7 @@ describe('avatar orbits', () => {
     expect(target.dataset.orbitLifted).toBe('false');
     expect(node.style.opacity).toBe('0.6');
     expect(node.style.transform).toContain('scale(0.8)');
+    expect(Number(node.style.zIndex)).toBeLessThan(2);
     expect(picker().dataset.orbitPaused).toBe('false');
   });
 
@@ -481,6 +483,31 @@ describe('avatar orbits', () => {
     expect(path.getAttribute('d')).not.toBe(originalPath);
     expect(angle(robot)).toBe(originalAngle);
     expect(frames.size).toBe(1);
+  });
+
+  it('rings the portrait fallback when the figure frame swaps to it, and the torso again after', async () => {
+    vi.stubGlobal('innerWidth', 1000);
+    vi.stubGlobal('innerHeight', 742);
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute('data-testid') === 'figure-frame') return rect(55, 40, 529, 678);
+      if (this.classList.contains('neo-avfig__portrait')) return rect(144, 203, 352, 352);
+      return rect(0, 0, 1000, 742);
+    });
+    render(<Harness />);
+    const path = document.querySelector('[data-orbit-path="portrait-front"] path')!;
+    const torso = path.getAttribute('d');
+    expect(torso).toMatch(/^M 595 365\.44 A 275\.5 105\.8/);
+
+    const fallback = document.createElement('span');
+    fallback.className = 'neo-avfig__portrait';
+    await act(async () => { screen.getByTestId('figure-frame').append(fallback); });
+    advance(16);
+    // Centred on the portrait's lower edge (203 + 352), clear of its face.
+    expect(path.getAttribute('d')).toMatch(/^M 595 555 A 275\.5 105\.8/);
+
+    await act(async () => { fallback.remove(); });
+    advance(16);
+    expect(path.getAttribute('d')).toBe(torso);
   });
 
   it('keeps phone targets below the face and within a 320 by 384 upper stage for a whole revolution', () => {

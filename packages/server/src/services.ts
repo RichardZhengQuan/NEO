@@ -101,7 +101,6 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
       });
     }
     const conversations = createConversationStore(db, { clock });
-    conversations.purgeOffRecord(clock() - 12 * 60 * 60_000);
     const devices = createDeviceStore(db);
     const push = createPushSubscriptionStore(db);
     config.providers = config.providers.map(provider => protectProviderHeaders(provider, secrets));
@@ -169,12 +168,13 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
         for (const tool of plugin.tools ?? []) tools.register(tool, 'plugin');
       }
     }
-    const runtime = createAgentRuntime({ conversations, settings, providers, memory, tools, logger, clock,
+    const runtime = createAgentRuntime({ conversations, reminders: stores.reminders, settings, providers, memory, tools, logger, clock,
       resolveSearchTool: current => {
         const engine = resolveSearchEngine(current, config.webSearch, secrets);
         return engine ? createWebSearchTool(engine) : undefined;
       },
     });
+    await runtime.purgeOffRecord(clock() - 12 * 60 * 60_000);
     // Core starts observation after the reply; keep that work alive until shutdown.
     const pending = new Set<Promise<unknown>>();
     const track = <T>(promise: Promise<T>): Promise<T> => {
@@ -254,6 +254,8 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
           ...(firing.reminder.messageId ? { messageId: firing.reminder.messageId, url: `neo://timeline/${encodeURIComponent(firing.reminder.messageId)}` }
             : { url: `neo://reminders/${firing.reminder.id}` }),
         },
+      }).then(() => {
+        if (firing.pendingFiringId) stores.reminders.clearPendingFiring?.(firing.pendingFiringId);
       }).catch(err => { logger.warn('Reminder notification failed', { error: String(err) }); });
     }));
 

@@ -163,7 +163,7 @@ export function NetTab({ selectedId, onSelect, focusId, onFocus }: { selectedId:
         ) : (
           <Skeleton className="neo-memory-net-viewport" height={desktop ? 640 : 420} style={{ borderRadius: 20 }} />
         )
-      ) : graph.data.nodes.length === 0 && markers.length === 0 ? (
+      ) : graph.data.nodes.length === 0 && markers.length === 0 && !toolUses.loading && !toolUses.error ? (
         <EmptyState art={<NetSeed />} title={t('memoryNet.empty_title')} description={t('memoryNet.empty_text')} />
       ) : (
         <>

@@ -239,7 +239,7 @@ export class NeoClient {
   };
 
   readonly reminders = {
-    list: (q?: { status?: ReminderStatus[]; from?: number; to?: number; limit?: number }): Promise<ListResponse<Reminder>> =>
+    list: (q?: { status?: ReminderStatus[]; from?: number; to?: number; limit?: number; lastFiredAtFrom?: number }): Promise<ListResponse<Reminder>> =>
       this._impl.reminders.list(q),
     get: (id: string): Promise<Reminder> =>
       this._impl.reminders.get(id),
@@ -266,6 +266,8 @@ export class NeoClient {
       this._impl.tasks.deleteList(id),
     list: (q?: { listId?: string; done?: boolean; query?: string; limit?: number }): Promise<ListResponse<Task>> =>
       this._impl.tasks.list(q),
+    get: (id: string): Promise<Task> =>
+      this._impl.tasks.get(id),
     create: (body: TaskInput): Promise<Task> =>
       this._impl.tasks.create(body),
     update: (id: string, body: TaskPatch): Promise<Task> =>

@@ -38,6 +38,8 @@ const en: Messages = {
   'nav.notes': 'Notes',
   'nav.settings': 'Settings',
   'nav.avatar': 'Avatar',
+  'nav.badge_label': '{name}, {count} due',
+  'nav.home_label': '{name}, {status}',
 
   // ── connection status ──
   'status.idle': 'Not connected',
@@ -577,6 +579,8 @@ const en: Messages = {
   'recur.every_hours': 'Every {n} hours',
   'recur.daily': 'Every day',
   'recur.every_days': 'Every {n} days',
+  'recur.daily_on': 'Every day on {days}',
+  'recur.every_days_on': 'Every {n} days on {days}',
   'recur.weekdays': 'Every weekday',
   'recur.weekly': 'Every week',
   'recur.weekly_on': 'Every {days}',
@@ -822,7 +826,7 @@ const en: Messages = {
   'dataSettings.shortcut_focus': 'Focus the message box',
   'dataSettings.shortcut_close': 'Close menus and dialogs',
   'dataSettings.about': 'About NEO',
-  'dataSettings.about_text': 'NEO is an open-source personal AI assistant you can make your own: you choose the AI, what it remembers and where it runs. MIT licensed.',
+  'dataSettings.about_text': 'NEO is an open-source personal AI assistant that builds its own memory over time and works with the AI you connect. MIT licensed.',
   'dataSettings.source_code': 'Source code',
 };
 
@@ -856,6 +860,8 @@ const zhCN: Messages = {
   'nav.notes': '笔记',
   'nav.settings': '设置',
   'nav.avatar': '形象',
+  'nav.badge_label': '{name}，{count} 条待处理',
+  'nav.home_label': '{name}，{status}',
 
   'status.idle': '未连接',
   'status.connecting': '正在连接…',
@@ -1353,6 +1359,8 @@ const zhCN: Messages = {
   'recur.every_hours': '每 {n} 小时',
   'recur.daily': '每天',
   'recur.every_days': '每 {n} 天',
+  'recur.daily_on': '每天的{days}',
+  'recur.every_days_on': '每 {n} 天的{days}',
   'recur.weekdays': '每个工作日',
   'recur.weekly': '每周',
   'recur.weekly_on': '每{days}',
@@ -1590,7 +1598,7 @@ const zhCN: Messages = {
   'dataSettings.shortcut_focus': '聚焦到输入框',
   'dataSettings.shortcut_close': '关闭菜单和对话框',
   'dataSettings.about': '关于 NEO',
-  'dataSettings.about_text': 'NEO 是一个开源的私人 AI 助手，可以完全按你的方式定制：用哪个 AI、记住什么、在哪里运行，都由你决定。采用 MIT 许可证。',
+  'dataSettings.about_text': 'NEO 是一个开源的私人 AI 助手，会随着对话自动积累记忆，配合你连接的 AI 一起工作。采用 MIT 许可证。',
   'dataSettings.source_code': '源代码',
 };
 

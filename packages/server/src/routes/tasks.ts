@@ -74,6 +74,13 @@ export function registerTasks(app: Hono, services: NeoServices): void {
     return c.json({ items });
   });
 
+  // GET /api/tasks/:id
+  app.get('/api/tasks/:id', (c) => {
+    const task = tasks.get(c.req.param('id'));
+    if (!task) throw new NeoError('not_found', 'Task not found');
+    return c.json(task);
+  });
+
   // POST /api/tasks
   app.post('/api/tasks', async (c) => {
     const body = await validateBody(c, CreateTaskRequestSchema);

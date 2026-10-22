@@ -11,6 +11,7 @@ import { resetTimeline } from './timeline.js';
 import { useData } from './data.js';
 import { useToasts } from './notifications.js';
 import { setDrawer } from './ui.js';
+import { resetChatDrafts } from './chat-drafts.js';
 
 export type Phase = 'booting' | 'connect' | 'offline' | 'ready';
 
@@ -89,9 +90,10 @@ export function onSessionEnd(cleanup: () => void): () => void {
 function resetSessionData(): void {
   for (const cleanup of [...sessionCleanups]) cleanup();
   sessionCleanups.clear();
+  resetChatDrafts();
   resetTimeline();
   useData.setState({
-    reminders: {}, remindersLoaded: false,
+    reminders: {}, reminderDeletions: {}, remindersLoaded: false, remindersComplete: false,
     tasks: {}, taskLists: [], tasksLoaded: false,
     notes: {}, notesLoaded: false,
     memoryVersion: 0,
@@ -135,6 +137,33 @@ export function setSettings(settings: NeoSettings): void {
 }
 
 /**
+ * Build a revert patch that mirrors the nested structure of `patchObj`, replacing
+ * each leaf with the corresponding pre-update value from `oldObj`. This ensures
+ * that concurrent successful saves to sibling nested paths (e.g. memory.recallLimit
+ * while another call fails on memory.recall) survive the rollback.
+ */
+function buildRevertPatch(
+  patchObj: Record<string, unknown>,
+  oldObj: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(patchObj).map(([k, patchVal]) => {
+      const oldVal = oldObj[k];
+      if (
+        patchVal !== null && typeof patchVal === 'object' && !Array.isArray(patchVal) &&
+        oldVal !== null && typeof oldVal === 'object' && !Array.isArray(oldVal)
+      ) {
+        return [k, buildRevertPatch(
+          patchVal as Record<string, unknown>,
+          oldVal as Record<string, unknown>,
+        )];
+      }
+      return [k, oldVal];
+    }),
+  );
+}
+
+/**
  * Optimistic settings update: apply locally, send the deep-partial patch, then
  * take the server's merged result. Reverts and rethrows on failure.
  */
@@ -147,7 +176,19 @@ export async function updateSettings(patch: NeoSettingsPatch): Promise<NeoSettin
     if (isCurrentSession(sessionEpoch, client)) setSettings(next);
     return next;
   } catch (err) {
-    if (isCurrentSession(sessionEpoch, client)) setSettings(settings);
+    if (isCurrentSession(sessionEpoch, client)) {
+      // Revert only the exact fields this call wrote, not the entire snapshot.
+      // buildRevertPatch mirrors the nested patch structure so that concurrent
+      // successful saves to sibling paths (e.g. memory.recallLimit) are preserved.
+      const current = useSession.getState().settings;
+      if (current) {
+        const revertPatch = buildRevertPatch(
+          patch as Record<string, unknown>,
+          settings as Record<string, unknown>,
+        ) as NeoSettingsPatch;
+        setSettings(applySettingsPatch(current, revertPatch));
+      }
+    }
     throw err;
   }
 }

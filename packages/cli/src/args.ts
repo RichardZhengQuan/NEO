@@ -17,6 +17,16 @@ export type Command =
 
 export type ParseArgsError = { error: string };
 
+/** Parse a decimal port in the range 0–65535. */
+export function parsePort(input: string): number | ParseArgsError {
+  const trimmed = input.trim();
+  const port = Number(trimmed);
+  if (!/^\d+$/.test(trimmed) || port < 0 || port > 65535) {
+    return { error: `Invalid port: ${input}` };
+  }
+  return port;
+}
+
 /** Parse process.argv (or a provided array). Returns a Command or an error. */
 export function parseCliArgs(argv: string[] = process.argv.slice(2)): Command | ParseArgsError {
   if (argv.length === 0) return { cmd: 'help' };
@@ -61,10 +71,8 @@ function parseServe(args: string[]): Command | ParseArgsError {
       allowPositionals: false,
     });
     if (values.help) return { cmd: 'help', topic: 'serve' };
-    const port = values.port ? parseInt(values.port, 10) : undefined;
-    if (port !== undefined && (isNaN(port) || port < 0 || port > 65535)) {
-      return { error: `Invalid port: ${values.port}` };
-    }
+    const port = values.port === undefined ? undefined : parsePort(values.port);
+    if (typeof port === 'object') return port;
     if (values.mode && values.mode !== 'local' && values.mode !== 'server') {
       return { error: `--mode must be local or server` };
     }
@@ -179,6 +187,7 @@ function parseToken(args: string[]): Command | ParseArgsError {
 function parseMemory(args: string[]): Command | ParseArgsError {
   const sub = args[0];
   if (!sub) return { error: 'memory requires a subcommand: export, import, stats, consolidate' };
+  if (sub === '--help' || sub === '-h') return { cmd: 'help', topic: 'memory' };
   const rest = args.slice(1);
 
   if (sub === 'stats' || sub === 'consolidate') {
@@ -215,6 +224,9 @@ function parseMemory(args: string[]): Command | ParseArgsError {
         allowPositionals: true,
       });
       if (values.help) return { cmd: 'help', topic: 'memory' };
+      if (positionals.length > 1) {
+        return { error: `memory export takes at most one file path, got: ${positionals.slice(1).join(', ')}` };
+      }
       return { cmd: 'memory', sub: 'export', file: positionals[0], dataDir: values['data-dir'], server: values.server, token: values.token };
     } catch (e) {
       return { error: String(e) };
@@ -236,6 +248,9 @@ function parseMemory(args: string[]): Command | ParseArgsError {
         allowPositionals: true,
       });
       if (values.help) return { cmd: 'help', topic: 'memory' };
+      if (positionals.length > 1) {
+        return { error: `memory import takes exactly one file path, got extra: ${positionals.slice(1).join(', ')}` };
+      }
       if (!positionals[0]) return { error: 'memory import requires a file path' };
       return { cmd: 'memory', sub: 'import', file: positionals[0], replace: values.replace, dataDir: values['data-dir'], server: values.server, token: values.token };
     } catch (e) {

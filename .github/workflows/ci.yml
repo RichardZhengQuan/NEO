@@ -10,7 +10,10 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push cancels a pull request's run. On main a run in progress is
+  # never cancelled, so the next merge can't leave this one untested (GitHub
+  # still drops a run that is only queued when several merges land at once).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:

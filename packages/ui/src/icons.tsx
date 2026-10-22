@@ -272,7 +272,11 @@ export const ICON_NAMES: readonly string[] = Object.keys(ICONS);
 
 /** Resolve a name or alias to path data; null when unknown. */
 export function iconPaths(name: string): readonly string[] | null {
-  return ICONS[name] ?? ICONS[ALIASES[name] ?? ''] ?? null;
+  const hasOwn = Object.prototype.hasOwnProperty;
+  if (hasOwn.call(ICONS, name)) return ICONS[name] ?? null;
+  const alias = hasOwn.call(ALIASES, name) ? ALIASES[name] : undefined;
+  if (alias !== undefined && hasOwn.call(ICONS, alias)) return ICONS[alias] ?? null;
+  return null;
 }
 
 const FALLBACK: readonly string[] = [circle(12, 12, 2.5)];

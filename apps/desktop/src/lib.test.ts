@@ -38,6 +38,14 @@ describe('isSafeExternalUrl', () => {
     expect(isSafeExternalUrl('https://example.com/path?q=1')).toBe(true);
   });
 
+  it('accepts mailto: URLs', () => {
+    expect(isSafeExternalUrl('mailto:alice@example.com')).toBe(true);
+  });
+
+  it('accepts tel: URLs', () => {
+    expect(isSafeExternalUrl('tel:+15551234567')).toBe(true);
+  });
+
   it('rejects javascript: scheme', () => {
     expect(isSafeExternalUrl('javascript:alert(1)')).toBe(false);
   });
@@ -120,6 +128,19 @@ describe('formatReminderNotification', () => {
     expect(result.title).toBe('Call Alice');
     expect(result.body).toBe('Re: project status');
     expect(result.deepLink).toBe('neo://reminders/rem_1');
+  });
+
+  it('opens a reminder notification at its timeline source message', () => {
+    const reminder = { ...makeReminder('rem_3', 'Follow up'), messageId: 'msg_abc' };
+    const firing = makeFiring({ reminder });
+    const result = formatReminderNotification(firing);
+    expect(result.deepLink).toBe('neo://timeline/msg_abc');
+    expect(deepLinkToHash(result.deepLink)).toBe('#/timeline?messageId=msg_abc');
+
+    // null messageId still goes to reminders
+    const firing2 = makeFiring({ reminder: makeReminder('rem_4', 'Buy milk') });
+    const result2 = formatReminderNotification(firing2);
+    expect(result2.deepLink).toBe('neo://reminders/rem_4');
   });
 
   it('falls back to "It\'s time" when notes are null', () => {

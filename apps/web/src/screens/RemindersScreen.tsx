@@ -28,7 +28,7 @@ import {
 import { Menu } from '../components/Menu.js';
 import { PageHeader } from '../components/PageHeader.js';
 import { errorMessage } from '../lib/errors.js';
-import { describeRecurrence, presetOf, recurrenceFor, weekdayName, type RepeatPreset } from '../lib/recurrence.js';
+import { describeRecurrence, presetOf, preserveRecurrence, recurrenceFor, weekdayName, type RepeatPreset } from '../lib/recurrence.js';
 import { fromLocalInputValue, listTimeZones, nextTimeOfDay, toLocalInputValue, tomorrowAt, wallTimeOf } from '../lib/time.js';
 import { getPlatform, type NotificationStatus } from '../platform/index.js';
 import { loadReminders, removeReminder, upsertReminder, useData } from '../state/data.js';
@@ -38,7 +38,7 @@ import { currentSessionEpoch, isCurrentSession, requireClient, useSession } from
 
 const ACTIVE = new Set<Reminder['status']>(['scheduled', 'fired']);
 
-function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder; open: boolean; onClose: () => void }): ReactElement {
+export function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder; open: boolean; onClose: () => void }): ReactElement {
   const t = useT();
   const locale = useLocale();
   const [timezone, setTimezone] = useState(reminder.timezone);
@@ -46,14 +46,53 @@ function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder; open:
   const [notes, setNotes] = useState(reminder.notes ?? '');
   const [due, setDue] = useState(() => toLocalInputValue(reminder.dueAt, reminder.timezone));
   const [preset, setPreset] = useState<RepeatPreset>(presetOf(reminder.recurrence));
+  const presetChanged = preset !== presetOf(reminder.recurrence);
   const [interval, setInterval] = useState(reminder.recurrence?.interval ?? 1);
   const [weekdays, setWeekdays] = useState<number[]>(reminder.recurrence?.byWeekday ?? []);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const zones = useMemo(() => listTimeZones(), []);
+  const serverRef = useRef({
+    title: reminder.title,
+    notes: reminder.notes ?? '',
+    timezone: reminder.timezone,
+    due: toLocalInputValue(reminder.dueAt, reminder.timezone),
+    preset: presetOf(reminder.recurrence) as RepeatPreset,
+    interval: reminder.recurrence?.interval ?? 1,
+    weekdays: (reminder.recurrence?.byWeekday ?? []) as number[],
+  });
+
+  // Remote edits (another device) resync untouched fields when the server version advances.
+  useEffect(() => {
+    const prev = serverRef.current;
+    const next = {
+      title: reminder.title,
+      notes: reminder.notes ?? '',
+      timezone: reminder.timezone,
+      due: toLocalInputValue(reminder.dueAt, reminder.timezone),
+      preset: presetOf(reminder.recurrence) as RepeatPreset,
+      interval: reminder.recurrence?.interval ?? 1,
+      weekdays: (reminder.recurrence?.byWeekday ?? []) as number[],
+    };
+    serverRef.current = next;
+    // Only resync a field if the user hasn't edited it since the last server sync.
+    setTitle((curr) => (curr === prev.title ? next.title : curr));
+    setNotes((curr) => (curr === prev.notes ? next.notes : curr));
+    setTimezone((curr) => (curr === prev.timezone ? next.timezone : curr));
+    setDue((curr) => (curr === prev.due ? next.due : curr));
+    setPreset((curr) => (curr === prev.preset ? next.preset : curr));
+    setInterval((curr) => (curr === prev.interval ? next.interval : curr));
+    setWeekdays((curr) =>
+      curr.length === prev.weekdays.length && curr.every((d, i) => d === prev.weekdays[i])
+        ? next.weekdays
+        : curr,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reminder.updatedAt]);
   const dueAt = fromLocalInputValue(due, timezone);
   const weekday = dueAt ? wallTimeOf(dueAt, timezone).weekday : 1;
-  const recurrence: RecurrenceInput | null = recurrenceFor(preset, { interval, weekdays, weekday });
+  const generated = recurrenceFor(preset, { interval, weekdays, weekday });
+  const recurrence: RecurrenceInput | null = presetChanged ? generated : preserveRecurrence(reminder.recurrence, generated);
 
   const quick = (ms: number) => setDue(toLocalInputValue(ms, timezone));
   const now = Date.now();
@@ -127,7 +166,7 @@ function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder; open:
           <Select
             label={t('reminders.repeat')}
             value={preset}
-            onChange={(v) => setPreset(v as RepeatPreset)}
+            onChange={(v) => { setPreset(v as RepeatPreset); }}
             options={(['none', 'daily', 'weekdays', 'weekly', 'monthly', 'yearly'] as const).map((p) => ({ value: p, label: t(`reminders.repeat_${p}`) }))}
           />
           {preset !== 'none' && preset !== 'weekdays' && (
@@ -358,7 +397,7 @@ export function RemindersScreen({ highlightId }: { highlightId?: string }): Reac
           )}
         </div>
       </div>
-      {editing && <ReminderEditor key={editing.id} reminder={editing} open onClose={() => setEditing(null)} />}
+      {editing && <ReminderEditor key={editing.id} reminder={reminders[editing.id] ?? editing} open onClose={() => setEditing(null)} />}
     </div>
   );
 }

@@ -32,10 +32,13 @@ const FIGURE_URLS: Record<AvatarCharacter, Record<'color' | 'ink', string>> = {
 };
 
 const BURST_MS = 480;
+/** Delays before re-requesting a figure that failed to load; the last one repeats. */
+const RETRY_MS = [1000, 3000, 10000, 30000];
 
 const FIGURE_CSS = `
 .neo-avfig{position:relative;display:inline-flex;align-items:center;justify-content:center;width:100%;height:100%;min-width:0;line-height:0;vertical-align:middle}
 .neo-avfig>img{display:block;width:100%;height:100%;object-fit:contain}
+.neo-avfig>img[hidden]{display:none}
 .neo-avfig>.neo-avfig__ink{position:absolute;inset:0;opacity:0;pointer-events:none}
 .neo-avfig>.neo-av{width:min(100%,22rem)!important;height:auto!important;aspect-ratio:1}
 .neo-avfig[data-glitch]{animation:neo-avfig-shake ${BURST_MS}ms steps(1,end)}
@@ -172,11 +175,45 @@ function FigureImage({ avatar, title, variant, onReady, onUnavailable }: {
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [inkFailed, setInkFailed] = useState(false);
-  if (failed) return <NeoAvatar avatar={avatar} title={title} animated={false} shape="squircle" />;
+  const [retries, setRetries] = useState(0);
+  const [probing, setProbing] = useState(false);
+  const src = FIGURE_URLS[avatar.kind][variant === 'ink' ? 'ink' : 'color'];
+
+  // A failed load is often transient (a rebuild replacing the asset, a dropped
+  // connection), so keep probing in the background and return to the figure.
+  useEffect(() => {
+    if (!failed || probing) return;
+    const probe = () => setProbing(true);
+    const timer = setTimeout(probe, RETRY_MS[retries] ?? RETRY_MS[RETRY_MS.length - 1]);
+    window.addEventListener('online', probe);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('online', probe);
+    };
+  }, [failed, probing, retries]);
+
+  if (failed) return (
+    <>
+      <NeoAvatar avatar={avatar} title={title} animated={false} shape="squircle" className="neo-avfig__portrait" />
+      {probing && (
+        <img
+          key={retries}
+          src={src}
+          alt=""
+          hidden
+          aria-hidden="true"
+          loading="eager"
+          decoding="async"
+          onLoad={() => { setProbing(false); setRetries(0); setFailed(false); }}
+          onError={() => { setProbing(false); setRetries((n) => n + 1); }}
+        />
+      )}
+    </>
+  );
   return (
     <>
       <img
-        src={FIGURE_URLS[avatar.kind][variant === 'ink' ? 'ink' : 'color']}
+        src={src}
         alt={title}
         decoding="async"
         draggable={false}

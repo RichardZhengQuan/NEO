@@ -1,0 +1,58 @@
+name: Mobile
+
+on:
+  pull_request:
+    paths:
+      - 'apps/mobile/**'
+      - 'apps/web/**'
+      - 'packages/ui/**'
+      - 'packages/client/**'
+      - 'packages/protocol/**'
+      - 'packages/tunnel/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/mobile.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/mobile/**'
+      - 'apps/web/**'
+      - 'packages/ui/**'
+      - 'packages/client/**'
+      - 'packages/protocol/**'
+      - 'packages/tunnel/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/mobile.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ios-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - name: Build web app
+        run: pnpm --filter @neo/web build
+      - name: Sync Capacitor iOS
+        run: cd apps/mobile && npx cap sync ios
+      - name: Build iOS app for the simulator
+        working-directory: apps/mobile
+        run: |
+          xcodebuild -project ios/App/App.xcodeproj \
+            -scheme App \
+            -sdk iphonesimulator -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            -destination 'generic/platform=iOS Simulator' \
+            build
