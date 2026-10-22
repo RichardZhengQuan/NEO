@@ -435,6 +435,12 @@ async function abstractEpisodes(
     const from = n === 1 ? 'from 1 conversation' : `from ${n} conversations`;
     try {
       runWrite(ctx, now, (s) => {
+        for (const ep of cluster.episodes) {
+          if (!getNode(ctx.db, ep.id)) {
+            ctx.logger.warn('memory: source episode was forgotten; skipping abstraction', { episodeId: ep.id });
+            return;
+          }
+        }
         for (const [k, v] of entityVectors) s.entityVectors.set(k, v);
         items.forEach((it, i) => {
           const { node, merged } = createOrMerge(s, {
@@ -464,8 +470,8 @@ async function abstractEpisodes(
           mark.run(now, ep.id);
           changed.add(ep.id);
         }
+        consolidated += n;
       });
-      consolidated += n;
     } catch (err) {
       ctx.logger.warn('memory: could not store abstracted knowledge', { error: String(err) });
     }
