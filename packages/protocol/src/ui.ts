@@ -39,7 +39,17 @@ export const LinkUrlSchema = z
   .max(4000)
   .refine(isSafeLinkUrl, 'Links must be http(s), mailto:, tel: or neo:// URLs');
 
-const blockId = { id: z.string().min(1).max(64).optional() };
+/** Rejects unpaired UTF-16 surrogates so ids survive `encodeURIComponent`. */
+const wellFormedBlockId = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine(
+    (s) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s),
+    'Block id must not contain unpaired UTF-16 surrogates',
+  );
+
+const blockId = { id: wellFormedBlockId.optional() };
 
 // ───────────────────────────── actions ─────────────────────────────
 
@@ -681,7 +691,15 @@ export function childBlocks(block: UIBlock): UIBlock[] {
 
 /** Stable block key: an encoded explicit id, or child indexes from the UI part's root. */
 export function uiBlockKey(block: UIBlock, path: readonly number[]): string {
-  return block.id !== undefined ? `id:${encodeURIComponent(block.id)}` : `path:${path.length ? path.join('.') : 'root'}`;
+  if (block.id !== undefined) {
+    try {
+      return `id:${encodeURIComponent(block.id)}`;
+    } catch {
+      // block.id contains an unpaired surrogate that encodeURIComponent cannot encode;
+      // fall through to the path form so callers are never thrown at.
+    }
+  }
+  return `path:${path.length ? path.join('.') : 'root'}`;
 }
 
 /** Traverse a stored tree in childBlocks order, including hidden tabs and accordion items. */
