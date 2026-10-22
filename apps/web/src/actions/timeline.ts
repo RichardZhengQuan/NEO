@@ -18,7 +18,7 @@ import type {
   UiActionResponse,
   UserInputPart,
 } from '@neo/protocol';
-import { NeoError, textOf } from '@neo/protocol';
+import { NeoError, UI_ACTION_ID_PREFIX, textOf } from '@neo/protocol';
 import { copyText, type ConfirmFn, type TranslateFn } from '@neo/ui';
 import { errorCode, errorMessage, httpStatus } from '../lib/errors.js';
 import { navigate } from '../router.js';
@@ -260,7 +260,7 @@ export async function runUiAction(
     }
   }
 
-  const quietWidget = input.action.id.startsWith('change.apply:');
+  const quietWidget = input.action.id.startsWith(UI_ACTION_ID_PREFIX + 'change.apply:');
   switch (res.kind) {
     case 'turn':
       applyTurnResponse(res);
@@ -273,10 +273,10 @@ export async function runUiAction(
         throw new Error(error ?? res.summary ?? 'tool failed');
       }
       // Quiet success for live widgets (the widget itself updates); others get a confirmation.
-      if (!quietWidget && (!/^(task\.toggle|(?:__neo:)?reminder\.|memory\.)/.test(input.action.id) || res.summary)) {
+      if (!quietWidget && (!/^((?:__neo:)?task\.toggle|(?:__neo:)?reminder\.|(?:__neo:)?memory\.)/.test(input.action.id) || res.summary)) {
         pushToast({ tone: 'success', title: res.summary ?? t('chat.action_done'), icon: 'check-circle' });
       }
-      if (input.action.id.startsWith('memory.') || (input.action.kind === 'tool' && /memory|forget|remember/.test(input.action.tool))) {
+      if (input.action.id.startsWith(UI_ACTION_ID_PREFIX + 'memory.') || (input.action.kind === 'tool' && /memory|forget|remember/.test(input.action.tool))) {
         bumpMemoryVersion();
       }
       return;

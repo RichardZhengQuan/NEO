@@ -92,7 +92,7 @@ export function resolveStoredAction(block: UIBlock, actionId: string, values?: R
   }
   const widget = resolveWidgetAction(block, actionId, clientValues);
   if (widget) return { action: widget };
-  if (actionId.startsWith(UI_ACTION_ID_PREFIX) || actionId.startsWith('change.apply:')) return null;
+  if (actionId.startsWith(UI_ACTION_ID_PREFIX)) return null;
   const action = collectActions([block]).find((a) => a.id === actionId);
   if (!action) return null;
   // Only a trusted changes snapshot may provide apply_change input.

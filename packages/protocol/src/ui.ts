@@ -1090,11 +1090,11 @@ export function uiBlocksToText(blocks: UIBlock[]): string {
  * {@link resolveWidgetAction}, so a client can only act on items the block shows.
  */
 export const widgetActionId = {
-  taskToggle: (taskId: string) => `task.toggle:${taskId}`,
+  taskToggle: (taskId: string) => `${UI_ACTION_ID_PREFIX}task.toggle:${encodeURIComponent(taskId)}`,
   reminderSnooze: (reminderId: string, minutes: number) => `${UI_ACTION_ID_PREFIX}reminder.snooze:${encodeURIComponent(reminderId)}:${minutes}`,
   reminderComplete: (reminderId: string) => `${UI_ACTION_ID_PREFIX}reminder.complete:${encodeURIComponent(reminderId)}`,
-  memoryForget: (nodeId: string) => `memory.forget:${nodeId}`,
-  changeApply: (itemId: string) => `change.apply:${itemId}`,
+  memoryForget: (nodeId: string) => `${UI_ACTION_ID_PREFIX}memory.forget:${encodeURIComponent(nodeId)}`,
+  changeApply: (itemId: string) => `${UI_ACTION_ID_PREFIX}change.apply:${encodeURIComponent(itemId)}`,
 } as const;
 
 /** Map a widget action id to the tool action it stands for, or null when it doesn't apply to this block tree. */
@@ -1126,21 +1126,30 @@ export function resolveWidgetAction(root: UIBlock, actionId: string, values?: Re
       ? { id: actionId, label: 'Done', kind: 'tool', tool: 'complete_reminder', input: { id: reminder.reminderId } }
       : { id: actionId, label: `Snooze ${minutes} min`, kind: 'tool', tool: 'snooze_reminder', input: { id: reminder.reminderId, minutes } };
   }
-  const [verb, arg = ''] = actionId.split(/:(.*)/s, 2) as [string, string | undefined];
+  const taskToggle = actionId.match(/^__neo:task\.toggle:(.+)$/);
+  const memoryForget = actionId.match(/^__neo:memory\.forget:(.+)$/);
+  const changeApply = actionId.match(/^__neo:change\.apply:(.+)$/);
+  const target = taskToggle ?? memoryForget ?? changeApply;
+  if (!target) return null;
+  let arg: string;
+  try {
+    arg = decodeURIComponent(target[1]!);
+  } catch {
+    return null;
+  }
   for (const b of blocks) {
-    if (b.type === 'changes' && verb === 'change.apply') {
+    if (b.type === 'changes' && changeApply) {
       const item = b.items.find((item) => item.id === arg && item.status !== 'applied');
       if (item) return { id: actionId, label: 'Apply change', kind: 'tool', tool: 'apply_change', input: { item } };
     }
-    if (b.type === 'tasks' && verb === 'task.toggle') {
+    if (b.type === 'tasks' && taskToggle) {
       const task = b.tasks.find((t) => t.id === arg);
       if (!task) continue;
       const done = typeof values?.done === 'boolean' ? values.done : !task.done;
       return { id: actionId, label: done ? 'Complete task' : 'Reopen task', kind: 'tool', tool: 'update_task', input: { id: task.id, done } };
     }
-    if (b.type === 'memory' && verb.startsWith('memory.') && b.nodes.some((n) => n.id === arg && n.status !== 'forgotten')) {
-      if (verb === 'memory.forget')
-        return { id: actionId, label: 'Forget', kind: 'tool', tool: 'forget', input: { ids: [arg] }, style: 'danger', confirm: 'Forget this memory for good?' };
+    if (b.type === 'memory' && memoryForget && b.nodes.some((n) => n.id === arg && n.status !== 'forgotten')) {
+      return { id: actionId, label: 'Forget', kind: 'tool', tool: 'forget', input: { ids: [arg] }, style: 'danger', confirm: 'Forget this memory for good?' };
     }
   }
   return null;

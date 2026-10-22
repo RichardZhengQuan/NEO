@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { parseConfig, silentLogger } from '@neo/protocol';
+import { parseConfig, silentLogger, widgetActionId } from '@neo/protocol';
 import type { Conversation, MemoryNode, UIPart, UiActionResponse } from '@neo/protocol';
 import { createApp } from './app.js';
 import { createServices } from './services.js';
@@ -38,7 +38,7 @@ it('real runtime: memory.forget widget confirms the named memory, deletes on app
     const node = widget.block.nodes[0]!;
     expect(node.label).toBe('Window seats');
     const path = '/timeline/ui-action';
-    const body = { messageId: message.id, uiId: widget.id, actionId: `memory.forget:${node.id}` };
+    const body = { messageId: message.id, uiId: widget.id, actionId: widgetActionId.memoryForget(node.id) };
     const result = await read<UiActionResponse>(await request(path, body));
     expect(result.kind).toBe('confirm');
     if (result.kind !== 'confirm') throw new Error('Expected server-written UI confirmation');
