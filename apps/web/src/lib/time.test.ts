@@ -13,6 +13,26 @@ describe('timezone conversions', () => {
     expect(instantOf(2026, 12, 1, 9, 0, 'America/New_York')).toBe(Date.UTC(2026, 11, 1, 14, 0));
   });
 
+  it('instantOf resolves DST spring-forward gaps forward (Europe/Berlin 2027-03-28 02:30)', () => {
+    expect(instantOf(2027, 3, 28, 2, 30, 'Europe/Berlin')).toBe(Date.UTC(2027, 2, 28, 1, 30));
+  });
+
+  it('fromLocalInputValue resolves DST spring-forward gaps forward', () => {
+    expect(fromLocalInputValue('2027-03-28T02:30', 'Europe/Berlin')).toBe(Date.UTC(2027, 2, 28, 1, 30));
+  });
+
+  it('instantOf resolves spring-forward gap (America/New_York 2027-03-14 02:30)', () => {
+    expect(instantOf(2027, 3, 14, 2, 30, 'America/New_York')).toBe(Date.UTC(2027, 2, 14, 7, 30));
+  });
+
+  it('instantOf resolves spring-forward gap (Pacific/Auckland 2026-09-27 02:30)', () => {
+    expect(instantOf(2026, 9, 27, 2, 30, 'Pacific/Auckland')).toBe(Date.UTC(2026, 8, 26, 14, 30));
+  });
+
+  it('instantOf resolves fall-back wall time to the earlier (pre-gap) instant (America/New_York 2026-11-01 01:30)', () => {
+    expect(instantOf(2026, 11, 1, 1, 30, 'America/New_York')).toBe(Date.UTC(2026, 10, 1, 5, 30));
+  });
+
   it('resolves a nonexistent spring-forward time to a real instant', () => {
     const ms = instantOf(2026, 3, 8, 2, 30, 'America/New_York');
     const w = wallTimeOf(ms, 'America/New_York');

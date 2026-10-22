@@ -45,9 +45,10 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
     return t;
   };
 
-  const widget = (title: string, items: Task[], listId?: string): UIBlock => ({
+  const widget = (title: string, items: Task[], timezone: string, listId?: string): UIBlock => ({
     type: 'tasks',
     title: clip(title, 200),
+    timezone,
     ...(listId ? { listId } : {}),
     tasks: items.slice(0, WIDGET_MAX).map((t) => ({
       id: t.id,
@@ -59,10 +60,10 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
   });
 
   /** The open tasks of a list, always including `focus` (the task just created). */
-  const listWidget = (list: TaskList, focus: Task): UIBlock => {
+  const listWidget = (list: TaskList, focus: Task, timezone: string): UIBlock => {
     const open = tasks.list({ listId: list.id, done: false, limit: WIDGET_MAX });
     const items = open.some((t) => t.id === focus.id) ? open : [...open.slice(0, WIDGET_MAX - 1), focus];
-    return widget(list.name, items, list.id);
+    return widget(list.name, items, timezone, list.id);
   };
 
   const createTask = defineTool({
@@ -95,7 +96,7 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
       });
       return {
         output: { task: taskOutput(task, ctx.timezone, stores) },
-        ui: [listWidget(list, task)],
+        ui: [listWidget(list, task, ctx.timezone)],
         summary: `Added “${clip(task.title, 60)}” to ${list.name}${dueAt !== null ? ` (due ${friendlyTime(dueAt, ctx.timezone, ctx.locale)})` : ''}`,
       };
     },
@@ -129,7 +130,7 @@ export function createTaskTools(stores: ProductivityStores, _clock?: Clock) {
       const title = list ? list.name : input.query ? `Tasks matching “${input.query}”` : input.done === true ? 'Completed tasks' : 'Tasks';
       return {
         output: { tasks: items.map((t) => taskOutput(t, ctx.timezone, stores)), total: items.length, ...(list ? { list: { id: list.id, name: list.name } } : {}) },
-        ui: [widget(title, items, list?.id)],
+        ui: [widget(title, items, ctx.timezone, list?.id)],
         summary: `${items.length} task${items.length === 1 ? '' : 's'}${list ? ` in ${list.name}` : ''}`,
       };
     },

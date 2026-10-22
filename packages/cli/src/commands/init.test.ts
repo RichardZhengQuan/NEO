@@ -118,4 +118,58 @@ describe('init API key input', () => {
       syncBuiltinESMExports();
     }
   });
+
+  it('submits the partial key and restores terminal on Ctrl-D at the API-key prompt', async () => {
+    const originalStdin = Object.getOwnPropertyDescriptor(process, 'stdin')!;
+    const originalStdout = Object.getOwnPropertyDescriptor(process, 'stdout')!;
+    const fakeStdin = Object.assign(new PassThrough(), {
+      isTTY: true,
+      setRawMode(this: PassThrough, _mode: boolean) { return this; },
+    });
+    const fakeStdout = Object.assign(new PassThrough(), { isTTY: true, columns: 120 });
+
+    Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true });
+    Object.defineProperty(process, 'stdout', { value: fakeStdout, configurable: true });
+    syncBuiltinESMExports();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const rawMode = vi.spyOn(fakeStdin, 'setRawMode');
+
+    try {
+      const providerPrompt = waitForOutput(fakeStdout, 'Enter number [0]');
+      const run = runInit({ dataDir });
+      run.catch(() => {});
+      await providerPrompt;
+
+      const keyPrompt = waitForOutput(fakeStdout, ' API key');
+      fakeStdin.write('1\n');
+      await keyPrompt;
+
+      const modelPrompt = waitForOutput(fakeStdout, 'Default model [');
+      // Type a partial key then press Ctrl-D (EOT byte 0x04).
+      for (const character of 'sk-partial') fakeStdin.write(character);
+      fakeStdin.write(Buffer.from([0x04]));
+
+      // Ctrl-D should submit; continue the wizard with the rest of the prompts.
+      await modelPrompt;
+      expect(rawMode).toHaveBeenLastCalledWith(false);
+
+      const modePrompt = waitForOutput(fakeStdout, 'Mode —');
+      fakeStdin.write('fixture-model\n');
+      await modePrompt;
+      fakeStdin.write('\n');
+      await run;
+
+      expect(kill).not.toHaveBeenCalledWith(process.pid, 'SIGINT');
+      const config = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'));
+      expect(config.providers[0]).toMatchObject({ apiKey: 'sk-partial' });
+    } finally {
+      Object.defineProperty(process, 'stdin', originalStdin);
+      Object.defineProperty(process, 'stdout', originalStdout);
+      fakeStdin.destroy();
+      fakeStdout.destroy();
+      rawMode.mockRestore();
+      kill.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
 });

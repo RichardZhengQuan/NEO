@@ -401,6 +401,11 @@ describe('misc helpers', () => {
     expect(describeRecurrence(null)).toBe('once');
   });
 
+  it('describeRecurrence includes weekday restrictions on daily recurrences', () => {
+    expect(describeRecurrence({ freq: 'daily', byWeekday: [1, 2, 3, 4, 5] })).toBe('every day on Mon, Tue, Wed, Thu, Fri');
+    expect(describeRecurrence({ freq: 'daily', interval: 2, byWeekday: [1, 3, 5] })).toBe('every 2 days on Mon, Wed, Fri');
+  });
+
   it('rejects recurrence cutoffs outside the ECMAScript Date range', () => {
     const parsed = RecurrenceSchema.safeParse({ freq: 'daily', until: 1e20 });
     expect(parsed.success).toBe(false);
@@ -469,6 +474,17 @@ describe('widget actions', () => {
 });
 
 describe('privacy helpers', () => {
+  it.each([
+    ['http://localhost./', true],
+    ['http://localhost.:7777/', true],
+    ['http://api.localhost./v1', true],
+    ['http://nas.local./', true],
+    ['http://nas.lan./', true],
+    ['http://LOCALHOST./', true],
+  ])('classifies rooted local hostnames like their unrooted equivalents (%s)', (url, expected) => {
+    expect(isLocalUrl(url)).toBe(expected);
+  });
+
   it.each<[string, boolean]>([
     ['http://[::ffff:127.0.0.1]:1234/v1', true],
     ['http://[::ffff:10.0.0.5]/', true],

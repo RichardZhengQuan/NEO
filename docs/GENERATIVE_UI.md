@@ -44,7 +44,7 @@ Every rendered block becomes a `ui` part `{ type: 'ui', id: 'ui_…', block, too
 | `tags` | `items[{label,tone,icon}]` | |
 | `countdown` | `label`, `until` (epoch ms), `timezone`, `doneText` | live ticking; optional timezone (max 64), defaults to the viewer's timezone |
 | `reminder` | `reminderId`, `title`, `notes`, `dueAt`, `timezone`, `recurrenceText`, `status` | **live widget**: Snooze 10 min / 1 h, Done; optional notes (max 5000), omitted when absent; deleted reminders show Deleted |
-| `tasks` | `title`, `listId`, `tasks[{id,title,done,dueAt,priority}]` | **live widget**: checkboxes |
+| `tasks` | `title`, `listId`, `timezone`, `tasks[{id,title,done,dueAt,priority}]` | **live widget**: checkboxes; optional timezone (max 64), defaults to the viewer's timezone |
 | `changes` | `title`, `note`, `timezone`, `items[{id,kind,status,…}]` | **live widget**: review before → after and apply selected changes |
 | `memory` | `title`, `note`, `nodes[{id,kind,label,content,status}]` | Forget with confirmation; forgotten status persists in the widget. `recall` shows UI only with `show: true` |
 

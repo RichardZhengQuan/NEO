@@ -358,7 +358,7 @@ function TableRenderer({ block }: { block: TableBlock }): ReactElement {
             <tr key={ri}>
               {block.columns.map((col) => (
                 <td key={col.key} style={{ textAlign: col.align ?? (numeric(col.format) ? 'right' : 'left') }}>
-                  {formatCell(row[col.key], col.format, locale, col.currency)}
+                  {formatCell(Object.prototype.hasOwnProperty.call(row, col.key) ? row[col.key] : undefined, col.format, locale, col.currency)}
                 </td>
               ))}
             </tr>
@@ -854,7 +854,7 @@ function AccordionRenderer({ block, uiId, onAction, live, depth, blockPath = [] 
   return (
     <div className="neo-accordion">
       {block.items.map((item, itemIndex) => {
-        const isOpen = open[item.id] ?? false;
+        const isOpen = Object.prototype.hasOwnProperty.call(open, item.id) ? open[item.id]! : false;
         const panelId = `${prefix}-${item.id}`;
         const childOffset = block.items.slice(0, itemIndex).reduce((count, previous) => count + previous.children.length, 0);
         return (
@@ -1078,8 +1078,13 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
   const [optimistic, setOptimistic] = useState<Record<string, boolean>>({});
   const runner = useActionRunner(onAction, uiId);
   const tasks = block.tasks.map((task) => {
-    const fresh = live?.tasks?.[task.id];
-    return { ...task, title: fresh?.title ?? task.title, dueAt: fresh ? fresh.dueAt : task.dueAt, priority: fresh?.priority ?? task.priority, done: optimistic[task.id] ?? fresh?.done ?? task.done };
+    const fresh = live?.tasks && Object.prototype.hasOwnProperty.call(live.tasks, task.id)
+      ? live.tasks[task.id]
+      : undefined;
+    const optimisticDone = Object.prototype.hasOwnProperty.call(optimistic, task.id)
+      ? optimistic[task.id]
+      : undefined;
+    return { ...task, title: fresh?.title ?? task.title, dueAt: fresh ? fresh.dueAt : task.dueAt, priority: fresh?.priority ?? task.priority, done: optimisticDone ?? fresh?.done ?? task.done };
   });
   // Drop optimistic values once live data agrees.
   useEffect(() => {
@@ -1087,7 +1092,8 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
       const next = { ...prev };
       let changed = false;
       for (const [id, done] of Object.entries(prev)) {
-        if (live?.tasks?.[id]?.done === done) {
+        const freshDone = live?.tasks && Object.prototype.hasOwnProperty.call(live.tasks, id) ? live.tasks[id]?.done : undefined;
+        if (freshDone === done) {
           delete next[id];
           changed = true;
         }
@@ -1137,7 +1143,7 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
                       <Icon name="flag" size={12} />
                     </span>
                   ) : null}
-                  {task.dueAt ? <time dateTime={new Date(task.dueAt).toISOString()}>{formatDate(task.dueAt, locale, undefined, 'short')}</time> : null}
+                  {task.dueAt ? <time dateTime={new Date(task.dueAt).toISOString()}>{formatDate(task.dueAt, locale, block.timezone, 'short')}</time> : null}
                 </span>
               </li>
             );
@@ -1153,7 +1159,12 @@ function ChangeDetails({ item, timezone }: { item: ChangeItem; timezone?: string
   const locale = useLocale();
   const time = (dueAt: number | null | undefined) => dueAt == null ? t('block.changes_no_due') : formatDateTime(dueAt, locale, timezone);
   const priority = (value: number | undefined) => value ? t(`task.priority_${value}`) : t('block.changes_no_priority');
-  if (item.kind === 'reminder.create') return <div className="neo-change__details">{time(item.dueAt)}</div>;
+  if (item.kind === 'reminder.create') return (
+    <div className="neo-change__details">
+      {formatDateTime(item.dueAt, locale, timezone ?? item.timezone)}
+      {item.notes && <p>{item.notes}</p>}
+    </div>
+  );
   return (
     <div className="neo-change__details">
       {item.after.dueAt !== undefined && <p>{t('block.changes_due', { from: time(item.before.dueAt), to: time(item.after.dueAt) })}</p>}
@@ -1181,7 +1192,7 @@ function ChangesRenderer({ block, uiId, onAction }: BlockRendererProps & { block
   const currentBlock = useRef(block);
   currentBlock.current = block;
   const isApplied = (item: ChangeItem) => item.status === 'applied' || state.results[item.id]?.status === 'applied';
-  const pending = block.items.filter((item) => !isApplied(item) && (selected[item.id] ?? true));
+  const pending = block.items.filter((item) => !isApplied(item) && (Object.prototype.hasOwnProperty.call(selected, item.id) ? selected[item.id]! : true));
   const retry = pending.some((item) => state.results[item.id]?.status === 'failed');
   const applyLabel = t(retry ? 'block.changes_retry' : 'block.changes_apply', { n: pending.length });
   const allApplied = block.items.every(isApplied);
@@ -1233,7 +1244,7 @@ function ChangesRenderer({ block, uiId, onAction }: BlockRendererProps & { block
                   id={checkboxId}
                   className="neo-checkbox neo-change__check"
                   type="checkbox"
-                  checked={selected[item.id] ?? true}
+                  checked={Object.prototype.hasOwnProperty.call(selected, item.id) ? selected[item.id]! : true}
                   disabled={state.running || !onAction}
                   onChange={(event) => setSelected((previous) => ({ ...previous, [item.id]: event.target.checked }))}
                 />
@@ -1285,8 +1296,11 @@ function MemoryWidgetRenderer({ block, uiId, onAction, live }: BlockRendererProp
       </div>
       <div>
         {block.nodes.map((node) => {
-          const status = node.status === 'forgotten' ? node.status : live?.memories?.[node.id]?.status ?? node.status ?? 'active';
-          const result = status === 'forgotten' ? 'forgotten' : resolved[node.id];
+          const liveStatus = live?.memories && Object.prototype.hasOwnProperty.call(live.memories, node.id)
+            ? live.memories[node.id]?.status
+            : undefined;
+          const status = node.status === 'forgotten' ? node.status : liveStatus ?? node.status ?? 'active';
+          const result = status === 'forgotten' ? 'forgotten' : (Object.prototype.hasOwnProperty.call(resolved, node.id) ? resolved[node.id] : undefined);
           return (
             <div key={node.id} className="neo-mem-row">
               <div className="neo-mem-row__main">

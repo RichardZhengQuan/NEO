@@ -7,6 +7,7 @@
  */
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFile, writeFile } from 'node:fs/promises';
 import {
   app,
   BrowserWindow,
@@ -364,12 +365,50 @@ function focusWindowAtHash(hash: string): void {
 function startNotificationListener(serverUrl: string, ownerToken: string): void {
   const client = new NeoClient({ baseUrl: serverUrl, token: ownerToken });
 
+  // Record the time before connecting so we can detect reminders that fired
+  // during the startup gap (after the scheduler tick but before the WS opens).
+  // Use a generous lookback window because the scheduler fires reminders
+  // synchronously inside startServer(), before this point is reached.
+  const listenStartAt = Date.now();
+  const STARTUP_CATCH_UP_WINDOW_MS = 60_000;
+  // Track reminders already notified via WS events to avoid duplicates.
+  const notifiedIds = new Set<string>();
+  let catchupDone = false;
+
+  // Persist the catch-up window start so a rapid restart does not re-show
+  // reminders that were already delivered in the previous process.
+  const catchupStateFile = path.join(app.getPath('userData'), 'reminder-catchup.json');
+  let persistedLastRunAt = 0;
+  // Best-effort: read the persisted last-run timestamp synchronously on
+  // startup is not available, so we read it in the catch-up async block.
+  const loadPersistedState = async (): Promise<number> => {
+    try {
+      const raw = await readFile(catchupStateFile, 'utf8');
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === 'object' && 'lastRunAt' in parsed && typeof (parsed as { lastRunAt: unknown }).lastRunAt === 'number') {
+        return (parsed as { lastRunAt: number }).lastRunAt;
+      }
+    } catch {
+      // File absent or unreadable — treat as first run.
+    }
+    return 0;
+  };
+  const savePersistedState = (lastRunAt: number): void => {
+    writeFile(catchupStateFile, JSON.stringify({ lastRunAt }), 'utf8').catch(() => {
+      // Non-fatal: persistence is best-effort.
+    });
+  };
+
   const connection = client.connect({
     onEvent(envelope: EventEnvelope) {
       const event = envelope.event as ServerEvent;
 
       if (event.type === 'reminder.fired') {
         if (!ElectronNotification.isSupported()) return;
+        notifiedIds.add(event.firing.reminder.id);
+        // Persist the delivery time so a restart within the catch-up window
+        // does not re-show this notification as a "Missed reminder".
+        savePersistedState(Date.now());
         const { title, body, deepLink } = formatReminderNotification(event.firing);
         const notif = new ElectronNotification({ title, body });
         notif.on('click', () => focusWindowAtHash(deepLinkToHash(deepLink)));
@@ -385,6 +424,56 @@ function startNotificationListener(serverUrl: string, ownerToken: string): void 
       }
     },
     onStatus(status: ConnectionStatus) {
+      if (status === 'open' && !catchupDone) {
+        catchupDone = true;
+        // Catch up on reminders that fired during the startup gap (between the
+        // scheduler's first tick and this WS connection becoming open).
+        //
+        // Use lastFiredAtFrom instead of status:'fired' so that:
+        //   (a) recurring reminders (status='scheduled' after markFired) are included;
+        //   (b) we only fetch reminders in the recent window, bypassing the 100-item
+        //       default page size which would truncate heavy users' fired history.
+        //
+        // To avoid duplicates on rapid restart, floor the window at the persisted
+        // last-run timestamp: reminders whose lastFiredAt predates the previous
+        // catch-up were already delivered and must not be shown again.
+        void (async () => {
+          try {
+            persistedLastRunAt = await loadPersistedState();
+            // Use the more restrictive (later) of the two bounds so we never
+            // re-notify reminders delivered in the previous process.
+            const windowStart = Math.max(
+              persistedLastRunAt,
+              listenStartAt - STARTUP_CATCH_UP_WINDOW_MS,
+            );
+            const { items } = await client.reminders.list({ lastFiredAtFrom: windowStart });
+            for (const reminder of items) {
+              if (
+                reminder.lastFiredAt !== null &&
+                !notifiedIds.has(reminder.id)
+              ) {
+                if (!ElectronNotification.isSupported()) return;
+                const firing = {
+                  reminder,
+                  occurrenceAt: reminder.lastFiredAt,
+                  firedAt: reminder.lastFiredAt,
+                  missed: true,
+                  nextDueAt: null,
+                };
+                const { title, body, deepLink } = formatReminderNotification(firing);
+                const notif = new ElectronNotification({ title, body });
+                notif.on('click', () => focusWindowAtHash(deepLinkToHash(deepLink)));
+                notif.show();
+              }
+            }
+            // Record when this catch-up completed so subsequent startups can
+            // use it as the floor of the next catch-up window.
+            savePersistedState(Date.now());
+          } catch {
+            // Non-fatal: catch-up is best-effort.
+          }
+        })();
+      }
       if (status === 'closed') {
         // Reconnect is handled internally by NeoClient; nothing to do here.
       }
