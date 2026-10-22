@@ -438,3 +438,34 @@ describe('epoch-ms range guards', () => {
     expect(ChangeItemSchema.safeParse({ ...base, dueAt: Date.now() }).success).toBe(true);
   });
 });
+
+describe('uiBlockKey and walkUIBlocks: unpaired surrogate safety', () => {
+  const lone = '\uD800'; // lone high surrogate; encodeURIComponent throws on current main
+
+  it('uiBlockKey does not throw and returns a string when block.id is a lone surrogate', () => {
+    expect(() => uiBlockKey({ type: 'text', text: '', id: lone }, [0])).not.toThrow();
+    const key = uiBlockKey({ type: 'text', text: '', id: lone }, [0]);
+    expect(typeof key).toBe('string');
+  });
+
+  it('walkUIBlocks does not throw and yields all entries when a child block.id is a lone surrogate', () => {
+    const root: UIBlock = { type: 'stack', children: [{ type: 'text', text: '', id: lone }] };
+    expect(() => [...walkUIBlocks(root)]).not.toThrow();
+    const entries = [...walkUIBlocks(root)];
+    expect(entries).toHaveLength(2);
+  });
+
+  it('UIBlockSchema rejects a block with a lone-surrogate id', () => {
+    expect(UIBlockSchema.safeParse({ type: 'text', text: '', id: lone }).success).toBe(false);
+  });
+
+  it('UIBlockSchema accepts a block with a well-formed id containing a proper surrogate pair', () => {
+    // U+1F600 is a valid code point encoded as the surrogate pair 😀
+    expect(UIBlockSchema.safeParse({ type: 'text', text: '', id: '😀' }).success).toBe(true);
+  });
+
+  it('uiBlockKey encodes a well-formed id containing a surrogate pair normally', () => {
+    const key = uiBlockKey({ type: 'text', text: '', id: '😀' }, []);
+    expect(key).toBe('id:%F0%9F%98%80');
+  });
+});
