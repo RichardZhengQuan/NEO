@@ -156,6 +156,13 @@ export interface TurnPlan {
   recentContext?: ContentPart;
   /** Timeline episodes retain their whole prefix; legacy internal sends may trim. */
   timeline?: boolean;
+  /**
+   * Messages from the origin normal episode to prepend before the private episode's
+   * own messages on the second and subsequent turns of an off-record session.
+   * The first private turn captures this prefix inside `enterOffRecord()`; subsequent
+   * turns receive it here so `buildRequest()` keeps the normal-history prefix intact.
+   */
+  previousHistory?: Message[];
   /** Frees the conversation for the next send(). Called exactly once, before the terminal event. */
   release(): void;
 }
@@ -411,6 +418,7 @@ class TurnRunner {
     this.turnId = init.plan.record.turnId;
     this.messageId = init.assistantMessage.id;
     this.privateTurn = (init.plan.conversation.offRecord ?? init.plan.conversation.incognito) || services.conversations.offRecordState().active;
+    if (init.plan.previousHistory) this.previousHistory = init.plan.previousHistory;
     this.toolset = new Set(init.toolset);
     this.toolSpecs = init.caps.tools ? this.buildToolSpecs() : [];
     this.lastPersistAt = services.clock();

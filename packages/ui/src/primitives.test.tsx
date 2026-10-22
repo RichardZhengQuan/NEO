@@ -91,3 +91,22 @@ describe('Lightbox inside a Modal', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 });
+
+describe('Modal without focusable controls', () => {
+  it.each([false, true])('prevents Tab from escaping the dialog (shift: %s)', (shiftKey) => {
+    render(
+      <I18nProvider locale="en">
+        <Modal open={true} onClose={vi.fn()} hideClose>
+          <p>Hello</p>
+        </Modal>
+      </I18nProvider>,
+    );
+    const content = screen.getByText('Hello');
+    const preventDefault = vi.spyOn(KeyboardEvent.prototype, 'preventDefault');
+
+    fireEvent.keyDown(content, { key: 'Tab', shiftKey });
+
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(preventDefault.mock.contexts[0]).toMatchObject({ key: 'Tab', target: content });
+  });
+});
