@@ -8,6 +8,8 @@ on:
       - 'packages/ui/**'
       - 'packages/client/**'
       - 'packages/protocol/**'
+      - 'packages/tunnel/**'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/mobile.yml'
   push:
     branches: [main]
@@ -17,6 +19,8 @@ on:
       - 'packages/ui/**'
       - 'packages/client/**'
       - 'packages/protocol/**'
+      - 'packages/tunnel/**'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/mobile.yml'
 
 permissions:
