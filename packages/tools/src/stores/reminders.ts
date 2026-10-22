@@ -97,6 +97,10 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
         where.push('due_at <= ?');
         args.push(query.to);
       }
+      if (typeof query.lastFiredAtFrom === 'number' && Number.isFinite(query.lastFiredAtFrom)) {
+        where.push('last_fired_at >= ?');
+        args.push(query.lastFiredAtFrom);
+      }
       args.push(clampLimit(query.limit, 100, 500));
       const sql = `SELECT * FROM reminders${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY due_at ASC, created_at ASC LIMIT ?`;
       return (db.prepare(sql).all(...args) as Row[]).map(toReminder);

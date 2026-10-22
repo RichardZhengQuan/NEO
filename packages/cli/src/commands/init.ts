@@ -87,6 +87,15 @@ async function readSecret(rl: readline.Interface, question: string): Promise<str
           process.kill(process.pid, 'SIGINT');
           return;
         }
+        if (byte === 4) { // Ctrl-D (EOT) — treat as submit with whatever has been typed so far
+          process.stdout.write('\n');
+          process.stdin.removeListener('data', handler);
+          process.stdin.setRawMode(false);
+          rl.resume();
+          for (const listener of keypressListeners) process.stdin.on('keypress', listener);
+          resolve(value);
+          return;
+        }
         if (byte === 127 || byte === 8) { // Backspace
           if (value.length > 0) {
             value = value.slice(0, -1);

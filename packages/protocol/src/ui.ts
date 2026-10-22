@@ -339,6 +339,7 @@ export const TasksBlockSchema = z.object({
   type: z.literal('tasks'),
   title: z.string().max(200).optional(),
   listId: z.string().max(64).optional(),
+  timezone: z.string().max(64).optional(),
   tasks: z
     .array(
       z.object({
