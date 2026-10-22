@@ -197,6 +197,66 @@ describe('the self node and the other write paths', () => {
     expect(selfEdges(db)).toHaveLength(1);
   });
 
+  it('survives extracted updates, supersessions and forgetting their resulting nodes unchanged', async () => {
+    const replies = [
+      extraction('Attempted self update', [{ op: 'update', id: SELF_MEMORY_ID, label: 'HACKED', content: 'HACKED', sensitivity: 'sensitive' }]),
+      extraction('Attempted self supersession', [{ op: 'supersede', id: SELF_MEMORY_ID, kind: 'fact', label: 'Replaced you', content: 'You have been replaced', sensitivity: 'sensitive' }]),
+    ];
+    const { model } = scripted(replies);
+    const { svc, db } = setup({ llm: model });
+    const tea = await svc.remember({ kind: 'preference', label: 'Green tea', content: 'The user likes green tea', source: { by: 'user' } });
+    expect(selfEdges(db).some((e) => e.src === tea.id && e.type === 'about')).toBe(true);
+    const original = (await svc.get(SELF_MEMORY_ID))!.node;
+    expect(original).toMatchObject({ label: 'You', content: '', sensitivity: 'normal', status: 'active' });
+    const expectUnchangedSelf = async () => {
+      const self = await svc.get(SELF_MEMORY_ID);
+      expect.soft(self?.node).toEqual(original);
+      expect.soft(self?.history).toEqual([]);
+    };
+
+    const updated = await svc.observe(turn('Keep the centre of my memory unchanged'));
+    expect(replies).toHaveLength(1);
+    expect(updated.created.some((n) => n.label === 'Attempted self update')).toBe(true);
+    expect.soft(updated.updated.map((n) => n.id)).not.toContain(SELF_MEMORY_ID);
+    await expectUnchangedSelf();
+
+    const result = await svc.observe(turn('Keep my identity unchanged too'));
+    expect(replies).toHaveLength(0);
+    expect(result.created.some((n) => n.label === 'Attempted self supersession')).toBe(true);
+    expect.soft(result.superseded.map((n) => n.id)).not.toContain(SELF_MEMORY_ID);
+    await expectUnchangedSelf();
+    for (const node of result.created) {
+      expect.soft((await svc.get(node.id))!.history.map((n) => n.id)).not.toContain(SELF_MEMORY_ID);
+    }
+
+    const nodeIds = result.created.map((n) => n.id);
+    expect.soft(await svc.forget(nodeIds)).toBe(nodeIds.length);
+    for (const id of nodeIds) expect(await svc.get(id)).toBeNull();
+    await expectUnchangedSelf();
+    expect((await svc.get(tea.id))!.node.status).toBe('active');
+  });
+
+  it('never recursively forgets the self node through legacy superseded history', async () => {
+    const { svc, db } = setup();
+    const tea = await svc.remember({ kind: 'preference', label: 'Green tea', content: 'The user likes green tea', source: { by: 'user' } });
+    const original = (await svc.get(SELF_MEMORY_ID))!.node;
+    const older = await svc.remember({ kind: 'fact', label: 'Old capital', content: 'The old capital was Kyoto', source: { by: 'tool' } });
+    const current = await svc.remember({ kind: 'fact', label: 'Current capital', content: 'The current capital is Tokyo', source: { by: 'tool' } });
+    // Reproduce history left by the old extraction bug, including a second recursive hop.
+    addEdge(db, current.id, older.id, 'supersedes', 1, T0);
+    addEdge(db, older.id, SELF_MEMORY_ID, 'supersedes', 1, T0);
+    db.prepare("UPDATE memory_nodes SET status = 'superseded' WHERE id IN (?, ?)").run(older.id, SELF_MEMORY_ID);
+    expect((await svc.get(current.id))!.history.map((n) => n.id)).toEqual([older.id, SELF_MEMORY_ID]);
+    const legacySelf = { ...original, status: 'superseded' };
+    expect((await svc.get(SELF_MEMORY_ID))!.node).toEqual(legacySelf);
+
+    expect.soft(await svc.forget([current.id])).toBe(2);
+    expect(await svc.get(current.id)).toBeNull();
+    expect(await svc.get(older.id)).toBeNull();
+    expect((await svc.get(SELF_MEMORY_ID))?.node).toEqual(legacySelf);
+    expect(selfEdges(db)).toEqual([{ src: tea.id, type: 'about', weight: 0.3 }]);
+  });
+
   it('links a memory once an update (from extraction or the user) makes it about the user', async () => {
     const { model } = scripted([]);
     const { svc, db } = setup({ llm: model });
