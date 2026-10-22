@@ -6,6 +6,9 @@ import { appDictionaries } from '../i18n.js';
 import { navigate } from '../router.js';
 import { emptyEntry, useTimeline } from '../state/timeline.js';
 import { useSession } from '../state/session.js';
+import { resetChatDrafts } from '../state/chat-drafts.js';
+import { useData } from '../state/data.js';
+import { handleServerEvent, type EventContext } from '../state/events.js';
 import { ProviderSetup } from '../components/ProviderSetup.js';
 import { AiSection } from './settings/AiSection.js';
 import { TimelineScreen } from './TimelineScreen.js';
@@ -24,11 +27,28 @@ function renderTimeline(locale = 'en') {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetChatDrafts();
   useSession.setState({ settings: DEFAULT_SETTINGS, providers: { items: [], defaultModel: null }, models: {}, client: null });
   useTimeline.setState({ ...emptyEntry(), loaded: true, offRecordLoaded: true }, true);
+  useData.setState({ reminders: {}, reminderDeletions: {}, tasks: {} });
   HTMLElement.prototype.scrollTo = vi.fn();
 });
 afterEach(cleanup);
+
+describe('live reminders in the timeline', () => {
+  it('shows deleted status after a delete event and after remounting', () => {
+    useTimeline.setState({ messages: [{ id: 'msg_1', episodeId: 'ep_1', conversationId: 'ep_1', role: 'assistant', parts: [{ type: 'ui', id: 'ui_1', block: { type: 'reminder', reminderId: 'rem_1', title: 'Stretch', dueAt: 1, status: 'scheduled' } }], createdAt: 0, status: 'complete' }] });
+    const view = renderTimeline();
+    expect(screen.getByRole('button', { name: 'Snooze 10 min' })).toBeTruthy();
+    act(() => handleServerEvent({ type: 'reminder.deleted', reminderId: 'rem_1' }, { syncReminders: vi.fn() } as unknown as EventContext));
+    expect(screen.getByText('Deleted')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Snooze 10 min' })).toBeNull();
+    view.unmount();
+    renderTimeline();
+    expect(screen.getByText('Deleted')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Snooze 10 min' })).toBeNull();
+  });
+});
 
 describe('timeline without AI', () => {
   it.each([
@@ -38,7 +58,8 @@ describe('timeline without AI', () => {
     renderTimeline(locale);
 
     expect(screen.getByRole('heading', { name: prompt })).toBeTruthy();
-    expect((screen.getByRole('textbox', { name: prompt }) as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByRole('textbox', { name: prompt }) as HTMLTextAreaElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: locale === 'en' ? 'Send' : '发送' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole('list', { name: /Things to try/ })).toBeNull();
     const buttons = screen.getAllByRole('button', { name: action });
     expect(buttons).toHaveLength(2);
@@ -62,16 +83,35 @@ describe('timeline without AI', () => {
     expect(screen.queryByText('A custom tagline')).toBeNull();
   });
 
-  it('keeps an existing transcript visible while the composer asks to connect AI', () => {
-    useTimeline.setState({ ...emptyEntry(), loaded: true, messages: [{ id: 'msg_1', episodeId: 'ep_1', conversationId: 'ep_1', role: 'user', parts: [{ type: 'text', text: 'My saved message' }], createdAt: 0, status: 'complete' }] });
+  it('keeps an existing transcript and local drafts available while AI is disconnected', () => {
+    useTimeline.setState({ ...emptyEntry(), loaded: true, offRecordLoaded: true, messages: [{ id: 'msg_1', episodeId: 'ep_1', conversationId: 'ep_1', role: 'user', parts: [{ type: 'text', text: 'My saved message' }], createdAt: 0, status: 'complete' }] });
     renderTimeline();
 
     expect(screen.getByText('My saved message')).toBeTruthy();
     expect(screen.getByText('Connect an AI to start chatting')).toBeTruthy();
-    expect((screen.getByRole('textbox', { name: 'Connect an AI to start chatting' }) as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByRole('textbox', { name: 'Connect an AI to start chatting' }) as HTMLTextAreaElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Open AI settings' }));
     expect(navigate).toHaveBeenCalledWith({ name: 'settings', section: 'ai' });
     expect(useTimeline.getState().messages).toHaveLength(1);
+  });
+
+  it('keeps any composer draft editable and unsendable across navigation without AI', () => {
+    const view = renderTimeline();
+    const draft = 'Help me organize tomorrow.\nKeep this unfinished request.';
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: draft } });
+    expect(textbox.disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    expect(textbox.value).toBe(draft);
+    expect(useTimeline.getState().messages).toEqual([]);
+    expect(navigate).not.toHaveBeenCalled();
+
+    view.unmount();
+    renderTimeline();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(draft);
+    expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('becomes ready when an enabled provider connects and returns to guidance when disabled', () => {

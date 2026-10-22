@@ -273,15 +273,20 @@ export class OpenAIAdapter implements ProviderAdapter {
         collectAnnotations(sources, delta['annotations']);
 
         const reasoning = delta['reasoning_content'] ?? delta['reasoning'];
-        if (typeof reasoning === 'string' && reasoning) yield { type: 'reasoning', text: reasoning };
+        if (typeof reasoning === 'string' && reasoning) {
+          throwIfAborted(request.signal);
+          yield { type: 'reasoning', text: reasoning };
+        }
         if (typeof delta['content'] === 'string' && delta['content']) {
           sawText = true;
+          throwIfAborted(request.signal);
           yield { type: 'text', text: delta['content'] };
         }
         // OpenAI streams a model refusal as `delta.refusal` text instead of content.
         if (typeof delta['refusal'] === 'string' && delta['refusal']) {
           sawText = true;
           refused = true;
+          throwIfAborted(request.signal);
           yield { type: 'text', text: delta['refusal'] };
         }
         if (Array.isArray(delta['tool_calls'])) {
@@ -303,7 +308,10 @@ export class OpenAIAdapter implements ProviderAdapter {
       throw new NeoError('provider_error', `The connection to ${this.label()} closed before the response finished.`, { retryable: true });
     }
 
-    for (const tc of tools) yield { type: 'tool_call', id: tc.id ?? newCallId('call'), name: tc.name, input: parseToolInput(tc.args) };
+    for (const tc of tools) {
+      throwIfAborted(request.signal);
+      yield { type: 'tool_call', id: tc.id ?? newCallId('call'), name: tc.name, input: parseToolInput(tc.args) };
+    }
 
     let stopReason: StopReason;
     if (finishReason === 'length') stopReason = 'max_tokens';
@@ -312,9 +320,19 @@ export class OpenAIAdapter implements ProviderAdapter {
     else if (finishReason === 'tool_calls' || finishReason === 'function_call' || tools.length > 0) stopReason = 'tool_use';
     else stopReason = 'end';
 
-    if (stopReason === 'refusal' && !sawText) yield { type: 'text', text: REFUSAL_NOTE };
-    if (sources.length) yield { type: 'sources', items: sources };
-    if (usage) yield { type: 'usage', usage };
+    if (stopReason === 'refusal' && !sawText) {
+      throwIfAborted(request.signal);
+      yield { type: 'text', text: REFUSAL_NOTE };
+    }
+    if (sources.length) {
+      throwIfAborted(request.signal);
+      yield { type: 'sources', items: sources };
+    }
+    if (usage) {
+      throwIfAborted(request.signal);
+      yield { type: 'usage', usage };
+    }
+    throwIfAborted(request.signal);
     yield { type: 'done', stopReason };
   }
 
@@ -408,10 +426,20 @@ export class OpenAIAdapter implements ProviderAdapter {
     let vectors: number[][];
     if (this.kind === 'ollama') {
       const resp = await this.request(`${this.ollamaRoot}/api/embed`, { method: 'POST', headers, body }, request.signal, false);
-      vectors = ((await resp.json()) as { embeddings?: number[][] }).embeddings ?? [];
+      const json = await resp.json().catch((err: unknown) => {
+        const cancelled = asCancelled(err, request.signal);
+        if (cancelled) throw cancelled;
+        throw err;
+      });
+      vectors = (json as { embeddings?: number[][] }).embeddings ?? [];
     } else {
       const resp = await this.request(`${this.baseUrl}/embeddings`, { method: 'POST', headers, body }, request.signal, false);
-      const data = ((await resp.json()) as { data?: { index?: number; embedding?: number[] }[] }).data ?? [];
+      const json = await resp.json().catch((err: unknown) => {
+        const cancelled = asCancelled(err, request.signal);
+        if (cancelled) throw cancelled;
+        throw err;
+      });
+      const data = (json as { data?: { index?: number; embedding?: number[] }[] }).data ?? [];
       vectors = [...data].sort((x, y) => (x.index ?? 0) - (y.index ?? 0)).map((d) => d.embedding ?? []);
     }
     if (vectors.length !== request.texts.length) {
@@ -453,7 +481,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       if (cancelled) throw cancelled;
       throw this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, signal);
     return response;
   }
 
@@ -479,8 +507,12 @@ export class OpenAIAdapter implements ProviderAdapter {
     return new NeoError('provider_error', this.clean(message), { retryable: true, cause: err });
   }
 
-  private async httpError(response: Response): Promise<NeoError> {
-    const text = await response.text().catch(() => '');
+  private async httpError(response: Response, signal?: AbortSignal): Promise<NeoError> {
+    const text = await response.text().catch((err: unknown) => {
+      const cancelled = asCancelled(err, signal);
+      if (cancelled) throw cancelled;
+      return '';
+    });
     let message = text.trim().slice(0, 1000);
     try {
       const parsed = JSON.parse(text) as { error?: unknown; message?: unknown };
@@ -506,7 +538,19 @@ export class OpenAIAdapter implements ProviderAdapter {
 
   private streamError(error: unknown): NeoError {
     const message = isPlainObject(error) && typeof error['message'] === 'string' ? error['message'] : typeof error === 'string' ? error : JSON.stringify(error);
-    return new NeoError('provider_error', this.clean(`${this.label()} error: ${message}`), { retryable: true });
+    const e = isPlainObject(error) ? error : {};
+    const code = typeof e['code'] === 'number' ? e['code'] : 0;
+    const codeStr = typeof e['code'] === 'string' ? e['code'] : '';
+    const detail = this.clean(`${this.label()} error: ${message}`);
+    if (code === 401 || code === 403 || codeStr === 'invalid_api_key' || codeStr === 'invalid_organization' || codeStr === 'account_deactivated') {
+      return new NeoError('provider_auth', detail, { details: code ? { status: code } : {} });
+    }
+    if (code === 429 || codeStr === 'rate_limit_exceeded' || codeStr === 'insufficient_quota') {
+      const delay = e['retryAfter'] ?? e['retryDelay'];
+      const retryAfterMs = typeof delay === 'number' ? delay * 1000 : typeof delay === 'string' ? parseRetryAfter(delay.replace(/s$/, '')) : undefined;
+      return new NeoError('rate_limited', detail, { retryable: true, details: { ...(code ? { status: code } : {}), ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) } });
+    }
+    return new NeoError('provider_error', detail, { retryable: code >= 500 || codeStr === 'server_error', details: code ? { status: code } : {} });
   }
 }
 

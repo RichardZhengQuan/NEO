@@ -8,6 +8,7 @@
  * Interactions come back as {@link UIAction}s.
  */
 import { z } from 'zod';
+import { NeoError } from './errors.js';
 
 // ───────────────────────────── primitives ─────────────────────────────
 
@@ -38,7 +39,17 @@ export const LinkUrlSchema = z
   .max(4000)
   .refine(isSafeLinkUrl, 'Links must be http(s), mailto:, tel: or neo:// URLs');
 
-const blockId = { id: z.string().min(1).max(64).optional() };
+/** Rejects unpaired UTF-16 surrogates so ids survive `encodeURIComponent`. */
+const wellFormedBlockId = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine(
+    (s) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s),
+    'Block id must not contain unpaired UTF-16 surrogates',
+  );
+
+const blockId = { id: wellFormedBlockId.optional() };
 
 // ───────────────────────────── actions ─────────────────────────────
 
@@ -74,7 +85,10 @@ export const UIActionSchema = z.discriminatedUnion('kind', [
 export type UIAction = z.infer<typeof UIActionSchema>;
 export type UIActionKind = UIAction['kind'];
 
-/** Implicit action id used when a `form` block is submitted (values travel in the UI event). */
+/** Reserved namespace for built-in actions; model-authored actions may not use it. */
+export const UI_ACTION_ID_PREFIX = '__neo:';
+
+/** Legacy form submit id; accepted only when the stored tree has one form. */
 export const FORM_SUBMIT_ACTION_ID = '__submit';
 
 // ───────────────────────────── leaf blocks ─────────────────────────────
@@ -119,6 +133,7 @@ export const TableBlockSchema = z.object({
         label: z.string().max(100),
         align: z.enum(['left', 'center', 'right']).optional(),
         format: z.enum(['text', 'number', 'currency', 'percent', 'date']).optional(),
+        currency: z.string().regex(/^[A-Z]{3}$/).optional(),
       }),
     )
     .min(1)
@@ -275,7 +290,10 @@ export const TimelineBlockSchema = z.object({
       z.object({
         id: z.string().max(64).optional(),
         /** Epoch ms (rendered in the viewer's timezone) or a display string. */
-        time: z.union([z.number(), z.string().max(60)]),
+        time: z.union([
+          z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }),
+          z.string().max(60),
+        ]),
         title: z.string().max(300),
         description: z.string().max(1000).optional(),
         icon: IconSchema.optional(),
@@ -310,7 +328,8 @@ export const CountdownBlockSchema = z.object({
   type: z.literal('countdown'),
   label: z.string().max(200),
   /** Epoch ms. */
-  until: z.number(),
+  until: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }),
+  timezone: z.string().max(64).optional(),
   doneText: z.string().max(200).optional(),
 });
 
@@ -320,7 +339,8 @@ export const ReminderBlockSchema = z.object({
   type: z.literal('reminder'),
   reminderId: z.string().min(1).max(64),
   title: z.string().max(300),
-  dueAt: z.number(),
+  notes: z.string().max(5000).optional(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }),
   timezone: z.string().max(64).optional(),
   recurrenceText: z.string().max(200).optional(),
   status: z.enum(['scheduled', 'fired', 'completed', 'cancelled']),
@@ -332,17 +352,89 @@ export const TasksBlockSchema = z.object({
   type: z.literal('tasks'),
   title: z.string().max(200).optional(),
   listId: z.string().max(64).optional(),
+  timezone: z.string().max(64).optional(),
   tasks: z
     .array(
       z.object({
         id: z.string().min(1).max(64),
         title: z.string().max(500),
         done: z.boolean(),
-        dueAt: z.number().nullable().optional(),
+        dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }).nullable().optional(),
         priority: z.number().int().min(0).max(3).optional(),
       }),
     )
     .max(100),
+});
+
+export const TaskFieldsSchema = z.object({
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }).nullable().optional(),
+  title: z.string().min(1).max(1000).optional(),
+  priority: z.number().int().min(0).max(3).optional(),
+  done: z.boolean().optional(),
+}).strict();
+export type TaskFields = z.infer<typeof TaskFieldsSchema>;
+
+export const ReminderFieldsSchema = z.object({
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }).optional(),
+  title: z.string().min(1).max(500).optional(),
+  timezone: z.string().optional(),
+}).strict();
+export type ReminderFields = z.infer<typeof ReminderFieldsSchema>;
+
+function matchingFields(item: { before: object; after: object }): boolean {
+  const before = Object.keys(item.before);
+  const after = Object.keys(item.after);
+  return after.length > 0 && before.length === after.length
+    && after.every((key) => before.includes(key))
+    && Object.values(item.before).every((value) => value !== undefined)
+    && Object.values(item.after).every((value) => value !== undefined);
+}
+
+const changeItemBase = {
+  id: z.string().min(1).max(64),
+  status: z.enum(['pending', 'applied']).optional(),
+};
+
+/** Trusted before/after snapshots created by productivity tools, never by the model. */
+export const ChangeItemSchema = z.discriminatedUnion('kind', [
+  z.object({
+    ...changeItemBase,
+    kind: z.literal('task.update'),
+    taskId: z.string().min(1).max(64),
+    title: z.string().max(500),
+    before: TaskFieldsSchema,
+    after: TaskFieldsSchema,
+  }).refine(matchingFields, 'Before must contain exactly the fields in a non-empty after.'),
+  z.object({
+    ...changeItemBase,
+    kind: z.literal('reminder.create'),
+    title: z.string().min(1).max(500),
+    dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }),
+    timezone: z.string().max(64).optional(),
+    notes: z.string().max(5000).optional(),
+    creationKey: z.uuid(),
+    reminderId: z.string().min(1).max(64).optional(),
+  }),
+  z.object({
+    ...changeItemBase,
+    kind: z.literal('reminder.update'),
+    reminderId: z.string().min(1).max(64),
+    title: z.string().max(500),
+    before: ReminderFieldsSchema,
+    after: ReminderFieldsSchema,
+  }).refine(matchingFields, 'Before must contain exactly the fields in a non-empty after.'),
+]);
+export type ChangeItem = z.infer<typeof ChangeItemSchema>;
+
+/** Reviewable edits; each pending item applies its stored snapshot through apply_change. */
+export const ChangesBlockSchema = z.object({
+  ...blockId,
+  type: z.literal('changes'),
+  title: z.string().max(200).optional(),
+  note: z.string().max(500).optional(),
+  timezone: z.string().max(64).optional(),
+  items: z.array(ChangeItemSchema).min(1).max(50)
+    .refine((items) => new Set(items.map((item) => item.id)).size === items.length, 'Change item ids must be unique.'),
 });
 
 /** Shows memories NEO just formed or recalled, with forget controls. */
@@ -358,7 +450,7 @@ export const MemoryBlockSchema = z.object({
         kind: z.string().max(30),
         label: z.string().max(300),
         content: z.string().max(2000).optional(),
-        status: z.enum(['active', 'archived', 'superseded']).optional(),
+        status: z.enum(['active', 'archived', 'superseded', 'forgotten']).optional(),
       }),
     )
     .min(1)
@@ -389,6 +481,7 @@ export type TagsBlock = z.infer<typeof TagsBlockSchema>;
 export type CountdownBlock = z.infer<typeof CountdownBlockSchema>;
 export type ReminderBlock = z.infer<typeof ReminderBlockSchema>;
 export type TasksBlock = z.infer<typeof TasksBlockSchema>;
+export type ChangesBlock = z.infer<typeof ChangesBlockSchema>;
 export type MemoryBlock = z.infer<typeof MemoryBlockSchema>;
 
 export interface CardBlock {
@@ -455,6 +548,7 @@ export type UIBlock =
   | CountdownBlock
   | ReminderBlock
   | TasksBlock
+  | ChangesBlock
   | MemoryBlock;
 
 export type UIBlockType = UIBlock['type'];
@@ -488,6 +582,7 @@ export const UIBlockSchema: z.ZodType<UIBlock> = z.lazy(() =>
     CountdownBlockSchema,
     ReminderBlockSchema,
     TasksBlockSchema,
+    ChangesBlockSchema,
     MemoryBlockSchema,
   ]),
 );
@@ -567,6 +662,7 @@ export const UI_BLOCK_TYPES: readonly UIBlockType[] = [
   'countdown',
   'reminder',
   'tasks',
+  'changes',
   'memory',
 ];
 
@@ -593,6 +689,43 @@ export function childBlocks(block: UIBlock): UIBlock[] {
   }
 }
 
+/** Stable block key: an encoded explicit id, or child indexes from the UI part's root. */
+export function uiBlockKey(block: UIBlock, path: readonly number[]): string {
+  if (block.id !== undefined) {
+    try {
+      return `id:${encodeURIComponent(block.id)}`;
+    } catch {
+      // block.id contains an unpaired surrogate that encodeURIComponent cannot encode;
+      // fall through to the path form so callers are never thrown at.
+    }
+  }
+  return `path:${path.length ? path.join('.') : 'root'}`;
+}
+
+/** Traverse a stored tree in childBlocks order, including hidden tabs and accordion items. */
+export function* walkUIBlocks(root: UIBlock, path: readonly number[] = []): Generator<{ block: UIBlock; path: readonly number[]; key: string }> {
+  yield { block: root, path, key: uiBlockKey(root, path) };
+  const children = childBlocks(root);
+  for (let i = 0; i < children.length; i++) yield* walkUIBlocks(children[i]!, [...path, i]);
+}
+
+/** Target-aware form submit id; values travel in the UI event. */
+export function formSubmitActionId(form: FormBlock, path: readonly number[] = []): string {
+  return `${UI_ACTION_ID_PREFIX}form.submit:${uiBlockKey(form, path)}`;
+}
+
+export const TOOL_ONLY_BLOCK_TYPES = ['changes'] as const;
+
+/** Find a tool-only widget anywhere in a block tree, including closed containers. */
+export function findToolOnlyBlock(blocks: readonly UIBlock[]): UIBlock | null {
+  for (const block of blocks) {
+    if (TOOL_ONLY_BLOCK_TYPES.some((type) => type === block.type)) return block;
+    const nested = findToolOnlyBlock(childBlocks(block));
+    if (nested) return nested;
+  }
+  return null;
+}
+
 /** Every action reachable in a block tree (card actions, buttons, list item actions). */
 export function collectActions(blocks: UIBlock[]): UIAction[] {
   const out: UIAction[] = [];
@@ -613,7 +746,18 @@ export function validateUIBlocks(input: unknown): UIValidationResult {
   const list = Array.isArray(input) ? input : [input];
   if (list.length === 0) return { ok: false, error: 'No UI blocks given.' };
   if (list.length > MAX_UI_TOP_LEVEL) return { ok: false, error: `At most ${MAX_UI_TOP_LEVEL} top-level blocks are allowed.` };
-  const parsed = z.array(UIBlockSchema).safeParse(list);
+  // Wrap safeParse: Zod's recursive UIBlockSchema parse can throw RangeError for
+  // deeply nested input before our own depth check runs. Convert to typed rejection.
+  const parseResult = (() => {
+    try {
+      return z.array(UIBlockSchema).safeParse(list);
+    } catch (e) {
+      if (e instanceof RangeError) return null;
+      throw e;
+    }
+  })();
+  if (parseResult === null) return { ok: false, error: `UI blocks may nest at most ${MAX_UI_DEPTH} levels deep.` };
+  const parsed = parseResult;
   if (!parsed.success) {
     return { ok: false, error: z.prettifyError(parsed.error), issues: parsed.error.issues };
   }
@@ -628,6 +772,8 @@ export function validateUIBlocks(input: unknown): UIValidationResult {
   if (tooDeep) return { ok: false, error: `UI blocks may nest at most ${MAX_UI_DEPTH} levels deep.` };
   if (count > MAX_UI_BLOCKS) return { ok: false, error: `At most ${MAX_UI_BLOCKS} UI blocks are allowed per message.` };
   const ids = collectActions(parsed.data).map((a) => a.id);
+  const reserved = ids.find((id) => id.startsWith(UI_ACTION_ID_PREFIX));
+  if (reserved) return { ok: false, error: `Action id "${reserved}" uses the reserved "${UI_ACTION_ID_PREFIX}" prefix.` };
   const dup = ids.find((id, i) => ids.indexOf(id) !== i);
   if (dup) return { ok: false, error: `Duplicate action id "${dup}"; action ids must be unique within a message.` };
   return { ok: true, blocks: parsed.data };
@@ -643,13 +789,57 @@ export function extractInlineUI(text: string): { text: string; blocks: UIBlock[]
   const stripped = text.replace(/```neo-ui\s*\n([\s\S]*?)```/g, (_m, json: string) => {
     try {
       const result = validateUIBlocks(JSON.parse(json));
-      if (result.ok) blocks.push(...result.blocks);
+      if (result.ok) {
+        const filter = (list: UIBlock[]): UIBlock[] => list.flatMap((block): UIBlock[] => {
+          if (TOOL_ONLY_BLOCK_TYPES.some((type) => type === block.type)) {
+            errors.push('The changes block is only available via propose_changes, not inline UI.');
+            return [];
+          }
+          switch (block.type) {
+            case 'card': return [{ ...block, ...(block.children ? { children: filter(block.children) } : {}) }];
+            case 'grid':
+            case 'stack': return [{ ...block, children: filter(block.children) }];
+            case 'tabs': return [{ ...block, tabs: block.tabs.map((tab) => ({ ...tab, children: filter(tab.children) })) }];
+            case 'accordion': return [{ ...block, items: block.items.map((item) => ({ ...item, children: filter(item.children) })) }];
+            default: return [block];
+          }
+        });
+        blocks.push(...filter(result.blocks));
+      }
       else errors.push(result.error);
     } catch (e) {
       errors.push(`Invalid neo-ui JSON: ${(e as Error).message}`);
     }
     return '';
   });
+
+  // Aggregate re-check across all fences: the combined blocks form one assistant
+  // message, so the per-message limits and uniqueness rules apply to the whole set.
+  // Run unconditionally — per-fence errors do not excuse the successfully parsed
+  // blocks from the aggregate limits.
+  if (blocks.length > MAX_UI_TOP_LEVEL) {
+    errors.push(`At most ${MAX_UI_TOP_LEVEL} top-level blocks are allowed.`);
+    blocks.splice(0);
+  } else {
+    let totalCount = 0;
+    const countBlocks = (b: UIBlock) => {
+      totalCount++;
+      for (const c of childBlocks(b)) countBlocks(c);
+    };
+    for (const b of blocks) countBlocks(b);
+    if (totalCount > MAX_UI_BLOCKS) {
+      errors.push(`At most ${MAX_UI_BLOCKS} UI blocks are allowed per message.`);
+      blocks.splice(0);
+    } else {
+      const ids = collectActions(blocks).map((a) => a.id);
+      const dup = ids.find((id, i) => ids.indexOf(id) !== i);
+      if (dup) {
+        errors.push(`Duplicate action id "${dup}"; action ids must be unique within a message.`);
+        blocks.splice(0);
+      }
+    }
+  }
+
   return { text: stripped.replace(/\n{3,}/g, '\n\n').trim(), blocks, errors };
 }
 
@@ -665,6 +855,7 @@ const TONE_PREFIX: Record<Tone, string> = {
 };
 
 function fmtTime(ms: number, timezone?: string): string {
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return '—';
   try {
     return new Date(ms).toLocaleString('en-US', {
       timeZone: timezone,
@@ -677,7 +868,27 @@ function fmtTime(ms: number, timezone?: string): string {
 }
 
 function actionsText(actions: UIAction[] | undefined): string {
-  return actions && actions.length ? actions.map((a) => `[${a.label}]`).join(' ') : '';
+  return actions && actions.length ? actions.map((a) => `[${a.label}]${a.kind === 'link' ? ` <${a.url}>` : ''}`).join(' ') : '';
+}
+
+/** Shared table formatting for visual clients and plain-text fallbacks. */
+export function formatTableCell(value: string | number | boolean | null | undefined, format: string | undefined, locale = 'en-US', currency = 'USD'): string {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'boolean') return value ? '✓' : '✗';
+  try {
+    if (typeof value === 'number') {
+      if (format === 'currency') return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(value);
+      if (format === 'percent') return new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 1 }).format(value);
+      if (format !== 'date') return new Intl.NumberFormat(locale, { maximumFractionDigits: 4 }).format(value);
+    }
+    if (format === 'date') {
+      const date = new Date(value);
+      if (!Number.isNaN(date.getTime())) return new Intl.DateTimeFormat(locale, { dateStyle: 'medium' }).format(date);
+    }
+  } catch {
+    // Invalid stored formats fall back to their original value.
+  }
+  return String(value);
 }
 
 /** Render a block tree as readable plain text (CLI, notifications, model summaries). */
@@ -712,18 +923,18 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       block.items.forEach((item, i) => {
         const bullet = block.ordered ? `${i + 1}.` : '-';
         const extra = [item.subtitle, item.meta, item.badge].filter(Boolean).join(' · ');
-        push(`${bullet} ${item.title}${extra ? ` — ${extra}` : ''}${item.action ? ` [${item.action.label}]` : ''}`);
+        push(`${bullet} ${item.title}${extra ? ` — ${extra}` : ''}${item.action ? ` ${actionsText([item.action])}` : ''}`);
       });
       break;
     case 'table': {
       if (block.caption) push(block.caption);
       const cols = block.columns;
-      const cell = (v: unknown) => (v === null || v === undefined ? '' : String(v));
-      const widths = cols.map((c) => Math.min(40, Math.max(c.label.length, ...block.rows.map((r) => cell(r[c.key]).length))));
+      const cell = (r: TableBlock['rows'][number], c: TableBlock['columns'][number]) => formatTableCell(r[c.key], c.format, 'en-US', c.currency);
+      const widths = cols.map((c) => Math.min(40, Math.max(c.label.length, ...block.rows.map((r) => cell(r, c).length))));
       const row = (vals: string[]) => vals.map((v, i) => v.slice(0, 40).padEnd(widths[i] ?? 0)).join(' │ ');
       push(row(cols.map((c) => c.label)));
       push(widths.map((w) => '─'.repeat(w)).join('─┼─'));
-      for (const r of block.rows.slice(0, 50)) push(row(cols.map((c) => cell(r[c.key]))));
+      for (const r of block.rows.slice(0, 50)) push(row(cols.map((c) => cell(r, c))));
       if (block.rows.length > 50) push(`… ${block.rows.length - 50} more rows`);
       break;
     }
@@ -744,12 +955,21 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       const pct = Math.round(block.value * 100);
       const filled = Math.round(block.value * 20);
       push(`${block.label ? `${block.label} ` : ''}[${'█'.repeat(filled)}${'░'.repeat(20 - filled)}] ${pct}%`);
+      if (block.caption) push(block.caption);
       break;
     }
     case 'form':
       push(`📝 ${block.title ?? 'Form'}`);
       if (block.description) push(block.description);
-      for (const f of block.fields) push(`  • ${f.label}${f.required ? ' *' : ''} (${f.kind})`);
+      for (const f of block.fields) {
+        push(`  • ${f.label}${f.required ? ' *' : ''} (${f.kind})`);
+        if (f.help) push(`    ${f.help}`);
+        if (f.placeholder) push(`    ${f.placeholder}`);
+        if (f.options?.length) push(`    Options: ${f.options.map((o) => `${o.label} (${o.value})`).join(', ')}`);
+        const bounds = [f.min !== undefined ? `min ${f.min}` : '', f.max !== undefined ? `max ${f.max}` : '', f.step !== undefined ? `step ${f.step}` : ''].filter(Boolean);
+        if (bounds.length) push(`    ${bounds.join(', ')}`);
+        if (f.defaultValue !== undefined) push(`    Default: ${Array.isArray(f.defaultValue) ? f.defaultValue.join(', ') : f.defaultValue}`);
+      }
       push(`  [${block.submitLabel ?? 'Submit'}]`);
       break;
     case 'buttons':
@@ -759,12 +979,13 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       push(`🖼  ${block.alt}${block.caption ? ` — ${block.caption}` : ''}`);
       break;
     case 'gallery':
-      for (const img of block.images) push(`🖼  ${img.alt}`);
+      for (const img of block.images) push(`🖼  ${img.alt}${img.caption ? ` — ${img.caption}` : ''}`);
       break;
     case 'callout':
       push(`${TONE_PREFIX[block.tone]} ${block.title ? `${block.title}: ` : ''}${block.text}`);
       break;
     case 'code':
+      if (block.filename) push(block.filename);
       push(`\`\`\`${block.language ?? ''}\n${block.code}\n\`\`\``);
       break;
     case 'quote':
@@ -807,20 +1028,50 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       push(block.items.map((t) => `#${t.label}`).join(' '));
       break;
     case 'countdown':
-      push(`⏳ ${block.label} — ${fmtTime(block.until)}`);
+      push(`⏳ ${block.label} — ${fmtTime(block.until, block.timezone)}`);
       break;
     case 'reminder':
       push(
         `⏰ ${block.title} — ${fmtTime(block.dueAt, block.timezone)}${block.recurrenceText ? ` (${block.recurrenceText})` : ''} [${block.status}]`,
       );
+      if (block.notes) push(block.notes);
       break;
     case 'tasks':
       if (block.title) push(block.title);
-      for (const t of block.tasks) push(`  ${t.done ? '☑' : '☐'} ${t.title}${t.dueAt ? ` (due ${fmtTime(t.dueAt)})` : ''}`);
+      for (const t of block.tasks) push(`  ${t.done ? '☑' : '☐'} ${t.title}${t.dueAt != null ? ` (due ${fmtTime(t.dueAt)})` : ''}${t.priority ? ` [priority ${t.priority}]` : ''}`);
+      break;
+    case 'changes':
+      push(block.title ?? 'Proposed changes');
+      if (block.note) push(block.note);
+      for (const item of block.items) {
+        const applied = item.status === 'applied' ? ' (applied)' : '';
+        if (item.kind === 'reminder.create') {
+          push(`• New reminder: ${item.title}, ${fmtTime(item.dueAt, block.timezone ?? item.timezone)}${applied}`);
+          if (item.notes) push(`  ${item.notes}`);
+          continue;
+        }
+        const edits: string[] = [];
+        if (item.after.dueAt !== undefined) {
+          const time = (value: number | null | undefined) => value == null ? 'No due date' : fmtTime(value, block.timezone);
+          edits.push(`due ${time(item.before.dueAt)} → ${time(item.after.dueAt)}`);
+        }
+        if (item.after.title !== undefined) edits.push(`title ${item.before.title} → ${item.after.title}`);
+        if (item.kind === 'reminder.update' && item.after.timezone !== undefined) {
+          edits.push(`timezone ${item.before.timezone} → ${item.after.timezone}`);
+        }
+        if (item.kind === 'task.update') {
+          if (item.after.priority !== undefined) edits.push(`priority ${item.before.priority} → ${item.after.priority}`);
+          if (item.after.done !== undefined) edits.push(item.after.done ? 'Mark done' : 'Reopen');
+        }
+        push(`• ${item.title}: ${edits.join('; ')}${applied}`);
+      }
       break;
     case 'memory':
       push(`🧠 ${block.title ?? 'Memory'}${block.note ? ` — ${block.note}` : ''}`);
-      for (const n of block.nodes) push(`  • [${n.kind}] ${n.label}`);
+      for (const n of block.nodes) {
+        push(`  • [${n.kind}] ${n.label}${n.status && n.status !== 'active' ? ` (${n.status})` : ''}`);
+        if (n.content && n.content !== n.label) push(`    ${n.content}`);
+      }
       break;
   }
   return lines.join('\n');
@@ -834,48 +1085,71 @@ export function uiBlocksToText(blocks: UIBlock[]): string {
 
 /**
  * Built-in controls of live widgets (task checkboxes, reminder snooze/done,
- * memory forget). Clients send these action ids to the
+ * memory forget, proposed change apply). Clients send these action ids to the
  * ui-action endpoint; the server resolves them against the STORED block with
  * {@link resolveWidgetAction}, so a client can only act on items the block shows.
  */
 export const widgetActionId = {
-  taskToggle: (taskId: string) => `task.toggle:${taskId}`,
-  reminderSnooze: (minutes: number) => `reminder.snooze:${minutes}`,
-  reminderComplete: () => 'reminder.complete',
-  memoryForget: (nodeId: string) => `memory.forget:${nodeId}`,
+  taskToggle: (taskId: string) => `${UI_ACTION_ID_PREFIX}task.toggle:${encodeURIComponent(taskId)}`,
+  reminderSnooze: (reminderId: string, minutes: number) => `${UI_ACTION_ID_PREFIX}reminder.snooze:${encodeURIComponent(reminderId)}:${minutes}`,
+  reminderComplete: (reminderId: string) => `${UI_ACTION_ID_PREFIX}reminder.complete:${encodeURIComponent(reminderId)}`,
+  memoryForget: (nodeId: string) => `${UI_ACTION_ID_PREFIX}memory.forget:${encodeURIComponent(nodeId)}`,
+  changeApply: (itemId: string) => `${UI_ACTION_ID_PREFIX}change.apply:${encodeURIComponent(itemId)}`,
 } as const;
-
-function allBlocks(root: UIBlock): UIBlock[] {
-  const out: UIBlock[] = [];
-  const visit = (b: UIBlock) => {
-    out.push(b);
-    childBlocks(b).forEach(visit);
-  };
-  visit(root);
-  return out;
-}
 
 /** Map a widget action id to the tool action it stands for, or null when it doesn't apply to this block tree. */
 export function resolveWidgetAction(root: UIBlock, actionId: string, values?: Record<string, unknown>): UIAction | null {
-  const [verb, arg = ''] = actionId.split(/:(.*)/s, 2) as [string, string | undefined];
-  for (const b of allBlocks(root)) {
-    if (b.type === 'tasks' && verb === 'task.toggle') {
+  const blocks = [...walkUIBlocks(root)].map(({ block }) => block);
+  const snooze = actionId.match(/^__neo:reminder\.snooze:([^:]+):([^:]+)$/);
+  const complete = actionId.match(/^__neo:reminder\.complete:([^:]+)$/);
+  const legacySnooze = actionId.match(/^reminder\.snooze:([^:]+)$/);
+  const legacyComplete = actionId === 'reminder.complete';
+  if (snooze || complete || legacySnooze || legacyComplete) {
+    const minutes = snooze || legacySnooze ? Number(snooze?.[2] ?? legacySnooze?.[1]) : undefined;
+    if (minutes !== undefined && (!Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60)) return null;
+    let reminderId: string | undefined;
+    if (snooze || complete) {
+      try {
+        reminderId = decodeURIComponent((snooze ?? complete)![1]!);
+      } catch {
+        return null;
+      }
+    }
+    const reminders = blocks.filter((b): b is ReminderBlock => b.type === 'reminder'
+      && (reminderId === undefined || b.reminderId === reminderId));
+    if (reminderId === undefined && reminders.length > 1) {
+      throw new NeoError('not_found', 'This reminder action is ambiguous; the stored UI contains multiple reminders.');
+    }
+    const reminder = reminders[0];
+    if (!reminder) return null;
+    return minutes === undefined
+      ? { id: actionId, label: 'Done', kind: 'tool', tool: 'complete_reminder', input: { id: reminder.reminderId } }
+      : { id: actionId, label: `Snooze ${minutes} min`, kind: 'tool', tool: 'snooze_reminder', input: { id: reminder.reminderId, minutes } };
+  }
+  const taskToggle = actionId.match(/^__neo:task\.toggle:(.+)$/);
+  const memoryForget = actionId.match(/^__neo:memory\.forget:(.+)$/);
+  const changeApply = actionId.match(/^__neo:change\.apply:(.+)$/);
+  const target = taskToggle ?? memoryForget ?? changeApply;
+  if (!target) return null;
+  let arg: string;
+  try {
+    arg = decodeURIComponent(target[1]!);
+  } catch {
+    return null;
+  }
+  for (const b of blocks) {
+    if (b.type === 'changes' && changeApply) {
+      const item = b.items.find((item) => item.id === arg && item.status !== 'applied');
+      if (item) return { id: actionId, label: 'Apply change', kind: 'tool', tool: 'apply_change', input: { item } };
+    }
+    if (b.type === 'tasks' && taskToggle) {
       const task = b.tasks.find((t) => t.id === arg);
       if (!task) continue;
       const done = typeof values?.done === 'boolean' ? values.done : !task.done;
       return { id: actionId, label: done ? 'Complete task' : 'Reopen task', kind: 'tool', tool: 'update_task', input: { id: task.id, done } };
     }
-    if (b.type === 'reminder' && verb === 'reminder.snooze') {
-      const minutes = Number(arg);
-      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60) return null;
-      return { id: actionId, label: `Snooze ${minutes} min`, kind: 'tool', tool: 'snooze_reminder', input: { id: b.reminderId, minutes } };
-    }
-    if (b.type === 'reminder' && verb === 'reminder.complete') {
-      return { id: actionId, label: 'Done', kind: 'tool', tool: 'complete_reminder', input: { id: b.reminderId } };
-    }
-    if (b.type === 'memory' && verb.startsWith('memory.') && b.nodes.some((n) => n.id === arg)) {
-      if (verb === 'memory.forget')
-        return { id: actionId, label: 'Forget', kind: 'tool', tool: 'forget', input: { ids: [arg] }, style: 'danger', confirm: 'Forget this memory for good?' };
+    if (b.type === 'memory' && memoryForget && b.nodes.some((n) => n.id === arg && n.status !== 'forgotten')) {
+      return { id: actionId, label: 'Forget', kind: 'tool', tool: 'forget', input: { ids: [arg] }, style: 'danger', confirm: 'Forget this memory for good?' };
     }
   }
   return null;

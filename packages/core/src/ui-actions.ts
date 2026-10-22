@@ -6,13 +6,16 @@
 import { createHash } from 'node:crypto';
 import {
   FORM_SUBMIT_ACTION_ID,
+  UI_ACTION_ID_PREFIX,
   NeoError,
-  childBlocks,
+  RecurrenceSchema,
   collectActions,
+  describeRecurrence,
+  formSubmitActionId,
   resolveWidgetAction,
   validateUIBlocks,
+  walkUIBlocks,
   type ContentPart,
-  type FormBlock,
   type UIAction,
   type UIBlock,
   type UIPart,
@@ -67,36 +70,33 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function findForm(block: UIBlock): FormBlock | null {
-  if (block.type === 'form') return block;
-  for (const child of childBlocks(block)) {
-    const form = findForm(child);
-    if (form) return form;
-  }
-  return null;
-}
-
 /**
  * The action `actionId` declared by `block`: a form submission, a live-widget
- * control (task toggle, reminder snooze/done, memory forget) or an
+ * control (task toggle, reminder snooze/done, memory forget, change apply) or an
  * action listed in the block tree. Null when the block declares no such action.
  */
 export function resolveStoredAction(block: UIBlock, actionId: string, values?: Record<string, unknown>): ResolvedUiAction | null {
   const clientValues = isPlainObject(values) ? values : undefined;
-  if (actionId === FORM_SUBMIT_ACTION_ID) {
-    const form = findForm(block);
-    if (!form) return null;
+  if (actionId === FORM_SUBMIT_ACTION_ID || actionId.startsWith(`${UI_ACTION_ID_PREFIX}form.submit:`)) {
+    const forms = [...walkUIBlocks(block)].filter(({ block: candidate, path }) => candidate.type === 'form'
+      && (actionId === FORM_SUBMIT_ACTION_ID || formSubmitActionId(candidate, path) === actionId));
+    if (forms.length > 1) throw new NeoError('not_found', `Action "${actionId}" is ambiguous: more than one form matches.`);
+    const form = forms[0]?.block;
+    if (!form || form.type !== 'form') return null;
     const fields = new Set(form.fields.map((f) => f.name));
     const declared = Object.fromEntries(Object.entries(clientValues ?? {}).filter(([name]) => fields.has(name)));
     return {
-      action: { id: FORM_SUBMIT_ACTION_ID, label: form.submitLabel || 'Submit', kind: 'event' },
+      action: { id: actionId, label: form.submitLabel || 'Submit', kind: 'event' },
       values: declared,
     };
   }
   const widget = resolveWidgetAction(block, actionId, clientValues);
   if (widget) return { action: widget };
+  if (actionId.startsWith(UI_ACTION_ID_PREFIX)) return null;
   const action = collectActions([block]).find((a) => a.id === actionId);
   if (!action) return null;
+  // Only a trusted changes snapshot may provide apply_change input.
+  if (action.kind === 'tool' && action.tool === 'apply_change') return null;
   return clientValues ? { action, values: clientValues } : { action };
 }
 
@@ -143,6 +143,14 @@ function patchReminder(block: ReminderBlock, reminder: Record<string, unknown>):
   const next = { ...block };
   if (typeof reminder.dueAt === 'number') next.dueAt = reminder.dueAt;
   if (typeof reminder.title === 'string') next.title = reminder.title.slice(0, 300);
+  if (typeof reminder.timezone === 'string') next.timezone = reminder.timezone.slice(0, 64);
+  if (typeof reminder.notes === 'string') next.notes = reminder.notes.slice(0, 5000);
+  else if (reminder.notes === null) delete next.notes;
+  if (reminder.recurrence === null) delete next.recurrenceText;
+  else if (reminder.recurrence !== undefined) {
+    const recurrence = RecurrenceSchema.safeParse(reminder.recurrence);
+    if (recurrence.success) next.recurrenceText = describeRecurrence(recurrence.data).slice(0, 200);
+  }
   if (REMINDER_STATUSES.includes(reminder.status as ReminderBlock['status'])) next.status = reminder.status as ReminderBlock['status'];
   return next;
 }
@@ -151,18 +159,32 @@ function patchReminder(block: ReminderBlock, reminder: Record<string, unknown>):
  * Apply a tool's output to the live widgets of a block tree: `{ task }` updates the
  * matching item of `tasks` widgets, `{ reminder }` the matching `reminder` widget
  * (the shapes returned by update_task / snooze_reminder / complete_reminder…).
+ * `{ change }` marks a proposed change applied alongside any task/reminder update.
+ * `{ forgotten, ids }` marks matching memory nodes forgotten, using ids rather than labels.
  * Returns the patched block, or null when nothing changed or the result would be invalid.
  */
 export function patchWidgetBlock(block: UIBlock, output: unknown): UIBlock | null {
   if (!isPlainObject(output)) return null;
   const task = isPlainObject(output.task) && typeof output.task.id === 'string' ? output.task : null;
   const reminder = isPlainObject(output.reminder) && typeof output.reminder.id === 'string' ? output.reminder : null;
-  if (!task && !reminder) return null;
+  const change = isPlainObject(output.change) && typeof output.change.id === 'string' && output.change.status === 'applied' ? output.change : null;
+  const forgottenIds = Array.isArray(output.forgotten) && Array.isArray(output.ids) && output.ids.every((id) => typeof id === 'string')
+    ? new Set(output.ids as string[]) : null;
+  if (!task && !reminder && !change && !forgottenIds?.size) return null;
   const patched = mapTree(block, (b) => {
+    if (change && b.type === 'changes' && b.items.some((item) => item.id === change.id)) {
+      return { ...b, items: b.items.map((item) => item.id === change.id ? {
+        ...item, status: 'applied' as const,
+        ...(item.kind === 'reminder.create' && typeof change.reminderId === 'string' ? { reminderId: change.reminderId } : {}),
+      } : item) };
+    }
     if (task && b.type === 'tasks' && b.tasks.some((t) => t.id === task.id)) {
       return { ...b, tasks: b.tasks.map((t) => (t.id === task.id ? patchTask(t, task) : t)) };
     }
     if (reminder && b.type === 'reminder' && b.reminderId === reminder.id) return patchReminder(b, reminder);
+    if (forgottenIds && b.type === 'memory' && b.nodes.some((node) => forgottenIds.has(node.id))) {
+      return { ...b, nodes: b.nodes.map((node) => forgottenIds.has(node.id) ? { ...node, status: 'forgotten' as const } : node) };
+    }
     return b;
   });
   if (JSON.stringify(patched) === JSON.stringify(block)) return null;

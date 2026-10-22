@@ -197,7 +197,7 @@ const names = (maxItems: number, maxLen: number) =>
 const opt = <T extends z.ZodType>(schema: T) => schema.optional().catch(undefined);
 
 function parseDate(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0 && Math.abs(value) <= 8.64e15) return value;
   if (typeof value === 'string' && value.trim()) {
     const ms = Date.parse(value.trim());
     if (Number.isFinite(ms)) return ms;

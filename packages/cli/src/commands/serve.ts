@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { loadConfig, startServer, type LoadConfigOptions } from '@neo/server';
 import { buildPairingUrl } from '@neo/protocol';
 import QRCode from 'qrcode';
-import { expandHome, resolveDataDir } from '../config-file.js';
+import { expandHome } from '../config-file.js';
 import { renderBanner } from '../render.js';
 
 export interface ServeOptions {
@@ -21,12 +21,15 @@ export interface ServeOptions {
 }
 
 export async function runServe(opts: ServeOptions): Promise<void> {
-  const dataDir = resolveDataDir(opts.dataDir);
-
   // Build overrides from CLI flags
   const overrides: Record<string, unknown> = {};
   if (opts.mode === 'local' || opts.mode === 'server') overrides['mode'] = opts.mode;
-  overrides['dataDir'] = dataDir;
+  // Only override dataDir when the flag is explicitly provided.
+  // NEO_DATA_DIR is handled by loadConfig's env layer; the config file's dataDir
+  // is used when neither flag nor env is set.
+  if (opts.dataDir !== undefined) {
+    overrides['dataDir'] = expandHome(opts.dataDir);
+  }
   if (opts.host || opts.port !== undefined || opts.webDir || opts.logLevel) {
     const serverObj: Record<string, unknown> = {};
     if (opts.host) serverObj['host'] = opts.host;
@@ -38,20 +41,17 @@ export async function runServe(opts: ServeOptions): Promise<void> {
     }
   }
 
-  // Auto-detect web dir if not provided
-  if (!opts.webDir && !overrides['server']) {
-    const webDir = detectWebDir();
-    if (webDir) overrides['server'] = { webDir };
-  } else if (!opts.webDir && overrides['server'] && !(overrides['server'] as Record<string, unknown>)['webDir']) {
-    const webDir = detectWebDir();
-    if (webDir) (overrides['server'] as Record<string, unknown>)['webDir'] = webDir;
-  }
-
   const loadOpts: LoadConfigOptions = {
     path: opts.config,
     overrides: overrides as LoadConfigOptions['overrides'],
   };
   const config = loadConfig(loadOpts);
+
+  // Auto-detect only when config file, env, and CLI flags left webDir unset.
+  if (!config.server.webDir) {
+    const webDir = detectWebDir();
+    if (webDir) config.server.webDir = webDir;
+  }
 
   // Start the server
   const server = await startServer(config);

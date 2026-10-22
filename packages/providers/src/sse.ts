@@ -10,6 +10,7 @@
  * the body itself does not observe the signal; leaving the loop early cancels
  * the body so the connection is released.
  */
+import { NeoError } from '@neo/protocol';
 import { cancelledError } from './shared.js';
 import type { SSEMessage } from './index.js';
 
@@ -66,7 +67,7 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>, signal?: Abort
         result = await (signal ? Promise.race([reader.read(), abortPromise]) : reader.read());
       } catch (err) {
         if (signal?.aborted) throw cancelledError(err);
-        throw err;
+        throw new NeoError('stream_read_failed', 'The response body failed mid-stream.', { retryable: true, cause: err });
       }
       if (result.done) {
         done = true;
@@ -75,10 +76,16 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>, signal?: Abort
         if (buf) {
           const msg = processLine(buf.endsWith('\r') ? buf.slice(0, -1) : buf);
           buf = '';
-          if (msg) yield msg;
+          if (msg) {
+            if (signal?.aborted) throw cancelledError(signal.reason);
+            yield msg;
+          }
         }
         const last = takeEvent();
-        if (last) yield last;
+        if (last) {
+          if (signal?.aborted) throw cancelledError(signal.reason);
+          yield last;
+        }
         return;
       }
       buf += decoder.decode(result.value, { stream: true });
@@ -93,13 +100,24 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>, signal?: Abort
         if (ch === '\r' && buf[i + 1] === '\n') i++;
         start = i + 1;
         const msg = processLine(line);
-        if (msg) yield msg;
+        if (msg) {
+          if (signal?.aborted) throw cancelledError(signal.reason);
+          yield msg;
+        }
       }
       buf = buf.slice(start);
     }
   } finally {
+    if (!done) {
+      const cancelPromise = reader.cancel().catch(() => {});
+      // Race cancel against abort, including a later abort while cancel is pending,
+      // so a never-resolving cancel callback cannot hold the generator open after abort.
+      const settled = signal
+        ? Promise.race([cancelPromise, abortPromise.catch(() => undefined)])
+        : cancelPromise;
+      await settled;
+    }
     signal?.removeEventListener('abort', onAbort);
-    if (!done) await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }

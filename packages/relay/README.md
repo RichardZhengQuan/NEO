@@ -99,9 +99,10 @@ milliseconds. Connection/count/byte/timing overrides are positive integers.
 | `RELAY_BYTES_PER_SECOND` | `4194304` | Per-phone sustained rate, both directions combined (4 MiB/s) |
 | `RELAY_BURST_BYTES` | `16777216` | Per-phone token-bucket burst capacity (16 MiB) |
 | `RELAY_MAX_BUFFERED_BYTES` | `8388608` | Destination queue cap (8 MiB) |
-| `RELAY_REGISTRATION_TIMEOUT_MS` | `10000` | Time to register after the challenge |
-| `RELAY_PHONE_IDLE_TIMEOUT_MS` | `120000` | No phone traffic in either direction |
-| `RELAY_HEARTBEAT_INTERVAL_MS` | `30000` | Server ping interval; a missed pong terminates it |
+| `RELAY_REGISTRATION_TIMEOUT_MS` | `10000` | Time to register after the challenge. Capped at `2147483647` (Node's `setTimeout` range); larger values fail startup |
+| `RELAY_PHONE_IDLE_TIMEOUT_MS` | `120000` | No phone traffic in either direction. Capped at `2147483647`; larger values fail startup |
+| `RELAY_HEARTBEAT_INTERVAL_MS` | `30000` | Server ping interval; a missed pong terminates it. Capped at `2147483647`; larger values fail startup |
+| `RELAY_CLOSE_TIMEOUT_MS` | `250` | Deadline for a half-open peer to finish closing before `ws.terminate()` is called (also the refused-upgrade raw-socket destroy deadline). Capped at `2147483647`; larger values fail startup |
 
 Noise messages are capped at 65,535 bytes; the server-side relay header adds
 five bytes. Text phone messages and text messages after server registration

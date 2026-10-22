@@ -14,7 +14,9 @@ import { appDictionaries } from '../i18n.js';
 import { applyTimelineEvent, emptyEntry, resetTimeline, useTimeline } from '../state/timeline.js';
 import { startSession, useSession } from '../state/session.js';
 import { useToasts } from '../state/notifications.js';
+import { useData } from '../state/data.js';
 import { applyTurnResponse, composeBody, retryTurn, sendMessage, cancelTurn, endTimelineOffRecord, setOffRecord, deleteMessage, deleteRange, respondToConfirmation, runUiAction, UiActionCancelled } from './timeline.js';
+import { UI_ACTION_ID_PREFIX, widgetActionId } from '@neo/protocol';
 
 const t = createTranslator('en', buildMessages('en', appDictionaries));
 
@@ -105,6 +107,33 @@ describe('runUiAction with server confirmation', () => {
   });
 });
 
+describe('runUiAction memory version bump by widget id (#524)', () => {
+  // A memory widget whose tool name is NOT caught by /memory|forget|remember/
+  // must still bump memoryVersion via the id-prefix branch of the guard: the
+  // prefix changed from the bare `memory.` to `__neo:memory.`, so the id
+  // branch has to be prefix-aware or memory screens stop refreshing on tools
+  // like pin_memory or archive_memory.
+  const toolWithoutMemoryKeyword = 'pin_item' as const;
+  const memoryAction = (id: string): UIAction =>
+    ({ id, kind: 'tool', tool: toolWithoutMemoryKeyword, label: 'Pin', input: { id: 'mem_1' } });
+
+  it('a prefixed memory widget id bumps memoryVersion even when the tool name does not match the keyword regex', async () => {
+    const before = useData.getState().memoryVersion;
+    const { client } = fakeClient([done]);
+    const id = widgetActionId.memoryForget('mem_1').replace('memory.forget', 'memory.pin');
+    expect(id.startsWith(UI_ACTION_ID_PREFIX + 'memory.')).toBe(true);
+    await runUiAction(client, { messageId: 'msg_1', uiId: 'ui_1', action: memoryAction(id) }, t, async () => true);
+    expect(useData.getState().memoryVersion).toBe(before + 1);
+  });
+
+  it('a bare "memory." id does NOT bump memoryVersion (guard is prefix-only)', async () => {
+    const before = useData.getState().memoryVersion;
+    const { client } = fakeClient([done]);
+    await runUiAction(client, { messageId: 'msg_1', uiId: 'ui_1', action: memoryAction('memory.forget:mem_1') }, t, async () => true);
+    expect(useData.getState().memoryVersion).toBe(before);
+  });
+});
+
 // ── F09: composeBody ─────────────────────────────────────────────────────────
 
 const img: ImagePart = { type: 'image', mediaType: 'image/png', data: 'base64abc' };
@@ -191,6 +220,35 @@ describe('retryTurn preserves composed input (F09)', () => {
     useSession.setState({ wsStatus: 'idle' });
     await retryTurn(client, assistant, t);
     expect(stream).toHaveBeenCalledWith(expected, expect.any(AbortSignal));
+  });
+});
+
+describe('retryTurn cross-turn boundary guard', () => {
+  it('retry does not resend another turn after its user message is deleted', async () => {
+    const user1: Message = {
+      id: 'user_1', episodeId: 'ep_1', conversationId: 'ep_1',
+      role: 'user', parts: [{ type: 'text', text: 'Old request' }],
+      createdAt: 1, status: 'complete', turnId: 'turn_1',
+    };
+    const assistant1: Message = {
+      id: 'assistant_1', episodeId: 'ep_1', conversationId: 'ep_1',
+      role: 'assistant', parts: [], createdAt: 2, status: 'complete', turnId: 'turn_1',
+    };
+    // user2 ("New request") is deleted — not in the messages list
+    const assistant2: Message = {
+      id: 'assistant_2', episodeId: 'ep_1', conversationId: 'ep_1',
+      role: 'assistant', parts: [], createdAt: 4, status: 'error', turnId: 'turn_2',
+    };
+    useTimeline.setState({ messages: [user1, assistant1, assistant2] });
+    const stream = vi.fn(async function* () {});
+    const client = { timeline: { stream } } as unknown as NeoClient;
+    useSession.setState({ wsStatus: 'idle' });
+    await retryTurn(client, assistant2, t);
+    // Must not send the previous turn's text
+    expect(stream).not.toHaveBeenCalledWith(expect.objectContaining({ text: 'Old request' }), expect.anything());
+    // Must surface retry_unavailable toast instead
+    expect(useToasts.getState().toasts[0]?.tone).toBe('warning');
+    expect(useToasts.getState().toasts[0]?.title).toBe("This message can't be sent again.");
   });
 });
 

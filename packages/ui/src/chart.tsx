@@ -60,7 +60,11 @@ export function niceTicks(min: number, max: number, count = 4): number[] {
   const start = Math.floor(min / step) * step;
   const end = Math.ceil(max / step) * step;
   const out: number[] = [];
-  for (let v = start; v <= end + step / 2; v += step) out.push(Number(v.toPrecision(12)));
+  // Overflow can make both v and the end threshold Infinity; bound by index too.
+  for (let i = 0, v = start; i < count + 2 && v <= end + step / 2; i++, v += step) {
+    if (!Number.isFinite(v)) break;
+    out.push(Number(v.toPrecision(12)));
+  }
   return out;
 }
 
@@ -265,14 +269,18 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
   // Lines / areas
   const lines: ReactElement[] = [];
   if (kind === 'line' || kind === 'area') {
-    const cumulative = categories.map(() => 0);
+    const cumulativePos = categories.map(() => 0);
+    const cumulativeNeg = categories.map(() => 0);
     values.forEach((row, si) => {
       const pts: { x: number; y: number; base: number }[] = [];
       row.forEach((v, ci) => {
         if (v === null) return;
-        const base = stacked ? cumulative[ci]! : 0;
+        const base = stacked ? (v >= 0 ? cumulativePos[ci]! : cumulativeNeg[ci]!) : 0;
         const top = base + v;
-        if (stacked) cumulative[ci] = top;
+        if (stacked) {
+          if (v >= 0) cumulativePos[ci] = top;
+          else cumulativeNeg[ci] = top;
+        }
         pts.push({ x: xCenter(ci), y: y(top), base: y(Math.max(yMin, Math.min(yMax, base))) });
       });
       if (pts.length === 0) return;

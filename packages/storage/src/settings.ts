@@ -19,6 +19,8 @@ const KEY = 'settings';
  * are merged over the current defaults, so new fields always get defaults.
  */
 export function createSettingsStore(db: NeoDatabase, defaults: NeoSettings = DEFAULT_SETTINGS): SettingsStore {
+  let updateGen = 0;
+  let publishGen = 0;
   const listeners = new Set<(s: NeoSettings) => void>();
 
   const read = (): NeoSettings => {
@@ -35,7 +37,8 @@ export function createSettingsStore(db: NeoDatabase, defaults: NeoSettings = DEF
     update(patch: NeoSettingsPatch) {
       let next: NeoSettings;
       try {
-        next = applySettingsPatch(current, patch);
+        // Read transaction-visible writes so successive patches keep earlier changes.
+        next = applySettingsPatch(read(), patch);
       } catch (err) {
         if (err instanceof z.ZodError) throw new NeoError('bad_request', 'Invalid settings.', { details: z.treeifyError(err) });
         throw err;
@@ -43,8 +46,14 @@ export function createSettingsStore(db: NeoDatabase, defaults: NeoSettings = DEF
       db.prepare(
         'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
       ).run(KEY, JSON.stringify(next), Date.now());
-      current = next;
-      for (const l of listeners) l(next);
+      // Publish only after the outermost commit; a rollback must leave the cache and listeners unchanged.
+      const gen = ++updateGen;
+      db.afterCommit(() => {
+        if (gen <= publishGen) return;
+        publishGen = gen;
+        current = next;
+        for (const l of listeners) l(next);
+      });
       return next;
     },
     onChange(listener) {

@@ -74,7 +74,8 @@ describe('icon-only navigation', () => {
   it('keeps the home avatar and live status together without a brand label', () => {
     renderShell();
     const brand = document.querySelector<HTMLButtonElement>('.side__brand')!;
-    expect(brand.getAttribute('aria-label')).toBe('NEO');
+    expect(screen.getByRole('button', { name: 'NEO, Connected' })).toBe(brand);
+    expect(brand.textContent).toBe('');
     expect(brand.querySelector('.neo-av')).not.toBeNull();
     expect(document.querySelector('.side__name')).toBeNull();
     expect(screen.queryByText('NEO')).toBeNull();
@@ -125,14 +126,81 @@ describe('icon-only navigation', () => {
       const badge = button.querySelector(badgeClass)!;
       expect(badge.textContent).toBe(text);
       expect(badge.getAttribute('aria-hidden')).toBe('true');
-      expect(screen.getByRole('button', { name: 'Reminders' })).toBe(button);
+      expect(screen.getByRole('button', { name: `Reminders, ${count} due` })).toBe(button);
     }
     act(() => seedReminders(0));
     expect(button.querySelector(badgeClass)).toBeNull();
   });
 });
 
+describe('accessible names for badges and status', () => {
+  it.each([
+    [true, 'en', 'Reminders', 'Reminders, 3 due'],
+    [false, 'en', 'Reminders', 'Reminders, 3 due'],
+    [true, 'zh-CN', '提醒', '提醒，3 条待处理'],
+    [false, 'zh-CN', '提醒', '提醒，3 条待处理'],
+  ] as const)('includes the badge count (desktop=%s, locale=%s)', (isDesktop, locale, plainName, badgedName) => {
+    desktop = isDesktop;
+    renderShell(locale);
+    const button = screen.getByRole('button', { name: plainName });
+    expect(button.textContent).toBe('');
+    act(() => seedReminders(3));
+    expect(screen.getByRole('button', { name: badgedName })).toBe(button);
+    expect(screen.queryByRole('button', { name: plainName })).toBeNull();
+  });
+
+  it.each([
+    [true, 'en', 'Reminders', 'Reminders, 2 due'],
+    [false, 'en', 'Reminders', 'Reminders, 2 due'],
+    [true, 'zh-CN', '提醒', '提醒，2 条待处理'],
+    [false, 'zh-CN', '提醒', '提醒，2 条待处理'],
+  ] as const)('returns to the plain name when the badge clears (desktop=%s, locale=%s)', (isDesktop, locale, plainName, badgedName) => {
+    desktop = isDesktop;
+    renderShell(locale);
+    act(() => seedReminders(2));
+    const button = screen.getByRole('button', { name: badgedName });
+    act(() => seedReminders(0));
+    expect(screen.getByRole('button', { name: plainName })).toBe(button);
+    expect(screen.queryByRole('button', { name: badgedName })).toBeNull();
+    expect(button.textContent).toBe('');
+  });
+
+  it.each([true, false])('updates the home name with connection status (desktop=%s)', (isDesktop) => {
+    desktop = isDesktop;
+    renderShell();
+    if (!isDesktop) act(() => setDrawer(true));
+    const brand = screen.getByRole('button', { name: 'NEO, Connected' });
+    expect(brand.className).toBe('side__brand');
+    act(() => useSession.setState({ wsStatus: 'reconnecting' }));
+    expect(screen.getByRole('button', { name: 'NEO, Reconnecting…' })).toBe(brand);
+    expect(screen.queryByRole('button', { name: 'NEO, Connected' })).toBeNull();
+    expect(brand.textContent).toBe('');
+  });
+
+  it.each(['en', 'zh-CN'] as const)('announces the home connection status in %s', (locale) => {
+    renderShell(locale);
+    const expectedStatus = appDictionaries[locale]['status.open'];
+    const expectedName = appDictionaries[locale]['nav.timeline'];
+    const expectedHome = (appDictionaries[locale]['nav.home_label'] as string)
+      .replace('{name}', expectedName as string)
+      .replace('{status}', expectedStatus as string);
+    expect(screen.getByRole('button', { name: expectedHome }).className).toBe('side__brand');
+  });
+});
+
 describe('rail tooltips', () => {
+  it('keeps home and badged navigation tooltip text unchanged', () => {
+    renderShell();
+    act(() => seedReminders(3));
+    for (const [ariaLabel, label] of [['NEO, Connected', 'NEO'], ['Reminders, 3 due', 'Reminders']] as const) {
+      const button = screen.getByRole('button', { name: ariaLabel });
+      fireEvent.focus(button);
+      expect(screen.getByRole('tooltip', { hidden: true }).textContent).toBe(label);
+      expect(screen.getByRole('button', { name: ariaLabel })).toBe(button);
+      fireEvent.blur(button);
+    }
+  });
+
   it.each(['en', 'zh-CN'] as const)('shows the translated tooltip immediately on focus without repeating its accessible name in %s', (locale) => {
     renderShell(locale);
     const label = appDictionaries[locale]['nav.memory'];

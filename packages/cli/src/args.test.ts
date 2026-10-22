@@ -49,8 +49,36 @@ describe('parseCliArgs', () => {
 
     it('rejects bad port', () => {
       const r = parseCliArgs(['serve', '--port', 'abc']);
-      expect(r).toHaveProperty('error');
+      expect(r).toEqual({ error: 'Invalid port: abc' });
     });
+
+    it('--port 7777junk → Invalid port', () => {
+      expect(parseCliArgs(['serve', '--port', '7777junk'])).toEqual({ error: 'Invalid port: 7777junk' });
+    });
+
+    it('--port 1e4 → Invalid port', () => {
+      expect(parseCliArgs(['serve', '--port', '1e4'])).toEqual({ error: 'Invalid port: 1e4' });
+    });
+
+    it('existing valid cases keep passing', () => {
+      expect(parseCliArgs(['serve', '--port', '8080'])).toMatchObject({ cmd: 'serve', port: 8080 });
+    });
+
+    it.each(['', '   ', '-1', '65536', '8080.5', '+8080', '0x1f90', '8080 90'])(
+      'rejects invalid decimal port %j', (input) => {
+        expect(parseCliArgs(['serve', '--port', input])).toHaveProperty('error');
+      },
+    );
+
+    it('rejects a negative port with equals syntax', () => {
+      expect(parseCliArgs(['serve', '--port=-1'])).toEqual({ error: 'Invalid port: -1' });
+    });
+
+    it.each([['0', 0], ['65535', 65535], [' 8080 ', 8080], ['008080', 8080]] as const)(
+      'accepts decimal port %j', (input, port) => {
+        expect(parseCliArgs(['serve', '--port', input])).toMatchObject({ cmd: 'serve', port });
+      },
+    );
 
     it('rejects bad mode', () => {
       const r = parseCliArgs(['serve', '--mode', 'invalid']);
@@ -120,6 +148,11 @@ describe('parseCliArgs', () => {
 
   // ── memory ──
   describe('memory', () => {
+    it('returns help for --help', () => {
+      expect(parseCliArgs(['memory', '--help'])).toEqual({ cmd: 'help', topic: 'memory' });
+      expect(parseCliArgs(['memory', '-h'])).toEqual({ cmd: 'help', topic: 'memory' });
+    });
+
     it('rejects missing subcommand', () => {
       const r = parseCliArgs(['memory']);
       expect(r).toHaveProperty('error');
@@ -143,9 +176,19 @@ describe('parseCliArgs', () => {
       expect(r).toMatchObject({ cmd: 'memory', sub: 'export', file: undefined });
     });
 
+    it('rejects memory export with extra file paths', () => {
+      const r = parseCliArgs(['memory', 'export', 'a.json', 'b.json']);
+      expect(r).toEqual({ error: 'memory export takes at most one file path, got: b.json' });
+    });
+
     it('parses memory import', () => {
       const r = parseCliArgs(['memory', 'import', '/tmp/export.json', '--replace']);
       expect(r).toMatchObject({ cmd: 'memory', sub: 'import', file: '/tmp/export.json', replace: true });
+    });
+
+    it('rejects memory import with extra file paths', () => {
+      const r = parseCliArgs(['memory', 'import', 'a.json', 'b.json']);
+      expect(r).toEqual({ error: 'memory import takes exactly one file path, got extra: b.json' });
     });
 
     it('rejects memory import with no file', () => {

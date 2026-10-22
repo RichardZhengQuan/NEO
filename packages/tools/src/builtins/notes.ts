@@ -6,6 +6,7 @@ import { NeoError, defineTool, type Note, type NotePatch, type ProductivityStore
 import { clip } from './format.js';
 
 const EXCERPT_CHARS = 200;
+const PREVIEW_CHARS = 1000;
 
 /** A title from the first meaningful line of Markdown ("# Trip to Lisbon" → "Trip to Lisbon"). */
 function deriveTitle(content: string): string {
@@ -15,6 +16,21 @@ function deriveTitle(content: string): string {
 
 function excerpt(content: string): string {
   return clip(content.replace(/\s+/g, ' ').trim(), EXCERPT_CHARS);
+}
+
+function preview(note: Note): UIBlock {
+  const content = note.content.trim();
+  let text = content;
+  if (content.length > PREVIEW_CHARS) {
+    const head = content.slice(0, PREVIEW_CHARS - 1);
+    const boundary = Math.max(head.lastIndexOf('\n'), head.lastIndexOf(' '));
+    text = `${head.slice(0, boundary >= PREVIEW_CHARS * 0.75 ? boundary : head.length).trimEnd()}…`;
+  }
+  return {
+    type: 'card',
+    title: clip(note.title || '(untitled)', 200),
+    children: [{ type: 'text', text }, { type: 'link', title: 'Open note', url: `neo://notes/${note.id}` }],
+  };
 }
 
 export function createNoteTools(stores: ProductivityStores) {
@@ -43,7 +59,7 @@ export function createNoteTools(stores: ProductivityStores) {
     async execute(input) {
       const title = input.title?.trim() || deriveTitle(input.content);
       const note = notes.create({ title, content: input.content, tags: input.tags ?? [] });
-      return { output: { note: brief(note) }, summary: `Saved note ${name(note)}` };
+      return { output: { note: brief(note) }, ui: [preview(note)], summary: `Saved note ${name(note)}` };
     },
   });
 
@@ -73,6 +89,7 @@ export function createNoteTools(stores: ProductivityStores) {
             ...(n.excerpt ? { subtitle: n.excerpt } : {}),
             icon: 'file-text',
             ...(n.tags.length ? { meta: clip(n.tags.join(', '), 100) } : {}),
+            action: { id: n.id, label: 'Open', kind: 'link' as const, url: `neo://notes/${n.id}` },
           })),
         },
       ];
@@ -89,7 +106,7 @@ export function createNoteTools(stores: ProductivityStores) {
     defaultPermission: 'auto',
     async execute(input) {
       const note = mustGet(input.id);
-      return { output: { note }, summary: `Read ${name(note)}` };
+      return { output: { note }, ui: [preview(note)], summary: `Read ${name(note)}` };
     },
   });
 
@@ -121,7 +138,7 @@ export function createNoteTools(stores: ProductivityStores) {
         patch.content = existing.content ? `${existing.content}\n${input.content}` : input.content;
       }
       const note = notes.update(existing.id, patch);
-      return { output: { note: { ...brief(note), length: note.content.length } }, summary: `Updated ${name(note)}` };
+      return { output: { note: { ...brief(note), length: note.content.length } }, ui: [preview(note)], summary: `Updated ${name(note)}` };
     },
   });
 
@@ -144,7 +161,7 @@ export function createNoteTools(stores: ProductivityStores) {
     async execute(input) {
       const existing = mustGet(input.id);
       const note = notes.update(existing.id, { content: input.content });
-      return { output: { note: { ...brief(note), length: note.content.length } }, summary: `Replaced content of ${name(note)}` };
+      return { output: { note: { ...brief(note), length: note.content.length } }, ui: [preview(note)], summary: `Replaced content of ${name(note)}` };
     },
   });
 

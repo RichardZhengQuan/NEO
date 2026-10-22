@@ -6,7 +6,7 @@ import { buildMessages, createTranslator } from '@neo/ui';
 import { appDictionaries } from '../i18n.js';
 import { EventSequencer, handleServerEvent, runReminderAction, type EventContext } from './events.js';
 import { emptyEntry, useTimeline } from './timeline.js';
-import { useData } from './data.js';
+import { loadReminders, refreshLoadedData, useData } from './data.js';
 import { useToasts } from './notifications.js';
 import { useSession } from './session.js';
 
@@ -30,6 +30,7 @@ const reminder: Reminder = {
 function fakeClient() {
   return {
     reminders: {
+      list: vi.fn(async () => ({ items: [reminder], nextCursor: null })),
       snooze: vi.fn(async (id: string) => ({ ...reminder, id, status: 'scheduled' as const, dueAt: 9999 })),
       complete: vi.fn(async (id: string) => ({ ...reminder, id, status: 'completed' as const })),
     },
@@ -55,7 +56,7 @@ function context(over: Partial<EventContext> = {}) {
 
 beforeEach(() => {
   useTimeline.setState(emptyEntry(), true);
-  useData.setState({ reminders: {}, tasks: {}, notes: {}, memoryVersion: 0, notifications: [], unreadNotifications: 0 });
+  useData.setState({ reminders: {}, reminderDeletions: {}, tasks: {}, notes: {}, memoryVersion: 0, notifications: [], unreadNotifications: 0 });
   useToasts.setState({ toasts: [] });
   useSession.setState({ settings: null });
 });
@@ -122,7 +123,55 @@ describe('handleServerEvent', () => {
     expect(useData.getState().reminders.rem_1!.status).toBe('completed');
     handleServerEvent({ type: 'reminder.deleted', reminderId: 'rem_1' }, ctx);
     expect(useData.getState().reminders.rem_1).toBeUndefined();
+    expect(useData.getState().reminderDeletions.rem_1).toBe(true);
     expect(ctx.syncReminders).toHaveBeenCalledTimes(2);
+    handleServerEvent({ type: 'reminder.updated', reminder }, ctx);
+    expect(useData.getState().reminderDeletions.rem_1).toBeUndefined();
+    expect(useData.getState().reminders.rem_1).toEqual(reminder);
+  });
+
+  it('keeps known deletions when a reminder list response still includes the old item', async () => {
+    const { ctx } = context();
+    handleServerEvent({ type: 'reminder.deleted', reminderId: 'rem_1' }, ctx);
+    await loadReminders(ctx.client);
+    expect(useData.getState().reminders.rem_1).toBeUndefined();
+    expect(useData.getState().reminderDeletions.rem_1).toBe(true);
+  });
+
+  it('remindersLoaded is true after any successful load; remindersComplete is true only when fewer than 500 items', async () => {
+    const { ctx, client } = context();
+    // Partial list: fewer than MAX_PAGE items → list is complete
+    client.reminders.list.mockResolvedValueOnce({ items: [reminder], nextCursor: null });
+    await loadReminders(ctx.client);
+    expect(useData.getState().remindersLoaded).toBe(true);
+    expect(useData.getState().remindersComplete).toBe(true);
+
+    // Reset state
+    useData.setState({ reminders: {}, reminderDeletions: {}, remindersLoaded: false, remindersComplete: false });
+
+    // Full page: exactly 500 items → list may be truncated; still marks as loaded (for reconnect), but not complete
+    const fullPage = Array.from({ length: 500 }, (_, i) => ({ ...reminder, id: `rem_${i}` }));
+    client.reminders.list.mockResolvedValueOnce({ items: fullPage, nextCursor: null });
+    await loadReminders(ctx.client);
+    expect(useData.getState().remindersLoaded).toBe(true);
+    expect(useData.getState().remindersComplete).toBe(false);
+  });
+
+  it('refreshLoadedData reloads reminders when 500+ were loaded (reconnect does not skip)', async () => {
+    const { ctx, client } = context();
+    // Seed state as if we already loaded 500+ reminders
+    const fullPage = Array.from({ length: 500 }, (_, i) => ({ ...reminder, id: `rem_${i}` }));
+    client.reminders.list.mockResolvedValueOnce({ items: fullPage, nextCursor: null });
+    await loadReminders(ctx.client);
+    expect(useData.getState().remindersLoaded).toBe(true);
+    expect(useData.getState().remindersComplete).toBe(false);
+
+    // Now simulate a reconnect: refreshLoadedData should call loadReminders again
+    const refreshPage = Array.from({ length: 10 }, (_, i) => ({ ...reminder, id: `rem_${i}` }));
+    client.reminders.list.mockResolvedValueOnce({ items: refreshPage, nextCursor: null });
+    await refreshLoadedData(ctx.client);
+    // loadReminders was called again (once for initial load, once for refresh)
+    expect(client.reminders.list).toHaveBeenCalledTimes(2);
   });
 
   it('task and note events update their caches', () => {

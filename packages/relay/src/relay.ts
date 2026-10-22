@@ -24,6 +24,7 @@ export interface RelayLimits {
   registrationTimeoutMs: number;
   phoneIdleTimeoutMs: number;
   heartbeatIntervalMs: number;
+  closeTimeoutMs: number;
 }
 
 export const DEFAULT_RELAY_LIMITS: Readonly<RelayLimits> = Object.freeze({
@@ -39,7 +40,16 @@ export const DEFAULT_RELAY_LIMITS: Readonly<RelayLimits> = Object.freeze({
   registrationTimeoutMs: 10_000,
   phoneIdleTimeoutMs: 120_000,
   heartbeatIntervalMs: 30_000,
+  closeTimeoutMs: 250,
 });
+
+const MAX_TIMER_MS = 2_147_483_647;
+const MS_LIMIT_FIELDS: ReadonlySet<keyof RelayLimits> = new Set([
+  'registrationTimeoutMs',
+  'phoneIdleTimeoutMs',
+  'heartbeatIntervalMs',
+  'closeTimeoutMs',
+]);
 
 export interface RelayStats {
   servers: number;
@@ -91,13 +101,46 @@ function bytes(data: RawData): Uint8Array {
   return data instanceof ArrayBuffer ? new Uint8Array(data) : data;
 }
 
+function canonicalizeIp(ip: string): string {
+  const kind = isIP(ip);
+  if (!kind) return ip;
+  // URL rejects zone-id IPv6 like fe80::1%eth0, so split the zone off, canonicalize the address,
+  // and re-attach the zone verbatim — the zone is a textual interface label, not part of the IP.
+  try {
+    if (kind === 6) {
+      const zoneAt = ip.indexOf('%');
+      const addr = zoneAt === -1 ? ip : ip.slice(0, zoneAt);
+      const zone = zoneAt === -1 ? '' : ip.slice(zoneAt);
+      const hostname = new URL(`http://[${addr}]/`).hostname;
+      const inner = hostname.startsWith('[') && hostname.endsWith(']')
+        ? hostname.slice(1, -1)
+        : hostname;
+      // Normalize IPv4-mapped IPv6 (::ffff:xxxx:yyyy, no zone) to plain IPv4
+      // so that socket.remoteAddress '::ffff:127.0.0.1' and an XFF value of
+      // '127.0.0.1' produce the same rate-limit key.
+      if (!zone) {
+        const m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(inner);
+        if (m) {
+          const hi = parseInt(m[1]!, 16);
+          const lo = parseInt(m[2]!, 16);
+          return `${(hi >>> 8) & 0xff}.${hi & 0xff}.${(lo >>> 8) & 0xff}.${lo & 0xff}`;
+        }
+      }
+      return inner + zone;
+    }
+    return new URL(`http://${ip}/`).hostname;
+  } catch {
+    return ip;
+  }
+}
+
 function clientIp(request: IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
     const header = request.headers['x-forwarded-for'];
     const first = (Array.isArray(header) ? header[0] : header)?.split(',')[0]?.trim();
-    if (first && isIP(first)) return first;
+    if (first && isIP(first)) return canonicalizeIp(first);
   }
-  return request.socket.remoteAddress ?? 'unknown';
+  return canonicalizeIp(request.socket.remoteAddress ?? 'unknown');
 }
 
 function listen(server: Server, host: string, port: number): Promise<number> {
@@ -123,6 +166,9 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
   const limits = { ...DEFAULT_RELAY_LIMITS, ...options.limits };
   for (const [name, value] of Object.entries(limits)) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`Invalid relay limit: ${name}`);
+    if (MS_LIMIT_FIELDS.has(name as keyof RelayLimits) && value > MAX_TIMER_MS) {
+      throw new Error(`Invalid relay limit: ${name}`);
+    }
   }
   const http = createServer((request, response) => {
     if (request.method === 'GET' && request.url === '/healthz') {
@@ -133,7 +179,7 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       response.end();
     }
   });
-  const sockets = new WebSocketServer({ noServer: true, maxPayload: NOISE_MAX_MESSAGE + RELAY_HEADER, perMessageDeflate: false });
+  const sockets = new WebSocketServer({ noServer: true, maxPayload: NOISE_MAX_MESSAGE + RELAY_HEADER, perMessageDeflate: false, autoPong: false });
   const servers = new Map<string, RegisteredServer>();
   const phones = new Map<number, Phone>();
   const perIpPhones = new Map<string, number>();
@@ -161,18 +207,25 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     return true;
   }
 
+  const terminateTimers = new WeakMap<WebSocket, ReturnType<typeof setTimeout>>();
+
   function closeSocket(socket: WebSocket, code: number, reason: string): void {
     if (socket.readyState === WebSocket.CLOSED) return;
-    const timeout = setTimeout(() => socket.terminate(), 250);
+    if (terminateTimers.has(socket)) return;
+    const timeout = setTimeout(() => socket.terminate(), limits.closeTimeoutMs);
     timeout.unref();
-    socket.once('close', () => clearTimeout(timeout));
+    terminateTimers.set(socket, timeout);
+    socket.once('close', () => { clearTimeout(timeout); terminateTimers.delete(socket); });
     if (socket.readyState === WebSocket.OPEN) socket.close(code, reason);
   }
 
-  function send(socket: WebSocket, data: string | Uint8Array): boolean {
+  function send(socket: WebSocket, data: string | Uint8Array, onWrite?: (error?: Error) => void): boolean {
     if (socket.readyState !== WebSocket.OPEN) return false;
     try {
-      socket.send(data, error => { if (error) socket.terminate(); });
+      socket.send(data, error => {
+        if (error) { socket.terminate(); onWrite?.(error); }
+        else onWrite?.();
+      });
       return true;
     } catch {
       socket.terminate();
@@ -211,14 +264,15 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
 
   function consume(phone: Phone, size: number): boolean {
     const now = clock();
+    const charge = Math.max(1, size);
     phone.tokens = Math.min(limits.burstBytes, phone.tokens + Math.max(0, now - phone.tokenTime) * limits.bytesPerSecond / 1000);
-    phone.tokenTime = now;
-    if (size > phone.tokens) {
+    if (now > phone.tokenTime) phone.tokenTime = now;
+    if (charge > phone.tokens) {
       closePhone(phone, TunnelCloseCode.RateLimited, 'Byte rate limit exceeded');
       return false;
     }
-    phone.tokens -= size;
-    phone.lastActivity = now;
+    phone.tokens -= charge;
+    if (now > phone.lastActivity) phone.lastActivity = now;
     return true;
   }
 
@@ -229,12 +283,12 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       return;
     }
     const data = framed ? encodeRelayFrame({ op: RelayOp.Data, connection: phone.connection, payload }) : payload;
-    if (!send(destination, data)) {
+    if (!send(destination, data, error => {
+      if (error) closePhone(phone, TunnelCloseCode.UnknownServer, 'Connection unavailable');
+      else { counts.messages++; counts.bytes += payload.length; }
+    })) {
       closePhone(phone, TunnelCloseCode.UnknownServer, 'Connection unavailable');
-      return;
     }
-    counts.messages++;
-    counts.bytes += payload.length;
   }
 
   function serverSocket(socket: WebSocket, ip: string): void {
@@ -265,6 +319,11 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
       }
     });
     socket.on('pong', () => { if (registered) registered.alive = true; });
+    socket.on('ping', (data: Buffer) => {
+      if (socket.bufferedAmount > limits.maxBufferedBytes) {
+        closeSocket(socket, TunnelCloseCode.RateLimited, 'Destination is busy');
+      } else socket.pong(data);
+    });
     socket.on('message', (data: RawData, binary: boolean) => {
       if (closing || socket.readyState !== WebSocket.OPEN) return;
       if (!registered) {
@@ -337,6 +396,11 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     server.phones.set(phone.connection, phone);
     perIpPhones.set(ip, (perIpPhones.get(ip) ?? 0) + 1);
     socket.once('close', () => closePhone(phone, 1000, 'Phone disconnected'));
+    socket.on('ping', (data: Buffer) => {
+      if (phone.socket.bufferedAmount > limits.maxBufferedBytes) {
+        closePhone(phone, TunnelCloseCode.RateLimited, 'Destination is busy');
+      } else socket.pong(data);
+    });
     socket.on('message', (data: RawData, binary: boolean) => {
       if (!phone.active || socket.readyState !== WebSocket.OPEN) return;
       if (!binary) { closePhone(phone, TunnelCloseCode.ProtocolError, 'Expected a binary message'); return; }
@@ -356,7 +420,7 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     if (closing || (path !== RELAY_SERVER_PATH && !ServerIdSchema.safeParse(id).success)) {
       // Upgrade sockets are no longer owned by HTTP shutdown. Do not wait for
       // an untrusted half-open peer to acknowledge the refusal or send FIN.
-      const timeout = setTimeout(() => socket.destroy(), 250);
+      const timeout = setTimeout(() => socket.destroy(), limits.closeTimeoutMs);
       timeout.unref();
       socket.once('close', () => clearTimeout(timeout));
       socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n', () => socket.destroy());
@@ -365,7 +429,18 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     const ip = clientIp(request, options.trustProxy ?? false);
     sockets.handleUpgrade(request, socket, head, ws => {
       // ws emits an error for oversized/invalid wire frames; never log its contents.
-      ws.on('error', () => {});
+      // Install a terminate deadline so a half-open TCP write side cannot hold an
+      // admission slot past closeTimeoutMs (same hardening as the refused-upgrade handler).
+      ws.on('error', () => {
+        // resetAndDestroy() does not reliably force TCP RST on Linux when the socket
+        // receive buffer has already been drained before the error fires (the kernel
+        // sends FIN instead of RST, leaving a half-open peer alive indefinitely).
+        // Use a timer deadline instead: if ws has not closed on its own within
+        // closeTimeoutMs, force-terminate it — OS-independent and sufficient.
+        const t = setTimeout(() => ws.terminate(), limits.closeTimeoutMs);
+        t.unref();
+        ws.once('close', () => clearTimeout(t));
+      });
       if (closing) { closeSocket(ws, 1001, 'Relay stopped'); return; }
       if (path === RELAY_SERVER_PATH) serverSocket(ws, ip);
       else phoneSocket(ws, id, ip);
@@ -379,7 +454,12 @@ export async function startRelay(options: RelayOptions = {}): Promise<Relay> {
     for (const server of servers.values()) {
       if (!server.alive) { server.socket.terminate(); continue; }
       server.alive = false;
-      if (server.socket.readyState === WebSocket.OPEN) server.socket.ping();
+      if (server.socket.readyState !== WebSocket.OPEN) continue;
+      if (server.socket.bufferedAmount > limits.maxBufferedBytes) {
+        closeSocket(server.socket, TunnelCloseCode.RateLimited, 'Destination is busy');
+        continue;
+      }
+      server.socket.ping();
     }
   }, limits.heartbeatIntervalMs);
   heartbeat.unref();

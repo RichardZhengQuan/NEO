@@ -10,16 +10,20 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "icon:generate": "node scripts/generate-icon.mjs",
     "start": "electron .",
     "dev": "pnpm --filter @neo/web build && pnpm -r --filter @neo/desktop... build && electron ."
   },
   "dependencies": {
     "@neo/protocol": "workspace:*",
     "@neo/server": "workspace:*",
-    "@neo/client": "workspace:*"
+    "@neo/client": "workspace:*",
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
-    "electron": "^44.0.0"
+    "@resvg/resvg-js": "^2.6.2",
+    "electron": "^44.0.0",
+    "png2icons": "^2.0.1"
   },
   "build": {
     "appId": "dev.neo.app",

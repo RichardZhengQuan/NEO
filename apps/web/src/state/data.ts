@@ -10,7 +10,11 @@ import { currentSessionEpoch, isCurrentSession } from './session.js';
 
 export interface DataState {
   reminders: Record<string, Reminder>;
+  reminderDeletions: Record<string, true>;
+  /** True after at least one successful reminder list load; used by refreshLoadedData to decide whether to reload on reconnect. */
   remindersLoaded: boolean;
+  /** True when the loaded reminder list is complete (fewer than MAX_PAGE items). Used to know whether absent ids are deletions. */
+  remindersComplete: boolean;
   tasks: Record<string, Task>;
   taskLists: TaskList[];
   tasksLoaded: boolean;
@@ -24,7 +28,9 @@ export interface DataState {
 
 export const useData = create<DataState>(() => ({
   reminders: {},
+  reminderDeletions: {},
   remindersLoaded: false,
+  remindersComplete: false,
   tasks: {},
   taskLists: [],
   tasksLoaded: false,
@@ -46,18 +52,22 @@ export async function loadReminders(client: NeoClient): Promise<void> {
   const epoch = currentSessionEpoch();
   const { items } = await client.reminders.list({ limit: MAX_PAGE });
   if (!isCurrentSession(epoch, client)) return;
-  useData.setState({ reminders: byId(items), remindersLoaded: true });
+  useData.setState((s) => ({ reminders: byId(items.filter((r) => !s.reminderDeletions[r.id])), remindersLoaded: true, remindersComplete: items.length < MAX_PAGE }));
 }
 
 export function upsertReminder(r: Reminder): void {
-  useData.setState((s) => ({ reminders: { ...s.reminders, [r.id]: r } }));
+  useData.setState((s) => {
+    const reminderDeletions = { ...s.reminderDeletions };
+    delete reminderDeletions[r.id];
+    return { reminders: { ...s.reminders, [r.id]: r }, reminderDeletions };
+  });
 }
 
 export function removeReminder(id: string): void {
   useData.setState((s) => {
     const reminders = { ...s.reminders };
     delete reminders[id];
-    return { reminders };
+    return { reminders, reminderDeletions: { ...s.reminderDeletions, [id]: true } };
   });
 }
 

@@ -156,6 +156,12 @@ export class VectorCache {
     for (const cache of this.caches.values()) cache.delete(nodeId);
   }
 
+  /** Forget a model's cached vectors; the next read reloads from the database. */
+  evictAll(model: string): void {
+    this.caches.delete(model);
+    this.loaded.delete(model);
+  }
+
   /** Forget everything (after `import(replace)`); the next read reloads from the database. */
   clear(): void {
     this.caches.clear();

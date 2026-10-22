@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatRequest, ProviderConfig } from '@neo/protocol';
-import { collectChat } from '@neo/protocol';
+import { collectChat, NeoError } from '@neo/protocol';
 import { OpenAIAdapter } from './openai.js';
 import {
   collect,
@@ -196,6 +196,37 @@ describe('OpenAI streaming', () => {
     expect(events.at(-1)).toEqual({ type: 'done', stopReason: 'tool_use' });
   });
 
+  it('abort after first tool_call in post-stream batch is honoured', async () => {
+    const ac = new AbortController();
+    const { a } = make(stream(
+      chunk({ tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'get_weather', arguments: '{}' } }] }),
+      chunk({ tool_calls: [{ index: 1, id: 'c2', type: 'function', function: { name: 'get_weather', arguments: '{}' } }] }),
+      chunk({}, 'tool_calls'),
+    ));
+    const it = a.chat(req({ signal: ac.signal, tools: TOOLS }))[Symbol.asyncIterator]();
+    let next = await it.next();
+    while (!next.done && next.value.type !== 'tool_call') next = await it.next();
+    expect(next.value).toMatchObject({ type: 'tool_call', id: 'c1' });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it.each([
+    ['reasoning', 'content', stream(chunk({ reasoning_content: 'think', content: 'answer' }), chunk({}, 'stop'))],
+    ['text', 'refusal delta', stream(chunk({ content: 'answer', refusal: 'refused' }), chunk({}, 'stop'))],
+    ['tool_call', 'refusal note', stream(chunk({ tool_calls: [{ index: 0, id: 'c1', function: { name: 'get_weather', arguments: '{}' } }] }), chunk({}, 'content_filter'))],
+    ['text', 'sources', stream(chunk({ annotations: [{ type: 'url_citation', url: 'https://example.com', title: 'Source' }] }, 'content_filter'))],
+    ['sources', 'usage', stream(chunk({ annotations: [{ type: 'url_citation', url: 'https://example.com', title: 'Source' }] }, 'stop', { usage: { prompt_tokens: 5, completion_tokens: 1 } }))],
+    ['usage', 'done', stream(chunk({}, 'stop', { usage: { prompt_tokens: 5, completion_tokens: 1 } }))],
+  ] as const)('abort after %s before %s in a yield batch is honoured', async (first, _next, reply) => {
+    const ac = new AbortController();
+    const { a } = make(reply);
+    const it = a.chat(req({ signal: ac.signal, tools: TOOLS }))[Symbol.asyncIterator]();
+    expect(await it.next()).toMatchObject({ done: false, value: { type: first } });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
   it('handles servers that omit the tool-call index and ids, and flags invalid JSON', async () => {
     const { a } = make(
       stream(
@@ -276,6 +307,59 @@ describe('OpenAI streaming', () => {
     await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'provider_error', message: expect.stringContaining('upstream exploded') });
   });
 
+  it('classifies an in-stream 429 as retryable rate_limited', async () => {
+    const { a, f, sleep } = make(stream({ error: { code: 429, message: 'Too many requests' } }));
+    const error = await collect(a.chat(req())).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'rate_limited', retryable: true, message: 'OpenAI error: Too many requests', details: { status: 429 } });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
+  });
+
+  it.each([
+    [401, 'provider_auth', false],
+    [403, 'provider_auth', false],
+    [400, 'provider_error', false],
+    [500, 'provider_error', true],
+    [503, 'provider_error', true],
+  ] as const)('classifies in-stream code %s as %s (retryable: %s)', async (status, code, retryable) => {
+    const { a } = make(stream({ error: { code: status, message: `Rejected ${KEY}` } }));
+    const error = await collect(a.chat(req())).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code, retryable, details: { status } });
+    expect((error as NeoError).message).not.toContain(KEY);
+  });
+
+  it.each([
+    [{ retryAfter: 0 }, 0],
+    [{ retryAfter: 1.5 }, 1500],
+    [{ retryAfter: 30 }, 30_000],
+    [{ retryDelay: '2.5s' }, 2500],
+    [{ retryDelay: 2 }, 2000],
+  ])('preserves in-stream rate-limit delay %j', async (delay, retryAfterMs) => {
+    const { a, f, sleep } = make(stream({ error: { code: 429, message: 'Too many requests', ...delay } }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'rate_limited', retryable: true, details: { status: 429, retryAfterMs } });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
+  });
+
+  it.each([
+    ['rate_limit_exceeded', 'rate_limited', true],
+    ['insufficient_quota', 'rate_limited', true],
+    ['invalid_api_key', 'provider_auth', false],
+    ['invalid_organization', 'provider_auth', false],
+    ['account_deactivated', 'provider_auth', false],
+    ['server_error', 'provider_error', true],
+  ] as const)('classifies in-stream string code %s as %s (retryable: %s)', async (codeStr, expected, retryable) => {
+    const { a } = make(stream({ error: { code: codeStr, message: 'OpenAI string error' } }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: expected, retryable });
+  });
+
+  it.each([{ message: 'Unknown failure' }, 'Unknown failure'])('does not retry an unclassified in-stream error %j', async (error) => {
+    const { a } = make(stream({ error }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'provider_error', retryable: false });
+  });
+
   it('abort mid-stream ends with cancelled', async () => {
     const ac = new AbortController();
     const { a } = make((r) => sseResponse(dataFrames([chunk({ content: 'Hi' })]), { hang: true, signal: r.signal }));
@@ -298,6 +382,21 @@ describe('OpenAI streaming', () => {
 describe('OpenAI errors and retries', () => {
   const err = (status: number, message: string, headers: Record<string, string> = {}): FakeResponder => () =>
     jsonResponse({ error: { message, type: 'x' } }, status, headers);
+
+  it('abort while reading error body throws cancelled, not provider_error', async () => {
+    const controller = new AbortController();
+    const f = fakeFetch(() => {
+      const body = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          ctrl.error(new DOMException('aborted', 'AbortError'));
+        },
+      });
+      controller.abort();
+      return new Response(body, { status: 400 });
+    });
+    const a = new OpenAIAdapter(cfg(), { fetch: f, sleep: recordingSleep() });
+    await expect(collect(a.chat(req({ signal: controller.signal })))).rejects.toMatchObject({ code: 'cancelled' });
+  });
 
   it('retries 429 (honoring retry-after) and 5xx, then succeeds', async () => {
     const { a, f, sleep } = make([err(429, 'slow', { 'retry-after': '1' }), err(503, 'busy'), okReply]);

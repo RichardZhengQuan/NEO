@@ -9,7 +9,7 @@ import { NeoClient } from '@neo/client';
 import type { EventConnection } from '@neo/client';
 import { loadConfig, startServer } from '@neo/server';
 import { NeoError, textOf, uiBlocksToText } from '@neo/protocol';
-import { bold, cyan, dim, green, magenta, red, yellow } from '../ansi.js';
+import { bold, cyan, dim, green, magenta, red, stripModelText, yellow } from '../ansi.js';
 import { resolveDataDir, readToken } from '../config-file.js';
 import { renderEvent } from '../render.js';
 import type { NeoServer } from '@neo/server';
@@ -63,7 +63,8 @@ export async function runChat(opts: ChatOptions): Promise<void> {
 
   for (const message of recent.items) {
     const text = textOf(message.parts) || message.parts.filter((part) => part.type === 'ui').map((part) => uiBlocksToText([part.block])).join('\n');
-    if (text.trim()) process.stdout.write(`${dim(`  ${new Date(message.createdAt).toLocaleString()} ${message.role}:`)} ${text}\n`);
+    const safeText = message.role === 'assistant' ? stripModelText(text) : text;
+    if (safeText.trim()) process.stdout.write(`${dim(`  ${new Date(message.createdAt).toLocaleString()} ${message.role}:`)} ${safeText}\n`);
   }
   if (recent.items.length) process.stdout.write('\n');
 
@@ -144,8 +145,8 @@ export async function runChat(opts: ChatOptions): Promise<void> {
         const lines = renderEvent(event, { showReasoning: opts.showReasoning });
 
         if (event.type === 'text.delta') {
-          // Accumulate and print inline
-          process.stdout.write(event.text);
+          // Accumulate and print inline; strip control sequences from model text.
+          process.stdout.write(stripModelText(event.text));
           onSameLine = true;
         } else if (event.type === 'tool.confirmation') {
           // Prompt for confirmation
@@ -341,7 +342,7 @@ export async function handleSlash(
         }
         process.stdout.write(`\n  ${bold('Matching memories:')}\n`);
         for (const n of res.items) {
-          process.stdout.write(`  • [${n.kind}] ${n.label} (${n.id})\n`);
+          process.stdout.write(`  • [${n.kind}] ${stripModelText(n.label)} (${n.id})\n`);
         }
         const answer = await rl.question('\n  Forget all of these? [y/N] ');
         if (answer.trim().toLowerCase() === 'y') {
@@ -365,7 +366,7 @@ export async function handleSlash(
           process.stdout.write(`\n  ${bold('Reminders:')}\n`);
           for (const r of res.items) {
             const dt = new Date(r.dueAt).toLocaleString();
-            process.stdout.write(`  • ${r.title} — ${dt}\n`);
+            process.stdout.write(`  • ${stripModelText(r.title)} — ${dt}\n`);
           }
           process.stdout.write('\n');
         }
@@ -383,7 +384,7 @@ export async function handleSlash(
         } else {
           process.stdout.write(`\n  ${bold('Tasks:')}\n`);
           for (const t of res.items) {
-            process.stdout.write(`  ${t.done ? '☑' : '☐'} ${t.title}\n`);
+            process.stdout.write(`  ${t.done ? '☑' : '☐'} ${stripModelText(t.title)}\n`);
           }
           process.stdout.write('\n');
         }
@@ -401,7 +402,7 @@ export async function handleSlash(
         } else {
           process.stdout.write(`\n  ${bold('Notes:')}\n`);
           for (const n of res.items) {
-            process.stdout.write(`  • ${n.title}\n`);
+            process.stdout.write(`  • ${stripModelText(n.title)}\n`);
           }
           process.stdout.write('\n');
         }

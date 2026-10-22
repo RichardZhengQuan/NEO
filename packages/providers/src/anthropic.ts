@@ -514,14 +514,28 @@ export class AnthropicAdapter implements ProviderAdapter {
       throw new NeoError('provider_error', 'The connection to Anthropic closed before the response finished.', { retryable: true });
     }
 
-    if (stopReason !== 'refusal') yield* toolCalls;
+    if (stopReason !== 'refusal') {
+      for (const ev of toolCalls) {
+        throwIfAborted(request.signal);
+        yield ev;
+      }
+    }
     if (nativeSearch && replayBlocks.size) {
       const content = [...replayBlocks].sort(([a], [b]) => a - b).map(([, block]) => block).filter(block => stopReason !== 'refusal' || block['type'] !== 'tool_use');
+      throwIfAborted(request.signal);
       yield { type: 'provider_part', part: { type: 'provider_part', provider: 'anthropic', model: request.model, data: { type: 'native_search_message', content } } };
     }
-    if (stopReason === 'refusal' && !sawText) yield { type: 'text', text: REFUSAL_NOTE };
-    if (sources.length) yield { type: 'sources', items: sources };
+    if (stopReason === 'refusal' && !sawText) {
+      throwIfAborted(request.signal);
+      yield { type: 'text', text: REFUSAL_NOTE };
+    }
+    if (sources.length) {
+      throwIfAborted(request.signal);
+      yield { type: 'sources', items: sources };
+    }
+    throwIfAborted(request.signal);
     yield { type: 'usage', usage: makeUsage(input, output, { cacheRead, cacheWrite, reasoning: thinkingTokens }) };
+    throwIfAborted(request.signal);
     yield { type: 'done', stopReason };
   }
 
@@ -586,33 +600,41 @@ export class AnthropicAdapter implements ProviderAdapter {
     return this.client.sdk;
   }
 
-  /** SDK errors → NeoError (docs/PROVIDERS.md "Errors"); API keys are redacted from messages. */
+  /** Redact the API key and credential-looking custom headers from user-visible text. */
+  private clean(text: string, apiKey: string): string {
+    const secrets: (string | undefined)[] = [apiKey];
+    for (const [name, value] of Object.entries(this.config.headers ?? {})) {
+      if (/auth|key|token|secret/i.test(name)) secrets.push(value, value.replace(/^bearer\s+/i, ''));
+    }
+    return redact(text, secrets);
+  }
+
+  /** SDK errors → NeoError (docs/PROVIDERS.md "Errors"); credentials are redacted from messages. */
   private mapError(err: unknown, signal: AbortSignal | undefined, apiKey: string): NeoError {
-    const clean = (s: string) => redact(s, [apiKey]);
     if (err instanceof APIUserAbortError) return cancelledError(err);
     const cancelled = asCancelled(err, signal);
     if (cancelled) return cancelled;
     if (err instanceof NeoError) return err;
     if (err instanceof AuthenticationError || err instanceof PermissionDeniedError) {
-      return new NeoError('provider_auth', clean(`Anthropic rejected the API key: ${apiMessage(err)}`), { cause: err });
+      return new NeoError('provider_auth', this.clean(`Anthropic rejected the API key: ${apiMessage(err)}`, apiKey), { cause: err });
     }
     if (err instanceof RateLimitError) {
       const retryAfterMs = parseRetryAfter(err.headers?.get('retry-after'));
-      return new NeoError('rate_limited', clean(`Anthropic rate limit: ${apiMessage(err)}`), {
+      return new NeoError('rate_limited', this.clean(`Anthropic rate limit: ${apiMessage(err)}`, apiKey), {
         retryable: true,
         ...(retryAfterMs !== undefined ? { details: { retryAfterMs } } : {}),
         cause: err,
       });
     }
     if (err instanceof APIConnectionError) {
-      return new NeoError('provider_error', clean(`Can't reach Anthropic at ${hostOf(this.baseUrl)}: ${describeNetworkError(err.cause ?? err)}`), {
+      return new NeoError('provider_error', this.clean(`Can't reach Anthropic at ${hostOf(this.baseUrl)}: ${describeNetworkError(err.cause ?? err)}`, apiKey), {
         retryable: true,
         cause: err,
       });
     }
     if (err instanceof APIError) {
       const type = apiErrorType(err);
-      const message = clean(`Anthropic error: ${apiMessage(err)}`);
+      const message = this.clean(`Anthropic error: ${apiMessage(err)}`, apiKey);
       // Errors inside an already-open stream carry no HTTP status, only an error type.
       if (type === 'rate_limit_error') return new NeoError('rate_limited', message, { retryable: true, cause: err });
       const streamFailure = err.status === undefined && (type === 'overloaded_error' || type === 'api_error');
@@ -620,7 +642,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       return new NeoError('provider_error', message, { retryable, cause: err });
     }
     const neo = NeoError.from(err, 'provider_error');
-    return new NeoError(neo.code, clean(neo.message), { retryable: neo.retryable, cause: err });
+    return new NeoError(neo.code, this.clean(neo.message, apiKey), { retryable: neo.retryable, cause: err });
   }
 }
 

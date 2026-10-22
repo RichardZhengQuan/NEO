@@ -130,6 +130,32 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
   if (Array.isArray(type)) {
     const nonNull = type.filter((t) => t !== 'null');
     if (nonNull.length < type.length) out['nullable'] = true;
+    if (nonNull.length > 1) {
+      // Distribute sibling constraints to the types they apply to inside anyOf.
+      const { type: _t, ...rest } = node;
+      const sanitized = nonNull
+        .map((t) => {
+          const branch: Record<string, unknown> = { type: t };
+          if (t === 'object') {
+            if (rest['properties'] !== undefined) branch['properties'] = rest['properties'];
+            if (rest['required'] !== undefined) branch['required'] = rest['required'];
+            if (rest['additionalProperties'] !== undefined) branch['additionalProperties'] = rest['additionalProperties'];
+          } else if (t === 'array') {
+            if (rest['items'] !== undefined) branch['items'] = rest['items'];
+          }
+          return sanitizeNode(branch, defs, refStack);
+        })
+        .filter((v): v is Record<string, unknown> => v !== undefined && !isEmptyObjectSchema(v));
+      if (sanitized.length) out['anyOf'] = sanitized;
+      // Preserve wrapper-level keywords (title, description, nullable, minLength/maxLength,
+      // minimum/maximum, pattern, minItems/maxItems, minProperties/maxProperties). Validators
+      // ignore keywords that don't apply to the value's actual type, so these stay correct on
+      // the outer wrapper when the union mixes types.
+      for (const [key, value] of Object.entries(rest)) {
+        if (SCALAR_KEYS.has(key)) out[key] = value;
+      }
+      return out;
+    }
     type = nonNull[0];
   }
   if (typeof type !== 'string') {
@@ -313,14 +339,14 @@ export class GeminiAdapter implements ProviderAdapter {
           if (!outcome.ok) return { retry: true };
           const { status } = outcome.value;
           if (status !== 429 && status < 500) return { retry: false };
-          return { retry: true, retryAfterMs: await retryDelayOf(outcome.value) };
+          return { retry: true, retryAfterMs: await retryDelayOf(outcome.value, request.signal) };
         },
         { signal: request.signal, sleep: this.options.sleep, discard: (r) => void r.body?.cancel().catch(() => {}) },
       );
     } catch (err) {
       throw asCancelled(err, request.signal) ?? this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, request.signal);
     if (!response.body) throw new NeoError('provider_error', 'Gemini returned an empty response.', { retryable: true });
 
     let thought = '';
@@ -357,9 +383,11 @@ export class GeminiAdapter implements ProviderAdapter {
             const text = typeof raw['text'] === 'string' ? raw['text'] : '';
             if (text) {
               thought += text;
+              throwIfAborted(request.signal);
               yield { type: 'reasoning', text };
             }
             if (signature) {
+              throwIfAborted(request.signal);
               yield { type: 'reasoning_part', part: { type: 'reasoning', text: thought, provider: 'gemini', model: request.model, data: { thoughtSignature: signature } } };
               thought = '';
             }
@@ -367,6 +395,7 @@ export class GeminiAdapter implements ProviderAdapter {
           }
           if (typeof raw['text'] === 'string' && raw['text']) {
             sawText = true;
+            throwIfAborted(request.signal);
             yield { type: 'text', text: raw['text'] };
           }
           if (isPlainObject(raw['functionCall'])) {
@@ -379,6 +408,7 @@ export class GeminiAdapter implements ProviderAdapter {
             };
             if (signature) call.data = { thoughtSignature: signature, model: request.model };
             calls.push(call);
+            throwIfAborted(request.signal);
             yield call;
           }
         }
@@ -400,9 +430,19 @@ export class GeminiAdapter implements ProviderAdapter {
     else if (finish === 'MAX_TOKENS') stopReason = 'max_tokens';
     else stopReason = calls.length ? 'tool_use' : 'end';
 
-    if (stopReason === 'refusal' && !sawText) yield { type: 'text', text: REFUSAL_NOTE };
-    if (sources.length) yield { type: 'sources', items: sources };
-    if (usage) yield { type: 'usage', usage };
+    if (stopReason === 'refusal' && !sawText) {
+      throwIfAborted(request.signal);
+      yield { type: 'text', text: REFUSAL_NOTE };
+    }
+    if (sources.length) {
+      throwIfAborted(request.signal);
+      yield { type: 'sources', items: sources };
+    }
+    if (usage) {
+      throwIfAborted(request.signal);
+      yield { type: 'usage', usage };
+    }
+    throwIfAborted(request.signal);
     yield { type: 'done', stopReason };
   }
 
@@ -490,8 +530,11 @@ export class GeminiAdapter implements ProviderAdapter {
     } catch (err) {
       throw asCancelled(err, request.signal) ?? this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
-    const vectors = (((await response.json()) as { embeddings?: { values?: number[] }[] }).embeddings ?? []).map((e) => e.values ?? []);
+    if (!response.ok) throw await this.httpError(response, request.signal);
+    const json = await response.json().catch((err: unknown) => {
+      throw asCancelled(err, request.signal) ?? err;
+    });
+    const vectors = ((json as { embeddings?: { values?: number[] }[] }).embeddings ?? []).map((e) => e.values ?? []);
     if (vectors.length !== request.texts.length) {
       throw new NeoError('provider_error', `Gemini returned ${vectors.length} embeddings for ${request.texts.length} texts.`);
     }
@@ -520,7 +563,7 @@ export class GeminiAdapter implements ProviderAdapter {
     } catch (err) {
       throw asCancelled(err, signal) ?? this.networkError(err);
     }
-    if (!response.ok) throw await this.httpError(response);
+    if (!response.ok) throw await this.httpError(response, signal);
     return response;
   }
 
@@ -536,8 +579,12 @@ export class GeminiAdapter implements ProviderAdapter {
     return new NeoError('provider_error', this.clean(`Can't reach Gemini at ${hostOf(this.baseUrl)}: ${describeNetworkError(err)}`), { retryable: true, cause: err });
   }
 
-  private async httpError(response: Response): Promise<NeoError> {
-    const text = await response.text().catch(() => '');
+  private async httpError(response: Response, signal?: AbortSignal): Promise<NeoError> {
+    const text = await response.text().catch((err: unknown) => {
+      const cancelled = asCancelled(err, signal);
+      if (cancelled) throw cancelled;
+      return '';
+    });
     const { message, reason, retryDelayMs } = parseErrorBody(text);
     const status = response.status;
     const detail = this.clean(`Gemini error (HTTP ${status})${message ? `: ${message}` : ''}`);
@@ -553,7 +600,22 @@ export class GeminiAdapter implements ProviderAdapter {
 
   private streamError(error: unknown): NeoError {
     const message = isPlainObject(error) && typeof error['message'] === 'string' ? error['message'] : JSON.stringify(error);
-    return new NeoError('provider_error', this.clean(`Gemini error: ${message}`), { retryable: true });
+    const code = isPlainObject(error) && typeof error['code'] === 'number' ? error['code'] : 0;
+    const status = isPlainObject(error) && typeof error['status'] === 'string' ? error['status'] : '';
+    const { reason, retryDelayMs } = parseErrorBody(JSON.stringify({ error }));
+    const detail = this.clean(`Gemini error: ${message}`);
+    if (code === 401 || code === 403 || status === 'UNAUTHENTICATED' || status === 'PERMISSION_DENIED' || reason === 'API_KEY_INVALID' || /api key not valid/i.test(message)) {
+      return new NeoError('provider_auth', detail, { details: { status: code } });
+    }
+    if (code === 429 || status === 'RESOURCE_EXHAUSTED') {
+      const retryAfter = isPlainObject(error) ? error['retryAfter'] : undefined;
+      const retryDelay = isPlainObject(error) ? error['retryDelay'] : undefined;
+      const delayMs = (value: unknown) => typeof value === 'number' || typeof value === 'string' ? parseRetryAfter(String(value).replace(/s$/, '')) : undefined;
+      const retryAfterMs = delayMs(retryAfter) ?? delayMs(retryDelay) ?? retryDelayMs;
+      return new NeoError('rate_limited', detail, { retryable: true, details: { status: code, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) } });
+    }
+    const RETRYABLE_STATUS = new Set(['INTERNAL', 'UNAVAILABLE', 'DEADLINE_EXCEEDED', 'DATA_LOSS', 'UNKNOWN']);
+    return new NeoError('provider_error', detail, { retryable: code >= 500 || RETRYABLE_STATUS.has(status), details: code ? { status: code } : {} });
   }
 }
 
@@ -587,10 +649,15 @@ function parseErrorBody(text: string): { message: string; reason?: string; retry
 }
 
 /** Server back-off for a 429/5xx: the `retry-after` header, else the body's RetryInfo. */
-async function retryDelayOf(response: Response): Promise<number | undefined> {
+async function retryDelayOf(response: Response, signal?: AbortSignal): Promise<number | undefined> {
   const header = parseRetryAfter(response.headers.get('retry-after'));
   if (header !== undefined) return header;
-  return parseErrorBody(await response.clone().text().catch(() => '')).retryDelayMs;
+  const text = await response.clone().text().catch((err: unknown) => {
+    const cancelled = asCancelled(err, signal);
+    if (cancelled) throw cancelled;
+    return '';
+  });
+  return parseErrorBody(text).retryDelayMs;
 }
 
 function toUsage(u: Record<string, unknown>): Usage {

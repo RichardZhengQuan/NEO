@@ -54,7 +54,7 @@ async function liveEmbeddingFixture(raw: unknown = {}) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const addProvider = () => request('/api/providers', 'POST', {
-    id: 'remote', kind: 'openai', baseUrl: 'https://embeddings.example/v1', apiKey: 'embedding-fixture-key',
+    id: 'remote', kind: 'openai-compatible', baseUrl: 'https://embeddings.example/v1', apiKey: 'embedding-fixture-key',
   });
   return { s, fetch, request, addProvider };
 }
@@ -112,6 +112,7 @@ describe('server composition', () => {
     expect((await live.request('/api/providers/remote', 'PATCH', { baseUrl: 'https://replacement.example/v1', headers: { 'x-api-key': 'replacement-header-key' } })).status).toBe(200);
     live.fetch.mockClear();
     await live.s.memory.remember({ content: 'Replacement host and header request' });
+    expect(live.fetch.mock.calls.length).toBeGreaterThan(0);
     for (const [url, init] of live.fetch.mock.calls) {
       expect(String(url)).toBe('https://replacement.example/v1/embeddings');
       expect(new Headers(init?.headers).get('x-api-key')).toBe('replacement-header-key');

@@ -15,7 +15,7 @@ import {
 } from '@neo/protocol';
 import type { ProviderOptions } from './index.js';
 import { parseSSE } from './sse.js';
-import { addSource, asCancelled, effortFor, isPlainObject, makeUsage, parseToolInput, readModelData, systemWithJsonInstruction, testByListingModels, throwIfAborted } from './shared.js';
+import { addSource, asCancelled, effortFor, isPlainObject, makeUsage, parseToolInput, raceAbort, readModelData, systemWithJsonInstruction, testByListingModels, throwIfAborted } from './shared.js';
 
 interface FunctionCall {
   id: string;
@@ -107,14 +107,19 @@ function collectItemSources(sources: Source[], item: Record<string, unknown>): v
 }
 
 /** Only search-specific rejections disable search; limits/auth/transient failures keep their normal guidance. */
-function isSearchRejection(value: unknown, status?: number): boolean {
+function isSearchRejection(value: unknown, tools: unknown[] | undefined, status?: number): boolean {
   if (!isPlainObject(value) || (status !== undefined && ![400, 403, 422].includes(status))) return false;
   const code = typeof value['code'] === 'string' ? value['code'] : '';
   const param = typeof value['param'] === 'string' ? value['param'] : '';
-  const message = typeof value['message'] === 'string' ? value['message'] : '';
   if (/^subscription_|invalid_grant/.test(code)) return false;
-  return /web_search|web search/i.test(`${code} ${param} ${message}`) || code === 'unsupported_tool'
-    || (/^tools(?:\.|\[|$)/.test(param) && /unsupported|not supported|not allowed|invalid tool/i.test(`${code} ${message}`));
+  // Identify the rejected tool from the structured param index and the request tool list.
+  const toolIndex = /^tools\[(\d+)\]/.exec(param);
+  if (toolIndex) {
+    const tool = tools?.[Number(toolIndex[1])];
+    return isPlainObject(tool) && tool['type'] === 'web_search';
+  }
+  // For non-indexed params, check code and param (not message) for search-specific API errors.
+  return /web_search|web search/i.test(`${code} ${param}`);
 }
 
 export class ChatGPTAdapter implements ProviderAdapter {
@@ -174,8 +179,9 @@ export class ChatGPTAdapter implements ProviderAdapter {
     }
     const nativeSearch = !!request.webSearch && !this.searchDisabled;
     if (nativeSearch) body['tools'] = [...(Array.isArray(body['tools']) ? body['tools'] : []), { type: 'web_search' }];
+    const sentTools = Array.isArray(body['tools']) ? (body['tools'] as unknown[]) : undefined;
     // Plan tokens reject temperature and max_output_tokens, so neither is sent.
-    const { response, token } = await this.request('/responses', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', accept: 'text/event-stream' } }, request.signal, nativeSearch);
+    const { response, token } = await this.request('/responses', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', accept: 'text/event-stream' } }, request.signal, nativeSearch, sentTools);
     if (!response.body) throw new NeoError('provider_error', 'ChatGPT returned an empty response.', { retryable: true });
 
     const calls = new Map<string, FunctionCall>();
@@ -222,7 +228,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
         if (type === 'response.failed' || type === 'error') {
           const result = isPlainObject(event['response']) ? event['response'] : event;
           const error = result['error'] ?? result;
-          if (nativeSearch && isSearchRejection(error)) throw this.disableSearch();
+          if (nativeSearch && isSearchRejection(error, sentTools)) throw this.disableSearch();
           throw this.error(error, undefined, token);
         }
         if (type === 'response.output_text.delta' || type === 'response.refusal.delta') {
@@ -262,15 +268,24 @@ export class ChatGPTAdapter implements ProviderAdapter {
             for (const item of result['output'].filter(isPlainObject)) {
               if (item['type'] === 'function_call') {
                 const complete = finishCall(remember(item, String(calls.size)));
-                if (complete) yield complete;
+                if (complete) {
+                  throwIfAborted(request.signal);
+                  yield complete;
+                }
               }
               const replay = rememberItem(item);
-              if (replay) yield replay;
+              if (replay) {
+                throwIfAborted(request.signal);
+                yield replay;
+              }
             }
           }
           for (const call of calls.values()) {
             const complete = finishCall(call);
-            if (complete) yield complete;
+            if (complete) {
+              throwIfAborted(request.signal);
+              yield complete;
+            }
           }
           const details = isPlainObject(result['incomplete_details']) ? result['incomplete_details'] : {};
           if (type === 'response.incomplete' && details['reason'] !== 'max_output_tokens' && details['reason'] !== 'content_filter') {
@@ -281,6 +296,7 @@ export class ChatGPTAdapter implements ProviderAdapter {
           if (nativeSearch && Array.isArray(result['output']) && result['output'].length) {
             // Item completion events can be interleaved. The final output array
             // is the authoritative order for the next stateless Responses call.
+            throwIfAborted(request.signal);
             yield { type: 'provider_part', part: { type: 'provider_part', provider: this.kind, model: request.model,
               data: { type: 'native_search_response', output: result['output'] } } };
           }
@@ -295,8 +311,15 @@ export class ChatGPTAdapter implements ProviderAdapter {
     }
     throwIfAborted(request.signal);
     if (!stopReason) throw new NeoError('provider_error', 'The connection to ChatGPT closed before the response finished.', { retryable: true });
-    if (sources.length) yield { type: 'sources', items: sources };
-    if (usage) yield { type: 'usage', usage };
+    if (sources.length) {
+      throwIfAborted(request.signal);
+      yield { type: 'sources', items: sources };
+    }
+    if (usage) {
+      throwIfAborted(request.signal);
+      yield { type: 'usage', usage };
+    }
+    throwIfAborted(request.signal);
     yield { type: 'done', stopReason };
   }
 
@@ -316,11 +339,13 @@ export class ChatGPTAdapter implements ProviderAdapter {
     return testByListingModels(() => this.listModels(signal));
   }
 
-  private async request(path: string, init: RequestInit, signal?: AbortSignal, nativeSearch = false): Promise<{ response: Response; token: string }> {
+  private async request(path: string, init: RequestInit, signal?: AbortSignal, nativeSearch = false, sentTools?: unknown[]): Promise<{ response: Response; token: string }> {
     throwIfAborted(signal);
     if (!this.options.getChatGPTAccessToken) throw chatgptSubscriptionError('subscription_sharing_invalid_user');
     let token: string;
-    try { token = await this.options.getChatGPTAccessToken(this.id); } catch (error) {
+    try { token = await raceAbort(this.options.getChatGPTAccessToken(this.id), signal); } catch (error) {
+      const cancelled = asCancelled(error, signal);
+      if (cancelled) throw cancelled;
       if (error instanceof NeoError) throw error;
       throw chatgptSubscriptionError('subscription_sharing_invalid_user');
     }
@@ -336,8 +361,12 @@ export class ChatGPTAdapter implements ProviderAdapter {
     }
     if (!response.ok) {
       let value: unknown;
-      try { value = await response.json(); } catch { /* upstream body is never reflected */ }
-      if (nativeSearch && isPlainObject(value) && isSearchRejection(value['error'], response.status)) throw this.disableSearch();
+      try { value = await response.json(); } catch (err) {
+        const cancelled = asCancelled(err, signal);
+        if (cancelled) throw cancelled;
+        /* upstream body is never reflected */
+      }
+      if (nativeSearch && isPlainObject(value) && isSearchRejection(value['error'], sentTools, response.status)) throw this.disableSearch();
       throw this.error(isPlainObject(value) ? value['error'] : undefined, response.status, token);
     }
     return { response, token };

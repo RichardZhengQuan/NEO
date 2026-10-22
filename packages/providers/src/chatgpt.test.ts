@@ -9,6 +9,53 @@ const request: ChatRequest = { model: 'gpt-5.2', messages: [{ role: 'user', part
 const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
 const completed = (extra: Record<string, unknown> = {}) => ({ type: 'response.completed', response: { status: 'completed', ...extra } });
 
+it('cancels while the access token is still pending', async () => {
+  const controller = new AbortController();
+  const aborted = new Promise<void>(resolve => {
+    controller.signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+  let started!: () => void;
+  const tokenRequested = new Promise<void>(resolve => { started = resolve; });
+  const token = new Promise<string>(() => {});
+  const getChatGPTAccessToken = vi.fn(() => { started(); return token; });
+  const fetch = vi.fn<typeof globalThis.fetch>();
+  const unauthorized = vi.fn();
+  const waiting = new ChatGPTAdapter(config, { getChatGPTAccessToken, fetch, onChatGPTUnauthorized: unauthorized });
+  const iterator = waiting.chat({ ...request, signal: controller.signal })[Symbol.asyncIterator]();
+  const next = expect(iterator.next()).rejects.toMatchObject({ code: 'cancelled' });
+
+  await tokenRequested;
+  await Promise.resolve();
+  expect(getChatGPTAccessToken).toHaveBeenCalledTimes(1);
+  expect(controller.signal.aborted).toBe(false);
+  controller.abort();
+  await aborted;
+  await next;
+  expect(getChatGPTAccessToken).toHaveBeenCalledExactlyOnceWith('chatgpt');
+  expect(fetch).not.toHaveBeenCalled();
+  expect(unauthorized).not.toHaveBeenCalled();
+});
+
+it('abort while reading error body throws cancelled, not provider_error', async () => {
+  const controller = new AbortController();
+  const fetchFn = vi.fn<typeof globalThis.fetch>().mockImplementationOnce(async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) {
+        ctrl.error(new DOMException('aborted', 'AbortError'));
+      },
+    });
+    controller.abort();
+    return new Response(body, { status: 400 });
+  });
+  const a = new ChatGPTAdapter(config, {
+    fetch: fetchFn,
+    getChatGPTAccessToken: async () => TOKEN,
+    onChatGPTUnauthorized: vi.fn(),
+  });
+  const iterator = a.chat({ ...request, signal: controller.signal })[Symbol.asyncIterator]();
+  await expect(iterator.next()).rejects.toMatchObject({ code: 'cancelled' });
+});
+
 describe('ChatGPT Responses API with a loopback fake', () => {
   let server: Server;
   let base: string;
@@ -143,6 +190,20 @@ describe('ChatGPT Responses API with a loopback fake', () => {
     expect((await collectChat(adapter.chat(request))).toolCalls).toHaveLength(1);
   });
 
+  it('abort after first tool_call in completion batch is honoured', async () => {
+    const ac = new AbortController();
+    stream(completed({ output: [
+      { type: 'function_call', id: 'fc_1', call_id: 'c1', name: 'get_weather', arguments: '{"city":"Paris"}' },
+      { type: 'function_call', id: 'fc_2', call_id: 'c2', name: 'get_weather', arguments: '{"city":"Rome"}' },
+    ] }));
+    const iterator = adapter.chat({ ...request, signal: ac.signal, tools: [{ name: 'get_weather', description: 'Weather', inputSchema: { type: 'object' } }] })[Symbol.asyncIterator]();
+    let event = await iterator.next();
+    while (!event.done && event.value.type !== 'tool_call') event = await iterator.next();
+    expect(event.value).toMatchObject({ type: 'tool_call', id: 'c1', input: { city: 'Paris' } });
+    ac.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
   it('finishes fragmented calls from accumulated arguments on completion', async () => {
     stream({ type: 'response.output_item.added', item: { type: 'function_call', id: 'fc_1', call_id: 'c1', name: 'go', arguments: '' } },
       { type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '{"x":' },
@@ -182,6 +243,58 @@ describe('ChatGPT Responses API with a loopback fake', () => {
     expect(error).toMatchObject({ code, message, retryable, details: { reason, status } });
     expect(JSON.stringify(error)).not.toContain(TOKEN);
     expect(unauthorized).toHaveBeenCalledTimes(status === 401 ? 1 : 0);
+  });
+
+  it('keeps native search available when an unsupported function tool is rejected', async () => {
+    handler = (_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'unsupported_tool', param: 'tools[0]', message: 'The tool "my_func" is not supported.' } }));
+    };
+    const funcTool: ToolSpec = { name: 'my_func', description: 'A function tool', inputSchema: { type: 'object' as const } };
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    const error = await collectChat(adapter.chat(searchRequest)).catch((value: unknown) => value);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body?.['tools']).toMatchObject([{ type: 'function', name: 'my_func' }, { type: 'web_search' }]);
+    expect(adapter.capabilities(request.model).nativeWebSearch).toBe(true);
+    expect(error).toMatchObject({ code: 'provider_error' });
+  });
+
+  it('sends native search on a follow-up after an unsupported function tool is rejected', async () => {
+    handler = (_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'unsupported_tool', param: 'tools[0]', message: 'The tool "my_func" is not supported.' } }));
+    };
+    const funcTool: ToolSpec = { name: 'my_func', description: 'A function tool', inputSchema: { type: 'object' as const } };
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    await expect(collectChat(adapter.chat(searchRequest))).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body?.['tools']).toMatchObject([{ type: 'function', name: 'my_func' }, { type: 'web_search' }]);
+
+    stream(completed());
+    await collectChat(adapter.chat(searchRequest));
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.body?.['tools']).toContainEqual({ type: 'web_search' });
+  });
+
+  it('does not disable search when a function tool named my_web_search_assistant at tools[0] is rejected', async () => {
+    handler = (_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'unsupported_tool', param: 'tools[0]', message: 'The tool "my_web_search_assistant" is not supported.' } }));
+    };
+    const funcTool: ToolSpec = { name: 'my_web_search_assistant', description: 'A web search helper', inputSchema: { type: 'object' as const } };
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    const error = await collectChat(adapter.chat(searchRequest)).catch((value: unknown) => value);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body?.['tools']).toMatchObject([{ type: 'function', name: 'my_web_search_assistant' }, { type: 'web_search' }]);
+    // Must NOT have disabled search; the rejection was for the function tool, not the hosted web_search.
+    expect(adapter.capabilities(request.model).nativeWebSearch).toBe(true);
+    expect(error).toMatchObject({ code: 'provider_error' });
+
+    // Follow-up request on the same adapter must still include the hosted web_search tool.
+    stream(completed());
+    await expect(collectChat(adapter.chat(searchRequest))).resolves.toBeDefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.body?.['tools']).toContainEqual({ type: 'web_search' });
   });
 
   it.each([
@@ -270,5 +383,98 @@ describe('ChatGPT Responses API with a loopback fake', () => {
 
   it('rejects non-public production endpoints including backend-api', () => {
     expect(() => new ChatGPTAdapter({ ...config, baseUrl: 'https://chatgpt.com/backend-api' })).toThrow('public OpenAI API');
+  });
+});
+
+describe('ChatGPT structured search rejection with injected fetch', () => {
+  it.each(['http', 'stream'] as const)('disables search when web_search tool is rejected with a field-level param like tools[1].type (%s)', async transport => {
+    const error = { code: 'unsupported_value', param: 'tools[1].type', message: 'The value "web_search" is not supported.' };
+    const calls: Record<string, unknown>[] = [];
+    const adapter = new ChatGPTAdapter(config, {
+      fetch: async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (calls.length === 1) {
+          return transport === 'http'
+            ? new Response(JSON.stringify({ error }), { status: 400, headers: { 'content-type': 'application/json' } })
+            : new Response(frame({ type: 'response.failed', response: { error } }), { headers: { 'content-type': 'text/event-stream' } });
+        }
+        return new Response(frame(completed()), { headers: { 'content-type': 'text/event-stream' } });
+      },
+      getChatGPTAccessToken: async () => TOKEN,
+    });
+    const funcTool: ToolSpec = { name: 'my_func', description: 'A helper', inputSchema: { type: 'object' } };
+    // tools array sent: [funcTool, web_search]; web_search is at index 1.
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    const rejected = await collectChat(adapter.chat(searchRequest)).catch((value: unknown) => value);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.['tools']).toMatchObject([{ type: 'function', name: 'my_func' }, { type: 'web_search' }]);
+    // The rejection param tools[1].type refers to the web_search tool at index 1; search must be disabled.
+    expect(adapter.capabilities(request.model).nativeWebSearch).toBe(false);
+    expect(rejected).toMatchObject({ code: 'search_unavailable' });
+
+    // Follow-up must not re-send the rejected web_search tool.
+    await expect(collectChat(adapter.chat(searchRequest))).resolves.toBeDefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.['tools']).not.toContainEqual(expect.objectContaining({ type: 'web_search' }));
+  });
+
+  it.each(['http', 'stream'] as const)('keeps hosted search after an indexed function-tool name rejection (%s)', async transport => {
+    const error = { code: 'unsupported_tool', param: 'tools[0]', message: 'The tool "my_web_search_assistant" is not supported.' };
+    const calls: Record<string, unknown>[] = [];
+    const adapter = new ChatGPTAdapter(config, {
+      fetch: async (_input, init) => {
+        calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (calls.length === 1) {
+          return transport === 'http'
+            ? new Response(JSON.stringify({ error }), { status: 400, headers: { 'content-type': 'application/json' } })
+            : new Response(frame({ type: 'response.failed', response: { error } }), { headers: { 'content-type': 'text/event-stream' } });
+        }
+        return new Response(frame(completed()), { headers: { 'content-type': 'text/event-stream' } });
+      },
+      getChatGPTAccessToken: async () => TOKEN,
+    });
+    const funcTool: ToolSpec = { name: 'my_web_search_assistant', description: 'A web search helper', inputSchema: { type: 'object' } };
+    const searchRequest: ChatRequest = { ...request, tools: [funcTool], webSearch: {} };
+    const rejected = await collectChat(adapter.chat(searchRequest)).catch((value: unknown) => value);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.['tools']).toMatchObject([{ type: 'function', name: 'my_web_search_assistant' }, { type: 'web_search' }]);
+    expect(adapter.capabilities(request.model).nativeWebSearch).toBe(true);
+    expect(rejected).toMatchObject({ code: 'provider_error' });
+
+    await expect(collectChat(adapter.chat(searchRequest))).resolves.toBeDefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.['tools']).toContainEqual({ type: 'web_search' });
+  });
+});
+
+describe('ChatGPT per-yield batch cancellation', () => {
+  const first = { type: 'function_call', id: 'fc_1', call_id: 'c1', name: 'get_weather', arguments: '{"city":"Paris"}' };
+  const second = { type: 'function_call', id: 'fc_2', call_id: 'c2', name: 'get_weather', arguments: '{"city":"Rome"}' };
+  const search = { type: 'web_search_call', id: 'search_1' };
+  const usage = { input_tokens: 10, output_tokens: 5 };
+
+  it.each([
+    { name: 'completed output tool-call batch', events: [completed({ output: [first, second] })], after: { type: 'tool_call', id: 'c1' }, nativeSearch: false },
+    { name: 'accumulated tool-call batch', events: [
+      { type: 'response.output_item.added', item: first },
+      { type: 'response.output_item.added', item: second },
+      completed(),
+    ], after: { type: 'tool_call', id: 'c1' }, nativeSearch: false },
+    { name: 'completed output replay batch', events: [completed({ output: [search, { ...search, id: 'search_2' }] })], after: { type: 'provider_part', part: { data: { id: 'search_1' } } }, nativeSearch: true },
+    { name: 'native-search replay before the final aggregate', events: [completed({ output: [search] })], after: { type: 'provider_part', part: { data: { id: 'search_1' } } }, nativeSearch: true },
+    { name: 'sources before usage', events: [completed({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'Answer', annotations: [{ type: 'url_citation', url: 'https://example.com', title: 'Example' }] }] }], usage })], after: { type: 'sources' }, nativeSearch: false },
+    { name: 'usage before done', events: [completed({ usage })], after: { type: 'usage' }, nativeSearch: false },
+  ])('abort after $name is honoured', async ({ events, after, nativeSearch }) => {
+    const ac = new AbortController();
+    const adapter = new ChatGPTAdapter(config, {
+      fetch: async () => new Response(events.map(frame).join(''), { headers: { 'content-type': 'text/event-stream' } }),
+      getChatGPTAccessToken: async () => TOKEN,
+    });
+    const iterator = adapter.chat({ ...request, signal: ac.signal, ...(nativeSearch ? { webSearch: {} } : {}), tools: [{ name: 'get_weather', description: 'Weather', inputSchema: { type: 'object' } }] })[Symbol.asyncIterator]();
+    let event = await iterator.next();
+    while (!event.done && event.value.type !== after.type) event = await iterator.next();
+    expect(event.value).toMatchObject(after);
+    ac.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'cancelled' });
   });
 });

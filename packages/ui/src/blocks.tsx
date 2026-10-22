@@ -6,8 +6,7 @@
  *   "Can't display this content" fallback with the plain-text rendering inside
  *   <details>.
  * - Actions go through `onAction(action, { uiId, values })`. Live widgets send
- *   the reserved ids from `widgetActionId` (task.toggle:<id>, reminder.snooze:<min>,
- *   reminder.complete, memory.forget:<id>), which the server
+ *   the reserved ids from `widgetActionId` (including reminder ids), which the server
  *   resolves against the stored block.
  * - `confirm` on a message / event / link / copy action asks first (in-app
  *   dialog). Tool actions ignore it: the server confirms them with its own
@@ -19,6 +18,7 @@ import {
   useEffect,
   useId,
   useMemo,
+  useRef,
   useState,
   type ErrorInfo,
   type FormEvent,
@@ -26,7 +26,9 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  FORM_SUBMIT_ACTION_ID,
+  describeRecurrence,
+  formatTableCell,
+  formSubmitActionId,
   UIBlockSchema,
   isSafeImageUrl,
   isSafeLinkUrl,
@@ -36,6 +38,8 @@ import {
   type ButtonsBlock,
   type CalloutBlock,
   type CardBlock,
+  type ChangeItem,
+  type ChangesBlock,
   type CodeBlock,
   type CountdownBlock,
   type DividerBlock,
@@ -74,6 +78,7 @@ import { useConfirm } from './confirm.js';
 import { useLinkClick } from './links.js';
 import { formatDate, formatDateTime, formatRelative } from './format.js';
 import { RemoteImagePlaceholder, SafeImage, useRemoteImages } from './remote-image.js';
+import { RetainedStateScope, useRetainedState } from './retained-state.js';
 
 export interface UIActionContext {
   uiId?: string;
@@ -83,10 +88,17 @@ export type OnUIAction = (action: UIAction, context: UIActionContext) => void | 
 
 /** Fresh state for live widgets (from the app's stores), keyed by id. */
 export interface LiveData {
-  reminders?: Record<string, Reminder>;
+  /** Null marks a known deletion; missing ids still use the saved snapshot. */
+  reminders?: Record<string, Reminder | null>;
   tasks?: Record<string, Task>;
   /** Current status of memories shown in memory widgets. */
   memories?: Record<string, { status: MemoryStatus }>;
+  /**
+   * True once the client has loaded the full reminder list from the server.
+   * When true, an id absent from `reminders` is treated as deleted.
+   * Optional so other clients (desktop, mobile) keep working without this flag.
+   */
+  remindersListLoaded?: boolean;
 }
 
 export interface BlockRendererProps {
@@ -95,6 +107,10 @@ export interface BlockRendererProps {
   onAction?: OnUIAction;
   live?: LiveData;
   depth?: number;
+  /** Stable structural identity supplied by container renderers for blocks without ids. */
+  stateKey?: string;
+  /** Child indexes from the stored UI part's root, in childBlocks order. */
+  blockPath?: readonly number[];
 }
 
 const MAX_DEPTH = 8;
@@ -114,7 +130,7 @@ const TONE_ICON: Record<Tone, string> = {
 function useActionRunner(onAction: OnUIAction | undefined, uiId: string | undefined) {
   const confirm = useConfirm();
   const [busy, setBusy] = useState<string | null>(null);
-  const run = async (action: UIAction, values?: Record<string, unknown>): Promise<boolean> => {
+  const run = async (action: UIAction, values?: Record<string, unknown>, onError?: (error: unknown) => void): Promise<boolean> => {
     if (!onAction) return false;
     // Model-written `confirm` text only guards actions that stay on the client
     // side of the conversation (message / event / link / copy). Tool actions are
@@ -130,13 +146,14 @@ function useActionRunner(onAction: OnUIAction | undefined, uiId: string | undefi
       if (values) ctx.values = values;
       await onAction(action, ctx);
       return true;
-    } catch {
+    } catch (error) {
+      onError?.(error);
       return false;
     } finally {
       setBusy(null);
     }
   };
-  return { run, busy };
+  return { run, busy, hasAction: !!onAction };
 }
 
 const STYLE_VARIANT: Record<NonNullable<UIAction['style']>, ButtonVariant> = {
@@ -154,7 +171,7 @@ function ActionButton({ action, runner, size = 'md' }: { action: UIAction; runne
       size={size}
       icon={icon}
       loading={runner.busy === action.id}
-      disabled={runner.busy !== null && runner.busy !== action.id}
+      disabled={!runner.hasAction || (runner.busy !== null && runner.busy !== action.id)}
       onClick={() => void runner.run(action)}
     >
       {action.label}
@@ -217,7 +234,7 @@ function HeadingRenderer({ block }: { block: HeadingBlock }): ReactElement {
   return <h2 className="neo-block-heading">{block.text}</h2>;
 }
 
-function CardRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: CardBlock }): ReactElement {
+function CardRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: CardBlock }): ReactElement {
   const runner = useActionRunner(onAction, uiId);
   const hasImage = Boolean(block.imageUrl && isSafeImageUrl(block.imageUrl));
   const body = (
@@ -237,7 +254,7 @@ function CardRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps
       )}
       {block.children && block.children.length > 0 && (
         <div style={{ marginTop: block.title || block.icon || block.subtitle ? '0.75rem' : 0 }}>
-          <BlockList blocks={block.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+          <BlockList blocks={block.children} parentPath={blockPath} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
         </div>
       )}
       {block.actions && block.actions.length > 0 && (
@@ -295,7 +312,7 @@ function ListRenderer({ block, uiId, onAction }: BlockRendererProps & { block: L
           return (
             <li key={item.id}>
               {item.action ? (
-                <button type="button" className="neo-list-item" data-tone={item.tone} onClick={() => void runner.run(item.action!)}>
+                <button type="button" className="neo-list-item" data-tone={item.tone} disabled={!onAction} onClick={() => void runner.run(item.action!)}>
                   {content}
                 </button>
               ) : (
@@ -311,24 +328,8 @@ function ListRenderer({ block, uiId, onAction }: BlockRendererProps & { block: L
   );
 }
 
-export function formatCell(value: string | number | boolean | null | undefined, format: string | undefined, locale: string): string {
-  if (value === null || value === undefined || value === '') return '—';
-  if (typeof value === 'boolean') return value ? '✓' : '✗';
-  try {
-    if (typeof value === 'number') {
-      if (format === 'currency') return new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD' }).format(value);
-      if (format === 'percent') return new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 1 }).format(value);
-      if (format === 'date') return formatDate(value, locale);
-      return new Intl.NumberFormat(locale, { maximumFractionDigits: 4 }).format(value);
-    }
-    if (format === 'date') {
-      const d = new Date(value);
-      if (!Number.isNaN(d.getTime())) return formatDate(d.getTime(), locale);
-    }
-  } catch {
-    // fall through
-  }
-  return String(value);
+export function formatCell(value: string | number | boolean | null | undefined, format: string | undefined, locale: string, currency = 'USD'): string {
+  return formatTableCell(value, format, locale, currency);
 }
 
 const TABLE_PAGE = 50;
@@ -336,7 +337,7 @@ const TABLE_PAGE = 50;
 function TableRenderer({ block }: { block: TableBlock }): ReactElement {
   const locale = useLocale();
   const t = useT();
-  const [all, setAll] = useState(false);
+  const [all, setAll] = useRetainedState('table:all', false);
   const rows = all ? block.rows : block.rows.slice(0, TABLE_PAGE);
   const numeric = (f?: string) => f === 'number' || f === 'currency' || f === 'percent';
   return (
@@ -357,7 +358,7 @@ function TableRenderer({ block }: { block: TableBlock }): ReactElement {
             <tr key={ri}>
               {block.columns.map((col) => (
                 <td key={col.key} style={{ textAlign: col.align ?? (numeric(col.format) ? 'right' : 'left') }}>
-                  {formatCell(row[col.key], col.format, locale)}
+                  {formatCell(Object.prototype.hasOwnProperty.call(row, col.key) ? row[col.key] : undefined, col.format, locale, col.currency)}
                 </td>
               ))}
             </tr>
@@ -577,12 +578,12 @@ function FormFieldControl({ field, id, value, error, onChange }: { field: FormFi
   );
 }
 
-function FormRenderer({ block, uiId, onAction }: BlockRendererProps & { block: FormBlock }): ReactElement {
+function FormRenderer({ block, uiId, onAction, blockPath = [] }: BlockRendererProps & { block: FormBlock }): ReactElement {
   const t = useT();
   const formId = useId();
-  const [values, setValues] = useState<Record<string, FieldValue>>(() => Object.fromEntries(block.fields.map((f) => [f.name, initialValue(f)])));
-  const [errors, setErrors] = useState<Record<string, string | null>>({});
-  const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [values, setValues] = useRetainedState<Record<string, FieldValue>>('form:values', () => Object.fromEntries(block.fields.map((f) => [f.name, initialValue(f)])));
+  const [errors, setErrors] = useRetainedState<Record<string, string | null>>('form:errors', {});
+  const [state, setState] = useRetainedState<'idle' | 'sending' | 'sent' | 'error'>('form:status', 'idle');
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -590,14 +591,14 @@ function FormRenderer({ block, uiId, onAction }: BlockRendererProps & { block: F
     let invalid = false;
     for (const f of block.fields) {
       const err = validateFormField(f, values[f.name] ?? '', t);
-      next[f.name] = err;
+      Object.defineProperty(next, f.name, { value: err, writable: true, enumerable: true, configurable: true });
       if (err) invalid = true;
     }
     setErrors(next);
-    if (invalid || !onAction) return;
+    if (invalid || !onAction || state === 'sending') return;
     setState('sending');
     try {
-      await onAction({ id: FORM_SUBMIT_ACTION_ID, kind: 'event', label: block.submitLabel ?? t('common.submit') }, { uiId, values });
+      await onAction({ id: formSubmitActionId(block, blockPath), kind: 'event', label: block.submitLabel ?? t('common.submit') }, { uiId, values });
       setState('sent');
     } catch {
       setState('error');
@@ -618,16 +619,16 @@ function FormRenderer({ block, uiId, onAction }: BlockRendererProps & { block: F
           field={field}
           id={`${formId}-${field.name}`}
           value={values[field.name] ?? ''}
-          error={errors[field.name] ?? null}
+          error={Object.hasOwn(errors, field.name) ? (errors[field.name] ?? null) : null}
           onChange={(v) => {
             setValues((prev) => ({ ...prev, [field.name]: v }));
-            if (errors[field.name]) setErrors((prev) => ({ ...prev, [field.name]: null }));
+            if (Object.hasOwn(errors, field.name) && errors[field.name]) setErrors((prev) => ({ ...prev, [field.name]: null }));
             if (state === 'sent') setState('idle');
           }}
         />
       ))}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-        <Button type="submit" variant="primary" loading={state === 'sending'}>
+        <Button type="submit" variant="primary" loading={state === 'sending'} disabled={!onAction}>
           {block.submitLabel ?? t('common.submit')}
         </Button>
         {state === 'sent' && (
@@ -662,18 +663,38 @@ function ButtonsRenderer({ block, uiId, onAction }: BlockRendererProps & { block
 function Lightbox({ images, index, onClose, onIndex }: { images: { url: string; alt: string; caption?: string | undefined }[]; index: number; onClose: () => void; onIndex: (i: number) => void }): ReactElement | null {
   const t = useT();
   const img = images[index];
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => opener?.focus();
+  }, []);
+  useEffect(() => {
+    dialogRef.current?.querySelector<HTMLElement>('button')?.focus();
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
       if (e.key === 'ArrowRight' && images.length > 1) onIndex((index + 1) % images.length);
       if (e.key === 'ArrowLeft' && images.length > 1) onIndex((index - 1 + images.length) % images.length);
+      if (e.key === 'Tab') {
+        const buttons = dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])');
+        const first = buttons?.[0];
+        const last = buttons?.[buttons.length - 1];
+        if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first?.focus();
+        } else if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last?.focus();
+        }
+      }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [index, images.length, onClose, onIndex]);
   if (!img) return null;
   return (
-    <div className="neo-lightbox" role="dialog" aria-modal="true" aria-label={img.alt} onClick={onClose}>
+    <div ref={dialogRef} className="neo-lightbox" role="dialog" aria-modal="true" aria-label={img.alt} onClick={onClose}>
       <span className="neo-lightbox__close">
         <IconButton icon="x" label={t('common.close')} onClick={onClose} />
       </span>
@@ -780,31 +801,33 @@ function DividerRenderer({ block }: { block: DividerBlock }): ReactElement {
 
 // ── containers ───────────────────────────────────────────────────────────
 
-function GridRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: GridBlock }): ReactElement {
+function GridRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: GridBlock }): ReactElement {
   const cols = Math.min(4, Math.max(1, Math.round(block.columns)));
   return (
     <div className="neo-grid" data-cols={cols} style={{ ['--neo-cols' as string]: cols }}>
       {block.children.map((child, i) => (
-        <BlockRenderer key={child.id ?? i} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} blockPath={[...blockPath, i]} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
       ))}
     </div>
   );
 }
 
-function StackRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: StackBlock }): ReactElement {
+function StackRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: StackBlock }): ReactElement {
   return (
     <div className="neo-stack" data-direction={block.direction ?? 'vertical'} data-gap={block.gap ?? 'md'}>
       {block.children.map((child, i) => (
-        <BlockRenderer key={child.id ?? i} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} blockPath={[...blockPath, i]} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
       ))}
     </div>
   );
 }
 
-function TabsRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: TabsBlock }): ReactElement {
+function TabsRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: TabsBlock }): ReactElement {
   const prefix = useId();
-  const [active, setActive] = useState(block.tabs[0]?.id ?? '');
-  const current = block.tabs.find((tab) => tab.id === active) ?? block.tabs[0];
+  const [active, setActive] = useRetainedState('tabs:active', block.tabs[0]?.id ?? '');
+  const currentIndex = Math.max(0, block.tabs.findIndex((tab) => tab.id === active));
+  const current = block.tabs[currentIndex];
+  const childOffset = block.tabs.slice(0, currentIndex).reduce((count, tab) => count + tab.children.length, 0);
   return (
     <div>
       <Tabs
@@ -816,21 +839,24 @@ function TabsRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps
       />
       {current && (
         <div className="neo-tabpanel" role="tabpanel" id={`${prefix}-panel-${current.id}`} aria-labelledby={`${prefix}-tab-${current.id}`}>
-          <BlockList blocks={current.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+          <RetainedStateScope key={current.id} scope={`tab:${current.id}`}>
+            <BlockList blocks={current.children} parentPath={blockPath} childOffset={childOffset} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+          </RetainedStateScope>
         </div>
       )}
     </div>
   );
 }
 
-function AccordionRenderer({ block, uiId, onAction, live, depth }: BlockRendererProps & { block: AccordionBlock }): ReactElement {
+function AccordionRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: AccordionBlock }): ReactElement {
   const prefix = useId();
-  const [open, setOpen] = useState<Record<string, boolean>>(() => Object.fromEntries(block.items.map((item) => [item.id, item.open ?? false])));
+  const [open, setOpen] = useRetainedState<Record<string, boolean>>('accordion:open', () => Object.fromEntries(block.items.map((item) => [item.id, item.open ?? false])));
   return (
     <div className="neo-accordion">
-      {block.items.map((item) => {
-        const isOpen = open[item.id] ?? false;
+      {block.items.map((item, itemIndex) => {
+        const isOpen = Object.prototype.hasOwnProperty.call(open, item.id) ? open[item.id]! : false;
         const panelId = `${prefix}-${item.id}`;
+        const childOffset = block.items.slice(0, itemIndex).reduce((count, previous) => count + previous.children.length, 0);
         return (
           <div key={item.id} className="neo-accordion__item">
             <button
@@ -847,7 +873,9 @@ function AccordionRenderer({ block, uiId, onAction, live, depth }: BlockRenderer
             </button>
             {isOpen && (
               <div id={panelId} className="neo-accordion__panel">
-                <BlockList blocks={item.children} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+                <RetainedStateScope scope={`item:${item.id}`}>
+                  <BlockList blocks={item.children} parentPath={blockPath} childOffset={childOffset} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+                </RetainedStateScope>
               </div>
             )}
           </div>
@@ -971,7 +999,7 @@ function CountdownRenderer({ block }: { block: CountdownBlock }): ReactElement {
   ];
   const visible = units[0]![0] > 0 ? units : units.slice(1);
   return (
-    <div className="neo-card neo-countdown" role="timer" aria-label={`${block.label}: ${formatDateTime(block.until, locale)}`}>
+    <div className="neo-card neo-countdown" role="timer" aria-label={`${block.label}: ${formatDateTime(block.until, locale, block.timezone)}`}>
       <span className="neo-countdown__label">{block.label}</span>
       <div className="neo-countdown__units" aria-hidden="true">
         {visible.map(([n, label], i) => (
@@ -981,7 +1009,7 @@ function CountdownRenderer({ block }: { block: CountdownBlock }): ReactElement {
           </span>
         ))}
       </div>
-      <span className="neo-help">{formatDateTime(block.until, locale)}</span>
+      <span className="neo-help">{formatDateTime(block.until, locale, block.timezone)}</span>
     </div>
   );
 }
@@ -995,15 +1023,19 @@ function ReminderRenderer({ block, uiId, onAction, live }: BlockRendererProps & 
   const locale = useLocale();
   const runner = useActionRunner(onAction, uiId);
   const fresh = live?.reminders?.[block.reminderId];
-  const status = fresh?.status ?? block.status;
-  const dueAt = fresh?.dueAt ?? block.dueAt;
-  const title = fresh?.title ?? block.title;
-  const tz = fresh?.timezone ?? block.timezone;
+  // When the full list has loaded, an id absent from the record means deleted.
+  const effectiveFresh = (fresh === undefined && live?.remindersListLoaded && live.reminders !== undefined) ? null : fresh;
+  const status = effectiveFresh === null ? 'deleted' : effectiveFresh?.status ?? block.status;
+  const dueAt = effectiveFresh?.dueAt ?? block.dueAt;
+  const title = effectiveFresh?.title ?? block.title;
+  const tz = effectiveFresh?.timezone ?? block.timezone;
+  const notes = effectiveFresh ? effectiveFresh.notes : block.notes;
+  const recurrenceText = effectiveFresh ? (effectiveFresh.recurrence ? describeRecurrence(effectiveFresh.recurrence) : undefined) : block.recurrenceText;
   const active = status === 'scheduled' || status === 'fired';
   const actions: UIAction[] = [
-    { id: widgetActionId.reminderSnooze(10), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_10'), icon: 'alarm-clock', input: { id: block.reminderId, minutes: 10 } },
-    { id: widgetActionId.reminderSnooze(60), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_60'), input: { id: block.reminderId, minutes: 60 } },
-    { id: widgetActionId.reminderComplete(), kind: 'tool', tool: 'complete_reminder', label: t('reminder.done'), icon: 'check', style: 'primary', input: { id: block.reminderId } },
+    { id: widgetActionId.reminderSnooze(block.reminderId, 10), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_10'), icon: 'alarm-clock', input: { id: block.reminderId, minutes: 10 } },
+    { id: widgetActionId.reminderSnooze(block.reminderId, 60), kind: 'tool', tool: 'snooze_reminder', label: t('reminder.snooze_60'), input: { id: block.reminderId, minutes: 60 } },
+    { id: widgetActionId.reminderComplete(block.reminderId), kind: 'tool', tool: 'complete_reminder', label: t('reminder.done'), icon: 'check', style: 'primary', input: { id: block.reminderId } },
   ];
   return (
     <section className="neo-card neo-widget" data-state={status} aria-label={t('reminder.widget_label', { title })}>
@@ -1018,15 +1050,16 @@ function ReminderRenderer({ block, uiId, onAction, live }: BlockRendererProps & 
               <time dateTime={new Date(dueAt).toISOString()}>{formatDateTime(dueAt, locale, tz)}</time>
               {active && <> · {formatRelative(dueAt, locale)}</>}
             </span>
-            {block.recurrenceText && (
+            {recurrenceText && (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                 <Icon name="repeat" size={12} />
-                {block.recurrenceText}
+                {recurrenceText}
               </span>
             )}
           </div>
+          {notes && <p className="neo-widget__notes" title={notes}>{notes}</p>}
         </div>
-        <Badge tone={REMINDER_TONE[status]}>{t(`reminder.status.${status}`)}</Badge>
+        <Badge tone={status === 'deleted' ? 'neutral' : REMINDER_TONE[status]}>{t(`reminder.status.${status}`)}</Badge>
       </div>
       {active && onAction && (
         <div className="neo-widget__actions">
@@ -1045,8 +1078,13 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
   const [optimistic, setOptimistic] = useState<Record<string, boolean>>({});
   const runner = useActionRunner(onAction, uiId);
   const tasks = block.tasks.map((task) => {
-    const fresh = live?.tasks?.[task.id];
-    return { ...task, title: fresh?.title ?? task.title, dueAt: fresh ? fresh.dueAt : task.dueAt, priority: fresh?.priority ?? task.priority, done: optimistic[task.id] ?? fresh?.done ?? task.done };
+    const fresh = live?.tasks && Object.prototype.hasOwnProperty.call(live.tasks, task.id)
+      ? live.tasks[task.id]
+      : undefined;
+    const optimisticDone = Object.prototype.hasOwnProperty.call(optimistic, task.id)
+      ? optimistic[task.id]
+      : undefined;
+    return { ...task, title: fresh?.title ?? task.title, dueAt: fresh ? fresh.dueAt : task.dueAt, priority: fresh?.priority ?? task.priority, done: optimisticDone ?? fresh?.done ?? task.done };
   });
   // Drop optimistic values once live data agrees.
   useEffect(() => {
@@ -1054,7 +1092,8 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
       const next = { ...prev };
       let changed = false;
       for (const [id, done] of Object.entries(prev)) {
-        if (live?.tasks?.[id]?.done === done) {
+        const freshDone = live?.tasks && Object.prototype.hasOwnProperty.call(live.tasks, id) ? live.tasks[id]?.done : undefined;
+        if (freshDone === done) {
           delete next[id];
           changed = true;
         }
@@ -1104,13 +1143,133 @@ function TasksRenderer({ block, uiId, onAction, live }: BlockRendererProps & { b
                       <Icon name="flag" size={12} />
                     </span>
                   ) : null}
-                  {task.dueAt ? <time dateTime={new Date(task.dueAt).toISOString()}>{formatDate(task.dueAt, locale, undefined, 'short')}</time> : null}
+                  {task.dueAt != null ? <time dateTime={new Date(task.dueAt).toISOString()}>{formatDate(task.dueAt, locale, block.timezone, 'short')}</time> : null}
                 </span>
               </li>
             );
           })}
         </ul>
       )}
+    </section>
+  );
+}
+
+function ChangeDetails({ item, timezone }: { item: ChangeItem; timezone?: string }): ReactElement {
+  const t = useT();
+  const locale = useLocale();
+  const time = (dueAt: number | null | undefined) => dueAt == null ? t('block.changes_no_due') : formatDateTime(dueAt, locale, timezone);
+  const priority = (value: number | undefined) => value ? t(`task.priority_${value}`) : t('block.changes_no_priority');
+  if (item.kind === 'reminder.create') return (
+    <div className="neo-change__details">
+      {formatDateTime(item.dueAt, locale, timezone ?? item.timezone)}
+      {item.notes && <p>{item.notes}</p>}
+    </div>
+  );
+  return (
+    <div className="neo-change__details">
+      {item.after.dueAt !== undefined && <p>{t('block.changes_due', { from: time(item.before.dueAt), to: time(item.after.dueAt) })}</p>}
+      {item.after.title !== undefined && <p>{t('block.changes_title_field', { from: item.before.title ?? '', to: item.after.title })}</p>}
+      {item.kind === 'reminder.update' && item.after.timezone !== undefined && <p>{t('block.changes_timezone', { from: item.before.timezone ?? '', to: item.after.timezone })}</p>}
+      {item.kind === 'task.update' && item.after.priority !== undefined && <p>{priority(item.before.priority)} → {priority(item.after.priority)}</p>}
+      {item.kind === 'task.update' && item.after.done !== undefined && <p>{t(item.after.done ? 'block.changes_mark_done' : 'block.changes_reopen')}</p>}
+    </div>
+  );
+}
+
+type ChangeApplyState = {
+  running: boolean;
+  applying: string | null;
+  results: Record<string, { status: 'applied' } | { status: 'failed'; error: string }>;
+};
+
+function ChangesRenderer({ block, uiId, onAction }: BlockRendererProps & { block: ChangesBlock }): ReactElement {
+  const t = useT();
+  const id = useId();
+  const runner = useActionRunner(onAction, uiId);
+  const [selected, setSelected] = useRetainedState<Record<string, boolean>>('selection', () => Object.fromEntries(block.items.map((item) => [item.id, item.status !== 'applied'])));
+  const [state, setState] = useRetainedState<ChangeApplyState>('apply', { running: false, applying: null, results: {} });
+  const running = useRef(false);
+  const currentBlock = useRef(block);
+  currentBlock.current = block;
+  const isApplied = (item: ChangeItem) => item.status === 'applied' || state.results[item.id]?.status === 'applied';
+  const pending = block.items.filter((item) => !isApplied(item) && (Object.prototype.hasOwnProperty.call(selected, item.id) ? selected[item.id]! : true));
+  const retry = pending.some((item) => state.results[item.id]?.status === 'failed');
+  const applyLabel = t(retry ? 'block.changes_retry' : 'block.changes_apply', { n: pending.length });
+  const allApplied = block.items.every(isApplied);
+  const apply = async () => {
+    if (!onAction || state.running || running.current || pending.length === 0) return;
+    running.current = true;
+    setState((previous) => ({ ...previous, running: true }));
+    try {
+      for (const item of pending) {
+        if (currentBlock.current.items.find((current) => current.id === item.id)?.status === 'applied') continue;
+        setState((previous) => ({ ...previous, applying: item.id }));
+        let error = t('block.changes_failed');
+        const ok = await runner.run(
+          { id: widgetActionId.changeApply(item.id), kind: 'tool', tool: 'apply_change', label: t('block.changes_apply_item'), input: {} },
+          undefined,
+          (cause) => { if (cause instanceof Error && cause.message) error = cause.message; else if (typeof cause === 'string' && cause) error = cause; },
+        );
+        setState((previous) => ({
+          ...previous,
+          applying: null,
+          results: { ...previous.results, [item.id]: ok ? { status: 'applied' } : { status: 'failed', error } },
+        }));
+      }
+    } finally {
+      running.current = false;
+      setState((previous) => ({ ...previous, running: false, applying: null }));
+    }
+  };
+  return (
+    <section className="neo-card neo-widget neo-changes" aria-label={block.title ?? t('block.changes_title')}>
+      <div className="neo-widget__head">
+        <span className="neo-widget__icon"><Icon name="list-checks" size={18} /></span>
+        <div className="neo-change__main">
+          <p className="neo-widget__title">{block.title ?? t('block.changes_title')}</p>
+          {block.note && <p className="neo-changes__note neo-help">{block.note}</p>}
+        </div>
+      </div>
+      <ul className="neo-changes__list">
+        {block.items.map((item) => {
+          const applied = isApplied(item);
+          const result = state.results[item.id];
+          const applying = state.applying === item.id;
+          const checkboxId = `${id}-${item.id}`;
+          const kind = item.kind === 'task.update' ? 'task' : item.kind === 'reminder.create' ? 'new_reminder' : 'reminder';
+          return (
+            <li key={item.id} className="neo-change" data-state={applied ? 'applied' : applying ? 'applying' : result?.status ?? 'pending'}>
+              {applied ? <span className="neo-change__check" aria-hidden="true"><Icon name="check" size={16} /></span> : (
+                <input
+                  id={checkboxId}
+                  className="neo-checkbox neo-change__check"
+                  type="checkbox"
+                  checked={Object.prototype.hasOwnProperty.call(selected, item.id) ? selected[item.id]! : true}
+                  disabled={state.running || !onAction}
+                  onChange={(event) => setSelected((previous) => ({ ...previous, [item.id]: event.target.checked }))}
+                />
+              )}
+              <div className="neo-change__main">
+                {applied ? <p className="neo-change__title">{item.title}</p> : <label htmlFor={checkboxId} className="neo-change__title">{item.title}</label>}
+                <span className="neo-change__kind">{t(`block.changes_kind_${kind}`)}</span>
+                <ChangeDetails item={item} timezone={block.timezone} />
+                <div className="neo-change__status" aria-live="polite" aria-atomic="true">
+                  {applied ? <span className="neo-change__applied">{t('block.changes_applied')}</span> : applying ? (
+                    <span><Spinner size={12} />{t('block.changes_applying')}</span>
+                  ) : result?.status === 'failed' ? <span className="neo-error-text">{result.error}</span> : null}
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="neo-widget__actions" aria-live="polite">
+        {allApplied ? <span className="neo-change__applied" role="status">{t('block.changes_all_applied')}</span> : (
+          <Button variant="primary" aria-label={applyLabel} loading={state.running} disabled={!onAction || pending.length === 0} onClick={() => void apply()}>
+            {applyLabel}
+          </Button>
+        )}
+      </div>
     </section>
   );
 }
@@ -1137,8 +1296,11 @@ function MemoryWidgetRenderer({ block, uiId, onAction, live }: BlockRendererProp
       </div>
       <div>
         {block.nodes.map((node) => {
-          const status = live?.memories?.[node.id]?.status ?? node.status ?? 'active';
-          const result = resolved[node.id];
+          const liveStatus = live?.memories && Object.prototype.hasOwnProperty.call(live.memories, node.id)
+            ? live.memories[node.id]?.status
+            : undefined;
+          const status = node.status === 'forgotten' ? node.status : liveStatus ?? node.status ?? 'active';
+          const result = status === 'forgotten' ? 'forgotten' : (Object.prototype.hasOwnProperty.call(resolved, node.id) ? resolved[node.id] : undefined);
           return (
             <div key={node.id} className="neo-mem-row">
               <div className="neo-mem-row__main">
@@ -1240,6 +1402,8 @@ function renderBlock(props: BlockRendererProps): ReactElement {
       return <ReminderRenderer {...props} block={block} />;
     case 'tasks':
       return <TasksRenderer {...props} block={block} />;
+    case 'changes':
+      return <ChangesRenderer {...props} block={block} />;
     case 'memory':
       return <MemoryWidgetRenderer {...props} block={block} />;
     default:
@@ -1247,13 +1411,25 @@ function renderBlock(props: BlockRendererProps): ReactElement {
   }
 }
 
+function blockStateKey(block: UIBlock, index: number): string {
+  return block?.id ? `id:${block.id}` : `index:${index}`;
+}
+
 /** Render one block. Top-level blocks (depth 0) are validated against the schema first. */
 export function BlockRenderer(props: BlockRendererProps): ReactElement | null {
   const { block, depth = 0 } = props;
+  const instance = useId();
+  const scope = props.stateKey ?? (block?.id ? `id:${block.id}` : props.uiId ? `ui:${props.uiId}` : `instance:${instance}`);
   const valid = useMemo(() => (depth > 0 ? true : UIBlockSchema.safeParse(block).success), [block, depth]);
   if (depth > MAX_DEPTH) return null;
   if (!valid || !block || typeof block !== 'object') return <FallbackRenderer block={block} />;
-  return <BlockBoundary block={block}>{renderBlock({ ...props, depth })}</BlockBoundary>;
+  return (
+    <RetainedStateScope scope={scope}>
+      <RetainedStateScope scope={block.type}>
+        <BlockBoundary block={block}>{renderBlock({ ...props, depth })}</BlockBoundary>
+      </RetainedStateScope>
+    </RetainedStateScope>
+  );
 }
 
 export function BlockList({
@@ -1262,17 +1438,21 @@ export function BlockList({
   onAction,
   live,
   depth = 0,
+  parentPath,
+  childOffset = 0,
 }: {
   blocks: UIBlock[];
   uiId?: string;
   onAction?: OnUIAction;
   live?: LiveData;
   depth?: number;
+  parentPath?: readonly number[];
+  childOffset?: number;
 }): ReactElement {
   return (
     <div className={`neo-blocks${depth === 0 ? ' neo-blocks--root' : ''}`}>
       {blocks.map((block, i) => (
-        <BlockRenderer key={block?.id ?? i} block={block} uiId={uiId} onAction={onAction} live={live} depth={depth} />
+        <BlockRenderer key={block?.id ?? i} stateKey={blockStateKey(block, i)} blockPath={parentPath ? [...parentPath, childOffset + i] : []} block={block} uiId={uiId} onAction={onAction} live={live} depth={depth} />
       ))}
     </div>
   );

@@ -205,6 +205,7 @@ export interface RecallQuery {
   /** Strengthen recalled memories (spaced repetition + Hebbian links). Default true. */
   reinforce?: boolean;
   now?: number;
+  signal?: AbortSignal;
 }
 
 export interface RecalledMemory {
@@ -258,7 +259,7 @@ export const RememberInputSchema = z.object({
   sensitivity: SensitivitySchema.optional(),
   /** Entity names this memory is about; entities are created/linked automatically. */
   entities: z.array(z.string().max(120)).max(20).optional(),
-  validUntil: z.number().nullable().optional(),
+  validUntil: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }).nullable().optional(),
   source: MemorySourceSchema.optional(),
 });
 export type RememberInput = z.infer<typeof RememberInputSchema>;
@@ -275,7 +276,7 @@ export const MemoryNodePatchSchema = z.object({
   pinned: z.boolean().optional(),
   sensitivity: SensitivitySchema.optional(),
   status: z.enum(['active', 'archived']).optional(),
-  validUntil: z.number().nullable().optional(),
+  validUntil: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }).nullable().optional(),
 });
 export type MemoryNodePatch = z.infer<typeof MemoryNodePatchSchema>;
 

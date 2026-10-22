@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { toolInputJsonSchema, type ChatMessage, type ChatRequest, type ProviderConfig, type MemoryService, type ProductivityStores } from '@neo/protocol';
+import { NeoError, toolInputJsonSchema, type ChatMessage, type ChatRequest, type ProviderConfig, type MemoryService, type ProductivityStores } from '@neo/protocol';
 import { createBuiltinTools } from '../../tools/src/builtins/index.js';
 import { GeminiAdapter, sanitizeGeminiSchema } from './gemini.js';
 import { collect, dataFrames, fakeFetch, jsonResponse, ofType, recordingSleep, sseResponse, textOfEvents, type FakeResponder } from './testing/http.js';
@@ -146,6 +146,59 @@ describe('sanitizeGeminiSchema', () => {
     });
   });
 
+  it('preserves all non-null types in a type-union array', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number'] })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+    });
+  });
+
+  it('preserves all non-null types and sets nullable when null is in the type-union array', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number', 'null'] })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      nullable: true,
+    });
+  });
+
+  it('preserves sibling constraints in object/string type-union', () => {
+    const out = sanitizeGeminiSchema({
+      type: ['object', 'string'],
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    });
+    expect(out).toEqual({
+      anyOf: [
+        { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+        { type: 'string' },
+      ],
+    });
+  });
+
+  it('preserves sibling items in array/string type-union', () => {
+    const out = sanitizeGeminiSchema({ type: ['array', 'string'], items: { type: 'number' } });
+    expect(out).toEqual({
+      anyOf: [
+        { type: 'array', items: { type: 'number' } },
+        { type: 'string' },
+      ],
+    });
+  });
+
+  it('preserves wrapper scalar constraints on a type-union (minLength, minimum)', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number'], minLength: 3, minimum: 10 })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      minLength: 3,
+      minimum: 10,
+    });
+  });
+
+  it('preserves wrapper nullable and title on a type-union', () => {
+    expect(sanitizeGeminiSchema({ type: ['string', 'number'], title: 'Foo', nullable: true })).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      title: 'Foo',
+      nullable: true,
+    });
+  });
+
   it('keeps property names that look like keywords and survives recursive refs', () => {
     const schema = {
       type: 'object',
@@ -287,6 +340,55 @@ describe('Gemini streaming', () => {
     });
   });
 
+  it('abort after first tool_call in a multi-call chunk is honoured', async () => {
+    const ac = new AbortController();
+    const { a } = make(stream(
+      cand([
+        { functionCall: { name: 'get_weather', args: { city: 'Paris' } } },
+        { functionCall: { name: 'get_weather', args: { city: 'Rome' } } },
+      ], 'STOP'),
+    ));
+    const it = a.chat(req({ signal: ac.signal, tools: TOOLS }))[Symbol.asyncIterator]();
+    expect((await it.next()).value).toMatchObject({ type: 'tool_call', name: 'get_weather', input: { city: 'Paris' } });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it.each([
+    ['text', [{ text: 'First' }, { text: 'Second' }], 'text'],
+    ['reasoning', [{ text: 'First', thought: true }, { text: 'Second', thought: true }], 'reasoning'],
+    ['reasoning_part', [{ text: 'First', thought: true, thoughtSignature: 'signature' }], 'reasoning'],
+  ] as const)('abort before %s in a multi-event chunk is honoured', async (_nextType, parts, firstType) => {
+    const ac = new AbortController();
+    const { a } = make(stream(cand([...parts], 'STOP')));
+    const it = a.chat(req({ signal: ac.signal }))[Symbol.asyncIterator]();
+    expect((await it.next()).value).toMatchObject({ type: firstType });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it.each([
+    ['sources', 'text'],
+    ['usage', 'sources'],
+    ['done', 'usage'],
+  ] as const)('abort before post-stream %s is honoured', async (_nextType, firstType) => {
+    const ac = new AbortController();
+    const { a } = make(stream({
+      candidates: [{
+        content: { parts: [] },
+        finishReason: 'SAFETY',
+        groundingMetadata: { groundingChunks: [{ web: { uri: 'https://example.com', title: 'Example' } }] },
+      }],
+      usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1 },
+    }));
+    const it = a.chat(req({ signal: ac.signal, webSearch: {} }))[Symbol.asyncIterator]();
+    let first = await it.next();
+    while (!first.done && first.value.type !== firstType) first = await it.next();
+    expect(first.value).toMatchObject({ type: firstType });
+    ac.abort();
+    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
   it('abort mid-stream → cancelled', async () => {
     const ac = new AbortController();
     const { a } = make(() => sseResponse(dataFrames([cand([{ text: 'Hi' }])]), { hang: true }));
@@ -298,6 +400,40 @@ describe('Gemini streaming', () => {
 });
 
 describe('Gemini errors, keys, models, embeddings', () => {
+  it('abort while reading error body throws cancelled, not provider_error', async () => {
+    const controller = new AbortController();
+    const f = fakeFetch(() => {
+      const body = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          ctrl.error(new DOMException('aborted', 'AbortError'));
+        },
+      });
+      controller.abort();
+      return new Response(body, { status: 400 });
+    });
+    const { sleep } = make([] as FakeResponder[]);
+    const a = new GeminiAdapter(cfg(), { fetch: f, sleep });
+    await expect(collect(a.chat(req({ signal: controller.signal })))).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it('abort while reading retry-info body throws cancelled instead of retrying through to a later success', async () => {
+    const f = fakeFetch([
+      () => {
+        const body = new ReadableStream<Uint8Array>({
+          start(ctrl) {
+            ctrl.error(new DOMException('aborted', 'AbortError'));
+          },
+        });
+        return new Response(body, { status: 429 });
+      },
+      stream(cand([{ text: 'Hi' }], 'STOP')),
+    ]);
+    const { sleep } = make([] as FakeResponder[]);
+    const a = new GeminiAdapter(cfg(), { fetch: f, sleep });
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'cancelled' });
+    expect(f.calls.length).toBe(1);
+  });
+
   it('does not expose malformed model-response text in errors or connection tests', async () => {
     const { a } = make(() => new Response(KEY, { headers: { 'Content-Type': 'application/json' } }));
     const error = await a.listModels().catch((err: unknown) => err);
@@ -334,6 +470,56 @@ describe('Gemini errors, keys, models, embeddings', () => {
   it('an invalid key (HTTP 400 API_KEY_INVALID) is provider_auth', async () => {
     const { a } = make(gErr(400, 'API key not valid. Please pass a valid API key.', { details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'API_KEY_INVALID' }] }));
     await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'provider_auth' });
+  });
+
+  it('an in-stream 401 error on HTTP 200 is a nonretryable provider_auth NeoError', async () => {
+    const { a, f, sleep } = make(stream({ error: { code: 401, status: 'UNAUTHENTICATED', message: 'Invalid credentials' } }));
+    const error = await collect(a.chat(req())).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'provider_auth', retryable: false, details: { status: 401 } });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
+  });
+
+  it.each([
+    [{ code: 403 }, 'provider_auth', false],
+    [{ status: 'UNAUTHENTICATED' }, 'provider_auth', false],
+    [{ status: 'PERMISSION_DENIED' }, 'provider_auth', false],
+    [{ code: 429, status: 'UNAUTHENTICATED' }, 'provider_auth', false],
+    [{ code: 429, details: [{ reason: 'API_KEY_INVALID' }] }, 'provider_auth', false],
+    [{ code: 429, message: 'API key not valid. Please pass a valid API key.' }, 'provider_auth', false],
+    [{ code: 401, status: 'RESOURCE_EXHAUSTED' }, 'provider_auth', false],
+    [{ code: 429 }, 'rate_limited', true],
+    [{ status: 'RESOURCE_EXHAUSTED' }, 'rate_limited', true],
+    [{ code: 500 }, 'provider_error', true],
+    [{ code: 503 }, 'provider_error', true],
+    [{ code: 400 }, 'provider_error', false],
+    [{ code: 404 }, 'provider_error', false],
+    [{}, 'provider_error', false],
+    [{ status: 'INTERNAL' }, 'provider_error', true],
+    [{ status: 'UNAVAILABLE' }, 'provider_error', true],
+    [{ status: 'DEADLINE_EXCEEDED' }, 'provider_error', true],
+    [{ status: 'DATA_LOSS' }, 'provider_error', true],
+    [{ status: 'UNKNOWN' }, 'provider_error', true],
+  ])('classifies in-stream Gemini errors without retrying: %j', async (error, code, retryable) => {
+    const { a, f, sleep } = make(stream({ error: { message: 'Request failed', ...error } }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code, retryable });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
+  });
+
+  it.each([
+    [{ retryAfter: 2.5 }, 2500],
+    [{ retryAfter: '3' }, 3000],
+    [{ retryDelay: '1.5s' }, 1500],
+    [{ retryDelay: 4 }, 4000],
+    [{ details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '30s' }] }, 30_000],
+    [{ retryAfter: 0, details: [{ retryDelay: '30s' }] }, 0],
+  ])('preserves in-stream Gemini rate-limit retry metadata: %j', async (extra, retryAfterMs) => {
+    const { a, f, sleep } = make(stream({ error: { code: 429, message: 'Quota exhausted', ...extra } }));
+    await expect(collect(a.chat(req()))).rejects.toMatchObject({ code: 'rate_limited', retryable: true, details: { status: 429, retryAfterMs } });
+    expect(f.calls).toHaveLength(1);
+    expect(sleep.delays).toEqual([]);
   });
 
   it('429 retries honor RetryInfo; an over-long delay surfaces rate_limited with retryAfterMs', async () => {

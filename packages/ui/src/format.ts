@@ -19,6 +19,7 @@ function safeTz(timeZone: string | undefined): string | undefined {
 
 /** "Oct 10, 2026, 5:00 PM" (medium date + short time). */
 export function formatDateTime(ms: number, locale?: string, timeZone?: string): string {
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return '—';
   try {
     return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: safeTz(timeZone) }).format(ms);
   } catch {
@@ -28,6 +29,7 @@ export function formatDateTime(ms: number, locale?: string, timeZone?: string): 
 
 /** "Oct 10, 2026". */
 export function formatDate(ms: number, locale?: string, timeZone?: string, style: 'short' | 'medium' | 'long' | 'full' = 'medium'): string {
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return '—';
   try {
     return new Intl.DateTimeFormat(locale, { dateStyle: style, timeZone: safeTz(timeZone) }).format(ms);
   } catch {
@@ -37,6 +39,7 @@ export function formatDate(ms: number, locale?: string, timeZone?: string, style
 
 /** "5:00 PM". */
 export function formatTime(ms: number, locale?: string, timeZone?: string): string {
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return '—';
   try {
     return new Intl.DateTimeFormat(locale, { timeStyle: 'short', timeZone: safeTz(timeZone) }).format(ms);
   } catch {
@@ -81,6 +84,7 @@ export function formatNumber(n: number, locale?: string, options?: Intl.NumberFo
 
 /** Calendar day key (YYYY-MM-DD) of an instant in a timezone. */
 export function dayKey(ms: number, timeZone?: string): string {
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return '0000-00-00';
   try {
     const parts = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: safeTz(timeZone) }).formatToParts(ms);
     const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00';

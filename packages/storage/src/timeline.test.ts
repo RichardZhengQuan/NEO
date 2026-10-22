@@ -22,7 +22,7 @@ describe('timeline migration', () => {
     store.update(b.id, { archived: true });
     for (const item of [message('a_first', a.id, 100), message('b_first', b.id, 200), message('a_last', a.id, 300), message('b_last', b.id, 400), message('private', privateEpisode.id, 500)]) store.appendMessage(item);
     const transcript = db.prepare('SELECT * FROM messages ORDER BY rowid').all();
-    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([5, 6]);
+    expect(migrate(db, 'storage', storageMigrations).applied).toEqual([5, 6, 7, 8]);
     expect(db.prepare('SELECT * FROM messages ORDER BY rowid').all()).toEqual(transcript);
     expect(store.currentEpisode()).toBeNull();
     expect(store.get(a.id)).toMatchObject({ kind: 'episode', startedAt: 100, closedAt: 300, pinned: true, systemPrompt: 'frozen', toolset: ['get_datetime'] });
@@ -130,6 +130,19 @@ describe('timeline storage', () => {
     store.deleteMessage('search');
     expect(store.searchMessages('jasmine')).toEqual([]);
     expect(db.prepare('SELECT COUNT(*) AS n FROM message_fts').get()).toEqual({ n: 0 });
+  });
+
+  it('finds messages regardless of whether the query is NFC- or NFD-normalized', () => {
+    db = openNeoDatabase(':memory:');
+    const store = createConversationStore(db);
+    const episode = store.createEpisode();
+    store.appendMessage(message('accented', episode.id, 1, 'école'));
+    const expected = [{
+      messageId: 'accented', episodeId: episode.id, createdAt: 1,
+      snippet: { text: 'école', highlights: [[0, 5]] },
+    }];
+    expect(store.searchMessages('école')).toEqual(expected);
+    expect(store.searchMessages('école'.normalize('NFD'))).toEqual(expected);
   });
 
   it('returns match ranges without consuming literal brackets or changing Unicode text', () => {

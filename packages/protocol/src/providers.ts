@@ -231,10 +231,19 @@ export function isLocalUrl(url: string | undefined): boolean {
   } catch {
     return false;
   }
-  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.lan')) return true;
+  // Strip FQDN trailing dot — WHATWG URL preserves it in hostname
+  const normalizedHost = host.endsWith('.') ? host.slice(0, -1) : host;
+  if (normalizedHost === 'localhost' || normalizedHost.endsWith('.localhost') || normalizedHost.endsWith('.local') || normalizedHost.endsWith('.lan')) return true;
   if (host.includes(':')) {
     // IPv6 literal: loopback, unique-local (fc00::/7) and link-local (fe80::/10). Never apply these
     // prefix checks to DNS names — "fd-api.example.com" is a public host.
+    // IPv4-mapped and compatible literals use the embedded IPv4 address's local ranges.
+    const mapped = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+    if (mapped) {
+      const hi = parseInt(mapped[1]!, 16);
+      const [a, b] = [(hi >> 8) & 0xff, hi & 0xff];
+      return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 100 && b >= 64 && b <= 127);
+    }
     return host === '::1' || /^f[cd][0-9a-f]{0,2}:/.test(host) || /^fe[89ab][0-9a-f]?:/.test(host);
   }
   const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host);

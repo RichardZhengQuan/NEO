@@ -199,6 +199,28 @@ describe('relay registration and routing', () => {
     expect(await secondPhone.closed).toBe(1000);
   });
 
+  it('does not count a forwarding write whose callback reports failure', async () => {
+    const relay = await start();
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    let captureWriteCb!: (cb: (error?: Error) => void) => void;
+    const writeCbCaptured = new Promise<(error?: Error) => void>(r => { captureWriteCb = r; });
+    const origSend = WebSocket.prototype.send;
+    vi.spyOn(WebSocket.prototype, 'send').mockImplementation(function (this: WebSocket, ...args: unknown[]) {
+      const cbArg = args[1];
+      if (!peers.some(peer => peer.socket === this) && typeof cbArg === 'function') {
+        captureWriteCb(cbArg as (error?: Error) => void);
+        return; // drop the write, keep the callback
+      }
+      return (origSend as (...a: unknown[]) => void).apply(this, args);
+    });
+    mobile.socket.send(Uint8Array.of(1));
+    const writeCb = await writeCbCaptured;
+    writeCb(new Error('write EPIPE'));
+    expect(await mobile.closed).toBe(TunnelCloseCode.UnknownServer);
+    expect(relay.stats()).toMatchObject({ messages: 0, bytes: 0 });
+  });
+
   it('rejects text from phones and from registered servers', async () => {
     const relay = await start();
     const server = await register(relay);
@@ -268,6 +290,15 @@ describe('relay registration and routing', () => {
 });
 
 describe('relay limits and lifecycle', () => {
+  it('rejects millisecond limits that exceed Node\'s setTimeout range', async () => {
+    await expect(start({ limits: { registrationTimeoutMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: registrationTimeoutMs/);
+    await expect(start({ limits: { heartbeatIntervalMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: heartbeatIntervalMs/);
+    await expect(start({ limits: { phoneIdleTimeoutMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: phoneIdleTimeoutMs/);
+    await expect(start({ limits: { closeTimeoutMs: 2_147_483_648 } })).rejects.toThrow(/Invalid relay limit: closeTimeoutMs/);
+    const relay = await start({ limits: { registrationTimeoutMs: 2_147_483_647 } });
+    expect(relay.port).toBeGreaterThan(0);
+  });
+
   it('caps concurrent phone connections per IP across servers and releases slots', async () => {
     const relay = await start({ limits: { perIpPhoneConnections: 1 } });
     const first = await register(relay);
@@ -295,6 +326,92 @@ describe('relay limits and lifecycle', () => {
     expect(local.ip).toBe('127.0.0.1');
     const refused = await connect(untrusted, `/v1/connect/${untrustedServer.identity.serverId}`, { headers: { 'x-forwarded-for': '192.0.2.2' } });
     expect(await refused.closed).toBe(TunnelCloseCode.RateLimited);
+  });
+
+  it('counts equivalent IPv6 spellings as one IP', async () => {
+    const relay = await start({ trustProxy: true, limits: { perIpPhoneConnections: 1 } });
+    const server = await register(relay);
+    await phone(relay, server, { headers: { 'x-forwarded-for': '2001:db8::1' } });
+    const refused = await connect(relay, `/v1/connect/${server.identity.serverId}`, { headers: { 'x-forwarded-for': '2001:0db8:0:0:0:0:0:1' } });
+    expect(await refused.closed).toBe(TunnelCloseCode.RateLimited);
+    expect(relay.stats().phones).toBe(1);
+  });
+
+  it('counts equivalent scoped IPv6 spellings as one IP', async () => {
+    const relay = await start({ trustProxy: true, limits: { perIpPhoneConnections: 1 } });
+    const server = await register(relay);
+    await phone(relay, server, { headers: { 'x-forwarded-for': 'fe80::1%eth0' } });
+    const refused = await connect(relay, `/v1/connect/${server.identity.serverId}`, { headers: { 'x-forwarded-for': 'fe80:0:0:0:0:0:0:1%eth0' } });
+    expect(await refused.closed).toBe(TunnelCloseCode.RateLimited);
+    expect(relay.stats().phones).toBe(1);
+  });
+
+  it('counts the socket fallback and the matching X-Forwarded-For against one per-IP phone cap', async () => {
+    // Listen on :: (dual-stack) so IPv4 clients appear as ::ffff:127.0.0.1 in socket.remoteAddress.
+    const relay = await startRelay({ host: '::', port: 0, trustProxy: true, limits: { perIpPhoneConnections: 1 } });
+    relays.push(relay);
+    // Use an IPv4 URL so that socket.remoteAddress is the IPv4-mapped form '::ffff:127.0.0.1'.
+    const ipv4Url = `ws://127.0.0.1:${relay.port}`;
+    const serverPeer = new WebSocket(ipv4Url + '/v1/server');
+    serverPeer.on('error', () => {});
+    const serverInbox = new Inbox(serverPeer);
+    peers.push({ socket: serverPeer, inbox: serverInbox, closed: new Promise<number>(resolve => serverPeer.once('close', code => resolve(code))) });
+    await once(serverPeer, 'open');
+    const challenge = await serverInbox.control();
+    expect(challenge.type).toBe('challenge');
+    if (challenge.type !== 'challenge') throw new Error('No challenge');
+    const identity = generateServerIdentity();
+    serverPeer.send(JSON.stringify({ type: 'register', serverId: identity.serverId, key: toBase64Url(identity.signing.publicKey), signature: toBase64Url(signRelayChallenge(identity, fromBase64Url(challenge.nonce))) }));
+    expect(await serverInbox.control()).toEqual({ type: 'registered', serverId: identity.serverId });
+    // First phone: no X-Forwarded-For header; socket.remoteAddress = '::ffff:127.0.0.1'.
+    const phoneSock = new WebSocket(ipv4Url + `/v1/connect/${identity.serverId}`);
+    phoneSock.on('error', () => {});
+    peers.push({ socket: phoneSock, inbox: new Inbox(phoneSock), closed: new Promise<number>(resolve => phoneSock.once('close', code => resolve(code))) });
+    await once(phoneSock, 'open');
+    const openFrame = await serverInbox.frame();
+    expect(openFrame.op).toBe(RelayOp.Open);
+    // IPv4-mapped IPv6 is normalized to plain IPv4 so that socket and XFF share one key.
+    expect(Buffer.from(openFrame.payload).toString('utf8')).toBe('127.0.0.1');
+    // Second phone: X-Forwarded-For carries the same IP as an IPv4-mapped IPv6 (non-canonical spelling).
+    const refused = new WebSocket(ipv4Url + `/v1/connect/${identity.serverId}`, { headers: { 'x-forwarded-for': '::ffff:127.0.0.1' } });
+    refused.on('error', () => {});
+    const refusedClosed = new Promise<number>(resolve => refused.once('close', code => resolve(code)));
+    peers.push({ socket: refused, inbox: new Inbox(refused), closed: refusedClosed });
+    expect(await refusedClosed).toBe(TunnelCloseCode.RateLimited);
+    expect(relay.stats().phones).toBe(1);
+  });
+
+  it('counts IPv4-mapped-IPv6 socket address and plain-IPv4 XFF against one per-IP phone cap', async () => {
+    // socket.remoteAddress = '::ffff:127.0.0.1', XFF = '127.0.0.1' — different spellings, same host.
+    const relay = await startRelay({ host: '::', port: 0, trustProxy: true, limits: { perIpPhoneConnections: 1 } });
+    relays.push(relay);
+    const ipv4Url = `ws://127.0.0.1:${relay.port}`;
+    const serverPeer = new WebSocket(ipv4Url + '/v1/server');
+    serverPeer.on('error', () => {});
+    const serverInbox = new Inbox(serverPeer);
+    peers.push({ socket: serverPeer, inbox: serverInbox, closed: new Promise<number>(resolve => serverPeer.once('close', code => resolve(code))) });
+    await once(serverPeer, 'open');
+    const challenge = await serverInbox.control();
+    expect(challenge.type).toBe('challenge');
+    if (challenge.type !== 'challenge') throw new Error('No challenge');
+    const identity = generateServerIdentity();
+    serverPeer.send(JSON.stringify({ type: 'register', serverId: identity.serverId, key: toBase64Url(identity.signing.publicKey), signature: toBase64Url(signRelayChallenge(identity, fromBase64Url(challenge.nonce))) }));
+    expect(await serverInbox.control()).toEqual({ type: 'registered', serverId: identity.serverId });
+    // First phone: socket.remoteAddress = '::ffff:127.0.0.1', no XFF header.
+    const phoneSock = new WebSocket(ipv4Url + `/v1/connect/${identity.serverId}`);
+    phoneSock.on('error', () => {});
+    peers.push({ socket: phoneSock, inbox: new Inbox(phoneSock), closed: new Promise<number>(resolve => phoneSock.once('close', code => resolve(code))) });
+    await once(phoneSock, 'open');
+    const openFrame = await serverInbox.frame();
+    expect(openFrame.op).toBe(RelayOp.Open);
+    expect(Buffer.from(openFrame.payload).toString('utf8')).toBe('127.0.0.1');
+    // Second phone: XFF carries plain '127.0.0.1' — must share the same rate-limit key.
+    const refused = new WebSocket(ipv4Url + `/v1/connect/${identity.serverId}`, { headers: { 'x-forwarded-for': '127.0.0.1' } });
+    refused.on('error', () => {});
+    const refusedClosed = new Promise<number>(resolve => refused.once('close', code => resolve(code)));
+    peers.push({ socket: refused, inbox: new Inbox(refused), closed: refusedClosed });
+    expect(await refusedClosed).toBe(TunnelCloseCode.RateLimited);
+    expect(relay.stats().phones).toBe(1);
   });
 
   it('caps phones per server and globally', async () => {
@@ -361,6 +478,35 @@ describe('relay limits and lifecycle', () => {
     expect(relay.stats()).toMatchObject({ phones: 0, messages: 1, bytes: 4 });
   });
 
+  it('closes a phone sending empty binary messages after exhausting its byte tokens', async () => {
+    const burstBytes = 6;
+    const relay = await start({ clock: () => 1000, limits: { burstBytes, bytesPerSecond: 2 } });
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    mobile.socket.send(new Uint8Array(burstBytes));
+    expect((await server.inbox.frame()).payload).toHaveLength(burstBytes);
+    for (let i = 0; i < 10; i++) mobile.socket.send(new Uint8Array(0));
+    const frame = await server.inbox.frame();
+    expect(relay.stats()).toMatchObject({ phones: 0, messages: 1, bytes: burstBytes });
+    expect(frame.op).toBe(RelayOp.Close);
+    expect(await mobile.closed).toBe(TunnelCloseCode.RateLimited);
+  });
+
+  it('closes a phone receiving empty binary messages after exhausting its byte tokens', async () => {
+    const burstBytes = 6;
+    const relay = await start({ clock: () => 1000, limits: { burstBytes, bytesPerSecond: 2 } });
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    mobile.socket.send(new Uint8Array(burstBytes));
+    expect((await server.inbox.frame()).payload).toHaveLength(burstBytes);
+    for (let i = 0; i < 10; i++) {
+      server.socket.send(encodeRelayFrame({ op: RelayOp.Data, connection: mobile.connection, payload: new Uint8Array(0) }));
+    }
+    expect((await server.inbox.frame()).op).toBe(RelayOp.Close);
+    expect(await mobile.closed).toBe(TunnelCloseCode.RateLimited);
+    expect(relay.stats()).toMatchObject({ phones: 0, messages: 1, bytes: burstBytes });
+  });
+
   it('refills byte tokens at the configured sustained rate', async () => {
     let now = 1000;
     const relay = await start({ clock: () => now, limits: { burstBytes: 4, bytesPerSecond: 2 } });
@@ -372,6 +518,22 @@ describe('relay limits and lifecycle', () => {
     server.socket.send(encodeRelayFrame({ op: RelayOp.Data, connection: mobile.connection, payload: Uint8Array.of(1, 2) }));
     expect((await mobile.inbox.next()).data).toEqual(Uint8Array.of(1, 2));
     expect(relay.stats().phones).toBe(1);
+  });
+
+  it('does not refill tokens when the clock moves backward and recovers', async () => {
+    let now = 1000;
+    const relay = await start({ clock: () => now, limits: { burstBytes: 6, bytesPerSecond: 4 } });
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    mobile.socket.send(Uint8Array.of(1, 2, 3, 4));
+    expect((await server.inbox.frame()).payload).toHaveLength(4);
+    now = 0;
+    mobile.socket.send(Uint8Array.of(5));
+    expect((await server.inbox.frame()).payload).toHaveLength(1);
+    now = 1000;
+    mobile.socket.send(Uint8Array.of(6, 7));
+    expect((await server.inbox.frame()).op).toBe(RelayOp.Close);
+    expect(await mobile.closed).toBe(TunnelCloseCode.RateLimited);
   });
 
   it('rejects a slow destination instead of queuing additional phone data', async () => {
@@ -387,6 +549,175 @@ describe('relay limits and lifecycle', () => {
     expect(await mobile.closed).toBe(TunnelCloseCode.RateLimited);
     expect((await server.inbox.frame()).op).toBe(RelayOp.Close);
     expect(relay.stats().messages).toBe(0);
+  });
+
+  it('closes a phone that sends a PING when its outgoing buffer is over maxBufferedBytes', async () => {
+    const relay = await start({ limits: { maxBufferedBytes: 8 } });
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    const original = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!;
+    vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
+      return peers.some(peer => peer.socket === this) ? original.get!.call(this) : 9;
+    });
+    let pongFired = false;
+    const pong = new Promise<never>((_, reject) => {
+      mobile.socket.once('pong', () => {
+        pongFired = true;
+        reject(new Error('pong written while buffer over limit'));
+      });
+    });
+    mobile.socket.ping(Uint8Array.of(1, 2, 3));
+    expect(await Promise.race([mobile.closed, pong])).toBe(TunnelCloseCode.RateLimited);
+    expect(pongFired).toBe(false);
+  });
+
+  it('closes a server whose outgoing buffer is over maxBufferedBytes before the next heartbeat ping', async () => {
+    const relay = await start({ limits: { maxBufferedBytes: 8, heartbeatIntervalMs: 20 } });
+    const server = await register(relay, generateServerIdentity(), { autoPong: false });
+    const original = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!;
+    vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
+      return peers.some(peer => peer.socket === this) ? original.get!.call(this) : 9;
+    });
+    const pingSpy = vi.spyOn(WebSocket.prototype, 'ping');
+    // Unsolicited pong keeps alive=true — server buffers are over-limit but it sends keepalives.
+    server.socket.pong(Uint8Array.of(1));
+    expect(await server.closed).toBe(TunnelCloseCode.RateLimited);
+    expect(pingSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not add another terminate timer or close listener for a CLOSING server socket', async () => {
+    const relay = await start();
+    const server = await register(relay, generateServerIdentity(), { autoPong: false });
+    const originalClose = WebSocket.prototype.close;
+    const closing = new Promise<WebSocket>(resolve => {
+      vi.spyOn(WebSocket.prototype, 'close').mockImplementation(function (this: WebSocket, code, data) {
+        originalClose.call(this, code, data);
+        if (this !== server.socket) resolve(this);
+      });
+    });
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    // Hold the close handshake open until shutdown revisits the same relay-side socket.
+    server.socket.pause();
+    server.socket.send('invalid relay frame');
+    const socket = await closing;
+    const stateBeforeShutdown = socket.readyState;
+    const closeListeners = socket.listenerCount('close');
+    const closed = once(socket, 'close');
+    const stopped = relay.close();
+    try {
+      expect(stateBeforeShutdown).toBe(WebSocket.CLOSING);
+      // ws has its own close-handshake timer; count only the relay's terminate timer.
+      expect(timeouts.mock.calls.filter(([, delay]) => delay === 250)).toHaveLength(1);
+      // The event promise adds one listener; shutdown must not add another.
+      expect(socket.listenerCount('close')).toBe(closeListeners + 1);
+    } finally {
+      server.socket.resume();
+      await closed;
+      await stopped;
+    }
+  });
+
+  it('installs the terminate timer when a socket is already CLOSING without a prior closeSocket call', async () => {
+    // Reproduces the Codex P2 on #191: if `ws` moves a socket to CLOSING without the relay
+    // having called closeSocket first (e.g. a peer that initiated the close handshake), the
+    // relay.close() visit must still install the 250 ms terminate timer so shutdown does not
+    // stall until `ws`'s much longer close-handshake timeout fires.
+    const relay = await start();
+    const server = await register(relay);
+    // Keep the relay-side close frame from being acknowledged by pausing the test-side TCP.
+    server.socket.pause();
+    // Peer-initiated close: moves the relay-side socket to CLOSING via `ws` itself, with no
+    // prior relay-side closeSocket() call, so no terminate timer has been installed yet.
+    const originalClose = WebSocket.prototype.close;
+    const closing = new Promise<WebSocket>(resolve => {
+      vi.spyOn(WebSocket.prototype, 'close').mockImplementation(function (this: WebSocket, code, data) {
+        originalClose.call(this, code, data);
+        if (this !== server.socket) resolve(this);
+      });
+    });
+    server.socket.close();
+    const socket = await closing;
+    expect(socket.readyState).toBe(WebSocket.CLOSING);
+    const closed = once(socket, 'close');
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    const stopped = relay.close();
+    try {
+      // relay.close() iterates sockets.clients and calls closeSocket on this CLOSING socket.
+      // Pre-fix (readyState !== OPEN return): no terminate timer, shutdown stalls on ws's own
+      // close-handshake timeout. Post-fix: the 250 ms timer is installed.
+      expect(timeouts.mock.calls.filter(([, delay]) => delay === 250)).toHaveLength(1);
+    } finally {
+      server.socket.resume();
+      await closed;
+      await stopped;
+    }
+  });
+
+  it('does not add another terminate timer or close listener for a CLOSING phone socket', async () => {
+    const relay = await start();
+    const server = await register(relay);
+    const mobile = await phone(relay, server);
+    const originalClose = WebSocket.prototype.close;
+    const closing = new Promise<WebSocket>(resolve => {
+      vi.spyOn(WebSocket.prototype, 'close').mockImplementation(function (this: WebSocket, code, data) {
+        originalClose.call(this, code, data);
+        if (this !== server.socket && this !== mobile.socket) resolve(this);
+      });
+    });
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    // Hold the close handshake open until shutdown revisits the same relay-side socket.
+    mobile.socket.pause();
+    mobile.socket.send('invalid phone frame');
+    const socket = await closing;
+    const stateBeforeShutdown = socket.readyState;
+    const closeListeners = socket.listenerCount('close');
+    const closed = once(socket, 'close');
+    timeouts.mockClear();
+    const stopped = relay.close();
+    try {
+      expect(stateBeforeShutdown).toBe(WebSocket.CLOSING);
+      // ws has its own close-handshake timer; count only the relay's terminate timer.
+      // relay.close() closes the server socket (OPEN → 1 timer); phone is CLOSING → no extra timer.
+      expect(timeouts.mock.calls.filter(([, delay]) => delay === 250)).toHaveLength(1);
+      // The event promise adds one listener; shutdown must not add another.
+      expect(socket.listenerCount('close')).toBe(closeListeners + 1);
+    } finally {
+      mobile.socket.resume();
+      await closed;
+      await stopped;
+    }
+  });
+
+  it('terminates a phone whose underlying socket emits error with a half-open TCP write within closeTimeoutMs', async () => {
+    // Regression: the upgrade handler's error listener was empty, so a half-open TCP write side
+    // (allowHalfOpen: true) could hold a phone slot indefinitely after a ws protocol error.
+    const relay = await start({ limits: { perIpPhoneConnections: 1, closeTimeoutMs: 50 } });
+    const server = await register(relay);
+    const raw = createConnection({ host: '127.0.0.1', port: relay.port, allowHalfOpen: true });
+    raw.on('error', () => {});
+    try {
+      await once(raw, 'connect');
+      const key = Buffer.alloc(16).toString('base64');
+      const upgradeData = once(raw, 'data');
+      raw.write(
+        `GET /v1/connect/${server.identity.serverId} HTTP/1.1\r\n` +
+        `Host: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+        `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\n\r\n`,
+      );
+      await upgradeData; // 101 Switching Protocols
+      await server.inbox.frame(); // RelayOp.Open — phone is now admitted
+      expect(relay.stats().phones).toBe(1);
+      // Send a malformed masked frame: RSV2 bit set, invalid per RFC 6455 without an extension.
+      // ws emits 'error'; the timer handler calls ws.terminate() after closeTimeoutMs.
+      raw.write(Buffer.from([0xa0, 0x80, 0x00, 0x00, 0x00, 0x00]));
+      // closePhone() sends the Close frame and removes the phone in the same synchronous call,
+      // so awaiting the Close frame is an event-based wait — no polling needed.
+      await server.inbox.frame();
+      expect(relay.stats().phones).toBe(0);
+      // The admission slot is released; a second phone from the same IP is now accepted.
+      const second = await phone(relay, server);
+      expect(second).toBeDefined();
+    } finally { raw.destroy(); }
   });
 
   it('expires idle phones using the clock, but traffic in either direction keeps them active', async () => {

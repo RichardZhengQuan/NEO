@@ -399,6 +399,7 @@ export function createOrMerge(s: WriteSession, spec: CreateSpec, opts: { episode
       kind: 'preference', label: spec.label, content: spec.content, tags: spec.tags, source: spec.source,
       reason: 'The user changed this assistant-style preference', vector: spec.vector, episodeId: opts.episodeId,
       sensitivity: previous.some((old) => old.sensitivity === 'sensitive') ? 'sensitive' : spec.sensitivity,
+      validUntil: spec.validUntil,
     });
     const superseded: MemoryNode[] = [];
     for (const old of previous) {
@@ -467,6 +468,7 @@ function createRevision(
     episodeId?: string;
     /** Raised (never lowered) from the old node's. */
     sensitivity?: Sensitivity;
+    validUntil?: number;
   },
 ): MemoryNode {
   const metadata: Record<string, unknown> = {};
@@ -490,6 +492,7 @@ function createRevision(
     pinned: old.pinned,
     sensitivity: stricter(old.sensitivity, r.sensitivity),
     source: r.source,
+    validUntil: r.validUntil,
     metadata: Object.keys(metadata).length ? metadata : undefined,
   };
   insertNode(s.ctx.db, node);
@@ -751,9 +754,9 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
           }
           return true;
         case 'update':
-          return !refused(op.label, op.content);
+          return !refused(op.label, op.content, op.reason);
         case 'supersede':
-          return (!op.kind || allowed.has(op.kind)) && !refused(op.label, op.content);
+          return (!op.kind || allowed.has(op.kind)) && !refused(op.label, op.content, op.reason);
         case 'reinforce':
           // Written by the remember tool a moment ago: already as strong as this turn makes it.
           return !writtenIds.has(op.id);
@@ -1136,6 +1139,9 @@ export function unlink(ctx: MemoryContext, edgeId: string): boolean {
   return runWrite(ctx, ctx.clock(), (s) => {
     const edge = getEdge(ctx.db, edgeId);
     if (!edge) return false;
+    if (edge.from === SELF_MEMORY_ID || edge.to === SELF_MEMORY_ID) {
+      throw new NeoError('bad_request', 'Cannot unlink the self node');
+    }
     ctx.db.prepare('DELETE FROM memory_edges WHERE id = ?').run(edgeId);
     s.updated.add(edge.from);
     s.updated.add(edge.to);

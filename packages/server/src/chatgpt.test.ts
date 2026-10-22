@@ -106,6 +106,28 @@ async function callback(attempt: ChatGPTStartResponse, overrides: Record<string,
 const status = async (state: string) => (await request(`/api/auth/chatgpt/status?state=${state}`)).json();
 
 describe('local ChatGPT sign-in', () => {
+  it('/auth/chatgpt/start honours a providerId body sent with a case-insensitive application/json content-type', async () => {
+    const { chatGPTSecretName } = await import('./chatgpt-auth.js');
+    services.providerConfigs.upsert({ id: 'chatgpt', kind: 'chatgpt', label: 'ChatGPT 1', enabled: true, local: false, baseUrl: `${origin}/v1` });
+    services.secrets.set(chatGPTSecretName('chatgpt'), JSON.stringify({
+      clientId: ISSUED, sub: 'sub-1', idToken: 'id-token-1', accessToken: 'access-1',
+      refreshToken: 'refresh-1', scopes: ['openid', 'profile', 'email'], hostId: 'host-1',
+      expiresAt: now + 3600_000, earliestRefreshAt: now + 60_000,
+    }));
+    services.providerConfigs.upsert({ id: 'chatgpt-2', kind: 'chatgpt', label: 'ChatGPT 2', enabled: true, local: false, baseUrl: `${origin}/v1` });
+
+    const res = await app.request('/api/auth/chatgpt/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'APPLICATION/JSON', Authorization: `Bearer ${services.ownerToken}` },
+      body: JSON.stringify({ providerId: 'chatgpt-2' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as ChatGPTStartResponse;
+    // A fresh sign-in for chatgpt-2 returns the direct authorization URL; chatgpt would return a launch URL.
+    expect(body.url).not.toContain('/callback?launch=');
+    expect(body.url).toContain('code_challenge');
+  });
+
   it('starts the exact loopback listener before returning every required authorize parameter', async () => {
     const attempt = await start();
     const url = new URL(attempt.url);

@@ -1,5 +1,7 @@
 import {
   TUNNEL_BODY_CHUNK,
+  TUNNEL_FRAME_HEADER,
+  TUNNEL_MAX_FRAME,
   TunnelCloseCode,
   TunnelFrameType,
 } from '@neo/protocol';
@@ -256,7 +258,10 @@ export function serveTunnel(link: MessageLink, options: {
       type: TunnelFrameType.Response,
       stream,
       payload: encodeJson({ status: response.status, headers }),
-    })) return;
+    })) {
+      await response.body?.cancel().catch(() => {});
+      return;
+    }
     state.headSent = true;
     if (response.body && state.head.method !== 'HEAD' && !NULL_BODY_STATUSES.has(response.status)) {
       const reader = response.body.getReader();
@@ -265,6 +270,10 @@ export function serveTunnel(link: MessageLink, options: {
         while (await waitForBuffer(stream, state)) {
           const next = await reader.read();
           if (!active(stream, state) || next.done) break;
+          if (!(next.value instanceof Uint8Array)) {
+            reset(stream, 'internal');
+            return;
+          }
           for (let offset = 0; offset < next.value.byteLength; offset += TUNNEL_BODY_CHUNK) {
             if (!await waitForBuffer(stream, state)) return;
             if (!send({
@@ -343,8 +352,16 @@ export function serveTunnel(link: MessageLink, options: {
     sockets.set(stream, state);
     function outgoing(frame: Frame) {
       if (closed || state.closed) return;
-      if (state.ready) send(frame);
-      else state.pending.push(frame);
+      if (state.ready) {
+        if (channel!.bufferedAmount > 1024 * 1024) {
+          finishSocket(stream, 1013, 'WebSocket outbound buffer limit exceeded');
+          reset(stream, 'limit');
+          return;
+        }
+        send(frame);
+      } else {
+        state.pending.push(frame);
+      }
     }
     const socket: TunnelSocket = {
       send(text) {
@@ -353,7 +370,13 @@ export function serveTunnel(link: MessageLink, options: {
           finishSocket(stream, 1011, 'Invalid WebSocket message');
           return;
         }
-        outgoing({ type: TunnelFrameType.WsMessage, stream, payload: utf8Encoder.encode(text) });
+        const payload = utf8Encoder.encode(text);
+        if (payload.byteLength + TUNNEL_FRAME_HEADER > TUNNEL_MAX_FRAME) {
+          reset(stream, 'too_large');
+          finishSocket(stream, 1009, 'Message too large');
+          return;
+        }
+        outgoing({ type: TunnelFrameType.WsMessage, stream, payload });
       },
       close(code, reason) {
         if (closed || state.closed) return;
@@ -387,7 +410,7 @@ export function serveTunnel(link: MessageLink, options: {
       state.pending = [];
       for (const frame of pending) {
         if (state.closed || closed) break;
-        send(frame);
+        outgoing(frame);
         if (frame.type === TunnelFrameType.WsClose) {
           const value = decodeJson<TunnelWsClose>(frame.payload);
           finishSocket(stream, value.code, value.reason);
@@ -458,6 +481,8 @@ export function serveTunnel(link: MessageLink, options: {
       if (request.dispatched || (type !== TunnelFrameType.RequestBody && type !== TunnelFrameType.RequestEnd)) {
         close('Invalid request frame sequence', TunnelCloseCode.ProtocolError);
       } else if (type === TunnelFrameType.RequestBody) {
+        // Empty chunks consume no byte budget, so do not retain them.
+        if (payload.byteLength === 0) return;
         request.size += payload.byteLength;
         buffered += payload.byteLength;
         if (request.size > limits.maxRequestBodyBytes) reset(stream, 'too_large');

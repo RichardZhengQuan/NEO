@@ -1,14 +1,19 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NeoApiError } from '@neo/client';
 import { runDoctor } from './doctor.js';
 
 const client = vi.hoisted(() => ({
   health: vi.fn(),
   providers: { list: vi.fn(), test: vi.fn() },
 }));
-vi.mock('@neo/client', () => ({ NeoClient: vi.fn(function () { return client; }) }));
+vi.mock('@neo/client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@neo/client')>(),
+  NeoClient: vi.fn(function () { return client; }),
+}));
 
 let dataDir: string;
 beforeEach(() => {
@@ -22,10 +27,47 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  syncBuiltinESMExports();
   rmSync(dataDir, { recursive: true, force: true });
 });
 
 describe('doctor without an AI provider', () => {
+  it('runDoctor does not follow a symlink at the old predictable test-file path', async () => {
+    if (process.platform === 'win32') return;
+    const sentinelPath = join(dataDir, 'sentinel.txt');
+    const sentinelContent = 'sentinel-content';
+    writeFileSync(sentinelPath, sentinelContent);
+    symlinkSync(sentinelPath, join(dataDir, '.neo-doctor-test'));
+
+    await runDoctor({ dataDir });
+
+    expect(readFileSync(sentinelPath, 'utf8')).toBe(sentinelContent);
+  });
+
+  it('cleans up the data-directory test file when writing fails after creation', async () => {
+    // Buffer data bypasses Node's native UTF-8 fast path so the old
+    // writeFileSync implementation also reaches the writeSync failure.
+    const originalWriteFileSync = fs.writeFileSync;
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((file, data, options) => {
+      const isTestFile = typeof file === 'string' && file.startsWith(join(dataDir, '.neo-doctor-test-'));
+      originalWriteFileSync(file, isTestFile && typeof data === 'string' ? Buffer.from(data) : data, options);
+    });
+    const write = vi.spyOn(fs, 'writeSync').mockImplementation(() => {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    });
+    syncBuiltinESMExports();
+    vi.mocked(process.exit).mockImplementation(() => undefined as never);
+
+    await expect(runDoctor({ dataDir })).resolves.toBeUndefined();
+
+    expect(write).toHaveBeenCalledOnce();
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(output).toContain('✗ Data directory');
+    expect(output).toContain('ENOSPC: no space left on device');
+    expect(process.exit).toHaveBeenCalledWith(1);
+    expect(fs.readdirSync(dataDir).filter(name => name.startsWith('.neo-doctor-test-'))).toEqual([]);
+  });
+
   it.each([{ items: [] }, { items: [
     { id: 'test', kind: 'mock', enabled: true },
     { id: 'off', kind: 'ollama', enabled: false },
@@ -38,6 +80,89 @@ describe('doctor without an AI provider', () => {
     expect(output).toContain('All checks passed.');
     expect(process.exit).not.toHaveBeenCalled();
     expect(client.providers.test).not.toHaveBeenCalled();
+  });
+
+  it('reports a provider-list failure as a failed check', async () => {
+    client.providers.list.mockRejectedValue(new Error('401 Unauthorized'));
+    vi.mocked(process.exit).mockImplementation(() => { throw new Error('exit(1) called'); });
+    await expect(runDoctor({ dataDir, server: 'http://fixture.test', token: 'bad-token' }))
+      .rejects.toThrow('exit(1) called');
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('✗ Providers');
+    expect(output).toContain('provider list failed — 401 Unauthorized');
+    expect(output).toContain('Some checks failed.');
+    expect(output).not.toContain('All checks passed.');
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it.each([
+    new Error('403 Forbidden'),
+    new Error('500 Internal Server Error'),
+    new TypeError('fetch failed'),
+    'connection reset',
+  ])('reports other provider-list errors as failed checks: %s', async (error) => {
+    client.providers.list.mockRejectedValue(error);
+    vi.mocked(process.exit).mockImplementation(() => { throw new Error('exit(1) called'); });
+    await expect(runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' }))
+      .rejects.toThrow('exit(1) called');
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    const message = error instanceof Error ? error.message : error;
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('✗ Providers');
+    expect(output).toContain(`provider list failed — ${message}`);
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('treats a 404 from the provider list as a warning, not a failure', async () => {
+    client.providers.list.mockRejectedValue(new Error('404 Not Found'));
+    await runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' });
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('! Providers');
+    expect(output).toContain('provider list unavailable (older server?)');
+    expect(output).toContain('All checks passed.');
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
+  it('treats a server-shape NeoApiError 404 as an older-server warning', async () => {
+    client.providers.list.mockRejectedValue(
+      new NeoApiError(404, { code: 'not_found', message: 'Route not found' }),
+    );
+    await runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' });
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('! Providers');
+    expect(output).toContain('provider list unavailable (older server?)');
+    expect(output).toContain('All checks passed.');
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
+  it('treats NeoApiError 500 with "404" in message as a failure, not a warning', async () => {
+    client.providers.list.mockRejectedValue(
+      new NeoApiError(500, { code: 'internal', message: 'Backend 404 dependency failed' }),
+    );
+    vi.mocked(process.exit).mockImplementation(() => { throw new Error('exit(1) called'); });
+    await expect(runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' }))
+      .rejects.toThrow('exit(1) called');
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('✗ Providers');
+    expect(output).toContain('provider list failed');
+    expect(output).not.toContain('provider list unavailable (older server?)');
+    expect(output).toContain('Some checks failed.');
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('treats a plain Error with "404" in message as an older-server warning (regex fallback)', async () => {
+    client.providers.list.mockRejectedValue(new Error('timed out after 404 ms'));
+    await runDoctor({ dataDir, server: 'http://fixture.test', token: 'fixture-token' });
+    const output = vi.mocked(process.stdout.write).mock.calls.map(([text]) => String(text)).join('');
+    expect(client.providers.list).toHaveBeenCalledOnce();
+    expect(output).toContain('! Providers');
+    expect(output).toContain('provider list unavailable (older server?)');
+    expect(output).toContain('All checks passed.');
+    expect(process.exit).not.toHaveBeenCalled();
   });
 
   it('checks enabled supported providers normally', async () => {

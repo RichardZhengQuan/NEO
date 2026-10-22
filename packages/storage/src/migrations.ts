@@ -193,6 +193,40 @@ export const storageMigrations: Migration[] = [
           WHERE off_record = 1 AND ephemeral = 1 AND closed_at IS NULL ORDER BY started_at DESC, rowid DESC LIMIT 1);
     `,
   },
+  {
+    version: 7,
+    name: 'persist episode search mode',
+    up: `ALTER TABLE conversations ADD COLUMN search_mode TEXT;`,
+  },
+  {
+    version: 8,
+    name: 'fix message FTS group_concat separator',
+    up: `
+      DROP TRIGGER IF EXISTS message_fts_insert;
+      DROP TRIGGER IF EXISTS message_fts_update;
+      DROP TRIGGER IF EXISTS message_fts_delete;
+      CREATE TRIGGER message_fts_insert AFTER INSERT ON messages BEGIN
+        INSERT INTO message_fts (rowid, message_id, text) VALUES (new.rowid, new.id,
+          COALESCE((SELECT group_concat(json_extract(value, '$.text'), ' ')
+                    FROM json_each(new.parts) WHERE json_extract(value, '$.type') = 'text'), ''));
+      END;
+      CREATE TRIGGER message_fts_update AFTER UPDATE OF parts ON messages BEGIN
+        DELETE FROM message_fts WHERE rowid = old.rowid;
+        INSERT INTO message_fts (rowid, message_id, text) VALUES (new.rowid, new.id,
+          COALESCE((SELECT group_concat(json_extract(value, '$.text'), ' ')
+                    FROM json_each(new.parts) WHERE json_extract(value, '$.type') = 'text'), ''));
+      END;
+      CREATE TRIGGER message_fts_delete AFTER DELETE ON messages BEGIN
+        DELETE FROM message_fts WHERE rowid = old.rowid;
+      END;
+      DELETE FROM message_fts;
+      INSERT INTO message_fts (rowid, message_id, text)
+        SELECT messages.rowid, messages.id,
+          COALESCE((SELECT group_concat(json_extract(value, '$.text'), ' ')
+                    FROM json_each(messages.parts) WHERE json_extract(value, '$.type') = 'text'), '')
+        FROM messages;
+    `,
+  },
 ];
 
 /** Startup can retire orphan references after checking config-file providers as well. */

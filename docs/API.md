@@ -17,8 +17,8 @@ Provider creation, draft tests, updates that enable or use `kind: mock`, and set
 | `POST /api/timeline/cancel` | `{ turnId? }` | `{ cancelled }`; absent id cancels the running timeline turn |
 | `POST /api/timeline/ui-action` | `UiActionRequestSchema` | `UiActionResponse`; message/event actions start a timeline turn, tool actions resolve the stored source message |
 | `GET /api/timeline/search?q&limit` | | `ListResponse<TimelineSearchHit>` with `{ messageId, episodeId, createdAt, snippet: { text, highlights } }`; full-text search of visible message text; snippet ranges are described below |
-| `DELETE /api/timeline/messages/:id` | | `TimelineDeleteResult`: `{ deleted, messageIds, derivedMemories }`; deletes message parts and FTS rows and closes the touched episode |
-| `DELETE /api/timeline?from&to` | | `TimelineDeleteResult`; at least one ISO bound required, inclusive timestamps, `from <= to`. Derived memories remain |
+| `DELETE /api/timeline/messages/:id` | | `TimelineDeleteResult`: `{ deleted, messageIds, derivedMemories }`; deletes message parts and FTS rows and closes the touched episode; the episode's preview and `last_message_at` are refreshed from remaining messages; `messageId` on any reminder linked to the deleted message is cleared to `null` |
+| `DELETE /api/timeline?from&to` | | `TimelineDeleteResult`; at least one ISO bound required, inclusive timestamps, `from <= to`. Derived memories remain. Each touched episode's preview and `last_message_at` are refreshed; `messageId` on any reminder linked to a deleted message is cleared to `null` |
 | `GET /api/timeline/off-record` | | `OffRecordState`: `{ active, episodeId, startedAt }`; inactive ids/timestamps are null |
 | `POST /api/timeline/off-record/start` | `{}` | `OffRecordState`; idempotently closes the normal episode and enters persisted private mode, creating an empty private episode without needing a provider |
 | `POST /api/timeline/off-record/end` | | `{ deleted }` episode count; settles private work then deletes new ephemeral off-record episodes and their messages/FTS rows; without a private session it is a no-op |
@@ -52,6 +52,7 @@ Provider creation, draft tests, updates that enable or use `kind: mock`, and set
 | `GET /api/task-lists` · `POST` | `CreateTaskListRequestSchema` | `ListResponse<TaskList>` / `201 TaskList` |
 | `PATCH /api/task-lists/:id` · `DELETE` | `UpdateTaskListRequestSchema` | `TaskList` / `204` (inbox → 400) |
 | `GET /api/tasks?listId&done&query&limit` · `POST` | `CreateTaskRequestSchema` | `ListResponse<Task>` / `201 Task` |
+| `GET /api/tasks/:id` | | `Task` / `404 not_found` |
 | `PATCH /api/tasks/:id` · `DELETE` | `UpdateTaskRequestSchema` | `Task` / `204` |
 | **Notes** | | |
 | `GET /api/notes?query&tag&limit` · `POST` | `CreateNoteRequestSchema` | `ListResponse<Note>` / `201 Note` |
@@ -62,7 +63,7 @@ Provider creation, draft tests, updates that enable or use `kind: mock`, and set
 | **Providers & models** | | |
 | `GET /api/providers` | | `ProvidersResponse` (config-file + app-added providers, `ai` capability settings and legacy `defaultModel`; secrets redacted to `hasApiKey`) |
 | `POST /api/providers` | `CreateProviderRequestSchema` | `201 ProviderView`. `apiKey` is stored in the SecretStore as `provider:<id>` and replaced by `apiKeySecret`. A missing `id` is derived from the kind (`openai`, `openai-2`, …). With `simple: true`, the server verifies the live model list before saving and assigns capability defaults in Simple mode. Otherwise a provider `defaultModel` becomes Text when no Text assignment exists |
-| `PATCH /api/providers/:id` | `UpdateProviderRequestSchema` | `ProviderView` (config-file providers: 409) |
+| `PATCH /api/providers/:id` | `UpdateProviderRequestSchema` | `ProviderView` (config-file providers: 409). Changing `baseUrl` clears the stored API key and credential headers unless a replacement `apiKey` is supplied. |
 | `DELETE /api/providers/:id` | | `204` (config-file providers: 409; deletes encrypted credentials and clears all capability assignments that pointed at it) |
 | `GET /api/providers/:id/models` | | `ListResponse<ModelInfo>` |
 | `POST /api/providers/:id/test` | | `ProviderTestResult` |
@@ -188,6 +189,8 @@ The wire contract is authoritative in `@neo/protocol`'s `packages/protocol/src/t
 A model tool call that requires approval emits `tool.confirmation` with a `ToolConfirmation`. Pending items are also available from `GET /api/confirmations`. Answer with `POST /api/confirmations/<confirmation.id> { "approve": true, "always": false }` (or `approve: false` to decline). The `id` is a server-generated, single-use `cnf_…` nonce. The provider's `toolCallId` identifies the call in the transcript and events; it is not an approval id, because providers can reuse it across turns and conversations. Expired, cancelled, unknown or answered nonces return `404 not_found`.
 
 UI actions have a separate confirmation round trip:
+
+Reminder and form controls use the target-aware ids documented in [Generative UI actions](GENERATIVE_UI.md#actions). Legacy reminder ids and `__submit` are accepted only for a single matching widget in the stored UI tree; ambiguous actions return `404 not_found`.
 
 1. Send `POST /api/timeline/ui-action` with `{ messageId, uiId, actionId, values? }`. The server resolves the stored action and validates its tool input. A denied tool returns `tool_denied`; a tool with `confirm` permission or `dangerous` risk returns `{ kind: "confirm", confirmation: { token, tool, title, description, risk, expiresAt } }` without executing it.
 2. Show the returned `title` and `description` and ask the user to approve. These are generated from the tool definition and validated input, rather than the model's labels or `confirm` text.

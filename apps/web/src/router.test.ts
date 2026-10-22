@@ -12,6 +12,9 @@ describe('parseRoute', () => {
     ['', { name: 'timeline' }],
     ['#/', { name: 'timeline' }],
     ['#/timeline', { name: 'timeline' }],
+    ['#/plan-tomorrow', { name: 'timeline' }],
+    ['#/plan-tomorrow?date=2026-10-13', { name: 'timeline' }],
+    ['#/plan-tomorrow/legacy?date=2026-02-30&messageId=msg_1', { name: 'timeline' }],
     ['#/timeline/msg_1', { name: 'timeline', messageId: 'msg_1' }],
     ['#/timeline?messageId=msg_2', { name: 'timeline', messageId: 'msg_2' }],
     ['#/chat', { name: 'timeline' }],
@@ -46,6 +49,19 @@ describe('parseRoute', () => {
     for (const [k, v] of Object.entries(route)) if (!(k in expected)) expect(v).toBeUndefined();
   });
 
+  it('preserves tunnel parameters in v2 pairing links', () => {
+    const route = parseRoute('#/pair?v=2&code=abc_123&id=aabbccddeeff00112233445566778899&pk=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB-&lan=192.168.1.1%3A7778&relay=wss%3A%2F%2Frelay.example.com');
+    expect(route).toMatchObject({
+      name: 'pair',
+      version: '2',
+      code: 'abc_123',
+      id: 'aabbccddeeff00112233445566778899',
+      pk: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB-',
+      lan: '192.168.1.1:7778',
+      relay: 'wss://relay.example.com',
+    });
+  });
+
   it('ignores ids with unsafe characters', () => {
     expect(parseRoute('#/timeline/<script>')).toEqual({ name: 'timeline' });
     expect(parseRoute('#/chat/conv_1?messageId=%3Cscript%3E')).toEqual({ name: 'timeline' });
@@ -71,6 +87,19 @@ describe('routeToHash', () => {
   ])('round-trips %j', (route) => {
     expect(parseRoute(routeToHash(route))).toMatchObject(route);
   });
+
+  it('round-trips tunnel parameters in v2 pairing links', () => {
+    const route = parseRoute('#/pair?v=2&code=abc_123&id=aabbccddeeff00112233445566778899&pk=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB-&lan=192.168.1.1%3A7778&relay=wss%3A%2F%2Frelay.example.com');
+    expect(parseRoute(routeToHash(route))).toMatchObject({
+      name: 'pair',
+      version: '2',
+      code: 'abc_123',
+      id: 'aabbccddeeff00112233445566778899',
+      pk: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB-',
+      lan: '192.168.1.1:7778',
+      relay: 'wss://relay.example.com',
+    });
+  });
 });
 
 describe('neoUrlToRoute', () => {
@@ -80,6 +109,9 @@ describe('neoUrlToRoute', () => {
     ['neo://timeline/msg_1', { name: 'timeline', messageId: 'msg_1' }],
     ['neo://reminders/rem_abc', { name: 'reminders', reminderId: 'rem_abc' }],
     ['neo://reminders', { name: 'reminders' }],
+    ['neo://plan-tomorrow', { name: 'timeline' }],
+    ['neo://plan-tomorrow?date=2026-10-13', { name: 'timeline' }],
+    ['neo://plan-tomorrow/legacy?date=2026-10-13&messageId=msg_1', { name: 'timeline' }],
     ['neo://memory/mem_5', { name: 'memory', tab: 'net', nodeId: 'mem_5' }],
     ['neo://tasks/task_1', { name: 'tasks', taskId: 'task_1' }],
     ['neo://notes/note_1', { name: 'notes', noteId: 'note_1' }],

@@ -42,6 +42,10 @@ import {
   toolSpec,
   validateUIBlocks,
   extractInlineUI,
+  childBlocks,
+  collectActions,
+  MAX_UI_BLOCKS,
+  MAX_UI_TOP_LEVEL,
   episodeOf,
   wrapUntrusted,
   type AgentEvent,
@@ -75,6 +79,7 @@ import {
   type ToolResultPart,
   type ToolSpec,
   type TurnHandle,
+  type UIBlock,
   type UIPart,
   type Usage,
 } from '@neo/protocol';
@@ -123,6 +128,8 @@ export interface TurnServices {
   clock: Clock;
   /** Deliver an event to the runtime's global subscribers (each isolated from the others). */
   broadcast(event: AgentEvent): void;
+  /** After a chat-turn forget, patch memory widgets in all stored messages of this conversation. */
+  patchConversationWidgets(conversationId: string, result: ToolResult): void;
 }
 
 /** A turn that holds its conversation (AgentRuntime bookkeeping). */
@@ -183,9 +190,32 @@ export async function startTurn(services: TurnServices, plan: TurnPlan): Promise
 
   // 2. Recall.
   const allowSensitive = adapter.isLocal || settings.memory.sendSensitiveToCloud;
-  const prepared = plan.context && plan.recalled
-    ? { context: plan.context, recalled: plan.recalled }
-    : await prepareTurnContext(services, conv, settings, plan.parts, history, allowSensitive);
+  let prepared: { context: ContentPart; recalled: RecalledMemory[] };
+  if (plan.context && plan.recalled) {
+    prepared = { context: plan.context, recalled: plan.recalled };
+  } else {
+    try {
+      prepared = await prepareTurnContext(services, conv, settings, plan.parts, history, allowSensitive, undefined, record.controller.signal);
+    } catch (err) {
+      if (!(err instanceof NeoError && err.code === 'cancelled' && record.controller.signal.aborted)) throw err;
+      // Recall was interrupted by cancellation before the TurnRunner existed.
+      // Build a minimal context so the TurnRunner can run its cancelled-signal
+      // fast-path and emit the terminal event cleanly.
+      prepared = {
+        recalled: [],
+        context: {
+          type: 'context',
+          text: buildContextBlock({
+            now: clock(),
+            timezone: settings.timezone,
+            locale: settings.locale,
+            memories: [],
+            offRecord: conv.offRecord ?? conv.incognito,
+          }),
+        },
+      };
+    }
+  }
   const { context, recalled } = prepared;
 
   // 3. Persist the user message (with its context part) and the streaming assistant message.
@@ -268,8 +298,9 @@ export async function prepareTurnContext(
   history: readonly Message[],
   allowSensitive: boolean,
   reinforce?: boolean,
+  signal?: AbortSignal,
 ): Promise<{ context: ContentPart; recalled: RecalledMemory[] }> {
-  const recalled = await recallMemories(services, conversation, settings, parts, history, allowSensitive, reinforce);
+  const recalled = await recallMemories(services, conversation, settings, parts, history, allowSensitive, reinforce, signal);
   const sensitive = recalled.some(({ node }) => node.sensitivity === 'sensitive');
   return {
     recalled,
@@ -301,6 +332,7 @@ async function recallMemories(
   history: readonly Message[],
   allowSensitive: boolean,
   reinforce?: boolean,
+  signal?: AbortSignal,
 ): Promise<RecalledMemory[]> {
   const policy = settings.memory;
   if (!policy.recall) return [];
@@ -312,7 +344,7 @@ async function recallMemories(
   const previousReply = previousMessage && !(containsSensitive(previousMessage) && !allowSensitive) ? textOf(previousMessage.parts).trim() : '';
   const context = previousReply.slice(-RECALL_PREVIOUS_REPLY_CHARS).trim();
   try {
-    const result = await services.memory.recall({
+    const pending = services.memory.recall({
       text,
       ...(context ? { context } : {}),
       conversationId: conv.id,
@@ -321,9 +353,12 @@ async function recallMemories(
       allowSensitive,
       ...((conv.offRecord ?? conv.incognito) || reinforce === false ? { reinforce: false } : {}),
       now: services.clock(),
+      signal,
     });
+    const result = await (signal ? raceAbort(pending, signal) : pending);
     return result.items;
   } catch (err) {
+    if (err instanceof NeoError && err.code === 'cancelled') throw err;
     services.logger.warn('memory recall failed; continuing without memories', { conversationId: conv.id, error: String(err) });
     return [];
   }
@@ -412,7 +447,13 @@ class TurnRunner {
       }];
     });
     const publicParts: ContentPart[] = [...this.parts, ...closedCalls];
-    const previous = store.updateMessage(this.messageId, { parts: publicParts, status: 'complete', usage: this.usage });
+    const publicSensitive = this.sawSensitive || publicParts.some((p) => p.type === 'tool_result' && p.sensitive === true);
+    const previous = store.updateMessage(this.messageId, {
+      parts: publicParts,
+      status: 'complete',
+      usage: this.usage,
+      ...(publicSensitive ? { sensitive: true } : {}),
+    });
     this.emit({ type: 'message.completed', conversationId: this.conversationId, turnId: this.turnId, message: previous });
     const now = this.services.clock();
     const continuation = store.appendMessage({ ...this.snapshot('streaming', null), id: newId('msg', now), conversationId: episode.id, episodeId: episode.id, createdAt: now });
@@ -641,13 +682,32 @@ class TurnRunner {
     // Without native tools in the request (tool-less model, or a conversation whose frozen prompt
     // taught ```neo-ui fences), inline UI blocks become ui parts.
     if (!this.toolSpecs.length) {
+      // Gather per-part results first so one cross-part aggregate check can run
+      // before any part is written — a model streaming multiple text parts in a
+      // single step must not collectively exceed MAX_UI_BLOCKS.
+      const pending: Array<{ index: number; extracted: ReturnType<typeof extractInlineUI> }> = [];
       for (const index of [...this.stepText].sort((a, b) => a - b)) {
         const part = this.parts[index];
         if (part?.type !== 'text') continue;
         const extracted = extractInlineUI(part.text);
         if (!extracted.blocks.length) continue;
-        this.replacePart(index, { type: 'text', text: extracted.text });
-        for (const block of extracted.blocks) this.addPart({ type: 'ui', id: newId('ui'), block });
+        pending.push({ index, extracted });
+      }
+      if (pending.length) {
+        // Cross-part aggregate: total block count, top-level block count, and duplicate action ids.
+        let totalCount = 0;
+        const countBlock = (b: UIBlock) => { totalCount++; for (const c of childBlocks(b)) countBlock(c); };
+        for (const { extracted } of pending) for (const b of extracted.blocks) countBlock(b);
+        const totalTopLevel = pending.reduce((sum, { extracted }) => sum + extracted.blocks.length, 0);
+        const allIds = pending.flatMap(({ extracted }) => collectActions(extracted.blocks).map((a) => a.id));
+        const crossPartDup = allIds.find((id, i) => allIds.indexOf(id) !== i);
+        if (totalCount <= MAX_UI_BLOCKS && totalTopLevel <= MAX_UI_TOP_LEVEL && !crossPartDup) {
+          for (const { index, extracted } of pending) {
+            this.replacePart(index, { type: 'text', text: extracted.text });
+            for (const block of extracted.blocks) this.addPart({ type: 'ui', id: newId('ui'), block });
+          }
+        }
+        // Blocks exceeding the aggregate limit, the top-level limit, or with cross-part duplicate ids are silently dropped.
       }
     }
     this.persist(true);
@@ -739,6 +799,9 @@ class TurnRunner {
     if (this.signal.aborted) return;
     if (executionController.signal.aborted) return this.refuse(call, MSG.declined, 'Declined');
     this.addToolResult(call, result, def);
+    if (call.name === 'forget' && !result.isError) {
+      this.services.patchConversationWidgets(this.conversationId, result);
+    }
   }
 
   private toolContext(call: ToolCallPart, signal = this.signal): ToolContext {
@@ -960,13 +1023,14 @@ class TurnRunner {
     }
 
     const preview = previewOf(this.parts);
-    if (preview) {
-      try {
-        const conversation = conversations.update(this.conversationId, { preview, lastMessageAt: clock() });
-        this.emit({ type: 'conversation.updated', conversation: episodeOf(conversation) });
-      } catch (err) {
-        this.logger.warn('could not update the conversation preview', { error: String(err) });
-      }
+    try {
+      const conversation = conversations.update(this.conversationId, {
+        ...(preview ? { preview } : {}),
+        lastMessageAt: clock(),
+      });
+      this.emit({ type: 'conversation.updated', conversation: episodeOf(conversation) });
+    } catch (err) {
+      this.logger.warn('could not update the conversation preview', { error: String(err) });
     }
 
     // Free the conversation before the terminal event, so its listeners may send again.

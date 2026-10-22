@@ -337,8 +337,8 @@ interface Cluster {
 
 /**
  * Abstract clusters of unconsolidated episodes into summaries and facts.
- * `fadedNow` are episodes the fade step archived in this same run: like sleep,
- * consolidation still learns from the day's experiences before they are gone.
+ * Like sleep, consolidation learns from active and newly faded episodes,
+ * and retries unconsolidated episodes archived in previous runs.
  */
 async function abstractEpisodes(
   ctx: MemoryContext,
@@ -361,9 +361,7 @@ async function abstractEpisodes(
          ${allowSensitive ? '' : `AND sensitivity = 'normal'`} ORDER BY created_at ASC, rowid ASC`,
       )
       .all() as unknown as NodeRow[]
-  )
-    .map(rowToNode)
-    .filter((e) => e.status === 'active' || fadedNow.has(e.id));
+  ).map(rowToNode);
   if (!episodes.length) return;
 
   // Greedy clustering in time order: centroid similarity or a shared entity. Every episode
@@ -426,6 +424,10 @@ async function abstractEpisodes(
     const items: { kind: MemoryKind; label: string; content: string; importance: number; sensitive: boolean; entities: string[] }[] = [];
     if (summary) items.push({ kind: 'summary', label: summary.label, content: summary.content, importance: summary.importance ?? 0.5, sensitive, entities: [] });
     for (const f of facts) items.push({ kind: f.kind, label: f.label, content: f.content, importance: f.importance ?? 0.5, sensitive: sensitive || f.sensitivity === 'sensitive', entities: f.entities ?? [] });
+    if (items.length === 0) {
+      ctx.logger.warn('memory: episode abstraction reply produced no items; episodes will be retried');
+      continue;
+    }
 
     // Sensitive knowledge is embedded on the device only.
     const onDevice = items.map((it) => ctx.keepLocal({ sensitivity: it.sensitive ? 'sensitive' : 'normal' }));
@@ -437,6 +439,12 @@ async function abstractEpisodes(
     const from = n === 1 ? 'from 1 conversation' : `from ${n} conversations`;
     try {
       runWrite(ctx, now, (s) => {
+        for (const ep of cluster.episodes) {
+          if (!getNode(ctx.db, ep.id)) {
+            ctx.logger.warn('memory: source episode was forgotten; skipping abstraction', { episodeId: ep.id });
+            return;
+          }
+        }
         for (const [k, v] of entityVectors) s.entityVectors.set(k, v);
         items.forEach((it, i) => {
           const { node, merged } = createOrMerge(s, {
@@ -466,8 +474,8 @@ async function abstractEpisodes(
           mark.run(now, ep.id);
           changed.add(ep.id);
         }
+        consolidated += n;
       });
-      consolidated += n;
     } catch (err) {
       ctx.logger.warn('memory: could not store abstracted knowledge', { error: String(err) });
     }

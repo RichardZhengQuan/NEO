@@ -196,6 +196,58 @@ describe('timeline HTTP API', () => {
     expect(services.conversations.getMessage('retained')).not.toBeNull();
   });
 
+  it('deleting the first message clears its reminder link and retains the second message preview', async () => {
+    const { services, request } = await fixture();
+    const episode = services.conversations.createEpisode();
+    append(services, episode.id, 'msg-first', epoch, 'first text');
+    append(services, episode.id, 'msg-second', epoch + 1, 'second text');
+    const reminder = services.stores.reminders.create({ title: 'Linked reminder', dueAt: epoch + 3600_000, messageId: 'msg-first' });
+
+    expect(await json(await request('/timeline/messages/msg-first', 'DELETE'))).toEqual({ deleted: 1, messageIds: ['msg-first'], derivedMemories: 0 });
+    expect(services.stores.reminders.get(reminder.id)?.messageId).toBeNull();
+    expect(services.conversations.get(episode.id)?.preview).toBe('second text');
+    expect(services.conversations.get(episode.id)?.lastMessageAt).toBe(epoch + 1);
+  });
+
+  it('deleting messages refreshes the episode preview and clears reminder links only when their source is deleted', async () => {
+    const { services, request } = await fixture();
+    const episode = services.conversations.createEpisode();
+    append(services, episode.id, 'msg-first', epoch, 'first text');
+    append(services, episode.id, 'msg-second', epoch + 1, 'second text');
+    const reminder = services.stores.reminders.create({ title: 'Linked reminder', dueAt: epoch + 3600_000, messageId: 'msg-first' });
+
+    await json(await request('/timeline/messages/msg-second', 'DELETE'));
+    expect(services.conversations.get(episode.id)?.preview).toBe('first text');
+    expect(services.conversations.get(episode.id)?.lastMessageAt).toBe(epoch);
+    expect(services.stores.reminders.get(reminder.id)?.messageId).toBe('msg-first');
+
+    await json(await request('/timeline/messages/msg-first', 'DELETE'));
+    expect(services.conversations.get(episode.id)?.preview).toBeNull();
+    expect(services.conversations.get(episode.id)?.lastMessageAt).toBeNull();
+    expect(services.stores.reminders.get(reminder.id)?.messageId).toBeNull();
+  });
+
+  it('deleting a range clears reminder links and refreshes previews across affected episodes', async () => {
+    const { services, request } = await fixture();
+    const first = services.conversations.createEpisode();
+    append(services, first.id, 'kept', epoch - 1, 'kept text');
+    append(services, first.id, 'start', epoch, 'deleted first preview');
+    const second = services.conversations.createEpisode();
+    append(services, second.id, 'end', epoch + 1000, 'deleted second preview');
+    const reminders = ['kept', 'start', 'end'].map(messageId => services.stores.reminders.create({
+      title: messageId, dueAt: epoch + 3600_000, messageId,
+    }));
+
+    const result = await json<TimelineDeleteResult>(await request(`/timeline?from=${new Date(epoch).toISOString()}&to=${new Date(epoch + 1000).toISOString()}`, 'DELETE'));
+    expect(result.deleted).toBe(2);
+    expect(result.messageIds.sort()).toEqual(['end', 'start']);
+    expect(reminders.map(reminder => services.stores.reminders.get(reminder.id)?.messageId)).toEqual(['kept', null, null]);
+    expect(services.conversations.get(first.id)?.preview).toBe('kept text');
+    expect(services.conversations.get(first.id)?.lastMessageAt).toBe(epoch - 1);
+    expect(services.conversations.get(second.id)?.preview).toBeNull();
+    expect(services.conversations.get(second.id)?.lastMessageAt).toBeNull();
+  });
+
   it('deletes an inclusive timestamp range across episodes, retaining memories and everything outside it', async () => {
     const { services, request } = await fixture();
     const first = services.conversations.createEpisode();

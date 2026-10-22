@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   ContentPartSchema,
   DEFAULT_SETTINGS,
+  MemoryNodePatchSchema,
   MemoryPolicySchema,
   NeoConfigSchema,
   NeoSettingsSchema,
@@ -12,7 +13,13 @@ import {
   EpisodeSchema,
   ForgetBySourceRequestSchema,
   OffRecordStateSchema,
+  RecurrenceSchema,
+  RememberInputSchema,
+  ReminderInputSchema,
+  ReminderPatchSchema,
   StartOffRecordRequestSchema,
+  TaskInputSchema,
+  TaskPatchSchema,
   EndOffRecordResponseSchema,
   TimelineOffRecordEventSchema,
   SendMessageRequestSchema,
@@ -276,6 +283,27 @@ describe('config & settings', () => {
     expect(MemoryPolicySchema.parse({}).allowedKinds).toContain('episode');
   });
 
+  describe('NeoConfigSchema tunnel.advertise validation', () => {
+    it('bare IP without port should be rejected', () => {
+      const parse = () => NeoConfigSchema.parse({ tunnel: { advertise: ['192.168.1.1'] } });
+      expect(parse).toThrow(z.ZodError);
+      expect(parse).toThrow('host:port');
+    });
+
+    it('accepts a valid host:port address', () => {
+      const cfg = NeoConfigSchema.parse({ tunnel: { advertise: ['192.168.1.1:7779'] } });
+      expect(cfg.tunnel.advertise).toEqual(['192.168.1.1:7779']);
+    });
+
+    it('accepts an empty list', () => {
+      expect(NeoConfigSchema.parse({ tunnel: { advertise: [] } }).tunnel.advertise).toEqual([]);
+    });
+
+    it('URL with scheme should be rejected', () => {
+      expect(() => NeoConfigSchema.parse({ tunnel: { advertise: ['http://192.168.1.1:7779'] } })).toThrow('host:port');
+    });
+  });
+
   it('applies deep patches and rejects invalid ones', () => {
     const next = applySettingsPatch(DEFAULT_SETTINGS, { persona: { avatar: '🌟' }, memory: { recall: false } });
     expect(next.persona).toEqual({ avatar: '🌟' });
@@ -375,6 +403,66 @@ describe('misc helpers', () => {
     expect(describeRecurrence(null)).toBe('once');
   });
 
+  it('describeRecurrence includes weekday restrictions on daily recurrences', () => {
+    expect(describeRecurrence({ freq: 'daily', byWeekday: [1, 2, 3, 4, 5] })).toBe('every day on Mon, Tue, Wed, Thu, Fri');
+    expect(describeRecurrence({ freq: 'daily', interval: 2, byWeekday: [1, 3, 5] })).toBe('every 2 days on Mon, Wed, Fri');
+  });
+
+  it('rejects recurrence cutoffs outside the ECMAScript Date range', () => {
+    const parsed = RecurrenceSchema.safeParse({ freq: 'daily', until: 1e20 });
+    expect(parsed.success).toBe(false);
+    const negative = RecurrenceSchema.safeParse({ freq: 'daily', until: -1e20 });
+    expect(negative.success).toBe(false);
+  });
+
+  it('describeRecurrence does not crash for any value accepted by RecurrenceSchema', () => {
+    for (const until of [-8.64e15, -1, 0, 1, 8.64e15]) {
+      expect(() => describeRecurrence({ freq: 'daily', until })).not.toThrow();
+    }
+  });
+
+  it('rejects ReminderInput dueAt outside the ECMAScript Date range', () => {
+    const base = { title: 'test', dueAt: 1e20, timezone: 'UTC' };
+    expect(ReminderInputSchema.safeParse(base).success).toBe(false);
+    expect(ReminderInputSchema.safeParse({ ...base, dueAt: -1e20 }).success).toBe(false);
+    expect(ReminderInputSchema.safeParse({ ...base, dueAt: Date.now() }).success).toBe(true);
+  });
+
+  it('rejects ReminderPatch dueAt outside the ECMAScript Date range', () => {
+    expect(ReminderPatchSchema.safeParse({ dueAt: 1e20 }).success).toBe(false);
+    expect(ReminderPatchSchema.safeParse({ dueAt: -1e20 }).success).toBe(false);
+    expect(ReminderPatchSchema.safeParse({ dueAt: Date.now() }).success).toBe(true);
+    expect(ReminderPatchSchema.safeParse({}).success).toBe(true);
+  });
+
+  it('rejects TaskInput dueAt outside the ECMAScript Date range', () => {
+    expect(TaskInputSchema.safeParse({ title: 'x', dueAt: 1e20 }).success).toBe(false);
+    expect(TaskInputSchema.safeParse({ title: 'x', dueAt: -1e20 }).success).toBe(false);
+    expect(TaskInputSchema.safeParse({ title: 'x', dueAt: null }).success).toBe(true);
+    expect(TaskInputSchema.safeParse({ title: 'x', dueAt: Date.now() }).success).toBe(true);
+  });
+
+  it('rejects TaskPatch dueAt outside the ECMAScript Date range', () => {
+    expect(TaskPatchSchema.safeParse({ dueAt: 1e20 }).success).toBe(false);
+    expect(TaskPatchSchema.safeParse({ dueAt: -1e20 }).success).toBe(false);
+    expect(TaskPatchSchema.safeParse({ dueAt: Date.now() }).success).toBe(true);
+    expect(TaskPatchSchema.safeParse({}).success).toBe(true);
+  });
+
+  it('rejects RememberInput validUntil outside the ECMAScript Date range', () => {
+    expect(RememberInputSchema.safeParse({ label: 'x', content: 'y', validUntil: 1e20 }).success).toBe(false);
+    expect(RememberInputSchema.safeParse({ label: 'x', content: 'y', validUntil: -1e20 }).success).toBe(false);
+    expect(RememberInputSchema.safeParse({ label: 'x', content: 'y', validUntil: Date.now() }).success).toBe(true);
+    expect(RememberInputSchema.safeParse({ label: 'x', content: 'y', validUntil: null }).success).toBe(true);
+  });
+
+  it('rejects MemoryNodePatch validUntil outside the ECMAScript Date range', () => {
+    expect(MemoryNodePatchSchema.safeParse({ validUntil: 1e20 }).success).toBe(false);
+    expect(MemoryNodePatchSchema.safeParse({ validUntil: -1e20 }).success).toBe(false);
+    expect(MemoryNodePatchSchema.safeParse({ validUntil: Date.now() }).success).toBe(true);
+    expect(MemoryNodePatchSchema.safeParse({ validUntil: null }).success).toBe(true);
+  });
+
   it('normalizes errors', () => {
     const e = NeoError.from(Object.assign(new Error('x'), { name: 'AbortError' }));
     expect(e.code).toBe('cancelled');
@@ -389,19 +477,66 @@ describe('widget actions', () => {
     expect(resolveWidgetAction(tasks, widgetActionId.taskToggle('task_1'))).toMatchObject({ kind: 'tool', tool: 'update_task', input: { id: 'task_1', done: true } });
     expect(resolveWidgetAction(tasks, widgetActionId.taskToggle('task_1'), { done: false })).toMatchObject({ input: { done: false } });
     expect(resolveWidgetAction(tasks, widgetActionId.taskToggle('task_other'))).toBeNull();
+    expect(resolveWidgetAction(tasks, 'task.toggle:task_1')).toBeNull();
     const card: UIBlock = {
       type: 'card',
       children: [{ type: 'reminder', reminderId: 'rem_1', title: 'Water', dueAt: 0, status: 'fired' }],
     };
-    expect(resolveWidgetAction(card, widgetActionId.reminderSnooze(10))).toMatchObject({ tool: 'snooze_reminder', input: { id: 'rem_1', minutes: 10 } });
+    expect(resolveWidgetAction(card, widgetActionId.reminderSnooze('rem_1', 10))).toMatchObject({ tool: 'snooze_reminder', input: { id: 'rem_1', minutes: 10 } });
     expect(resolveWidgetAction(card, 'reminder.snooze:999999')).toBeNull();
     const mem: UIBlock = { type: 'memory', nodes: [{ id: 'mem_1', kind: 'fact', label: 'x' }] };
     expect(resolveWidgetAction(mem, widgetActionId.memoryForget('mem_1'))).toMatchObject({ tool: 'forget', confirm: expect.any(String) });
     expect(resolveWidgetAction(mem, widgetActionId.memoryForget('mem_2'))).toBeNull();
+    expect(resolveWidgetAction(mem, 'memory.forget:mem_1')).toBeNull();
   });
 });
 
 describe('privacy helpers', () => {
+  it.each([
+    ['http://localhost./', true],
+    ['http://localhost.:7777/', true],
+    ['http://api.localhost./v1', true],
+    ['http://nas.local./', true],
+    ['http://nas.lan./', true],
+    ['http://LOCALHOST./', true],
+  ])('classifies rooted local hostnames like their unrooted equivalents (%s)', (url, expected) => {
+    expect(isLocalUrl(url)).toBe(expected);
+  });
+
+  it.each<[string, boolean]>([
+    ['http://[::ffff:127.0.0.1]:1234/v1', true],
+    ['http://[::ffff:10.0.0.5]/', true],
+    ['http://[::ffff:192.168.1.1]/', true],
+    ['http://[::ffff:8.8.8.8]/', false],
+    ['http://[::ffff:172.16.0.1]/', true],
+    ['http://[::127.0.0.1]:1234/v1', true],
+    ['http://[::10.0.0.5]/', true],
+    ['http://[::192.168.1.1]/', true],
+    ['http://[::8.8.8.8]/', false],
+    ['http://[::172.16.0.1]/', true],
+    ['http://[::ffff:7f00:1]/', true],
+    ['http://[::7f00:1]/', true],
+    ['http://[0:0:0:0:0:FFFF:7F00:1]/', true],
+    ['http://[::ffff:172.15.0.1]/', false],
+    ['http://[::ffff:172.31.255.255]/', true],
+    ['http://[::ffff:172.32.0.1]/', false],
+    ['http://[::172.15.0.1]/', false],
+    ['http://[::172.31.255.255]/', true],
+    ['http://[::172.32.0.1]/', false],
+    ['http://[::ffff:100.63.255.255]/', false],
+    ['http://[::ffff:100.64.0.1]/', true],
+    ['http://[::ffff:100.127.255.255]/', true],
+    ['http://[::ffff:100.128.0.1]/', false],
+    ['http://[::100.63.255.255]/', false],
+    ['http://[::100.64.0.1]/', true],
+    ['http://[::100.127.255.255]/', true],
+    ['http://[::100.128.0.1]/', false],
+    ['http://[::ffff:0:7f00:1]/', false],
+    ['http://[::1:2:3:4:5:6]/', false],
+  ])('classifies IPv4-mapped/compatible URL %s as local=%s', (url, local) => {
+    expect(isLocalUrl(url)).toBe(local);
+  });
+
   it('only treats IPv6 literals (not DNS names) as unique-local/link-local', () => {
     expect(isLocalUrl('https://fd-collector.example.com/v1')).toBe(false);
     expect(isLocalUrl('https://fe80.example.com')).toBe(false);

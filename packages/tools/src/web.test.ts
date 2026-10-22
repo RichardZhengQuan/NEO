@@ -13,6 +13,7 @@ import {
   systemResolver,
   type DnsResolver,
 } from './builtins/web.js';
+import { fetchTransport, guardedFetch } from './net.js';
 import { createToolRegistry } from './registry.js';
 
 function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
@@ -196,6 +197,77 @@ describe('web_fetch', () => {
     expect(errorOf(t2)).toMatch(/timed out/i);
   });
 
+  it('aborts during DNS resolution and settles promptly', async () => {
+    const ac = new AbortController();
+    let resolveStall!: () => void;
+    const stall = new Promise<string[]>((resolve) => { resolveStall = () => resolve([]); });
+    let startDns!: () => void;
+    const dnsStarted = new Promise<void>((resolve) => { startDns = resolve; });
+    const resolver: DnsResolver = () => { startDns(); return stall; };
+    const f = fakeFetch(() => html(''));
+    const tool = createWebFetchTool({ fetch: f.fn, resolver, timeoutMs: 5000 });
+    const resultP = tool.execute({ url: 'https://stall.example/' }, ctx({ signal: ac.signal }));
+    try {
+      await dnsStarted;
+      ac.abort(new DOMException('user aborted', 'AbortError'));
+      const result = await resultP;
+      expect(result.isError).toBe(true);
+      expect(errorOf(result)).toMatch(/cancelled/i);
+      expect(f.calls).toHaveLength(0);
+    } finally {
+      resolveStall();
+    }
+  });
+
+  it('preserves the guardedFetch abort reason during DNS resolution', async () => {
+    const ac = new AbortController();
+    const reason = new DOMException('user aborted', 'AbortError');
+    let resolveStall!: () => void;
+    const stall = new Promise<string[]>((resolve) => { resolveStall = () => resolve([]); });
+    const hosts: string[] = [];
+    const resolver: DnsResolver = (host) => { hosts.push(host); return stall; };
+    const f = fakeFetch(() => html(''));
+    const resultP = guardedFetch('https://stall.example/', {
+      resolver,
+      transport: fetchTransport(f.fn),
+      signal: ac.signal,
+      allowPrivateNetwork: false,
+      isBlockedAddress,
+      maxRedirects: 5,
+      headers: {},
+    });
+    try {
+      expect(hosts).toEqual(['stall.example']);
+      ac.abort(reason);
+      await expect(resultP).rejects.toBe(reason);
+      expect(f.calls).toHaveLength(0);
+    } finally {
+      resolveStall();
+    }
+  });
+
+  it('does not invoke the resolver when the signal is already aborted', async () => {
+    const ac = new AbortController();
+    const reason = new DOMException('pre-aborted', 'AbortError');
+    ac.abort(reason);
+    let resolverCalls = 0;
+    const resolver: DnsResolver = async () => { resolverCalls++; return ['93.184.216.34']; };
+    const f = fakeFetch(() => html(''));
+    await expect(
+      guardedFetch('https://stall.example/', {
+        resolver,
+        transport: fetchTransport(f.fn),
+        signal: ac.signal,
+        allowPrivateNetwork: false,
+        isBlockedAddress,
+        maxRedirects: 5,
+        headers: {},
+      }),
+    ).rejects.toBe(reason);
+    expect(resolverCalls).toBe(0);
+    expect(f.calls).toHaveLength(0);
+  });
+
   it('turns HTML into readable text with title and link URLs', async () => {
     const page = `<!doctype html><html><head><title>My &amp; Page</title><style>p{color:red}</style>
       <script>var x = "<p>not text</p>";</script></head><body>
@@ -304,6 +376,37 @@ describe('web_fetch', () => {
 });
 
 describe('htmlToText', () => {
+  it('uses the real href, not href= embedded in another attribute value', () => {
+    const out = htmlToText('<a title="See href=\'https://wrong.example/\'" href="https://right.example/">Read</a>');
+    expect(out.text).toContain('https://right.example/');
+    expect(out.text).not.toContain('https://wrong.example/');
+  });
+
+  it.each([
+    'title=\'See href="https://wrong.example/"\'',
+    'aria-label="See href=\'https://wrong.example/\'"',
+    'aria-label=\'See href="https://wrong.example/"\'',
+    'data-example="See href=\'https://wrong.example/\'"',
+    'data-example=\'See href="https://wrong.example/"\'',
+  ])('ignores embedded href= in %s', (attrs) => {
+    const out = htmlToText(`<a ${attrs} href="https://right.example/">Read</a>`);
+    expect(out.text).toContain('https://right.example/');
+    expect(out.text).not.toContain('https://wrong.example/');
+    expect(htmlToText(`<a ${attrs}>Read</a>`).text).toBe('Read');
+  });
+
+  it('preserves href parsing with boolean, named and unquoted attributes', () => {
+    for (const attrs of [
+      'download HREF \t=\nhttps://right.example/',
+      'title=Read href=\'https://right.example/\'',
+      'data-href="https://wrong.example/" href="https://right.example/"',
+      '/href="https://right.example/"',
+      'href="https://right.example/" href="https://wrong.example/"',
+    ]) {
+      expect(htmlToText(`<a ${attrs}>Read</a>`).text, attrs).toBe('Read (https://right.example/)');
+    }
+  });
+
   it('limits decoded titles to 300 characters without splitting a surrogate pair', () => {
     const out = htmlToText(`<title>${'T'.repeat(299)}&#x1F600;${'T'.repeat(1000)}</title>`);
     expect(out.title.length).toBeLessThanOrEqual(300);

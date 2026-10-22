@@ -172,17 +172,29 @@ export class HashingEmbedder implements Embedder {
 const EMBED_BATCH_SIZE = 64;
 
 /** Embedder backed by a provider's embed() method. Batches of 64, L2-normalizes, validates the response. */
-export function createProviderEmbedder(adapter: ProviderAdapter, model: string): Embedder & { readonly isLocal: boolean } {
+export function createProviderEmbedder(adapter: ProviderAdapter, model: string): Embedder & { readonly isLocal: boolean; readonly settingsFingerprint: string } {
   if (!adapter.embed) {
     throw new NeoError('config_error', `Provider "${adapter.id}" does not support embeddings.`);
   }
   const embedFn = adapter.embed.bind(adapter);
   const id = `${adapter.id}:${model}`;
+  const settingsFingerprint = JSON.stringify({
+    kind: adapter.kind,
+    baseUrl: adapter.config?.baseUrl,
+    options: adapter.config?.options,
+    headers: adapter.config?.headers,
+  }, (_key, value: unknown) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return Object.fromEntries(Object.keys(value).sort().map(key => [key, (value as Record<string, unknown>)[key]]));
+    }
+    return value;
+  });
   // Unknown until the first response; vectors are stored with their own length.
   let dimensions = 0;
 
   return {
     id,
+    settingsFingerprint,
     /** Text only stays on the device when the provider runs on the user's own infrastructure. */
     isLocal: adapter.isLocal === true,
     get dimensions(): number {

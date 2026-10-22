@@ -1,7 +1,7 @@
 /** Review tests for the productivity stores and their migrations. */
-import { beforeEach, describe, expect, it } from 'vitest';
-import { migrate, openDatabase, type NeoDatabase } from '@neo/storage';
-import { INBOX_LIST_ID, NeoError, type ProductivityStores } from '@neo/protocol';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createConversationStore, migrate, openDatabase, storageMigrations, type NeoDatabase } from '@neo/storage';
+import { INBOX_LIST_ID, NeoError, type ProductivityStores, type ReminderStatus } from '@neo/protocol';
 import { createProductivityStores, toolsMigrations } from './stores/index.js';
 
 const utc = (y: number, mo: number, d: number, h = 0, mi = 0) => Date.UTC(y, mo - 1, d, h, mi);
@@ -62,6 +62,49 @@ describe('ReminderStore', () => {
     expect(updated.firedCount).toBe(0);
   });
 
+  it('nextDue handles ≥1000 excluded reminders within the SQL variable limit', () => {
+    const reminders = t.db.transaction(() => Array.from({ length: 1001 }, (_, i) =>
+      stores.reminders.create({ title: `Reminder ${i}`, dueAt: t.now + i }),
+    ));
+    const remaining = reminders[1000]!;
+    const excludeIds = new Set(reminders.slice(0, -1).map((reminder) => reminder.id));
+
+    // Enforce SQLite's conservative limit even when node:sqlite allows more.
+    const prepare = t.db.prepare;
+    t.db.prepare = (sql) => {
+      if ((sql.match(/\?/g) ?? []).length > 999) throw new Error('too many SQL variables');
+      return prepare.call(t.db, sql);
+    };
+    try {
+      expect(stores.reminders.nextDue(excludeIds)).toEqual(remaining);
+      excludeIds.add('rem_missing');
+      expect(stores.reminders.nextDue(excludeIds)).toEqual(remaining);
+      excludeIds.add(remaining.id);
+      expect(stores.reminders.nextDue(excludeIds)).toBeNull();
+    } finally {
+      t.db.prepare = prepare;
+    }
+  });
+
+  it('list dedupes repeated statuses so the IN(?) clause stays under the SQL variable limit', () => {
+    const scheduled = t.db.transaction(() => stores.reminders.create({ title: 'A', dueAt: t.now + 1 }));
+    // Caller passes the same enum value 1,000 times (an API shape that passes zod
+    // because status is a non-empty array of enum values with no uniqueness
+    // guard). Without deduping, the IN(?,?,...) clause binds 1,000 variables and
+    // the 999-cap wrapper rejects the prepare.
+    const statuses: ReminderStatus[] = Array.from({ length: 1000 }, () => 'scheduled');
+    const prepare = t.db.prepare;
+    t.db.prepare = (sql) => {
+      if ((sql.match(/\?/g) ?? []).length > 999) throw new Error('too many SQL variables');
+      return prepare.call(t.db, sql);
+    };
+    try {
+      expect(stores.reminders.list({ status: statuses })).toEqual([scheduled]);
+    } finally {
+      t.db.prepare = prepare;
+    }
+  });
+
   it('snooze keeps the recurrence anchor; updating dueAt re-anchors', () => {
     const r = stores.reminders;
     const daily = r.create({ title: 'standup', dueAt: utc(2026, 10, 10, 9), recurrence: { freq: 'daily' } });
@@ -76,6 +119,64 @@ describe('ReminderStore', () => {
     r.update(daily.id, { dueAt: utc(2026, 10, 12, 18) }); // re-anchor at 18:00
     t.setNow(utc(2026, 10, 12, 18));
     expect(r.markFired(daily.id, t.now).reminder.dueAt).toBe(utc(2026, 10, 13, 18));
+  });
+
+  it('updating timezone re-anchors a recurring reminder across DST', () => {
+    // America/New_York spring-forward: 2026-03-08 02:00 → 03:00.
+    // Reminder: daily New York reminder anchored at 2026-03-07 14:00Z (= 09:00 NY EST).
+    const r = stores.reminders;
+    const mar7_14z = utc(2026, 3, 7, 14); // 2026-03-07T14:00Z
+    const mar8_13z = utc(2026, 3, 8, 13); // 2026-03-08T13:00Z (= 09:00 NY EDT after spring-forward)
+    const mar9_13z = utc(2026, 3, 9, 13); // expected next after re-anchor to UTC
+
+    const reminder = r.create({
+      title: 'morning',
+      dueAt: mar7_14z,
+      timezone: 'America/New_York',
+      recurrence: { freq: 'daily' },
+    });
+
+    // Fire March 7 occurrence; dueAt advances to March 8 13:00Z (09:00 NY EDT).
+    t.setNow(mar7_14z);
+    const after1 = r.markFired(reminder.id, t.now);
+    expect(after1.reminder.dueAt).toBe(mar8_13z);
+
+    // User patches timezone to UTC with the same epoch — reanchor must fire.
+    r.update(reminder.id, { timezone: 'UTC', dueAt: mar8_13z });
+
+    // Fire March 8 occurrence; next must be exactly one day later (13:00Z on March 9).
+    t.setNow(mar8_13z);
+    const after2 = r.markFired(reminder.id, t.now);
+    expect(after2.reminder.dueAt).toBe(mar9_13z); // not Mar 8 14:00Z (old NY anchor)
+  });
+
+  it('updating dueAt with timezone unchanged re-anchors', () => {
+    const r = stores.reminders;
+    const daily = r.create({ title: 'standup', dueAt: utc(2026, 10, 10, 9), recurrence: { freq: 'daily' } });
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(daily.id, t.now); // dueAt → Oct 11 09:00
+    // Re-anchor to 18:00 without changing timezone
+    r.update(daily.id, { dueAt: utc(2026, 10, 12, 18) });
+    t.setNow(utc(2026, 10, 12, 18));
+    expect(r.markFired(daily.id, t.now).reminder.dueAt).toBe(utc(2026, 10, 13, 18));
+  });
+
+  it('update({dueAt}) during active snooze clears the snooze anchor so markFired honours the new time', () => {
+    const r = stores.reminders;
+    // Recurring reminder fires for the first time → dueAt=Day2
+    const daily = r.create({ title: 'standup', dueAt: utc(2026, 10, 10, 9), recurrence: { freq: 'daily' } });
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(daily.id, t.now); // dueAt → 10-11 09:00
+    // User snoozes 10 min → snoozed_due_at=10-11 09:00, dueAt=09:11
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(daily.id, 10);
+    // While snoozed, user reschedules the series to a new anchor (Day3 18:00)
+    r.update(daily.id, { dueAt: utc(2026, 10, 12, 18) });
+    // The snooze delivery fires; it must NOT restore the stale snoozed_due_at (Day2)
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    const fired = r.markFired(daily.id, t.now);
+    // Next occurrence must be anchored at 18:00, not 09:00
+    expect(fired.reminder.dueAt).toBe(utc(2026, 10, 13, 18));
   });
 
   it('markFired: one-shot, recurring, exhausted and long-downtime collapse', () => {
@@ -98,6 +199,179 @@ describe('ReminderStore', () => {
     expect(collapsed.reminder.firedCount).toBe(1);
   });
 
+  it('snoozing a count-bounded recurring reminder does not consume an occurrence', () => {
+    const r = stores.reminders;
+    const rem = r.create({
+      title: 'medication',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', interval: 1, count: 2 },
+    });
+    // Day 1 fires
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    // User snoozes 10 min
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 10);
+    // Snoozed redelivery fires
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    r.markFired(rem.id, t.now);
+    // Day 2 must still be scheduled
+    const after = r.get(rem.id)!;
+    expect(after.status).toBe('scheduled');
+    expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
+    // Day 2 fires
+    t.setNow(after.dueAt);
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('fired');
+  });
+
+  it('snoozing an until-bounded recurring reminder does not consume an occurrence', () => {
+    const r = stores.reminders;
+    const day3 = utc(2026, 10, 12, 9);
+    const rem = r.create({
+      title: 'standup',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', interval: 1, until: day3 },
+    });
+    // Day 1 fires
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    // User snoozes 10 min
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 10);
+    // Snoozed redelivery fires
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    r.markFired(rem.id, t.now);
+    // Day 2 must still be scheduled (not consumed)
+    const after = r.get(rem.id)!;
+    expect(after.status).toBe('scheduled');
+    expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
+  });
+
+  it('timezone-only patch on a snoozed count-bounded reminder does not corrupt recurrence state', () => {
+    // Regression: when timezoneMoved and the reminder is snoozed, the previous
+    // code set anchor_at = snoozed dueAt (delivery epoch) AND cleared snoozed_due_at.
+    // markFired then treated the snoozed redelivery as a true occurrence, incremented
+    // firedCount, and exhausted a count:2 series after only one real firing.
+    const r = stores.reminders;
+    const rem = r.create({
+      title: 'medication',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', interval: 1, count: 2 },
+      timezone: 'America/New_York',
+    });
+    // Day 1 fires
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now); // firedCount=1, dueAt → Day 2 09:00
+    // User snoozes 10 min while Day 2 is the live dueAt
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 10); // snoozed_due_at = Day2 09:00, dueAt = Day2 09:11
+    // User patches only the timezone (dueAt does not move)
+    r.update(rem.id, { timezone: 'UTC' });
+    // Snoozed redelivery fires — must NOT count as a true occurrence
+    t.setNow(utc(2026, 10, 10, 9, 11));
+    r.markFired(rem.id, t.now);
+    // Day 2 must still be scheduled (firedCount should still be 1)
+    const after = r.get(rem.id)!;
+    expect(after.status).toBe('scheduled');
+    expect(after.dueAt).toBeGreaterThan(t.now + 60 * 60_000);
+    // Day 2 fires — series is now exhausted after 2 real occurrences
+    t.setNow(after.dueAt);
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('fired');
+  });
+
+  it('snoozed redelivery of an exhausted count=1 recurring series does not re-arm beyond the count', () => {
+    const r = stores.reminders;
+    const rem = r.create({
+      title: 'once-a-day',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', count: 1 },
+      timezone: 'UTC',
+    });
+    // The one occurrence fires normally: firedCount=1, status='fired'.
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('fired');
+    // Owner snoozes the fired reminder.
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 5);
+    // Scheduler fires the snoozed redelivery.
+    const snoozeDue = utc(2026, 10, 10, 9, 6);
+    t.setNow(snoozeDue);
+    const first = r.markFired(rem.id, snoozeDue);
+    expect(first.reminder.firedCount).toBe(1);
+    expect(first.reminder.status).toBe('fired');
+    // The scheduler must not pick this reminder up again.
+    expect(r.due(snoozeDue + 10 * 60_000)).toEqual([]);
+  });
+
+  it('snoozed redelivery of an exhausted until-bounded recurring series does not re-arm past until', () => {
+    const r = stores.reminders;
+    const until = utc(2026, 10, 10, 9);
+    const rem = r.create({
+      title: 'standup',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'daily', until },
+      timezone: 'UTC',
+    });
+    // The last occurrence before `until` fires normally.
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    // nextOccurrence would advance past `until`, so status is 'fired'.
+    expect(r.get(rem.id)!.status).toBe('fired');
+    // Owner snoozes the fired reminder; the snooze delivery falls after `until`.
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 5);
+    // Scheduler fires the snoozed redelivery.
+    const snoozeDue = utc(2026, 10, 10, 9, 6);
+    t.setNow(snoozeDue);
+    const first = r.markFired(rem.id, snoozeDue);
+    expect(first.reminder.status).toBe('fired');
+    // The scheduler must not pick this reminder up again.
+    expect(r.due(snoozeDue + 10 * 60_000)).toEqual([]);
+  });
+
+  it('snoozed redelivery of an until-bounded series with a valid remaining occurrence re-arms to that occurrence', () => {
+    // Regression: hourly series anchor=09:00 until=10:00 has two occurrences (09:00, 10:00).
+    // After 09:00 fires (firedCount=1, dueAt→10:00), the owner snoozes.
+    // snoozedDueAt=10:00 (the next scheduled occurrence, equal to `until`).
+    // The exhaustion check must NOT call nextOccurrence(afterMs=snoozedDueAt=10:00),
+    // because that asks for occurrences strictly after 10:00; the candidate (11:00)
+    // exceeds `until` and nextOccurrence returns null, incorrectly marking the series
+    // exhausted and dropping the 10:00 occurrence.
+    const r = stores.reminders;
+    const until = utc(2026, 10, 10, 10);
+    const rem = r.create({
+      title: 'hourly-two',
+      dueAt: utc(2026, 10, 10, 9),
+      recurrence: { freq: 'hourly', until },
+      timezone: 'UTC',
+    });
+    // 09:00 fires normally: firedCount=1, dueAt advances to 10:00.
+    t.setNow(utc(2026, 10, 10, 9));
+    r.markFired(rem.id, t.now);
+    expect(r.get(rem.id)!.status).toBe('scheduled');
+    expect(r.get(rem.id)!.dueAt).toBe(until);
+    // Owner snoozes at 09:01.
+    t.setNow(utc(2026, 10, 10, 9, 1));
+    r.snooze(rem.id, 5);
+    // Snoozed redelivery fires at 09:06.
+    const snoozeDue = utc(2026, 10, 10, 9, 6);
+    t.setNow(snoozeDue);
+    const redelivery = r.markFired(rem.id, snoozeDue);
+    // Must re-arm to 10:00, not mark as exhausted.
+    expect(redelivery.reminder.status).toBe('scheduled');
+    expect(redelivery.reminder.dueAt).toBe(until);
+    expect(redelivery.reminder.firedCount).toBe(1);
+    // The 10:00 occurrence fires normally: series is now exhausted.
+    t.setNow(until);
+    const last = r.markFired(rem.id, until);
+    expect(last.reminder.status).toBe('fired');
+    expect(last.reminder.firedCount).toBe(2);
+    expect(r.due(until + 10 * 60_000)).toEqual([]);
+  });
+
   it('markFired refuses reminders that are not scheduled (no resurrection of a completed series)', () => {
     const r = stores.reminders;
     const series = r.create({ title: 'daily', dueAt: utc(2026, 10, 10, 8), recurrence: { freq: 'daily' } });
@@ -115,6 +389,16 @@ describe('ReminderStore', () => {
     const moved = r.update(once.id, { dueAt: utc(2026, 10, 11, 8) });
     expect(moved.status).toBe('scheduled');
     expect(r.nextDue()?.id).toBe(once.id);
+  });
+
+  it('timezone-only patch on a fired non-recurring reminder does not re-arm it', () => {
+    const r = stores.reminders;
+    const once = r.create({ title: 'tz-test', dueAt: utc(2026, 10, 10, 8), timezone: 'America/New_York' });
+    r.markFired(once.id, utc(2026, 10, 10, 8));
+    // Patch only the timezone — dueAt stays in the past.
+    const patched = r.update(once.id, { timezone: 'UTC' });
+    expect(patched.status).toBe('fired');
+    expect(r.nextDue()?.id).not.toBe(once.id);
   });
 
   it('emits onChange after every mutation', () => {
@@ -137,6 +421,48 @@ describe('ReminderStore', () => {
     expect(stores.reminders.list({ limit: -3 })).toHaveLength(1);
     expect(stores.reminders.list({ limit: 1.7 })).toHaveLength(1);
     expect(stores.reminders.list({ status: [] })).toHaveLength(2);
+  });
+
+  it('clearMessageLinks sets messageId to null for the given message ids and emits updated reminders', () => {
+    migrate(t.db, 'storage', storageMigrations);
+    const conversations = createConversationStore(t.db, { clock: () => t.now });
+    const episode = conversations.createEpisode();
+    for (const id of ['msg-x', 'msg-y']) {
+      conversations.appendMessage({ id, conversationId: episode.id, role: 'user', parts: [{ type: 'text', text: id }], createdAt: t.now, status: 'complete' });
+    }
+    const r = stores.reminders;
+    const linked = r.create({ title: 'linked', dueAt: t.now + 60_000, messageId: 'msg-x' });
+    const completed = r.complete(r.create({ title: 'completed linked', dueAt: t.now + 60_000, messageId: 'msg-x' }).id);
+    const other = r.create({ title: 'other linked', dueAt: t.now + 60_000, messageId: 'msg-y' });
+    const unlinked = r.create({ title: 'unlinked', dueAt: t.now + 60_000 });
+    const events: unknown[] = [];
+    r.onChange(event => events.push(event));
+    t.setNow(t.now + 1000);
+
+    r.clearMessageLinks(['msg-x', 'msg-x', 'msg-z']);
+    expect(r.get(linked.id)).toEqual({ ...linked, messageId: null, updatedAt: t.now });
+    expect(r.get(completed.id)).toEqual({ ...completed, messageId: null, updatedAt: t.now });
+    expect(r.get(other.id)).toEqual(other);
+    expect(r.get(unlinked.id)).toEqual(unlinked);
+    expect(events).toHaveLength(2);
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'upsert', reminder: r.get(linked.id) },
+      { type: 'upsert', reminder: r.get(completed.id) },
+    ]));
+
+    r.clearMessageLinks([]);
+    r.clearMessageLinks(['msg-z', 'msg-x']);
+    expect(events).toHaveLength(2);
+  });
+
+  it('clearMessageLinks handles large message-id sets', () => {
+    const r = stores.reminders;
+    const reminder = r.create({ title: 'linked', dueAt: t.now + 60_000, messageId: 'msg-last' });
+    const messageIds = Array.from({ length: 40_000 }, (_, i) => `missing-${i}`);
+    messageIds.push('msg-last');
+
+    r.clearMessageLinks(messageIds);
+    expect(r.get(reminder.id)?.messageId).toBeNull();
   });
 });
 
@@ -189,6 +515,277 @@ describe('TaskStore', () => {
     expect(stores.tasks.update(task.id, { done: false }).doneAt).toBeNull();
   });
 
+  it('moving a subtask to a different list detaches it from its parent', () => {
+    const work = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Project' });
+    const child = stores.tasks.create({ title: 'Step', parentId: parent.id });
+    expect(stores.tasks.update(child.id, { listId: INBOX_LIST_ID }).parentId).toBe(parent.id);
+
+    const result = stores.tasks.update(child.id, { listId: work.id });
+    const updated = stores.tasks.get(child.id)!;
+    expect(updated.listId === work.id && updated.parentId === parent.id).toBe(false);
+    expect(updated.listId).toBe(work.id);
+    expect(updated.parentId).toBeNull();
+    expect(result).toEqual(updated);
+    expect(stores.tasks.get(parent.id)).toEqual(parent);
+  });
+
+  it('creating a subtask in a different list than its parent silently detaches it', () => {
+    const work = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Project' });
+    const task = stores.tasks.create({ title: 'Step', listId: work.id, parentId: parent.id });
+    expect(task.listId).toBe(work.id);
+    expect(task.parentId).toBeNull();
+    expect(stores.tasks.get(task.id)).toEqual(task);
+  });
+
+  it('moving a parent task to another list moves its subtasks and emits upsert for each', () => {
+    const list = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Epic', listId: list.id });
+    const child1 = stores.tasks.create({ title: 'Step 1', listId: list.id, parentId: parent.id });
+    const child2 = stores.tasks.create({ title: 'Step 2', listId: list.id, parentId: parent.id });
+    const unrelated = stores.tasks.create({ title: 'Unrelated', listId: list.id });
+
+    t.setNow(t.now + 1000);
+    const events: Array<{ type: string; id: string; listId: string }> = [];
+    stores.tasks.onChange((e) =>
+      events.push(e.type === 'upsert' ? { type: 'upsert', id: e.task.id, listId: e.task.listId } : { type: 'delete', id: e.id, listId: '' }),
+    );
+
+    stores.tasks.update(parent.id, { listId: INBOX_LIST_ID });
+
+    // Parent and both subtasks must appear in the inbox
+    expect(stores.tasks.get(parent.id)?.listId).toBe(INBOX_LIST_ID);
+    expect(stores.tasks.get(child1.id)?.listId).toBe(INBOX_LIST_ID);
+    expect(stores.tasks.get(child2.id)?.listId).toBe(INBOX_LIST_ID);
+
+    // updatedAt bumped for all three
+    expect(stores.tasks.get(parent.id)?.updatedAt).toBe(t.now);
+    expect(stores.tasks.get(child1.id)?.updatedAt).toBe(t.now);
+    expect(stores.tasks.get(child2.id)?.updatedAt).toBe(t.now);
+
+    // Unrelated task in the same list stays put
+    expect(stores.tasks.get(unrelated.id)?.listId).toBe(list.id);
+
+    // Three upsert events: one for the parent and one for each subtask
+    const upserts = events.filter((e) => e.type === 'upsert');
+    expect(upserts).toHaveLength(3);
+    expect(upserts.map((e) => e.id).sort()).toEqual([parent.id, child1.id, child2.id].sort());
+    expect(upserts.every((e) => e.listId === INBOX_LIST_ID)).toBe(true);
+  });
+
+  it('moving a parent task into another list moves grandchildren too', () => {
+    const list = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Epic' });
+    const child = stores.tasks.create({ title: 'Step', parentId: parent.id });
+    const grandchild = stores.tasks.create({ title: 'Detail', parentId: child.id });
+    t.setNow(t.now + 1000);
+    const events: unknown[] = [];
+    stores.tasks.onChange((e) => events.push(e));
+
+    stores.tasks.update(parent.id, { listId: list.id });
+
+    expect(stores.tasks.get(grandchild.id)?.listId).toBe(list.id);
+    expect(stores.tasks.get(grandchild.id)?.parentId).toBe(child.id);
+    expect(stores.tasks.get(grandchild.id)?.updatedAt).toBe(t.now);
+    expect(stores.tasks.get(child.id)?.parentId).toBe(parent.id);
+    for (const task of [parent, child, grandchild]) {
+      expect(stores.tasks.get(task.id)).toMatchObject({ listId: list.id, updatedAt: t.now });
+    }
+    expect(events).toHaveLength(3);
+    expect(events).toEqual(expect.arrayContaining(
+      [parent, child, grandchild].map((task) => ({ type: 'upsert', task: stores.tasks.get(task.id) })),
+    ));
+  });
+
+  it('moving a parent task with a corrupt descendant cycle moves each task once', () => {
+    const list = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Epic' });
+    const child = stores.tasks.create({ title: 'Step', parentId: parent.id });
+    const grandchild = stores.tasks.create({ title: 'Detail', parentId: child.id });
+    t.db.prepare('UPDATE tasks SET parent_id = ? WHERE id = ?').run(grandchild.id, parent.id);
+    t.setNow(t.now + 1000);
+    const events: unknown[] = [];
+    stores.tasks.onChange((e) => events.push(e));
+
+    stores.tasks.update(parent.id, { listId: list.id });
+
+    for (const task of [parent, child, grandchild]) {
+      expect(stores.tasks.get(task.id)).toMatchObject({ listId: list.id, updatedAt: t.now });
+    }
+    expect(stores.tasks.get(parent.id)?.parentId).toBeNull();
+    expect(events).toHaveLength(3);
+    expect(events).toEqual(expect.arrayContaining(
+      [parent, child, grandchild].map((task) => ({ type: 'upsert', task: stores.tasks.get(task.id) })),
+    ));
+  });
+
+  it('moving a parent task rolls back all changes when a subtask move fails', () => {
+    const list = stores.tasks.createList({ name: 'Work' });
+    const parent = stores.tasks.create({ title: 'Epic', listId: list.id });
+    const child1 = stores.tasks.create({ title: 'Step 1', listId: list.id, parentId: parent.id });
+    const child2 = stores.tasks.create({ title: 'Step 2', listId: list.id, parentId: parent.id });
+    t.db.exec(`
+      CREATE TRIGGER reject_subtask_move BEFORE UPDATE OF list_id ON tasks
+      WHEN OLD.parent_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM tasks WHERE parent_id = OLD.parent_id AND list_id != OLD.list_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'subtask move failed');
+      END;
+    `);
+
+    t.setNow(t.now + 1000);
+    const events: string[] = [];
+    stores.tasks.onChange((e) => events.push(e.type));
+
+    expect(() => stores.tasks.update(parent.id, { listId: INBOX_LIST_ID })).toThrow('subtask move failed');
+    for (const task of [parent, child1, child2]) expect(stores.tasks.get(task.id)).toEqual(task);
+    expect(events).toEqual([]);
+  });
+
+  it('deleting a parent task also deletes its child and emits delete for each', () => {
+    const parent = stores.tasks.create({ title: 'A' });
+    const child = stores.tasks.create({ title: 'B', parentId: parent.id });
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(stores.tasks.delete(parent.id)).toBe(true);
+
+    expect(stores.tasks.get(child.id)).toBeNull();
+    expect(stores.tasks.get(parent.id)).toBeNull();
+    expect(events).toHaveLength(2);
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'delete', id: parent.id },
+      { type: 'delete', id: child.id }
+    ]));
+  });
+
+  it('deleting a root with ≥1000 descendants succeeds and emits a delete event for every task', () => {
+    const { root, ids } = t.db.transaction(() => {
+      const root = stores.tasks.create({ title: 'Root' });
+      const ids = [root.id];
+      for (let i = 0; i < 1000; i++) {
+        ids.push(stores.tasks.create({ title: `Child ${i}`, parentId: root.id }).id);
+      }
+      return { root, ids };
+    });
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    // Enforce SQLite's conservative limit even when node:sqlite allows more.
+    const prepare = t.db.prepare;
+    t.db.prepare = (sql) => {
+      if ((sql.match(/\?/g) ?? []).length > 999) throw new Error('too many SQL variables');
+      return prepare.call(t.db, sql);
+    };
+    try {
+      expect(stores.tasks.delete(root.id)).toBe(true);
+
+      for (const id of ids) expect(stores.tasks.get(id)).toBeNull();
+      expect(events).toHaveLength(1001);
+      expect(events).toEqual(expect.arrayContaining(
+        ids.map((id) => ({ type: 'delete', id }))
+      ));
+    } finally {
+      t.db.prepare = prepare;
+    }
+  });
+
+  it('moving a root with ≥1000 descendants to another list stays under the SQL variable limit', () => {
+    const otherList = stores.tasks.createList({ name: 'Side' });
+    const { root, ids } = t.db.transaction(() => {
+      const root = stores.tasks.create({ title: 'Root' });
+      const ids = [root.id];
+      for (let i = 0; i < 1000; i++) {
+        ids.push(stores.tasks.create({ title: `Child ${i}`, parentId: root.id }).id);
+      }
+      return { root, ids };
+    });
+
+    const prepare = t.db.prepare;
+    t.db.prepare = (sql) => {
+      if ((sql.match(/\?/g) ?? []).length > 999) throw new Error('too many SQL variables');
+      return prepare.call(t.db, sql);
+    };
+    try {
+      const updated = stores.tasks.update(root.id, { listId: otherList.id });
+      expect(updated.listId).toBe(otherList.id);
+      for (const id of ids) expect(stores.tasks.get(id)?.listId).toBe(otherList.id);
+    } finally {
+      t.db.prepare = prepare;
+    }
+  });
+
+  it('deleting a subtask recursively deletes only its subtree', () => {
+    const parent = stores.tasks.create({ title: 'Parent' });
+    const child = stores.tasks.create({ title: 'Child', parentId: parent.id });
+    const grandchild = stores.tasks.create({ title: 'Grandchild', parentId: child.id });
+    const greatGrandchild = stores.tasks.create({ title: 'Detail', parentId: grandchild.id });
+    const otherChild = stores.tasks.create({ title: 'Other child', parentId: child.id });
+    const sibling = stores.tasks.create({ title: 'Sibling', parentId: parent.id });
+    const unrelated = stores.tasks.create({ title: 'Unrelated' });
+    const deleted = [child, grandchild, greatGrandchild, otherChild];
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(stores.tasks.delete(child.id)).toBe(true);
+
+    for (const task of deleted) expect(stores.tasks.get(task.id)).toBeNull();
+    for (const task of [parent, sibling, unrelated]) expect(stores.tasks.get(task.id)).toEqual(task);
+    expect(events).toHaveLength(deleted.length);
+    expect(events).toEqual(expect.arrayContaining(
+      deleted.map((task) => ({ type: 'delete', id: task.id }))
+    ));
+  });
+
+  it('deleting a task with a corrupt descendant cycle deletes each task once', () => {
+    const parent = stores.tasks.create({ title: 'Parent' });
+    const child = stores.tasks.create({ title: 'Child', parentId: parent.id });
+    const grandchild = stores.tasks.create({ title: 'Grandchild', parentId: child.id });
+    t.db.prepare('UPDATE tasks SET parent_id = ? WHERE id = ?').run(grandchild.id, parent.id);
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(stores.tasks.delete(parent.id)).toBe(true);
+
+    for (const task of [parent, child, grandchild]) expect(stores.tasks.get(task.id)).toBeNull();
+    expect(events).toHaveLength(3);
+    expect(events).toEqual(expect.arrayContaining(
+      [parent, child, grandchild].map((task) => ({ type: 'delete', id: task.id }))
+    ));
+  });
+
+  it('deleting a task rolls back and emits nothing when a descendant deletion fails', () => {
+    const parent = stores.tasks.create({ title: 'Parent' });
+    const child = stores.tasks.create({ title: 'Child', parentId: parent.id });
+    t.db.exec(`
+      CREATE TRIGGER reject_subtask_delete BEFORE DELETE ON tasks
+      WHEN OLD.parent_id IS NOT NULL
+      BEGIN
+        SELECT RAISE(FAIL, 'subtask delete failed');
+      END;
+    `);
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(() => stores.tasks.delete(parent.id)).toThrow('subtask delete failed');
+
+    for (const task of [parent, child]) expect(stores.tasks.get(task.id)).toEqual(task);
+    expect(events).toEqual([]);
+  });
+
+  it('deleting an unknown task returns false and emits nothing', () => {
+    const task = stores.tasks.create({ title: 'Unrelated' });
+    const events: unknown[] = [];
+    stores.tasks.onChange((event) => events.push(event));
+
+    expect(stores.tasks.delete('task_missing')).toBe(false);
+
+    expect(stores.tasks.get(task.id)).toEqual(task);
+    expect(events).toEqual([]);
+  });
+
   it('deleteList moves tasks to the inbox, bumps updatedAt and emits an upsert per moved task', () => {
     const list = stores.tasks.createList({ name: 'Groceries' });
     const ids = [stores.tasks.create({ title: 'milk', listId: list.id }).id, stores.tasks.create({ title: 'eggs', listId: list.id }).id];
@@ -224,6 +821,105 @@ describe('TaskStore', () => {
     expect(stores.tasks.list({ limit: Number.NaN })).toHaveLength(2);
     expect(stores.tasks.list({ query: 'trip' }).map((x) => x.title)).toEqual(['Call mom']);
     expect(stores.tasks.list({ query: '50%_' })).toEqual([]);
+  });
+
+  // ── cycle-detection tests ───────────────────────────────────────────────
+
+  it('update rejects a 2-level cycle (A→B, then B→A)', () => {
+    const a = stores.tasks.create({ title: 'A' });
+    const b = stores.tasks.create({ title: 'B', parentId: a.id });
+    expectNeoError(() => stores.tasks.update(a.id, { parentId: b.id }), 'bad_request', /ancestor/i);
+    // task A must be unchanged
+    expect(stores.tasks.get(a.id)!.parentId).toBeNull();
+    // task B must still point at A
+    expect(stores.tasks.get(b.id)!.parentId).toBe(a.id);
+  });
+
+  it('update rejects a 3-level cycle (A→B→C, then C→A)', () => {
+    const a = stores.tasks.create({ title: 'A' });
+    const b = stores.tasks.create({ title: 'B', parentId: a.id });
+    const c = stores.tasks.create({ title: 'C', parentId: b.id });
+    expectNeoError(() => stores.tasks.update(a.id, { parentId: c.id }), 'bad_request', /ancestor/i);
+    expect(stores.tasks.get(a.id)!.parentId).toBeNull();
+    expect(stores.tasks.get(b.id)!.parentId).toBe(a.id);
+    expect(stores.tasks.get(c.id)!.parentId).toBe(b.id);
+  });
+
+  it('update rejects a 4-level cycle (A→B→C→D, then D→A)', () => {
+    const a = stores.tasks.create({ title: 'A' });
+    const b = stores.tasks.create({ title: 'B', parentId: a.id });
+    const c = stores.tasks.create({ title: 'C', parentId: b.id });
+    const d = stores.tasks.create({ title: 'D', parentId: c.id });
+    expectNeoError(() => stores.tasks.update(a.id, { parentId: d.id }), 'bad_request', /ancestor/i);
+    expect(stores.tasks.get(a.id)!.parentId).toBeNull();
+    expect(stores.tasks.get(d.id)!.parentId).toBe(c.id);
+  });
+
+  it('create rejects a self-referential parentId (symmetric guard on create)', () => {
+    // A task cannot name itself as parent on creation; the ID is known by the
+    // caller only via the return value, so this is only reachable by a
+    // crafted API call.  requireParent catches it via the self-equality check.
+    const a = stores.tasks.create({ title: 'A' });
+    expectNeoError(() => stores.tasks.update(a.id, { parentId: a.id }), 'bad_request');
+    expect(stores.tasks.get(a.id)!.parentId).toBeNull();
+  });
+
+  it('valid re-parenting is still allowed after the cycle-detection fix', () => {
+    const a = stores.tasks.create({ title: 'A' });
+    const b = stores.tasks.create({ title: 'B', parentId: a.id });
+    const c = stores.tasks.create({ title: 'C', parentId: b.id });
+    const d = stores.tasks.create({ title: 'D' });
+    // Moving C under D (no cycle) must succeed
+    const updated = stores.tasks.update(c.id, { parentId: d.id });
+    expect(updated.parentId).toBe(d.id);
+    expect(stores.tasks.get(c.id)!.parentId).toBe(d.id);
+    // Now A can become a child of C's original position (B) — still no cycle
+    const updated2 = stores.tasks.update(d.id, { parentId: a.id });
+    expect(updated2.parentId).toBe(a.id);
+  });
+
+  it('update movedList collects a 100-descendant chain in bounded SQL round trips', () => {
+    // Build a 100-level linear chain: root → c0 → c1 → … → c99
+    const list = stores.tasks.createList({ name: 'Work' });
+    const root = stores.tasks.create({ title: 'root' });
+    let parentId = root.id;
+    for (let i = 0; i < 100; i++) {
+      parentId = stores.tasks.create({ title: `c${i}`, parentId }).id;
+    }
+
+    // Spy on db.prepare to count calls that happen during update.
+    let calls = 0;
+    const orig = t.db.prepare.bind(t.db);
+    vi.spyOn(t.db, 'prepare').mockImplementation((sql) => { calls++; return orig(sql); });
+
+    stores.tasks.update(root.id, { listId: list.id });
+
+    // A bulk-UPDATE implementation uses at most 8 prepare calls:
+    // mustGet, mustGetList, nextOrder, main UPDATE, CTE SELECT, bulk UPDATE (≤6 fixed).
+    // The old N+1 loop would call prepare ≥100 times for a 100-descendant chain.
+    expect(calls).toBeLessThanOrEqual(8);
+    expect(stores.tasks.get(root.id)?.listId).toBe(list.id);
+  });
+
+  it('delete collects a 100-descendant chain in one SQL round trip', () => {
+    // Build a 100-level linear chain: root → c0 → c1 → … → c99
+    const root = stores.tasks.create({ title: 'root' });
+    let parentId = root.id;
+    for (let i = 0; i < 100; i++) {
+      parentId = stores.tasks.create({ title: `c${i}`, parentId }).id;
+    }
+
+    // Spy on db.prepare to count calls that happen during delete.
+    let calls = 0;
+    const orig = t.db.prepare.bind(t.db);
+    vi.spyOn(t.db, 'prepare').mockImplementation((sql) => { calls++; return orig(sql); });
+
+    expect(stores.tasks.delete(root.id)).toBe(true);
+
+    // A recursive-CTE implementation uses at most 3 prepare calls: get, CTE, DELETE.
+    // The old BFS would call prepare ≥100 times for a 100-descendant chain.
+    expect(calls).toBeLessThanOrEqual(3);
+    expect(stores.tasks.get(root.id)).toBeNull();
   });
 });
 

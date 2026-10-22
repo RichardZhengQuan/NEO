@@ -17,7 +17,7 @@ export const RecurrenceSchema = z.object({
   /** Stop after this many occurrences in total. */
   count: z.number().int().min(1).optional(),
   /** Stop after this instant (epoch ms). */
-  until: z.number().optional(),
+  until: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15).optional(),
 });
 export type Recurrence = z.infer<typeof RecurrenceSchema>;
 export type RecurrenceInput = z.input<typeof RecurrenceSchema>;
@@ -37,6 +37,8 @@ export const ReminderSchema = z.object({
   firedCount: z.number().int().nonnegative(),
   lastFiredAt: z.number().nullable(),
   messageId: z.string().nullable(),
+  /** Opaque caller key for retrying the same creation without making a duplicate. */
+  creationKey: z.string().min(1).max(256).optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
@@ -45,17 +47,18 @@ export type Reminder = z.infer<typeof ReminderSchema>;
 export const ReminderInputSchema = z.object({
   title: z.string().min(1).max(500),
   notes: z.string().max(5000).nullable().optional(),
-  dueAt: z.number(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15),
   timezone: z.string().optional(),
   recurrence: RecurrenceSchema.nullable().optional(),
   messageId: z.string().nullable().optional(),
+  creationKey: z.string().trim().min(1).max(256).optional(),
 });
 export type ReminderInput = z.input<typeof ReminderInputSchema>;
 
 export const ReminderPatchSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   notes: z.string().max(5000).nullable().optional(),
-  dueAt: z.number().optional(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15).optional(),
   timezone: z.string().optional(),
   recurrence: RecurrenceSchema.nullable().optional(),
   status: ReminderStatusSchema.optional(),
@@ -72,6 +75,8 @@ export interface ReminderFiring {
   /** Fired later than the grace period (e.g. the device was asleep / server was down). */
   missed: boolean;
   nextDueAt: number | null;
+  /** ID of the pending_firings durability row written atomically with the status advance. */
+  pendingFiringId?: string;
 }
 
 // ───────────────────────────── tasks ─────────────────────────────
@@ -98,7 +103,7 @@ export const TaskInputSchema = z.object({
   title: z.string().min(1).max(1000),
   listId: z.string().optional(),
   notes: z.string().max(10_000).nullable().optional(),
-  dueAt: z.number().nullable().optional(),
+  dueAt: z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15).nullable().optional(),
   priority: z.number().int().min(0).max(3).optional(),
   tags: z.array(z.string().max(60)).max(20).optional(),
   parentId: z.string().nullable().optional(),
@@ -200,7 +205,7 @@ export function describeRecurrence(r: RecurrenceInput | null | undefined): strin
   const n = r.interval ?? 1;
   const unit = { hourly: 'hour', daily: 'day', weekly: 'week', monthly: 'month', yearly: 'year' }[r.freq];
   let s = n === 1 ? `every ${unit}` : `every ${n} ${unit}s`;
-  if (r.freq === 'weekly' && r.byWeekday?.length) s += ` on ${[...r.byWeekday].sort().map((d) => WEEKDAYS[d]).join(', ')}`;
+  if ((r.freq === 'weekly' || r.freq === 'daily') && r.byWeekday?.length) s += ` on ${[...r.byWeekday].sort().map((d) => WEEKDAYS[d]).join(', ')}`;
   if (r.freq === 'monthly' && r.byMonthDay?.length)
     s += ` on ${r.byMonthDay.map((d) => (d === -1 ? 'the last day' : `day ${d}`)).join(', ')}`;
   if (r.count) s += `, ${r.count} times`;

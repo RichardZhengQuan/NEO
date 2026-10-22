@@ -13,6 +13,7 @@ export const ID_PREFIXES = [
   'cons', // consolidation report
   'rem', // reminder
   'task', // task
+  'chg', // proposed change item
   'list', // task list
   'note', // note
   'ntf', // notification
@@ -20,6 +21,7 @@ export const ID_PREFIXES = [
   'push', // push subscription
   'cnf', // confirmation (single-use approval nonce)
   'pair', // pairing session (one-time phone pairing code)
+  'pfr', // pending firing (durability journal row)
 ] as const;
 
 export type IdPrefix = (typeof ID_PREFIXES)[number];

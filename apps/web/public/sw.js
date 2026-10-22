@@ -17,7 +17,8 @@
  * - Clicks: focus an open NEO window and ask it to navigate (or perform the
  *   reminder action); with no window open, open the app at the right route.
  */
-const SHELL_CACHE = 'neo-shell-v3';
+// v4 drops v3 caches that may hold the app's HTML under an asset URL.
+const SHELL_CACHE = 'neo-shell-v4';
 const META_CACHE = 'neo-meta';
 const SCOPE = self.registration.scope;
 const SCOPE_PATH = new URL(SCOPE).pathname;
@@ -58,8 +59,11 @@ function cacheRule(request) {
   return null;
 }
 
-function cacheableResponse(response) {
+function cacheableResponse(response, rule) {
   if (!response || !response.ok || response.type !== 'basic' || response.redirected) return false;
+  // Only the shell is HTML. HTML at any other path is a server fallback page;
+  // cached cache-first under an asset URL, it would break that asset for good.
+  if (rule !== 'shell' && /^text\/html/i.test(response.headers.get('content-type') || '')) return false;
   const cc = (response.headers.get('cache-control') || '').toLowerCase();
   if (/(^|[,\s])(no-store|private)([,\s=]|$)/.test(cc)) return false;
   const vary = (response.headers.get('vary') || '').toLowerCase();
@@ -67,8 +71,8 @@ function cacheableResponse(response) {
 }
 
 /** Clones synchronously (before the page consumes the body), then stores. */
-function putIfCacheable(cacheKey, response) {
-  if (!cacheableResponse(response)) return Promise.resolve();
+function putIfCacheable(cacheKey, response, rule) {
+  if (!cacheableResponse(response, rule)) return Promise.resolve();
   const copy = response.clone();
   return caches.open(SHELL_CACHE).then((cache) => cache.put(cacheKey, copy));
 }
@@ -85,7 +89,7 @@ function extend(event, promise) {
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    Promise.allSettled(SHELL.map((url) => fetch(url, { cache: 'no-cache', credentials: 'omit' }).then((res) => putIfCacheable(url, res)))).then(() => self.skipWaiting()),
+    Promise.allSettled(SHELL.map((url) => fetch(url, { cache: 'no-cache', credentials: 'omit' }).then((res) => putIfCacheable(url, res, url === INDEX_URL ? 'shell' : 'static')))).then(() => self.skipWaiting()),
   );
 });
 
@@ -107,7 +111,7 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(request)
         .then((response) => {
-          extend(event, putIfCacheable(INDEX_URL, response));
+          extend(event, putIfCacheable(INDEX_URL, response, rule));
           return response;
         })
         .catch(async () => (await caches.match(INDEX_URL, { cacheName: SHELL_CACHE })) || Response.error()),
@@ -122,7 +126,7 @@ self.addEventListener('fetch', (event) => {
       if (cached && rule === 'immutable') return cached;
       const network = fetch(request).then(
         (response) => {
-          extend(event, putIfCacheable(request, response));
+          extend(event, putIfCacheable(request, response, rule));
           return response;
         },
         (err) => {

@@ -20,7 +20,7 @@ import {
   type TaskStore,
 } from '@neo/protocol';
 import { fromJson, toBool, toJson, toNum, toNumOrNull, type NeoDatabase } from '@neo/storage';
-import { changes, clampLimit, likePattern, parseInput, requireText } from './validate.js';
+import { clampLimit, likePattern, parseInput, requireText } from './validate.js';
 
 type Row = Record<string, unknown>;
 type ChangeEvent = { type: 'upsert'; task: Task } | { type: 'delete'; id: string };
@@ -92,6 +92,19 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
     if (parentId == null) return;
     if (parentId === self) throw new NeoError('bad_request', 'A task cannot be its own parent.');
     if (!get(parentId)) throw new NeoError('not_found', `Unknown parent task "${parentId}".`);
+    if (self !== undefined) {
+      // Walk the ancestor chain to reject N-level cycles.  The walk runs
+      // inside the caller's db.transaction so a concurrent reparent cannot
+      // sneak a cycle past this check.
+      let cur: string | null = parentId;
+      const visited = new Set<string>();
+      while (cur !== null) {
+        if (cur === self) throw new NeoError('bad_request', 'A task cannot be an ancestor of itself.');
+        if (visited.has(cur)) break; // pre-existing corrupt cycle in storage — stop to avoid looping forever
+        visited.add(cur);
+        cur = get(cur)?.parentId ?? null;
+      }
+    }
   };
   const nextOrder = (table: 'tasks' | 'task_lists', listId?: string): number => {
     const r = (listId === undefined
@@ -190,6 +203,8 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
       const listId = data.listId ?? INBOX_LIST_ID;
       mustGetList(listId);
       requireParent(data.parentId);
+      let parentId = data.parentId ?? null;
+      if (parentId !== null && get(parentId)?.listId !== listId) parentId = null;
       const now = clock();
       const task: Task = {
         id: newId('task', now),
@@ -202,7 +217,7 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
         priority: data.priority ?? 0,
         tags: data.tags ?? [],
         order: nextOrder('tasks', listId),
-        parentId: data.parentId ?? null,
+        parentId,
         createdAt: now,
         updatedAt: now,
       };
@@ -215,41 +230,99 @@ export function createTaskStore(db: NeoDatabase, options: { clock?: Clock } = {}
     },
 
     update(id: string, patch: TaskPatch): Task {
-      const data = parseInput(TaskPatchSchema, patch, 'task update');
-      const existing = mustGetTask(id);
-      if (data.listId !== undefined) mustGetList(data.listId);
-      if (data.parentId !== undefined) requireParent(data.parentId, id);
-      const now = clock();
-      const done = data.done ?? existing.done;
-      const movedList = data.listId !== undefined && data.listId !== existing.listId;
-      const updated: Task = {
-        ...existing,
-        title: data.title !== undefined ? requireText(data.title, 'title') : existing.title,
-        notes: data.notes !== undefined ? data.notes : existing.notes,
-        done,
-        doneAt: done ? (existing.done ? existing.doneAt : now) : null,
-        dueAt: data.dueAt !== undefined ? data.dueAt : existing.dueAt,
-        priority: data.priority ?? existing.priority,
-        tags: data.tags ?? existing.tags,
-        listId: data.listId ?? existing.listId,
-        order: data.order ?? (movedList ? nextOrder('tasks', data.listId) : existing.order),
-        parentId: data.parentId !== undefined ? data.parentId : existing.parentId,
-        updatedAt: now,
-      };
-      db.prepare(
-        `UPDATE tasks SET list_id = ?, title = ?, notes = ?, done = ?, done_at = ?, due_at = ?, priority = ?, tags = ?, "order" = ?, parent_id = ?, updated_at = ? WHERE id = ?`,
-      ).run(
-        updated.listId, updated.title, updated.notes, updated.done ? 1 : 0, updated.doneAt, updated.dueAt, updated.priority,
-        toJson(updated.tags), updated.order, updated.parentId, now, id,
-      );
+      const { updated, subtasks } = db.transaction(() => {
+        const data = parseInput(TaskPatchSchema, patch, 'task update');
+        const existing = mustGetTask(id);
+        if (data.listId !== undefined) mustGetList(data.listId);
+        if (data.parentId !== undefined) requireParent(data.parentId, id);
+        const now = clock();
+        const done = data.done ?? existing.done;
+        const movedList = data.listId !== undefined && data.listId !== existing.listId;
+        const movedAwayFromParent = movedList && existing.parentId !== null;
+        const updated: Task = {
+          ...existing,
+          title: data.title !== undefined ? requireText(data.title, 'title') : existing.title,
+          notes: data.notes !== undefined ? data.notes : existing.notes,
+          done,
+          doneAt: done ? (existing.done ? existing.doneAt : now) : null,
+          dueAt: data.dueAt !== undefined ? data.dueAt : existing.dueAt,
+          priority: data.priority ?? existing.priority,
+          tags: data.tags ?? existing.tags,
+          listId: data.listId ?? existing.listId,
+          order: data.order ?? (movedList ? nextOrder('tasks', data.listId) : existing.order),
+          parentId: (() => {
+            let pid = data.parentId !== undefined ? data.parentId : (movedAwayFromParent ? null : existing.parentId);
+            const effectiveListId = data.listId ?? existing.listId;
+            if (pid !== null && pid !== undefined && get(pid)?.listId !== effectiveListId) pid = null;
+            return pid;
+          })(),
+          updatedAt: now,
+        };
+        db.prepare(
+          `UPDATE tasks SET list_id = ?, title = ?, notes = ?, done = ?, done_at = ?, due_at = ?, priority = ?, tags = ?, "order" = ?, parent_id = ?, updated_at = ? WHERE id = ?`,
+        ).run(
+          updated.listId, updated.title, updated.notes, updated.done ? 1 : 0, updated.doneAt, updated.dueAt, updated.priority,
+          toJson(updated.tags), updated.order, updated.parentId, now, id,
+        );
+        const subtasks: Task[] = [];
+        if (movedList) {
+          const rows = db
+            .prepare(
+              `WITH RECURSIVE descendants(id) AS (
+                 SELECT id FROM tasks WHERE id = ?
+                 UNION
+                 SELECT t.id FROM tasks t JOIN descendants d ON t.parent_id = d.id
+               )
+               SELECT * FROM tasks WHERE id IN (SELECT id FROM descendants) AND id != ?`,
+            )
+            .all(id, id) as Row[];
+          if (rows.length > 0) {
+            const ids = rows.map((r) => r.id as string);
+            // The UPDATE binds two set-list placeholders (list_id and
+            // updated_at) in addition to the IN(?,...) ids, so keep each
+            // chunk at 997 to stay under SQLite's 999 variable cap.
+            const CHUNK = 997;
+            for (let i = 0; i < ids.length; i += CHUNK) {
+              const chunk = ids.slice(i, i + CHUNK);
+              db.prepare(
+                `UPDATE tasks SET list_id = ?, updated_at = ? WHERE id IN (${chunk.map(() => '?').join(', ')})`,
+              ).run(updated.listId, now, ...chunk);
+            }
+          }
+          for (const row of rows) {
+            subtasks.push({ ...toTask(row), listId: updated.listId, updatedAt: now });
+          }
+        }
+        return { updated, subtasks };
+      });
+      for (const task of subtasks) emit({ type: 'upsert', task });
       emit({ type: 'upsert', task: updated });
       return updated;
     },
 
     delete(id: string): boolean {
-      if (changes(db.prepare('DELETE FROM tasks WHERE id = ?').run(id)) === 0) return false;
-      emit({ type: 'delete', id });
-      return true;
+      const deletedIds = db.transaction(() => {
+        if (!get(id)) return [];
+        const rows = db
+          .prepare(
+            `WITH RECURSIVE descendants(id) AS (
+               SELECT id FROM tasks WHERE id = ?
+               UNION
+               SELECT t.id FROM tasks t JOIN descendants d ON t.parent_id = d.id
+             )
+             SELECT id FROM descendants`,
+          )
+          .all(id) as { id: string }[];
+        const ids = rows.map((r) => r.id);
+        const CHUNK = 999;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const chunk = ids.slice(i, i + CHUNK);
+          db.prepare(`DELETE FROM tasks WHERE id IN (${chunk.map(() => '?').join(', ')})`).run(...chunk);
+        }
+        return ids;
+      });
+      for (const deletedId of deletedIds) emit({ type: 'delete', id: deletedId });
+      return deletedIds.length > 0;
     },
 
     onChange(listener: (event: ChangeEvent) => void): () => void {

@@ -965,6 +965,60 @@ describe('Off-record migration race', () => {
   });
 });
 
+describe('conversation.lastMessageAt', () => {
+  it('always updates lastMessageAt even when the turn produces no text (tool-only finish)', async () => {
+    const { clock, advance } = makeFakeClock();
+    const conversations = new FakeConversationStore();
+    const settings = new FakeSettingsStore();
+    const providers = new FakeProviderRegistry();
+    const memory = new FakeMemoryService();
+    const tools = new FakeToolRegistry();
+    const logger = silentLogger;
+
+    tools.register({
+      name: 'auto_tool',
+      title: 'Auto Tool',
+      description: 'Runs automatically',
+      inputSchema: z.object({ msg: z.string() }),
+      risk: 'read',
+      defaultPermission: 'auto',
+      async execute(input) {
+        return { output: { result: `auto:${input.msg}` }, summary: 'Done' };
+      },
+    });
+
+    const runtime = new AgentRuntime({ conversations, settings, providers, memory, tools, logger, clock });
+    const conv = conversations.create();
+    conversations.update(conv.id, { preview: 'Last visible preview' });
+    const lastMessageAtBeforeTurn = conversations.get(conv.id)!.lastMessageAt;
+
+    providers.fakeAdapter.addScript(async function* () {
+      yield { type: 'tool_call', id: 'tc_only', name: 'auto_tool', input: { msg: 'x' } };
+      yield { type: 'done', stopReason: 'tool_use' };
+    });
+    providers.fakeAdapter.addScript(async function* () {
+      advance(120_000);
+      yield { type: 'done', stopReason: 'end' };
+    });
+
+    const handle = await runtime.send({ conversationId: conv.id, parts: [{ type: 'text', text: 'Run the tool' }] });
+    await collectEvents(handle.events);
+    const message = await handle.done;
+
+    expect(message.status).toBe('complete');
+    expect(message.parts.map((part) => part.type)).toEqual(['tool_call', 'tool_result']);
+    expect(providers.fakeAdapter.requests).toHaveLength(2);
+    expect(clock()).toBe(handle.userMessage.createdAt + 120_000);
+
+    const updated = conversations.get(conv.id)!;
+    expect(updated.lastMessageAt).toBe(clock());
+    expect(updated.lastMessageAt).not.toBeNull();
+    expect(updated.lastMessageAt).not.toBe(lastMessageAtBeforeTurn);
+    expect(updated.lastMessageAt).not.toBe(handle.userMessage.createdAt);
+    expect(updated.preview).toBe('Last visible preview');
+  });
+});
+
 describe('Incognito mode', () => {
   it('allows memory recall for legacy off-record episodes', async () => {
     const { providers, runtime, conversations, memory } = makeEnv();

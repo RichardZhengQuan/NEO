@@ -184,7 +184,10 @@ export const CreateProviderRequestSchema = ProviderConfigSchema.omit({ apiKeySec
   simple: z.boolean().optional(),
 });
 export type CreateProviderRequest = z.input<typeof CreateProviderRequestSchema>;
-export const UpdateProviderRequestSchema = ProviderConfigSchema.omit({ id: true, kind: true, apiKeySecret: true }).partial();
+export const UpdateProviderRequestSchema = ProviderConfigSchema
+  .omit({ id: true, kind: true, apiKeySecret: true, enabled: true })
+  .partial()
+  .extend({ enabled: z.boolean().optional() });
 export type UpdateProviderRequest = z.input<typeof UpdateProviderRequestSchema>;
 
 /** Test either a saved provider (POST /providers/:id/test) or an unsaved draft (POST /providers/test). */

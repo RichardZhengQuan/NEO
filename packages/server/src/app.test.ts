@@ -387,6 +387,15 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     expect((await f.request('/api/providers/ollama', 'DELETE')).status).toBe(404);
   });
 
+  it('keeps a disabled provider disabled after a label-only PATCH', async () => {
+    f.services.providerConfigs.upsert({ id: 'work-ai', kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:1234/v1', enabled: false });
+    const res = await f.request('/api/providers/work-ai', 'PATCH', { label: 'Renamed' });
+    expect(res.status).toBe(200);
+    const view = await json<ProviderView>(res);
+    expect(view.enabled).toBe(false);
+    expect(f.services.providerConfigs.get('work-ai')!.enabled).toBe(false);
+  });
+
   it('keeps config-file providers immutable and draft tests isolated from all stores', async () => {
     f.services.config.providers.push({ id: 'configured', kind: 'ollama', enabled: true, apiKey: 'config-secret' });
     expect((await f.request('/api/providers/configured', 'PATCH', { label: 'Rename' })).status).toBe(409);
@@ -550,6 +559,12 @@ describe('HTTP API with real SQLite stores and fake runtime/memory/providers', (
     expect((await app.request('/manifest.webmanifest')).headers.get('Content-Type')).toBe('application/manifest+json');
     expect((await app.request('/app.js')).headers.get('Cache-Control')).toContain('immutable');
     expect((await app.request('/leak.txt')).status).toBe(404);
+    // A missing file is a 404, never the shell: caches would keep the HTML as that file.
+    for (const path of ['/assets/dog-abc.webp', '/missing.js']) {
+      const response = await app.request(path);
+      expect(response.status).toBe(404);
+      expect(response.headers.get('Content-Type')).not.toContain('text/html');
+    }
     expect((await app.request('/api/unknown', { headers: { Authorization: `Bearer ${OWNER_TOKEN}` } })).status).toBe(404);
     expect((await app.request('/api', { headers: { Authorization: `Bearer ${OWNER_TOKEN}` } })).status).toBe(404);
   });

@@ -436,7 +436,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
     async findForForget(query: string, limit = 20): Promise<MemoryNode[]> {
       const text = query.trim();
       if (!text) return [];
-      const max = Math.max(1, Math.min(500, limit));
+      const max = Math.max(1, Math.min(10_000, limit));
       // Never the self node: "forget everything about me" must not reach every memory through it.
       const where: Where = (alias = '') => ({ sql: `${alias ? `${alias}.` : ''}status IN ('active', 'archived') AND ${alias ? `${alias}.` : ''}id != ?`, params: [SELF_MEMORY_ID] });
       const scored = new Map<string, number>();
@@ -662,6 +662,11 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
     /** Live-swap the embedder without restarting the service.
      *  Updates the routing table and re-embeds any stale vectors in the background. */
     setEmbedder(newEmbedder: Embedder): void {
+      if (embedder.id === newEmbedder.id && 'settingsFingerprint' in embedder && 'settingsFingerprint' in newEmbedder &&
+          embedder.settingsFingerprint !== newEmbedder.settingsFingerprint) {
+        db.prepare('UPDATE memory_nodes SET embedding_model = NULL WHERE embedding_model = ?').run(embedder.id);
+        vectors.evictAll(embedder.id);
+      }
       const newLocalEmbedder: Embedder = isLocalEmbedder(newEmbedder) ? newEmbedder : new LocalFallbackEmbedder(512);
       const newKeepLocal = (node: { sensitivity: string }): boolean =>
         newLocalEmbedder !== newEmbedder && node.sensitivity === 'sensitive' && !policy.sendSensitiveToCloud;

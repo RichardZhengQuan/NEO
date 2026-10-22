@@ -102,7 +102,7 @@ export function useAvatarOrbit(props: {
         }
         node.style.transform = `translate3d(${x.toFixed(2)}px, ${(originY + y).toFixed(2)}px, 0) translate(-50%, -50%) scale(${front ? 1 : showHovered ? .9 : .8})`;
         node.style.opacity = front || showHovered ? '1' : '.6';
-        node.style.zIndex = showFocused ? '4' : front ? '3' : '1';
+        node.style.zIndex = lifted ? '4' : front ? '3' : '1';
         node.dataset.orbitAngle = String(theta);
         node.dataset.orbitDepth = depth;
         node.dataset.orbitLifted = String(lifted);
@@ -113,6 +113,7 @@ export function useAvatarOrbit(props: {
       const geometry = avatarOrbitGeometry({
         area: area.getBoundingClientRect(),
         frame: frame?.getBoundingClientRect(),
+        fallback: frame?.querySelector('.neo-avfig__portrait')?.getBoundingClientRect(),
         clearance: clearance?.getBoundingClientRect(),
         viewport: { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight },
       });
@@ -273,6 +274,9 @@ export function useAvatarOrbit(props: {
     const layoutObserver = typeof MutationObserver === 'function' ? new MutationObserver(scheduleMeasure) : undefined;
     layoutObserver?.observe(layoutRoot, { attributes: true, attributeFilter: ['class', 'data-step', 'data-card-side', 'data-transition', 'data-layout'] });
     frame?.addEventListener('load', scheduleMeasure, true);
+    // The figure can swap to its portrait fallback (and back) inside an unchanged frame.
+    const artObserver = frame && typeof MutationObserver === 'function' ? new MutationObserver(scheduleMeasure) : undefined;
+    if (frame) artObserver?.observe(frame, { childList: true, subtree: true });
     window.addEventListener('resize', measure);
     measure();
     if (!reduced && !document.hidden) frameId = requestAnimationFrame(tick);
@@ -284,6 +288,7 @@ export function useAvatarOrbit(props: {
       clearTimeout(touchTimer);
       observer?.disconnect();
       layoutObserver?.disconnect();
+      artObserver?.disconnect();
       frame?.removeEventListener('load', scheduleMeasure, true);
       settleTargets.forEach((element) => {
         element.removeEventListener('animationend', settleGeometry);

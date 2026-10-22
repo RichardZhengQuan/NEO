@@ -67,6 +67,7 @@ function toConversation(r: Row): Conversation {
     ephemeral: toBool(r.ephemeral),
     startedAt: toNum(r.started_at ?? r.created_at),
     closedAt: toNumOrNull(r.closed_at),
+    searchMode: (r.search_mode as 'native' | 'engine' | 'off') || undefined,
   };
 }
 
@@ -117,6 +118,27 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
       db.prepare('UPDATE conversations SET closed_at = ?, updated_at = ? WHERE id = ?').run(clock(), clock(), id);
     }
     return mustGet(id);
+  };
+  const latestPreview = (episodeId: string): string | null => {
+    const rows = db.prepare(
+      'SELECT parts FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC',
+    ).iterate(episodeId);
+    for (const row of rows) {
+      const preview = previewOf(fromJson(row.parts, [])) || null;
+      if (preview) return preview;
+    }
+    return null;
+  };
+  const refreshEpisodePreview = (episodeId: string): void => {
+    const row = db.prepare(
+      'SELECT created_at FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+    ).get(episodeId) as Row | undefined;
+    db.prepare('UPDATE conversations SET preview = ?, last_message_at = ?, updated_at = ? WHERE id = ?')
+      .run(latestPreview(episodeId), row ? toNum(row.created_at) : null, clock(), episodeId);
+  };
+  const refreshEpisodePreviewOnly = (episodeId: string): void => {
+    db.prepare('UPDATE conversations SET preview = ?, updated_at = ? WHERE id = ?')
+      .run(latestPreview(episodeId), clock(), episodeId);
   };
   const create = (input: NewConversation = {}): Conversation => {
     const now = clock();
@@ -213,8 +235,14 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
       const where: string[] = ['archived = ?'];
       const args: (string | number)[] = [fromBool(query.archived ?? false)];
       if (query.before !== undefined) {
-        where.push('updated_at < ?');
-        args.push(query.before);
+        if (query.beforePinned !== undefined) {
+          const cp = fromBool(query.beforePinned);
+          where.push('(pinned < ? OR (pinned = ? AND updated_at < ?))');
+          args.push(cp, cp, query.before);
+        } else {
+          where.push('updated_at < ?');
+          args.push(query.before);
+        }
       }
       if (query.query?.trim()) {
         where.push("(title LIKE ? ESCAPE '\\' OR preview LIKE ? ESCAPE '\\')");
@@ -249,17 +277,23 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
         id,
       );
       if (hasEpisodes() && patch.closedAt !== undefined) db.prepare('UPDATE conversations SET closed_at = ? WHERE id = ?').run(patch.closedAt, id);
+      if (hasEpisodes() && patch.searchMode !== undefined) db.prepare('UPDATE conversations SET search_mode = ? WHERE id = ?').run(patch.searchMode, id);
       return next;
     },
 
     delete: deleteEpisode,
 
-    messages(conversationId: string, options: { limit?: number; before?: number } = {}) {
+    messages(conversationId: string, options: { limit?: number; before?: number; beforeId?: string } = {}) {
       const args: (string | number)[] = [conversationId];
       let where = 'conversation_id = ?';
       if (options.before !== undefined) {
-        where += ' AND created_at < ?';
-        args.push(options.before);
+        if (options.beforeId !== undefined) {
+          where += ' AND (created_at < ? OR (created_at = ? AND rowid < (SELECT rowid FROM messages WHERE id = ?)))';
+          args.push(options.before, options.before, options.beforeId);
+        } else {
+          where += ' AND created_at < ?';
+          args.push(options.before);
+        }
       }
       if (options.limit !== undefined) {
         const rows = db
@@ -316,10 +350,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
           next.sensitive ? 1 : null,
           id,
         );
-        if (patch.parts) {
-          const preview = previewOf(next.parts);
-          if (preview) db.prepare('UPDATE conversations SET preview = ?, updated_at = ? WHERE id = ?').run(preview, clock(), next.conversationId);
-        }
+        if (patch.parts) refreshEpisodePreviewOnly(next.conversationId);
       });
       return next;
     },
@@ -329,7 +360,9 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
         const message = getMessage(id);
         if (!message) return false;
         if (hasEpisodes()) closeEpisode(message.conversationId);
-        return toNum(db.prepare('DELETE FROM messages WHERE id = ?').run(id).changes) > 0;
+        const deleted = toNum(db.prepare('DELETE FROM messages WHERE id = ?').run(id).changes) > 0;
+        if (deleted) refreshEpisodePreview(message.conversationId);
+        return deleted;
       });
     },
 
@@ -379,7 +412,7 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
     timeline,
 
     searchMessages(query: string, limit = 50) {
-      const tokens = query.toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(Boolean).slice(0, 32);
+      const tokens = query.normalize('NFC').toLowerCase().split(/[^\p{L}\p{N}_\p{M}]+/u).filter(Boolean).slice(0, 32);
       if (!tokens.length) return [];
       const match = tokens.map((token) => `"${token}"`).join(' OR ');
       return (db.prepare(
@@ -461,8 +494,10 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
       return db.transaction(() => {
         const { clause, args } = rangeQuery(range);
         const messages = messagesInRange(range);
-        for (const id of new Set(messages.map((message) => message.conversationId))) closeEpisode(id);
+        const episodeIds = new Set(messages.map((message) => message.conversationId));
+        for (const id of episodeIds) closeEpisode(id);
         db.prepare(`DELETE FROM messages${clause}`).run(...args);
+        for (const id of episodeIds) refreshEpisodePreview(id);
         return messages;
       });
     },

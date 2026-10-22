@@ -780,6 +780,47 @@ describe('consolidation', () => {
     const report = await svc.consolidate({ force: true });
     expect(report.episodesConsolidated).toBe(0);
     expect((await svc.get(e1.id))!.node.consolidatedAt ?? null).toBeNull();
+    tickDays(30);
+    await svc.consolidate({ force: true });
+    expect((await svc.get(e1.id))!.node.consolidatedAt ?? null).toBeNull();
+  });
+
+  it('keeps episodes unconsolidated when a malformed summary produces no items', async () => {
+    const { model, requests } = scriptedLLM({ consolidate: () => '{"summary":"oops"}' });
+    const { svc, db, tickDays } = setup({ llm: model });
+    try {
+      const [e1, e2] = await twoHikingEpisodes(svc);
+      tickDays(1);
+      await svc.consolidate({ force: true });
+      expect(requests).toHaveLength(1);
+      expect(count(db, `SELECT COUNT(*) n FROM memory_nodes WHERE kind IN ('summary','fact','preference','skill','goal')`)).toBe(0);
+      expect((await svc.get(e1.id))!.node.consolidatedAt ?? null).toBeNull();
+      expect((await svc.get(e2.id))!.node.consolidatedAt ?? null).toBeNull();
+    } finally { db.close(); }
+  });
+
+  it('retries previously-faded episodes on the next run when the model becomes usable', async () => {
+    let attempts = 0;
+    const { model } = scriptedLLM({
+      consolidate: () => (++attempts === 1 ? 'not json' : abstraction([])),
+    });
+    const { svc, tickDays } = setup({ llm: model });
+    const ep = await svc.remember({
+      kind: 'episode',
+      label: 'Hiking',
+      content: 'The user enjoyed hiking in the Alps.',
+      importance: 0.5,
+    });
+    tickDays(30);
+    const first = await svc.consolidate({ force: true });
+    expect(first.episodesConsolidated).toBe(0);
+    const after1 = (await svc.get(ep.id))!.node;
+    expect(after1.status).toBe('archived');
+    expect(after1.consolidatedAt ?? null).toBeNull();
+    tickDays(1);
+    const second = await svc.consolidate({ force: true });
+    expect(second.episodesConsolidated).toBe(1);
+    expect(attempts).toBe(2);
   });
 
   it('is idempotent and single-flight', async () => {
