@@ -466,6 +466,48 @@ describe('startup reminder catch-up', () => {
     expect(clientMock.remindersList.mock.calls[0]![0]).not.toHaveProperty('status');
   });
 
+  it('persists catch-up window floor even when ElectronNotification.isSupported() is false', async () => {
+    const firedAt = Date.now() - 5_000;
+    fsMock.readFile.mockResolvedValueOnce(JSON.stringify({ lastRunAt: firedAt - 1_000 }));
+    const overdueReminder = {
+      id: 'r-unsupported-1',
+      title: 'Call dentist',
+      notes: null,
+      dueAt: firedAt - 1_000,
+      status: 'fired',
+      firedCount: 1,
+      lastFiredAt: firedAt,
+      messageId: null,
+    };
+    clientMock.remindersList.mockResolvedValueOnce({ items: [overdueReminder] });
+
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7782',
+      ownerToken: 'owner-tok-unsupported',
+      stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    });
+
+    const startupDone = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+
+    await import('./main.js');
+    await startupDone;
+
+    const { Notification } = await import('electron');
+    vi.spyOn(Notification as { isSupported: () => boolean }, 'isSupported').mockReturnValue(false);
+    const beforeCatchup = Date.now();
+    clientMock.onStatus?.('open');
+    await flushCatchup();
+
+    expect(Notification).not.toHaveBeenCalled();
+    expect(fsMock.writeFile).toHaveBeenCalled();
+    const written = JSON.parse(fsMock.writeFile.mock.calls.at(-1)![1] as string) as { lastRunAt: number };
+    expect(written.lastRunAt).toBeGreaterThanOrEqual(beforeCatchup);
+  });
+
   it('uses lastFiredAtFrom from persisted state to avoid duplicate on rapid restart', async () => {
     const firedAt = Date.now() - 5_000; // fired 5 s ago
     const lastRunAt = firedAt + 1_000;  // previous process completed catch-up 1 s after firing
