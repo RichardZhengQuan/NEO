@@ -222,6 +222,17 @@ export interface RemoteMode {
 
 export type StartupMode = 'local' | RemoteMode;
 
+export type DesktopMode = { kind: 'local' } | { kind: 'remote'; serverUrl?: string };
+
+/**
+ * Compute the StartupMode to persist when the user picks a new mode in Settings.
+ * Switching to 'remote' always clears the saved credentials so the Connect
+ * screen appears again on next launch (issue #556: "connect to a different NEO").
+ */
+export function nextStartupModeForSwitch(target: 'local' | 'remote'): StartupMode {
+  return target === 'local' ? 'local' : { kind: 'remote' };
+}
+
 export function parseStartupMode(raw: string): StartupMode | null {
   try {
     const data: unknown = JSON.parse(raw);

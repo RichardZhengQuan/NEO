@@ -7,6 +7,8 @@
  * without nodeIntegration enabled in the renderer.
  */
 
+import type { DesktopMode } from './lib.js' with { 'resolution-mode': 'import' };
+
 /* eslint-disable @typescript-eslint/no-require-imports */
 // Under verbatimModuleSyntax, .cts files must use require() for CJS modules.
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron');
@@ -15,6 +17,10 @@ const { contextBridge, ipcRenderer } = require('electron') as typeof import('ele
 export interface NeoDesktopApi {
   /** Fetch the running server URL and auth token from the main process. */
   getConfig(): Promise<{ serverUrl: string; token: string }>;
+  /** Which NEO this app currently uses. */
+  getMode?(): Promise<DesktopMode>;
+  /** Restart using this Mac's NEO or a new remote pairing. */
+  switchMode?(target: 'local' | 'remote'): Promise<void>;
   /** The current platform string (darwin | win32 | linux). */
   platform: string;
   /**
@@ -37,6 +43,14 @@ export interface NeoDesktopApi {
 const api: NeoDesktopApi = {
   getConfig(): Promise<{ serverUrl: string; token: string }> {
     return ipcRenderer.invoke('neo:getConfig') as Promise<{ serverUrl: string; token: string }>;
+  },
+
+  getMode(): Promise<DesktopMode> {
+    return ipcRenderer.invoke('neo:getMode') as Promise<DesktopMode>;
+  },
+
+  switchMode(target: 'local' | 'remote'): Promise<void> {
+    return ipcRenderer.invoke('neo:switchMode', target) as Promise<void>;
   },
 
   platform: process.platform,

@@ -18,7 +18,7 @@ import { useEffect, useSyncExternalStore } from 'react';
 export const MEMORY_TABS = ['net', 'list', 'journal', 'stats', 'data'] as const;
 export type MemoryTab = (typeof MEMORY_TABS)[number];
 
-export const SETTINGS_SECTIONS = ['ai', 'avatar', 'memory', 'tools', 'devices', 'notifications', 'appearance', 'data'] as const;
+export const SETTINGS_SECTIONS = ['ai', 'avatar', 'memory', 'tools', 'devices', 'notifications', 'appearance', 'data', 'desktop'] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 export type Route =

@@ -8,6 +8,7 @@ import {
   formatSystemNotification,
   deepLinkToHash,
   createTrayIconPng,
+  nextStartupModeForSwitch,
   parseStartupMode,
   loadStartupMode,
   saveStartupMode,
@@ -273,6 +274,16 @@ it('maps timeline message notification links into the web timeline route', () =>
 });
 
 // ───────────────────────────── startup mode ─────────────────────────────
+
+describe('nextStartupModeForSwitch', () => {
+  it('returns local when switching to this Mac', () => {
+    expect(nextStartupModeForSwitch('local')).toBe('local');
+  });
+
+  it('returns only the remote kind so switching requires pairing again', () => {
+    expect(nextStartupModeForSwitch('remote')).toStrictEqual({ kind: 'remote' });
+  });
+});
 
 describe('parseStartupMode', () => {
   it('returns "local" for the string literal local', () => {

@@ -84,6 +84,7 @@ const electron = await vi.hoisted(async () => {
   return {
     app: Object.assign(new EventEmitter(), {
       whenReady: vi.fn().mockResolvedValue(undefined),
+      relaunch: vi.fn(),
       quit: vi.fn(),
       requestSingleInstanceLock: vi.fn(() => true),
       getPath: vi.fn(() => '/neo-test'),
@@ -245,6 +246,65 @@ describe('desktop window lifecycle', () => {
     expect(electron.BrowserWindow).toHaveBeenCalledTimes(2);
     const reopenedWindow = electron.BrowserWindow.mock.results[1]!.value;
     expect(reopenedWindow.loadURL).toHaveBeenCalledWith(serverUrl);
+  });
+});
+
+describe('desktop local mode IPC', () => {
+  const serverUrl = 'http://127.0.0.1:7777';
+  const localEvent = { senderFrame: { url: `${serverUrl}/#/settings/desktop` } } as Electron.IpcMainInvokeEvent;
+
+  async function enterLocalMode(): Promise<void> {
+    server.startServer.mockResolvedValueOnce({
+      url: serverUrl,
+      ownerToken: 'local-token',
+      stop: server.stopServer,
+    });
+    const ready = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+    await import('./main.js');
+    await ready;
+  }
+
+  function ipcHandler(channel: string) {
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(([name]) => name === channel)?.[1];
+    expect(handler, `${channel} must be registered`).toBeTypeOf('function');
+    return handler!;
+  }
+
+  it('neo:getMode reports this Mac in local mode', async () => {
+    await enterLocalMode();
+    await expect(ipcHandler('neo:getMode')(localEvent)).resolves.toStrictEqual({ kind: 'local' });
+  });
+
+  it('neo:switchMode persists a credential-free remote mode before relaunching and quitting', async () => {
+    await enterLocalMode();
+    let finishSave!: () => void;
+    fsMock.writeFile.mockImplementationOnce(() => new Promise<void>((resolve) => { finishSave = resolve; }));
+    const switching = ipcHandler('neo:switchMode')(localEvent, 'remote');
+    expect(fsMock.writeFile).toHaveBeenCalledExactlyOnceWith(
+      '/neo-test/startup-mode.json', JSON.stringify({ kind: 'remote' }), 'utf8',
+    );
+    expect(electron.app.relaunch).not.toHaveBeenCalled();
+    expect(electron.app.quit).not.toHaveBeenCalled();
+    finishSave();
+    await switching;
+    expect(electron.app.relaunch).toHaveBeenCalledExactlyOnceWith();
+    expect(electron.app.quit).toHaveBeenCalledExactlyOnceWith();
+    expect(electron.app.relaunch.mock.invocationCallOrder[0]).toBeLessThan(electron.app.quit.mock.invocationCallOrder[0]!);
+  });
+
+  it.each(['neo:getMode', 'neo:switchMode'])('%s rejects unauthorized senders in local mode', async (channel) => {
+    await enterLocalMode();
+    const handler = ipcHandler(channel);
+    for (const url of ['file:///evil', 'https://evil.example', 'http://127.0.0.1:9999']) {
+      await expect(handler({ senderFrame: { url } } as Electron.IpcMainInvokeEvent, 'remote')).rejects.toThrow('Unauthorized sender');
+    }
+    expect(fsMock.writeFile).not.toHaveBeenCalled();
+    expect(electron.app.relaunch).not.toHaveBeenCalled();
+    expect(electron.app.quit).not.toHaveBeenCalled();
   });
 });
 
@@ -749,6 +809,61 @@ describe('desktop connect mode', () => {
   const route = {
     serverId: 's1', publicKey: 'p1', lan: ['192.168.1.10:7777'], relay: 'wss://relay.example',
   };
+
+  it('neo:getMode reports only the remote address after saveMode pairs a NEO', async () => {
+    await enterConnectMode();
+    await ipcHandler('neo:saveMode')(appEvent, {
+      kind: 'remote', serverUrl: 'https://neo.example', token: 'private-token', tunnel: route,
+    });
+    await expect(ipcHandler('neo:getMode')(appEvent)).resolves.toStrictEqual({
+      kind: 'remote', serverUrl: 'https://neo.example',
+    });
+  });
+
+  it('neo:getMode reports an unpaired remote mode without a serverUrl', async () => {
+    await enterConnectMode({ kind: 'remote' });
+    await expect(ipcHandler('neo:getMode')(appEvent)).resolves.toStrictEqual({ kind: 'remote' });
+  });
+
+  it('neo:getMode reports the saved remote address on startup without exposing credentials', async () => {
+    await enterConnectMode({ kind: 'remote', serverUrl: 'https://saved.example', token: 'private-token', tunnel: route });
+    await expect(ipcHandler('neo:getMode')(appEvent)).resolves.toStrictEqual({
+      kind: 'remote', serverUrl: 'https://saved.example',
+    });
+  });
+
+  it('neo:switchMode persists local mode then relaunches and quits from connect mode', async () => {
+    await enterConnectMode({ kind: 'remote', serverUrl: 'https://neo.example', token: 'private-token' });
+    await ipcHandler('neo:switchMode')(appEvent, 'local');
+    expect(fsMock.writeFile).toHaveBeenCalledExactlyOnceWith(
+      '/neo-test/startup-mode.json', JSON.stringify('local'), 'utf8',
+    );
+    expect(electron.app.relaunch).toHaveBeenCalledExactlyOnceWith();
+    expect(electron.app.quit).toHaveBeenCalledExactlyOnceWith();
+    expect(fsMock.writeFile.mock.invocationCallOrder[0]).toBeLessThan(electron.app.relaunch.mock.invocationCallOrder[0]!);
+    expect(electron.app.relaunch.mock.invocationCallOrder[0]).toBeLessThan(electron.app.quit.mock.invocationCallOrder[0]!);
+  });
+
+  it('neo:switchMode clears saved remote credentials when connecting to a different NEO', async () => {
+    await enterConnectMode({ kind: 'remote', serverUrl: 'https://old.example', token: 'old-token', tunnel: route });
+    await ipcHandler('neo:switchMode')(appEvent, 'remote');
+    expect(fsMock.writeFile).toHaveBeenCalledExactlyOnceWith(
+      '/neo-test/startup-mode.json', JSON.stringify({ kind: 'remote' }), 'utf8',
+    );
+    expect(electron.app.relaunch).toHaveBeenCalledExactlyOnceWith();
+    expect(electron.app.quit).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it.each(['neo:getMode', 'neo:switchMode'])('%s rejects unauthorized senders in connect mode', async (channel) => {
+    await enterConnectMode();
+    const handler = ipcHandler(channel);
+    for (const url of ['file:///evil', 'https://evil.example', 'app://evil/index.html']) {
+      await expect(handler({ senderFrame: { url } } as Electron.IpcMainInvokeEvent, 'local')).rejects.toThrow('Unauthorized sender');
+    }
+    expect(fsMock.writeFile).not.toHaveBeenCalled();
+    expect(electron.app.relaunch).not.toHaveBeenCalled();
+    expect(electron.app.quit).not.toHaveBeenCalled();
+  });
 
   it('registers the privileged app scheme before readiness and serves the bundled renderer at app://neo', async () => {
     const index = Buffer.from('<!doctype html><title>NEO</title>');

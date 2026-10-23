@@ -2,14 +2,16 @@
  * Settings: a section list beside the content on wide screens, a list that
  * drills into each section on phones.
  */
-import type { ReactElement } from 'react';
+import { useEffect, type ReactElement } from 'react';
 import { Icon, useT } from '@neo/ui';
 import { PageHeader } from '../components/PageHeader.js';
 import { useIsDesktop } from '../hooks/useMediaQuery.js';
+import { getPlatform } from '../platform/index.js';
 import { navigate, SETTINGS_SECTIONS, type SettingsSection } from '../router.js';
 import { AiSection } from './settings/AiSection.js';
 import { AppearanceSection } from './settings/AppearanceSection.js';
 import { DataSection } from './settings/DataSection.js';
+import { DesktopSection } from './settings/DesktopSection.js';
 import { DevicesSection } from './settings/DevicesSection.js';
 import { MemorySection } from './settings/MemorySection.js';
 import { NotificationsSection } from './settings/NotificationsSection.js';
@@ -25,6 +27,7 @@ const ICONS: Record<SettingsSection, string> = {
   notifications: 'bell',
   appearance: 'palette',
   data: 'database',
+  desktop: 'laptop',
 };
 
 function SectionContent({ section }: { section: SettingsSection }): ReactElement {
@@ -45,6 +48,8 @@ function SectionContent({ section }: { section: SettingsSection }): ReactElement
       return <AppearanceSection />;
     case 'data':
       return <DataSection />;
+    case 'desktop':
+      return <DesktopSection />;
   }
 }
 
@@ -52,10 +57,15 @@ export function SettingsScreen({ section }: { section?: SettingsSection }): Reac
   const t = useT();
   const desktop = useIsDesktop();
   const active = section ?? (desktop ? 'ai' : undefined);
+  const electron = getPlatform().kind === 'electron';
+
+  useEffect(() => {
+    if (active === 'desktop' && !electron) navigate({ name: 'settings' });
+  }, [active, electron]);
 
   const nav = (
     <nav className={desktop ? 'settings-nav' : undefined} aria-label={t('nav.settings')} style={desktop ? undefined : { display: 'flex', flexDirection: 'column', gap: 1 }}>
-      {SETTINGS_SECTIONS.map((s) => (
+      {SETTINGS_SECTIONS.filter((s) => s !== 'desktop' || electron).map((s) => (
         <button
           key={s}
           type="button"

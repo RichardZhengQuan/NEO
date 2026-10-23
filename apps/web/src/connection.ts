@@ -313,6 +313,8 @@ export function clearCredentials(): void {
 /** Typed `window.neoDesktop` bridge exposed by the Electron preload. */
 export interface NeoDesktopBridge {
   getConfig(): Promise<{ serverUrl: string; token: string }>;
+  getMode?(): Promise<{ kind: 'local' } | { kind: 'remote'; serverUrl?: string }>;
+  switchMode?(target: 'local' | 'remote'): Promise<void>;
   platform: string;
   openExternal(url: string): Promise<void> | void;
   /**
