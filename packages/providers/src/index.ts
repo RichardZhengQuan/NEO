@@ -69,8 +69,9 @@ export type { RetryOptions } from './retry.js';
 /**
  * Build an adapter for one provider config. Throws NeoError('config_error') for unusable configs.
  * Never throws for a missing API key: that surfaces as `provider_auth` when the adapter is used,
- * and `apiKeySecret` is resolved on every call so a key saved later is picked up.
- * `adapter.config` is the very object passed in (secrets are never copied into it).
+ * and direct calls resolve `apiKeySecret` on every call so a key saved later is picked up.
+ * `createProviderRegistry` snapshots available API keys when each adapter is created.
+ * `adapter.config` is the very object passed in; this function never copies secrets into it.
  */
 export function createProvider(config: ProviderConfig, options: ProviderOptions = {}): ProviderAdapter {
   switch (config.kind) {
@@ -95,8 +96,16 @@ export function createProvider(config: ProviderConfig, options: ProviderOptions 
 
 /** Registry over many providers; disabled providers are kept (and listed) but `resolve()` refuses them. */
 export function createProviderRegistry(configs: readonly ProviderConfig[], options: ProviderOptions = {}): ProviderRegistry {
+  /** Snapshot the API key so a retained adapter does not re-read the secret store. */
+  function snap(config: ProviderConfig): ProviderConfig {
+    if (!config.apiKeySecret || !options.resolveSecret) return config;
+    const key = options.resolveSecret(config.apiKeySecret);
+    if (!key) return config;
+    return { ...config, apiKey: key, apiKeySecret: undefined };
+  }
+
   const adapters = new Map<string, ProviderAdapter>();
-  for (const cfg of configs) adapters.set(cfg.id, createProvider(cfg, options));
+  for (const cfg of configs) adapters.set(cfg.id, createProvider(snap(cfg), options));
 
   return {
     get: (id) => adapters.get(id),
@@ -111,7 +120,7 @@ export function createProviderRegistry(configs: readonly ProviderConfig[], optio
     },
     upsert(config) {
       // Build first: a config that cannot be turned into an adapter leaves the registry unchanged.
-      const adapter = createProvider(config, options);
+      const adapter = createProvider(snap(config), options);
       adapters.set(config.id, adapter);
       return adapter;
     },
