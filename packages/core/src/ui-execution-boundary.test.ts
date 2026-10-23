@@ -134,4 +134,28 @@ describe('protected UI tool execution boundary', () => {
     if (result.kind !== 'tool') throw new Error('Expected tool result');
     expect(result.result.output).toEqual(expect.stringContaining('external tool failed'));
   });
+
+  it('rejects with not_found when source message is deleted during async schema validation', async () => {
+    const gate = deferred();
+    let parses = 0;
+    let validatingApproval = false;
+    const execute = vi.fn(async () => ({ output: { ok: true } }));
+    const def = {
+      ...standardTools()[1]!,
+      inputSchema: z.object({ msg: z.string() }).refine(async () => {
+        if (++parses === 2) { validatingApproval = true; await gate.promise; }
+        return true;
+      }),
+      execute,
+    };
+    const h = fixture(def);
+    const confirmationToken = await token(h);
+    const request = h.runtime.handleUiAction({ ...h.input, confirmationToken });
+    await until(() => validatingApproval);
+    h.conversations.deleteMessage(h.input.messageId);
+    gate.resolve();
+
+    await expect(request).rejects.toMatchObject({ code: 'not_found' });
+    expect(execute).not.toHaveBeenCalled();
+  });
 });
