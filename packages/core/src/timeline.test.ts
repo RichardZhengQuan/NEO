@@ -357,20 +357,24 @@ describe('off-record lifecycle', () => {
   });
 
   it('falls back to bounded continuity when the normal-episode prefix would exceed the token budget', async () => {
+    // Schema minimum for contextTokenBudget is 2000; keep it at the floor.
+    // originMessages: user msg (~13 tok) + assistant msg with 8000 'x' chars (~2004 tok) = ~2017 tok.
+    // incoming "first private turn after oversized normal episode" = ~17 tok.
+    // Total ~2034 tok > budget 2000, so originFits = false and previousHistory must NOT be set.
     const h = harness({ settings: { agent: { contextTokenBudget: 2000 } } });
     const normalText = 'normal anchor for budget guard test';
     await send(h, normalText);
     // Store a large response that puts the normal episode well over the budget.
-    stored(h, h.conv.id, 'x'.repeat(7500));
+    stored(h, h.conv.id, 'x'.repeat(8000));
     await h.runtime.startOffRecord();
 
     const result = await send(h, 'first private turn after oversized normal episode', true);
     const messages = h.model.requests.at(-1)!.messages;
 
     // originMessages exceed budget, so previousHistory must NOT be used.
-    // The normal-episode text may still appear via recentContext (truncated), but the
-    // raw full messages must not be prepended verbatim to the private-episode messages.
-    const rawNormalMsgCount = messages.filter((m) => m.role === 'user' && JSON.stringify(m).includes('x'.repeat(100))).length;
+    // The raw x-sequence must not appear verbatim in any message (user or assistant) —
+    // only the bounded recentContext summary is allowed.
+    const rawNormalMsgCount = messages.filter((m) => JSON.stringify(m).includes('x'.repeat(100))).length;
     expect(rawNormalMsgCount).toBe(0);
     // The turn must still complete successfully.
     expect(result.handle.conversationId).toBeDefined();
