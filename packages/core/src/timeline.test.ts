@@ -648,6 +648,35 @@ describe('authoritative off-record state', () => {
     expect(h.tools.executed).toEqual([]);
   });
 
+  it('appends a private widget copy after existing messages when the clock has not advanced', async () => {
+    const updateTask = { ...standardTools()[1]!, name: 'update_task', inputSchema: z.object({ id: z.string(), done: z.boolean() }), execute: async ({ id, done }: { id: string; done: boolean }) => ({ output: { task: { id, done } } }) } as ToolDefinition;
+    const h = harness({ tools: [updateTask] });
+    const t0 = h.clock();
+    const source = stored(h, h.conv.id, 'task');
+    h.conversations.updateMessage(source.id, { parts: [{ type: 'ui', id: 'ui_private_task', block: { type: 'tasks', tasks: [{ id: 'task_private', title: 'Task', done: false }] } }] });
+    const input = { messageId: source.id, uiId: 'ui_private_task', actionId: widgetActionId.taskToggle('task_private') };
+    const result = await h.runtime.handleTimelineUiAction(input);
+    if (result.kind !== 'confirm') throw new Error('Expected confirmation');
+    const state = await h.runtime.startOffRecord();
+    await send(h, 'turn A', true);
+    await send(h, 'turn B', true);
+    const existing = h.conversations.messages(state.episodeId!);
+    expect(existing.map((message) => message.createdAt)).toEqual([t0, t0 + 1, t0 + 2, t0 + 3]);
+    expect(h.clock()).toBe(t0);
+    const copied = deferred<Message>();
+    const unsubscribe = h.runtime.subscribe((event) => {
+      if (event.type === 'message.completed' && event.episodeId === state.episodeId) copied.resolve(event.message);
+    });
+    try {
+      await h.runtime.handleTimelineUiAction({ ...input, confirmationToken: result.confirmation.token });
+      const copy = await copied.promise;
+      expect.soft(copy.createdAt).toBeGreaterThan(Math.max(...existing.map((message) => message.createdAt)));
+      expect(h.conversations.messages(state.episodeId!).at(-1)?.id).toBe(copy.id);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('stores an approved UI widget result in the private episode and leaves its normal source unchanged', async () => {
     const updateTask = { ...standardTools()[1]!, name: 'update_task', inputSchema: z.object({ id: z.string(), done: z.boolean() }), execute: async ({ id, done }: { id: string; done: boolean }) => ({ output: { task: { id, done } } }) } as ToolDefinition;
     const h = harness({ tools: [updateTask] });
