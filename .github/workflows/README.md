@@ -6,7 +6,11 @@ Runs typecheck, test, and build on pull requests and pushes to `main`.
 
 ## mobile.yml
 
-Builds the iOS app unsigned for the simulator on pull requests and pushes to `main` that touch mobile-related paths or the workflow itself. The exact iOS build command comes from [apps/mobile/README.md](../../apps/mobile/README.md).
+Builds the iOS app unsigned for the simulator (job `ios-build`) and the Android
+debug APK (job `android-build`) on pull requests and pushes to `main` that touch
+mobile-related paths or the workflow itself. The exact build commands come from
+[apps/mobile/README.md](../../apps/mobile/README.md). The Android APK is
+uploaded as the `android-debug-apk` workflow artifact.
 
 ## release-desktop.yml
 

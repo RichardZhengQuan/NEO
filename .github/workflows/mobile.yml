@@ -56,3 +56,33 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             -destination 'generic/platform=iOS Simulator' \
             build
+
+  android-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - name: Build web app
+        run: pnpm --filter @neo/web build
+      - name: Sync Capacitor Android
+        run: cd apps/mobile && npx cap sync android
+      - name: Build Android debug APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleDebug
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
