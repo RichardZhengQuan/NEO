@@ -307,7 +307,7 @@ describe('off-record lifecycle', () => {
     const off = await send(h, 'off-record secret', true);
     expect(off.handle.episodeId).not.toBe(normal.handle.episodeId);
     expect(h.conversations.get(off.handle.episodeId)).toMatchObject({ offRecord: true, ephemeral: true });
-    expect(recent(off.handle.userMessage.parts)).toContain('normal context');
+    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).toContain('normal context');
     expect(h.memory.recallCalls.at(-1)).toMatchObject({ reinforce: false });
     await settle();
     expect(h.memory.observeCalls).toHaveLength(1);
@@ -337,6 +337,47 @@ describe('off-record lifecycle', () => {
     await send(h, 'second private turn', true);
     // originEpisode also expired: normalText must be absent from the second turn as well.
     expect(JSON.stringify(h.model.requests.at(-1)!.messages)).not.toContain(normalText);
+  });
+
+  it('shares an identical prefix across all turns of an explicitly started off-record session', async () => {
+    const h = harness();
+    const normalText = 'anchor text for explicit startOffRecord prefix test';
+    await send(h, normalText);
+    await h.runtime.startOffRecord();
+
+    await send(h, 'private turn A', true);
+    const messagesA = h.model.requests.at(-1)!.messages;
+
+    await send(h, 'private turn B', true);
+    const messagesB = h.model.requests.at(-1)!.messages;
+
+    expect(messagesB.slice(0, messagesA.length)).toEqual(messagesA);
+    expect(JSON.stringify(messagesA)).toContain(normalText);
+    expect(JSON.stringify(messagesB)).toContain(normalText);
+  });
+
+  it('falls back to bounded continuity when the normal-episode prefix would exceed the token budget', async () => {
+    // Schema minimum for contextTokenBudget is 2000; keep it at the floor.
+    // originMessages: user msg (~13 tok) + assistant msg with 8000 'x' chars (~2004 tok) = ~2017 tok.
+    // incoming "first private turn after oversized normal episode" = ~17 tok.
+    // Total ~2034 tok > budget 2000, so originFits = false and previousHistory must NOT be set.
+    const h = harness({ settings: { agent: { contextTokenBudget: 2000 } } });
+    const normalText = 'normal anchor for budget guard test';
+    await send(h, normalText);
+    // Store a large response that puts the normal episode well over the budget.
+    stored(h, h.conv.id, 'x'.repeat(8000));
+    await h.runtime.startOffRecord();
+
+    const result = await send(h, 'first private turn after oversized normal episode', true);
+    const messages = h.model.requests.at(-1)!.messages;
+
+    // originMessages exceed budget, so previousHistory must NOT be used.
+    // The raw x-sequence must not appear verbatim in any message (user or assistant) —
+    // only the bounded recentContext summary is allowed.
+    const rawNormalMsgCount = messages.filter((m) => JSON.stringify(m).includes('x'.repeat(100))).length;
+    expect(rawNormalMsgCount).toBe(0);
+    // The turn must still complete successfully.
+    expect(result.handle.conversationId).toBeDefined();
   });
 
   it('carries the normal-episode prefix into the second private turn when startOffRecord was called mid-stream', async () => {
