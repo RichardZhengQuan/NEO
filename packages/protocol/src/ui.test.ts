@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ChangeItemSchema,
   CountdownBlockSchema,
@@ -296,6 +296,22 @@ describe('meaningful text fallback', () => {
     expect(uiBlockToText({ ...reminder('rem_notes'), notes })).toContain(notes);
     const text = uiBlockToText({ type: 'countdown', label: 'Launch', until: instant, timezone: 'Asia/Singapore' });
     expect(text).toContain('Oct 14, 2026, 12:30 AM');
+  });
+
+  it('renders task due dates in the block timezone instead of the server timezone', () => {
+    vi.stubEnv('TZ', 'America/New_York');
+    try {
+      const dueAt = Date.UTC(2026, 9, 23, 15, 30);
+      expect(new Date(dueAt).getTimezoneOffset()).toBe(240);
+      const text = uiBlocksToText([{
+        type: 'tasks', timezone: 'Asia/Tokyo',
+        tasks: [{ id: 't1', title: 'Launch', dueAt, done: false }],
+      }]);
+      expect(text).toContain('Oct 24, 2026, 12:30 AM');
+      expect(text).not.toContain('Oct 23, 2026, 11:30 AM');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('renders timezone-only reminder updates', () => {

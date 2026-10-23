@@ -1038,7 +1038,7 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
       break;
     case 'tasks':
       if (block.title) push(block.title);
-      for (const t of block.tasks) push(`  ${t.done ? '☑' : '☐'} ${t.title}${t.dueAt != null ? ` (due ${fmtTime(t.dueAt)})` : ''}${t.priority ? ` [priority ${t.priority}]` : ''}`);
+      for (const t of block.tasks) push(`  ${t.done ? '☑' : '☐'} ${t.title}${t.dueAt != null ? ` (due ${fmtTime(t.dueAt, block.timezone)})` : ''}${t.priority ? ` [priority ${t.priority}]` : ''}`);
       break;
     case 'changes':
       push(block.title ?? 'Proposed changes');
