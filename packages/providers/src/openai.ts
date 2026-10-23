@@ -45,6 +45,8 @@ import {
   systemWithJsonInstruction,
   testByListingModels,
   throwIfAborted,
+  unwrapToolInput,
+  wrappedToolSet,
 } from './shared.js';
 
 type OpenAIKind = 'openai' | 'openai-compatible' | 'ollama';
@@ -244,6 +246,8 @@ export class OpenAIAdapter implements ProviderAdapter {
     const tools: ToolAccumulator[] = [];
     const byIndex = new Map<number, ToolAccumulator>();
     const sources: Source[] = [];
+    // Track tools whose schemas were wrapped by ensureObjectSchema at the API boundary.
+    const wrapped = wrappedToolSet(request.tools);
     let finishReason: string | null = null;
     let sawText = false;
     let refused = false;
@@ -311,7 +315,7 @@ export class OpenAIAdapter implements ProviderAdapter {
 
     for (const tc of tools) {
       throwIfAborted(request.signal);
-      yield { type: 'tool_call', id: tc.id ?? newCallId('call'), name: tc.name, input: parseToolInput(tc.args) };
+      yield { type: 'tool_call', id: tc.id ?? newCallId('call'), name: tc.name, input: unwrapToolInput(parseToolInput(tc.args), tc.name, wrapped) };
     }
 
     let stopReason: StopReason;
@@ -355,7 +359,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       body['temperature'] = request.temperature;
     }
     if (request.tools?.length && !searchPreview) {
-      body['tools'] = request.tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
+      body['tools'] = request.tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: ensureObjectSchema(t.inputSchema) } }));
       // tool_choice is only valid together with tools; forced choice is never sent.
       if (request.toolChoice) body['tool_choice'] = request.toolChoice;
     }
@@ -556,6 +560,16 @@ export class OpenAIAdapter implements ProviderAdapter {
 }
 
 /** OpenAI and OpenRouter share the Chat Completions URL-citation annotation shape. */
+/**
+ * Ensure a JSON Schema has a root `type: 'object'` as required by OpenAI function-calling.
+ * When the schema has a non-object root (e.g. `{anyOf: [...]}` from a zod union,
+ * or `{type: 'string'}`), wrap it as `{type:'object', properties:{value:<schema>}, required:['value']}`.
+ */
+function ensureObjectSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema['type'] === 'object') return schema;
+  return { type: 'object', properties: { value: schema }, required: ['value'] };
+}
+
 function collectAnnotations(sources: Source[], annotations: unknown): void {
   if (!Array.isArray(annotations)) return;
   for (const annotation of annotations) {

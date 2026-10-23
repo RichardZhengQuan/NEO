@@ -43,6 +43,8 @@ import {
   resolveApiKey,
   testByListingModels,
   throwIfAborted,
+  unwrapToolInput,
+  wrappedToolSet,
 } from './shared.js';
 
 const DEFAULT_BASE = PROVIDER_PRESETS.gemini.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
@@ -417,6 +419,8 @@ export class GeminiAdapter implements ProviderAdapter {
     let usage: Usage | null = null;
     const calls: ChatStreamEvent[] = [];
     const sources: Source[] = [];
+    // Track tools whose schemas were wrapped by ensureObjectSchema at the API boundary.
+    const wrapped = wrappedToolSet(request.tools);
 
     try {
       for await (const msg of parseSSE(response.body, request.signal)) {
@@ -461,11 +465,14 @@ export class GeminiAdapter implements ProviderAdapter {
           }
           if (isPlainObject(raw['functionCall'])) {
             const fc = raw['functionCall'];
+            const toolName = typeof fc['name'] === 'string' ? fc['name'] : '';
+            const rawInput: unknown = isPlainObject(fc['args']) ? fc['args'] : {};
             const call: ChatStreamEvent = {
               type: 'tool_call',
               id: typeof fc['id'] === 'string' && fc['id'] ? fc['id'] : newCallId('call'),
-              name: typeof fc['name'] === 'string' ? fc['name'] : '',
-              input: isPlainObject(fc['args']) ? fc['args'] : {},
+              name: toolName,
+              // Strip the {value} wrapper added by ensureObjectSchema for non-object-rooted schemas.
+              input: unwrapToolInput(rawInput, toolName, wrapped),
             };
             if (signature) call.data = { thoughtSignature: signature, model: request.model };
             calls.push(call);
@@ -522,7 +529,7 @@ export class GeminiAdapter implements ProviderAdapter {
       body['tools'] = [
         {
           functionDeclarations: request.tools.map((t) => {
-            const parameters = sanitizeGeminiSchema(t.inputSchema) as Record<string, unknown>;
+            const parameters = sanitizeGeminiSchema(ensureObjectSchema(t.inputSchema)) as Record<string, unknown>;
             const hasParams = isPlainObject(parameters['properties']) && Object.keys(parameters['properties']).length > 0;
             return { name: t.name, description: t.description, ...(hasParams ? { parameters } : {}) };
           }),
@@ -681,6 +688,16 @@ export class GeminiAdapter implements ProviderAdapter {
 }
 
 /** Grounding metadata contains web chunks even when the final text has no inline marker. */
+/**
+ * Ensure a JSON Schema has a root `type: 'object'` as required by the Gemini API.
+ * When the schema has a non-object root (e.g. `{anyOf: [...]}` from a zod union,
+ * or `{type: 'string'}`), wrap it as `{type:'object', properties:{value:<schema>}, required:['value']}`.
+ */
+function ensureObjectSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema['type'] === 'object') return schema;
+  return { type: 'object', properties: { value: schema }, required: ['value'] };
+}
+
 function collectGrounding(sources: Source[], metadata: unknown): void {
   if (!isPlainObject(metadata) || !Array.isArray(metadata['groundingChunks'])) return;
   for (const chunk of metadata['groundingChunks']) {

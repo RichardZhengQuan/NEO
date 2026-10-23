@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { ChatRequest, ProviderConfig } from '@neo/protocol';
-import { collectChat, NeoError } from '@neo/protocol';
+import { collectChat, NeoError, toolInputJsonSchema } from '@neo/protocol';
 import { OpenAIAdapter } from './openai.js';
 import {
   collect,
@@ -88,6 +89,62 @@ describe('OpenAI request shape', () => {
     await collect(a.chat(req({ toolChoice: 'none', tools: TOOLS })));
     expect(f.calls[1]!.body!['tool_choice']).toBe('none');
     expect(f.calls[1]!.body!['tools']).toEqual([{ type: 'function', function: { name: 'get_weather', description: 'Weather', parameters: TOOLS[0]!.inputSchema } }]);
+  });
+
+  it.each(['openai', 'openai-compatible', 'ollama'] as const)('%s wraps union-root tool parameters and preserves object roots', async (kind) => {
+    const schema = toolInputJsonSchema(z.union([
+      z.object({ kind: z.literal('a'), x: z.string() }),
+      z.object({ kind: z.literal('b'), y: z.number() }),
+    ]));
+    const tools = [{ name: 'union_tool', description: 'Union input', inputSchema: schema }, ...TOOLS];
+    const { a, f } = make(okReply, { kind });
+    await collect(a.chat(req({ tools })));
+    expect(f.calls).toHaveLength(1);
+    const sent = f.calls[0]!.body!['tools'] as { function: { parameters: Record<string, unknown> } }[];
+    expect(sent[0]!.function.parameters['type']).toBe('object');
+    expect(sent[0]!.function.parameters).toEqual({ type: 'object', properties: { value: schema }, required: ['value'] });
+    expect(sent[1]!.function.parameters['type']).toBe('object');
+    expect(sent[1]!.function.parameters).toEqual(TOOLS[0]!.inputSchema);
+  });
+
+  it.each([
+    ['string', z.string()],
+    ['array', z.array(z.string())],
+  ] as const)('wraps %s-root tool parameters', async (_type, inputSchema) => {
+    const schema = toolInputJsonSchema(inputSchema);
+    const { a, f } = make(okReply);
+    await collect(a.chat(req({ tools: [{ name: 'non_object', description: 'Non-object input', inputSchema: schema }] })));
+    expect(f.calls).toHaveLength(1);
+    const sent = f.calls[0]!.body!['tools'] as { function: { parameters: Record<string, unknown> } }[];
+    expect(sent[0]!.function.parameters['type']).toBe('object');
+    expect(sent[0]!.function.parameters).toEqual({ type: 'object', properties: { value: schema }, required: ['value'] });
+  });
+
+  it.each([
+    ['union', z.union([z.object({ kind: z.literal('a'), x: z.string() }), z.object({ kind: z.literal('b'), y: z.number() })]), { kind: 'a', x: 'hello' }],
+    ['string', z.string(), 'raw-value'],
+  ] as const)('unwraps {value:...} from model-emitted %s tool call inputs', async (_name, schema, actual) => {
+    const inputSchema = toolInputJsonSchema(schema as z.ZodType);
+    const wire = { value: actual };
+    const { a } = make(stream(
+      chunk({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'plugin_tool', arguments: JSON.stringify(wire) } }] }),
+      chunk({}, 'tool_calls'),
+    ));
+    const events = await collect(a.chat(req({ tools: [{ name: 'plugin_tool', description: 'Plugin', inputSchema }] })));
+    const toolCall = events.find((e) => e.type === 'tool_call');
+    expect(toolCall).toMatchObject({ type: 'tool_call', name: 'plugin_tool', input: actual });
+  });
+
+  it('does not unwrap {value:...} for object-root tool schemas (OpenAI)', async () => {
+    const inputSchema = toolInputJsonSchema(z.object({ city: z.string() }));
+    const wire = { city: 'Paris' };
+    const { a } = make(stream(
+      chunk({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'get_weather', arguments: JSON.stringify(wire) } }] }),
+      chunk({}, 'tool_calls'),
+    ));
+    const events = await collect(a.chat(req({ tools: [{ name: 'get_weather', description: 'Weather', inputSchema }] })));
+    const toolCall = events.find((e) => e.type === 'tool_call');
+    expect(toolCall).toMatchObject({ type: 'tool_call', name: 'get_weather', input: { city: 'Paris' } });
   });
 
   it('json mode: response_format for openai/ollama plus the system instruction everywhere', async () => {

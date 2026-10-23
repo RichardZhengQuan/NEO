@@ -63,6 +63,8 @@ import {
   systemWithJsonInstruction,
   testByListingModels,
   throwIfAborted,
+  unwrapToolInput,
+  wrappedToolSet,
 } from './shared.js';
 
 const DEFAULT_BASE_URL = PROVIDER_PRESETS.anthropic.baseUrl ?? 'https://api.anthropic.com';
@@ -312,7 +314,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       params.tools = request.tools.map((t) => ({
         name: t.name,
         description: t.description,
-        input_schema: t.inputSchema as { type: 'object'; [k: string]: unknown },
+        input_schema: ensureObjectSchema(t.inputSchema) as { type: 'object'; [k: string]: unknown },
         eager_input_streaming: true,
       }));
       // `auto` is the default; forced tool choice is never sent (current models reject it).
@@ -371,6 +373,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     const replayBlocks = new Map<number, Record<string, unknown>>();
     const sources: Source[] = [];
     const nativeSearch = !!request.webSearch && this.capabilities(request.model).nativeWebSearch === true;
+    // Track tools whose schemas were wrapped in an extra `{value}` object at the API boundary.
+    const wrapped = wrappedToolSet(request.tools);
     /**
      * Tool calls are released at the end of the message: a refusal means the turn's tool calls
      * must not run, and a server-side fallback discards calls made before its marker. Reasoning
@@ -484,8 +488,12 @@ export class AnthropicAdapter implements ProviderAdapter {
               part: { type: 'reasoning', text: '', provider: 'anthropic', model: request.model, redacted: true, data: { type: 'redacted_thinking', data: block.data } },
             };
           } else if (block?.kind === 'tool') {
-            if (replay && block.json) replay['input'] = parseToolInput(block.json);
-            toolCalls.push({ type: 'tool_call', id: block.id, name: block.name, input: parseToolInput(block.json) });
+            const rawInput = parseToolInput(block.json);
+            // replay stores the wire form for re-sending to the Anthropic API (wrapped as sent).
+            if (replay && block.json) replay['input'] = rawInput;
+            // toolCalls are consumed by registry.execute, which validates against the original
+            // (unwrapped) schema — strip the value wrapper when the schema was non-object-rooted.
+            toolCalls.push({ type: 'tool_call', id: block.id, name: block.name, input: unwrapToolInput(rawInput, block.name, wrapped) });
           } else if (block?.kind === 'server' && block.json) {
             block.data['input'] = parseToolInput(block.json);
           }
@@ -645,6 +653,16 @@ export class AnthropicAdapter implements ProviderAdapter {
     const neo = NeoError.from(err, 'provider_error');
     return new NeoError(neo.code, this.clean(neo.message, apiKey), { retryable: neo.retryable, cause: err });
   }
+}
+
+/**
+ * Ensure a JSON Schema has a root `type: 'object'` as required by the Anthropic API.
+ * When the schema has a non-object root (e.g. `{anyOf: [...]}` from a zod union,
+ * or `{type: 'string'}`), wrap it as `{type:'object', properties:{value:<schema>}, required:['value']}`.
+ */
+function ensureObjectSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema['type'] === 'object') return schema;
+  return { type: 'object', properties: { value: schema }, required: ['value'] };
 }
 
 function collectWebCitations(sources: Source[], citations: unknown): void {
