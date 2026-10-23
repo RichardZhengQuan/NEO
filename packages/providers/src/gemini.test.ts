@@ -238,6 +238,79 @@ describe('sanitizeGeminiSchema', () => {
     const out = sanitizeGeminiSchema({ type: 'array' });
     expect(out).toEqual({ type: 'array', items: { type: 'object' } });
   });
+
+  it('distributes sibling properties/required into the object branch of a multi-alternative anyOf without adding a top-level type', () => {
+    const schema = {
+      anyOf: [{ type: 'object' }, { type: 'string' }],
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    };
+    const out = sanitizeGeminiSchema(schema);
+    expect(out).toEqual({
+      anyOf: [
+        { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+        { type: 'string' },
+      ],
+    });
+  });
+
+  it('preserves wrapper enum on a multi-alternative anyOf so value restrictions reach Gemini', () => {
+    const schema = {
+      type: 'string',
+      enum: ['approved', 'denied'],
+      anyOf: [{ type: 'string', minLength: 1 }, { type: 'string', maxLength: 20 }],
+    };
+    const out = sanitizeGeminiSchema(schema);
+    expect(out).toEqual({
+      enum: ['approved', 'denied'],
+      anyOf: [
+        { type: 'string', minLength: 1 },
+        { type: 'string', maxLength: 20 },
+      ],
+    });
+  });
+
+  it('normalizes wrapper const to enum on a multi-alternative anyOf', () => {
+    const schema = {
+      type: 'string',
+      const: 'ready',
+      anyOf: [{ type: 'string', minLength: 1 }, { type: 'string', maxLength: 20 }],
+    };
+    const out = sanitizeGeminiSchema(schema);
+    expect(out).toEqual({
+      enum: ['ready'],
+      anyOf: [
+        { type: 'string', minLength: 1 },
+        { type: 'string', maxLength: 20 },
+      ],
+    });
+  });
+
+  it('merges wrapper properties and required with object alternatives that already declare their own', () => {
+    const schema = {
+      anyOf: [
+        { type: 'object', properties: { foo: { type: 'string' } }, required: ['foo'] },
+        { type: 'object', properties: { bar: { type: 'string' } }, required: ['bar'] },
+      ],
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+    };
+    const out = sanitizeGeminiSchema(schema);
+    expect(out).toEqual({
+      anyOf: [
+        {
+          type: 'object',
+          properties: { id: { type: 'string' }, foo: { type: 'string' } },
+          required: ['id', 'foo'],
+        },
+        {
+          type: 'object',
+          properties: { id: { type: 'string' }, bar: { type: 'string' } },
+          required: ['id', 'bar'],
+        },
+      ],
+    });
+  });
 });
 
 // ── Built-in tool schema coverage ──────────────────────────────────────────────

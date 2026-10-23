@@ -112,9 +112,44 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
       const inner = sanitizeNode({ ...(isPlainObject(nonNull[0]) ? nonNull[0] : {}), ...rest }, defs, refStack);
       return inner && nullable ? { ...inner, nullable: true } : inner;
     }
-    const out = sanitizeNode(rest, defs, refStack) ?? {};
+    // Do not call sanitizeNode on rest as the wrapper — that infers type:'object' from
+    // sibling `properties`, which then conflicts with the alternatives.
+    // Instead: put only scalar keywords on the wrapper, and distribute type-specific
+    // sibling constraints (properties/required/items) into each matching branch,
+    // merging rather than overwriting what the branch already declares.
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(rest)) {
+      if (SCALAR_KEYS.has(key)) out[key] = value;
+    }
+    // Scalar value-restrictors (enum/const) apply regardless of alternative type and
+    // belong on the wrapper. `const` normalizes to `enum: [value]` the same way the
+    // scalar node path does.
+    if (Array.isArray(rest['enum'])) {
+      const values = rest['enum'].filter((v) => v !== null);
+      if (values.length && values.every((v) => typeof v === 'string')) out['enum'] = values;
+    } else if (typeof rest['const'] === 'string') {
+      out['enum'] = [rest['const']];
+    }
     const sanitized = nonNull
-      .map((v) => sanitizeNode(v, defs, refStack))
+      .map((v) => {
+        const alt: Record<string, unknown> = isPlainObject(v) ? { ...v } : {};
+        const altType = typeof alt['type'] === 'string' ? alt['type'] : (isPlainObject(alt['properties']) ? 'object' : undefined);
+        if (altType === 'object') {
+          if (isPlainObject(rest['properties'])) {
+            alt['properties'] = isPlainObject(alt['properties'])
+              ? { ...(rest['properties'] as Record<string, unknown>), ...(alt['properties'] as Record<string, unknown>) }
+              : rest['properties'];
+          }
+          if (Array.isArray(rest['required'])) {
+            alt['required'] = Array.isArray(alt['required'])
+              ? Array.from(new Set([...(rest['required'] as unknown[]), ...(alt['required'] as unknown[])]))
+              : rest['required'];
+          }
+        } else if (altType === 'array') {
+          if (rest['items'] !== undefined && alt['items'] === undefined) alt['items'] = rest['items'];
+        }
+        return sanitizeNode(alt, defs, refStack);
+      })
       .filter((v): v is Record<string, unknown> => v !== undefined && !isEmptyObjectSchema(v));
     if (sanitized.length) out['anyOf'] = sanitized;
     if (nullable) out['nullable'] = true;
