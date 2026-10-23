@@ -208,6 +208,12 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
       for (const [key, value] of Object.entries(rest)) {
         if (SCALAR_KEYS.has(key)) out[key] = value;
       }
+      if (Array.isArray(rest['enum'])) {
+        const values = rest['enum'].filter((v) => v !== null);
+        if (values.length && values.every((v) => typeof v === 'string')) out['enum'] = values;
+      } else if (typeof rest['const'] === 'string') {
+        out['enum'] = [rest['const']];
+      }
       return out;
     }
     type = nonNull[0];
