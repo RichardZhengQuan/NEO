@@ -12,7 +12,7 @@ import {
 import { z } from 'zod';
 
 import { ConfirmationManager } from './confirmations.js';
-import { EPOCH, ScriptedAdapter, deferred, ev, harness, memoryNode, recalled, runTurn, settle, until } from './fakes.test-utils.js';
+import { EPOCH, ScriptedAdapter, deferred, ev, harness, memoryNode, recalled, runTurn, settle, until, userText } from './fakes.test-utils.js';
 
 const SECRET = 'The private vault code is orchid-729.';
 
@@ -163,17 +163,16 @@ describe('permission revocation after tool approval', () => {
     const parsing = deferred();
     const validationGate = deferred();
     const executionSettled = deferred();
-    const parse = def.inputSchema.safeParseAsync.bind(def.inputSchema);
-    def.inputSchema.safeParseAsync = async (input) => {
+    const parse = async (input: unknown) => {
       parsing.resolve();
       await validationGate.promise;
-      return parse(input);
+      return def.inputSchema.safeParseAsync(input);
     };
     // Match the real registry's asynchronous validation and post-validation
     // cancellation check; FakeTools normally validates synchronously.
     h.tools.execute = async (call, ctx) => {
       try {
-        const parsed = await def.inputSchema.safeParseAsync(call.input);
+        const parsed = await parse(call.input);
         if (!parsed.success) return { isError: true, output: { error: 'Invalid input' } };
         if (ctx.signal.aborted) return { isError: true, output: { error: 'The operation was cancelled.', code: 'cancelled' } };
         h.tools.executed.push({ name: call.name, input: parsed.data, ctx });
@@ -204,6 +203,45 @@ describe('permission revocation after tool approval', () => {
     } finally {
       validationGate.resolve();
     }
+  });
+
+  it('cancels the turn when describeCall hangs on a never-resolving async refinement', async () => {
+    const refinementStarted = deferred();
+    const h = harness({
+      tools: [
+        {
+          name: 'hanging_confirm',
+          title: 'Hanging confirm',
+          description: 'A tool whose schema async refinement never resolves.',
+          inputSchema: z.object({ x: z.string() }).refine(async () => {
+            refinementStarted.resolve();
+            return new Promise<boolean>(() => {});
+          }),
+          risk: 'dangerous',
+          defaultPermission: 'confirm',
+          describeCall: () => 'Hanging confirm',
+          async execute() { return { output: { done: true } }; },
+        },
+      ],
+    });
+    h.model.script([ev.call('hang_call', 'hanging_confirm', { x: 'hello' }), ev.done('tool_use')]);
+    const confirmationFired = deferred();
+    h.runtime.subscribe((event) => {
+      if (event.type === 'tool.confirmation') confirmationFired.resolve();
+    });
+    const handle = await h.runtime.send({ conversationId: h.conv.id, parts: userText('trigger it') });
+
+    // Cancel only once description validation has reached the hanging refinement.
+    await refinementStarted.promise;
+    h.runtime.cancel(handle.turnId);
+    const message = await Promise.race([
+      handle.done,
+      confirmationFired.promise.then(() => { throw new Error('Unexpected tool confirmation'); }),
+    ]);
+
+    expect(message.status).toBe('cancelled');
+    await settle();
+    expect(h.events.filter((event) => event.type === 'tool.confirmation')).toHaveLength(0);
   });
 });
 

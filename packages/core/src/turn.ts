@@ -841,6 +841,7 @@ class TurnRunner {
   private async askConfirmation(call: ToolCallPart, def: ToolDefinition): Promise<ConfirmationOutcome> {
     const timeoutMs = this.init.plan.settings.agent.confirmationTimeoutSec * 1000;
     const requestedAt = this.services.clock();
+    const description = await raceAbort(this.describeCall(def, call.input), this.signal);
     const confirmation: ToolConfirmation = {
       id: newId('cnf', requestedAt),
       conversationId: this.conversationId,
@@ -851,7 +852,7 @@ class TurnRunner {
       name: call.name,
       title: def.title,
       input: call.input,
-      description: this.describeCall(def, call.input),
+      description,
       risk: def.risk,
       requestedAt,
       expiresAt: requestedAt + timeoutMs,
@@ -873,9 +874,9 @@ class TurnRunner {
   }
 
   /** describeCall() on validated input; the tool title when that is impossible or it throws. */
-  private describeCall(def: ToolDefinition, input: unknown): string {
+  private async describeCall(def: ToolDefinition, input: unknown): Promise<string> {
     if (!def.describeCall) return def.title;
-    const parsed = def.inputSchema.safeParse(input);
+    const parsed = await def.inputSchema.safeParseAsync(input);
     if (!parsed.success) return def.title;
     try {
       const text = def.describeCall(parsed.data);
