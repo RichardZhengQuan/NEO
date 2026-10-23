@@ -931,6 +931,7 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
           break;
         }
         case 'update': {
+          if (op.id === SELF_MEMORY_ID) break;
           const existing = getNode(db, op.id);
           if (existing?.status !== 'active') break;
           const updated = updateNode(db, existing.id, {
@@ -950,6 +951,7 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
           break;
         }
         case 'supersede': {
+          if (op.id === SELF_MEMORY_ID) break;
           const old = getNode(db, op.id);
           if (!old || old.status === 'superseded') break;
           const revision = createRevision(s, old, {
@@ -1083,7 +1085,9 @@ export function forget(ctx: MemoryContext, ids: string[]): number {
       const older = ctx.db
         .prepare(`SELECT n.id FROM memory_edges e JOIN memory_nodes n ON n.id = e.dst WHERE e.src = ? AND e.type = 'supersedes' AND n.status = 'superseded'`)
         .all(id) as { id: string }[];
-      for (const o of older) queue.push(o.id);
+      for (const o of older) {
+        if (o.id !== SELF_MEMORY_ID) queue.push(o.id);
+      }
     }
     const labels = new Map(
       [...all].flatMap((id) => {
