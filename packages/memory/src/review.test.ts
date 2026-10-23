@@ -4,7 +4,7 @@
  * Offline and deterministic: in-memory SQLite, injected clock, HashingEmbedder,
  * scripted fake LLMs.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   ChatModel,
   ChatRequest,
@@ -692,6 +692,53 @@ async function twoHikingEpisodes(svc: ReturnType<typeof setup>['svc']) {
 }
 
 describe('consolidation', () => {
+  it('entity merge does not overwrite a sensitivity change that arrived at the yield', async () => {
+    // Only name matches may merge: zero vectors prevent incidental similarity matches.
+    const embedder = {
+      id: 'zero', dimensions: 1, isLocal: true,
+      embed: async (texts: string[]) => texts.map(() => new Float32Array(1)),
+    };
+    const { svc, db } = setup({ embedder });
+    const originalSetTimeout = globalThis.setTimeout;
+    try {
+      const entities: MemoryNode[] = [];
+      for (let i = 0; i < 26; i++) {
+        entities.push(await svc.remember({ kind: 'entity', label: `Entity ${i}`, content: `Entity: Entity ${i}`, source: { by: 'user' } }));
+      }
+      const survivor = entities[24]!;
+      const duplicate = entities[25]!;
+      await svc.update(duplicate.id, { aliases: [survivor.label] });
+      expect(count(db, `SELECT COUNT(*) n FROM memory_nodes WHERE kind = 'entity' AND status = 'active'`)).toBe(26);
+
+      let yields = 0;
+      let resumeYield = () => {};
+      let reachYield = () => {};
+      const atYield = new Promise<void>((resolve) => { reachYield = resolve; });
+      const timeout = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+        // Link discovery yields twice; the third yield pauses merging before index 24.
+        if (delay === 0 && ++yields === 3) {
+          return originalSetTimeout(() => {
+            resumeYield = () => callback(...args);
+            reachYield();
+          }, delay);
+        }
+        return originalSetTimeout(callback, delay, ...args);
+      });
+      try {
+        const consolidation = svc.consolidate({ force: true });
+        await atYield;
+        try {
+          await svc.update(survivor.id, { sensitivity: 'sensitive' });
+        } finally { resumeYield(); }
+        const report = await consolidation;
+        expect(yields).toBe(3);
+        expect(report.entitiesMerged).toBe(1);
+        expect(await svc.get(duplicate.id)).toBeNull();
+        expect((await svc.get(survivor.id))!.node.sensitivity).toBe('sensitive');
+      } finally { timeout.mockRestore(); }
+    } finally { db.close(); }
+  });
+
   it('never enables web search or model tools on actual consolidation requests', async () => {
     const { model, requests } = scriptedLLM({ consolidate: () => abstraction([]) });
     const { svc, db, tickDays } = setup({ llm: model });

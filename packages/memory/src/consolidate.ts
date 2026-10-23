@@ -311,9 +311,14 @@ async function mergeEntities(ctx: MemoryContext, now: number, report: Consolidat
       if (!sameName && !(va && vb && dot(va, vb) >= C.entityMergeSimilarity)) continue;
       const from = b.label;
       const mergedId = b.id;
-      db.transaction(() => {
-        a = mergeEntity(ctx, a, b, now);
+      const merged = db.transaction(() => {
+        const currentA = getNode(db, a.id);
+        const currentB = getNode(db, b.id);
+        if (!currentA || !currentB) return null;
+        return mergeEntity(ctx, currentA, currentB, now);
       });
+      if (!merged) continue;
+      a = merged;
       gone.add(b.id);
       ctx.vectors.drop(b.id);
       toEmbed.delete(b.id);
