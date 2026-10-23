@@ -123,6 +123,24 @@ describe('provider custom header security', () => {
     expect(secrets.list()).toEqual([]);
   });
 
+  it.each(['Cookie', 'Set-Cookie'])('encrypts %s headers and stores only references', (cookieHeader) => {
+    db = openNeoDatabase(':memory:');
+    const secrets = createSecretStore(db, new Uint8Array(32).fill(7));
+    const providers = createProviderConfigStore(db, secrets);
+    const stored = providers.upsert({
+      id: 'cookie-provider', kind: 'mock', enabled: true,
+      headers: { [cookieHeader]: 'session=abc123; HttpOnly', 'X-Region': 'eu-west' },
+    });
+    const secretKey = `provider:cookie-provider:header:${cookieHeader.toLowerCase()}`;
+    expect(stored.headers?.[cookieHeader]).toBe(`neo-secret:${secretKey}`);
+    expect(stored.headers?.['X-Region']).toBe('eu-west');
+    expect(secrets.get(secretKey)).toBe('session=abc123; HttpOnly');
+    const raw = db.prepare('SELECT config FROM provider_configs').get() as { config: string };
+    expect(raw.config).not.toContain('abc123');
+    expect(providers.delete('cookie-provider')).toBe(true);
+    expect(secrets.list()).toEqual([]);
+  });
+
   it('migrates legacy plaintext credential headers before returning persisted configs', () => {
     db = openNeoDatabase(':memory:');
     const secrets = createSecretStore(db, new Uint8Array(32).fill(7));

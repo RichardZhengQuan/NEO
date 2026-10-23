@@ -28,6 +28,7 @@ import type {
   BetaRawMessageStreamEvent,
   MessageCreateParamsStreaming as BetaMessageCreateParamsStreaming,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { isSecretProviderHeader } from '@neo/storage';
 import { NeoError, PROVIDER_PRESETS, isLocalUrl } from '@neo/protocol';
 import type {
   ChatMessage,
@@ -604,7 +605,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   private clean(text: string, apiKey: string): string {
     const secrets: (string | undefined)[] = [apiKey];
     for (const [name, value] of Object.entries(this.config.headers ?? {})) {
-      if (/auth|key|token|secret/i.test(name)) secrets.push(value, value.replace(/^bearer\s+/i, ''));
+      if (isSecretProviderHeader(name)) secrets.push(value, value.replace(/^bearer\s+/i, ''));
     }
     return redact(text, secrets);
   }

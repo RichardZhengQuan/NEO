@@ -35,10 +35,10 @@ apps/
 Dependency direction (no cycles):
 
 ```
-protocol ← storage ← memory ─┐
-protocol ← storage ← tools ──┤
-protocol ← providers ────────┼─ server ← cli
-protocol ← core ─────────────┘     ↑
+protocol ← storage ← memory ─────┐
+protocol ← storage ← tools ──────┤
+protocol ← storage ← providers ──┼─ server ← cli
+protocol ← core ─────────────────┘     ↑
 protocol ← client ← ui ← web ← desktop (loads the web build; imports server + client)
 protocol ← tunnel ──────────┬─ server
                             ├─ relay (standalone ciphertext forwarder)

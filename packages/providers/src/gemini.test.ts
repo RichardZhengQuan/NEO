@@ -697,6 +697,18 @@ describe('Gemini errors, keys, models, embeddings', () => {
     expect(e.message).not.toContain(KEY);
   });
 
+  it.each(['Cookie', 'cookie', 'COOKIE', 'Set-Cookie'])('redacts %s custom headers from error messages', async (name) => {
+    const cookie = 'session=private-cookie-value';
+    const { a, f } = make(gErr(401, `Unauthorized: ${cookie}`, { status: 'UNAUTHENTICATED' }), { headers: { [name]: cookie } });
+    const error = (await collect(a.chat(req())).catch((err: unknown) => err)) as NeoError;
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'provider_auth' });
+    expect(error.message).toContain('Unauthorized');
+    expect(error.message).not.toContain('private-cookie-value');
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.headers.get(name)).toBe(cookie);
+  });
+
   it('listModels follows pages and keeps text and embedding models with their own capabilities', async () => {
     const { a, f } = make([
       () => jsonResponse({ models: [{ name: 'models/gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', supportedGenerationMethods: ['generateContent'], inputTokenLimit: 1_048_576, outputTokenLimit: 65_536 }], nextPageToken: 'p2' }),

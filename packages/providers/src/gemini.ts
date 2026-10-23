@@ -7,6 +7,7 @@
  * - Thought parts become reasoning; a `thoughtSignature` is kept in the part's `data`
  *   (reasoning parts and tool calls) and replayed on the same part type for the same model.
  */
+import { isSecretProviderHeader } from '@neo/storage';
 import { NeoError, PROVIDER_PRESETS, isLocalUrl } from '@neo/protocol';
 import type {
   ChatMessage,
@@ -630,7 +631,7 @@ export class GeminiAdapter implements ProviderAdapter {
   private clean(text: string): string {
     const secrets: (string | undefined)[] = [resolveApiKey(this.config, this.options)];
     for (const [name, value] of Object.entries(this.config.headers ?? {})) {
-      if (/auth|key|token|secret/i.test(name)) secrets.push(value, value.replace(/^bearer\s+/i, ''));
+      if (isSecretProviderHeader(name)) secrets.push(value, value.replace(/^bearer\s+/i, ''));
     }
     return redact(text, secrets);
   }

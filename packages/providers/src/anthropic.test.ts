@@ -627,6 +627,20 @@ describe('Anthropic retries and errors', () => {
     expect(err.message).not.toContain('Bearer HEADER_SECRET');
   });
 
+  it.each(['Cookie', 'cookie', 'COOKIE', 'Set-Cookie'])('redacts %s custom headers from error messages', async (name) => {
+    const cookie = 'session=private-cookie-value';
+    const { a, f } = adapter(apiError(401, `Unauthorized: ${cookie}`, 'authentication_error'), {
+      headers: { [name]: cookie },
+    });
+    const err = (await collect(a.chat(req())).catch((e: unknown) => e)) as NeoError;
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.headers.get(name)).toBe(cookie);
+    expect(err).toBeInstanceOf(NeoError);
+    expect(err).toMatchObject({ code: 'provider_auth', retryable: false });
+    expect(err.message).toContain('Unauthorized:');
+    expect(err.message).not.toContain('private-cookie-value');
+  });
+
   it('network failures are retried, then reported as retryable provider_error', async () => {
     const f = fakeFetch(() => {
       throw new TypeError('fetch failed');
