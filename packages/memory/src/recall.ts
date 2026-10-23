@@ -429,9 +429,19 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
         if (tainted.has(id)) continue;
         const srcMap = allContrib.get(id);
         if (!srcMap) continue;
-        let removed = 0;
-        for (const [src, c] of srcMap) if (tainted.has(src)) removed += c;
-        if (removed > 0 && (A.get(id) ?? 0) - removed < minScore) {
+        // Bug 2 fix (saturation): A[id] is capped at 1 during spreading, but
+        // allContrib stores raw uncapped values.  Subtracting removed (tainted
+        // raw contributions) from the capped activation produces a value that
+        // can be arbitrarily negative under saturation, causing false-positive
+        // exclusion of valid memories.  Instead sum only the non-tainted
+        // contributions and apply the same cap to get the true clean activation.
+        let cleanContrib = 0;
+        let hasTaint = false;
+        for (const [src, c] of srcMap) {
+          if (tainted.has(src)) hasTaint = true;
+          else cleanContrib += c;
+        }
+        if (hasTaint && Math.min(1, cleanContrib) < minScore) {
           tainted.add(id);
           newTaint = true;
         }
