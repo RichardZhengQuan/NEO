@@ -114,6 +114,53 @@ describe('Gemini request', () => {
 });
 
 describe('sanitizeGeminiSchema', () => {
+  it('merges $ref target constraints with sibling constraints', () => {
+    const schema = {
+      $defs: { A: { type: 'object', required: ['a'], properties: { a: { type: 'string' } } } },
+      $ref: '#/$defs/A',
+      required: ['b'],
+      properties: { b: { type: 'string' } },
+    };
+    const out = sanitizeGeminiSchema(schema);
+    expect(out).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining(['a', 'b']),
+      properties: { a: { type: 'string' }, b: { type: 'string' } },
+    });
+    // Both a and b must be in required (order doesn't matter)
+    expect((out as { required: string[] }).required).toHaveLength(2);
+  });
+
+  it('merges single-branch anyOf sibling constraints with branch constraints', () => {
+    const schema = {
+      anyOf: [{ type: 'object', required: ['a'], properties: { a: { type: 'string' } } }],
+      required: ['b'],
+      properties: { b: { type: 'string' } },
+    };
+    const out = sanitizeGeminiSchema(schema);
+    expect(out).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining(['a', 'b']),
+      properties: { a: { type: 'string' }, b: { type: 'string' } },
+    });
+    expect((out as { required: string[] }).required).toHaveLength(2);
+  });
+
+  it('merges single-item allOf sibling constraints with inner constraints', () => {
+    const schema = {
+      allOf: [{ type: 'object', required: ['a'], properties: { a: { type: 'string' } } }],
+      required: ['b'],
+      properties: { b: { type: 'string' } },
+    };
+    const out = sanitizeGeminiSchema(schema);
+    expect(out).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining(['a', 'b']),
+      properties: { a: { type: 'string' }, b: { type: 'string' } },
+    });
+    expect((out as { required: string[] }).required).toHaveLength(2);
+  });
+
   it('drops $schema/additionalProperties, inlines $ref/$defs, const → enum, nullable unions', () => {
     const schema = {
       $schema: 'https://json-schema.org/draft/2020-12/schema',
