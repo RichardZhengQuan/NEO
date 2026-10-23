@@ -307,7 +307,7 @@ describe('off-record lifecycle', () => {
     const off = await send(h, 'off-record secret', true);
     expect(off.handle.episodeId).not.toBe(normal.handle.episodeId);
     expect(h.conversations.get(off.handle.episodeId)).toMatchObject({ offRecord: true, ephemeral: true });
-    expect(recent(off.handle.userMessage.parts)).toContain('normal context');
+    expect(JSON.stringify(h.model.requests.at(-1)!.messages)).toContain('normal context');
     expect(h.memory.recallCalls.at(-1)).toMatchObject({ reinforce: false });
     await settle();
     expect(h.memory.observeCalls).toHaveLength(1);
@@ -337,6 +337,23 @@ describe('off-record lifecycle', () => {
     await send(h, 'second private turn', true);
     // originEpisode also expired: normalText must be absent from the second turn as well.
     expect(JSON.stringify(h.model.requests.at(-1)!.messages)).not.toContain(normalText);
+  });
+
+  it('shares an identical prefix across all turns of an explicitly started off-record session', async () => {
+    const h = harness();
+    const normalText = 'anchor text for explicit startOffRecord prefix test';
+    await send(h, normalText);
+    await h.runtime.startOffRecord();
+
+    await send(h, 'private turn A', true);
+    const messagesA = h.model.requests.at(-1)!.messages;
+
+    await send(h, 'private turn B', true);
+    const messagesB = h.model.requests.at(-1)!.messages;
+
+    expect(messagesB.slice(0, messagesA.length)).toEqual(messagesA);
+    expect(JSON.stringify(messagesA)).toContain(normalText);
+    expect(JSON.stringify(messagesB)).toContain(normalText);
   });
 
   it('carries the normal-episode prefix into the second private turn when startOffRecord was called mid-stream', async () => {
