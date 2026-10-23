@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security configuration for NEO Android.
+
+  base-config denies cleartext for every host; the loopback domain-config
+  allows ws:// against the dev server on 127.0.0.1 / localhost.
+
+  Private-LAN cleartext is NOT configured here.  Android's
+  network-security-config does not support CIDR notation, and listing the
+  three RFC-1918 base addresses (10.0.0.0, 172.16.0.0, 192.168.0.0) as
+  domain-config entries is a placebo — Android's matcher is exact per host,
+  so an actual LAN address like 192.168.1.20 is still subject to the base
+  cleartext denial.  The NEO LAN tunnel (ws:// carrying Noise-encrypted
+  frames with a pinned server key) therefore does NOT work on Android from
+  this config alone; a public NEO over wss:// does.
+
+  Covering the private LAN requires either a runtime CIDR check at the
+  socket layer or widening base-config to allow cleartext (the Noise tunnel
+  provides the actual security).  Tracked in #569.
+-->
+<network-security-config>
+  <!-- Deny cleartext to every host by default. -->
+  <base-config cleartextTrafficPermitted="false" />
+
+  <!-- Allow cleartext against loopback for the dev server and emulator. -->
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">localhost</domain>
+    <domain includeSubdomains="false">127.0.0.1</domain>
+  </domain-config>
+</network-security-config>
