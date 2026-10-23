@@ -1,7 +1,7 @@
 /** Review tests for the tool registry. */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { NeoError, defineTool, silentLogger, type Logger, type ToolContext, type ToolDefinition } from '@neo/protocol';
+import { NeoError, defineTool, silentLogger, toolSpec, type Logger, type ToolContext, type ToolDefinition } from '@neo/protocol';
 import { createToolRegistry } from './registry.js';
 
 function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
@@ -191,6 +191,39 @@ describe('ToolRegistry plugin registration', () => {
     reg.register(new Weather() as unknown as ToolDefinition, 'plugin');
     expect(reg.get('weather')?.describeCall?.({ city: 'Paris' })).toBe('Weather in Paris');
     expect((await reg.execute({ id: '1', name: 'weather', input: { city: 'Paris' } }, ctx())).output).toBe('Weather in Paris: sunny');
+  });
+});
+
+describe('plugin tool with non-object inputSchema', () => {
+  it('advertises a union at the root and executes either object branch', async () => {
+    const reg = createToolRegistry();
+    const def = tool('union_input', {
+      inputSchema: z.union([
+        z.object({ kind: z.literal('a'), x: z.string() }),
+        z.object({ kind: z.literal('b'), y: z.number() }),
+      ]),
+    });
+    reg.register(def, 'plugin');
+    const schema = toolSpec(def).inputSchema;
+    expect(schema).toHaveProperty('anyOf');
+    expect(schema).not.toHaveProperty('properties.value');
+    expect(reg.specs()).toEqual([toolSpec(def)]);
+    for (const input of [{ kind: 'a', x: 'hello' }, { kind: 'b', y: 42 }]) {
+      const res = await reg.execute({ id: '1', name: def.name, input }, ctx());
+      expect(res.isError).toBeFalsy();
+      expect(res.output).toEqual({ echo: input });
+    }
+  });
+
+  it('advertises a scalar string and executes it without wrapping', async () => {
+    const reg = createToolRegistry();
+    const def = tool('string_input', { inputSchema: z.string() });
+    reg.register(def, 'plugin');
+    expect(toolSpec(def).inputSchema).toEqual({ type: 'string' });
+    expect(reg.specs()).toEqual([toolSpec(def)]);
+    const res = await reg.execute({ id: '1', name: def.name, input: 'hello' }, ctx());
+    expect(res.isError).toBeFalsy();
+    expect(res.output).toEqual({ echo: 'hello' });
   });
 });
 

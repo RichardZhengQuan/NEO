@@ -116,7 +116,6 @@ export interface ToolRegistry {
 export function toolInputJsonSchema(schema: z.ZodType): Record<string, unknown> {
   const json = z.toJSONSchema(schema, { io: 'input', unrepresentable: 'any' }) as Record<string, unknown>;
   delete json.$schema;
-  if (json.type !== 'object') return { type: 'object', properties: { value: json }, required: ['value'] };
   return json;
 }
 
