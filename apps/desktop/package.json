@@ -18,6 +18,7 @@
     "@neo/protocol": "workspace:*",
     "@neo/server": "workspace:*",
     "@neo/client": "workspace:*",
+    "@neo/tunnel": "workspace:*",
     "electron-updater": "^6.8.9"
   },
   "devDependencies": {

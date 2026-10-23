@@ -1,12 +1,13 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { ipcMain, shell } from 'electron';
 import { startServer } from '@neo/server';
+import { NeoClient } from '@neo/client';
 
 // Mock node:fs/promises so catch-up state persistence doesn't touch disk.
 // Default: startup-mode.json → 'local' (so existing tests don't trigger the dialog).
 const ENOENT = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
 const fsMock = vi.hoisted(() => ({
-  readFile: vi.fn<(p: string, enc: string) => Promise<string>>().mockImplementation((p: string) => {
+  readFile: vi.fn<(p: string, enc?: string) => Promise<string | Buffer>>().mockImplementation((p: string) => {
     if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify('local'));
     return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
   }),
@@ -17,6 +18,23 @@ vi.mock('node:fs/promises', () => fsMock);
 const dialogMock = vi.hoisted(() => ({
   showMessageBox: vi.fn().mockResolvedValue({ response: 0, checkboxChecked: false }),
 }));
+
+const protocolMock = vi.hoisted(() => ({
+  registerSchemesAsPrivileged: vi.fn(),
+  handle: vi.fn<(scheme: string, handler: (req: Request) => Promise<Response>) => void>(),
+}));
+
+const tunnelMock = vi.hoisted(() => ({
+  createTunnelTransport: vi.fn(function (_options: unknown) {
+    return {
+      baseUrl: 'https://fake.tunnel.invalid',
+      fetch: vi.fn(),
+      WebSocket: vi.fn(),
+      close: vi.fn(),
+    };
+  }),
+}));
+vi.mock('@neo/tunnel', () => tunnelMock);
 
 const electron = await vi.hoisted(async () => {
   const { EventEmitter } = await import('node:events');
@@ -93,6 +111,7 @@ const server = vi.hoisted(() => ({
 const clientMock = vi.hoisted(() => ({
   onStatus: null as ((status: string) => void) | null,
   onEvent: null as ((e: unknown) => void) | null,
+  connectionCloses: [] as ReturnType<typeof vi.fn>[],
   remindersList: vi.fn<(q?: { status?: string[]; lastFiredAtFrom?: number }) => Promise<{ items: unknown[] }>>()
     .mockResolvedValue({ items: [] }),
 }));
@@ -113,6 +132,7 @@ vi.mock('electron', () => {
     MenuItem: vi.fn(),
     Notification,
     nativeImage: { createFromBuffer: vi.fn(() => ({ setTemplateImage: vi.fn() })) },
+    protocol: protocolMock,
     shell: { openExternal: vi.fn() },
     Tray: electron.Tray,
   };
@@ -138,7 +158,9 @@ vi.mock('@neo/client', () => ({
       connect: vi.fn((opts: { onStatus?: (s: string) => void; onEvent?: (e: unknown) => void; reconnect?: boolean }) => {
         clientMock.onStatus = opts.onStatus ?? null;
         clientMock.onEvent = opts.onEvent ?? null;
-        return { close: vi.fn() };
+        const close = vi.fn();
+        clientMock.connectionCloses.push(close);
+        return { close };
       }),
       reminders: {
         list: clientMock.remindersList,
@@ -154,6 +176,7 @@ afterEach(() => {
   electron.app.removeAllListeners();
   clientMock.onStatus = null;
   clientMock.onEvent = null;
+  clientMock.connectionCloses = [];
   // Reset fsMock: startup-mode.json → 'local', everything else → ENOENT.
   fsMock.readFile.mockImplementation((p: string) => {
     if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify('local'));
@@ -699,6 +722,238 @@ function connectModeReady(): Promise<void> {
 }
 
 describe('desktop connect mode', () => {
+  async function enterConnectMode(mode: Record<string, unknown> = { kind: 'remote' }): Promise<void> {
+    fsMock.readFile.mockImplementation((p: string) => {
+      if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify(mode));
+      return Promise.reject(ENOENT);
+    });
+    const ready = connectModeReady();
+    await import('./main.js');
+    await ready;
+  }
+
+  function ipcHandler(channel: string) {
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(([name]) => name === channel)?.[1];
+    expect(handler, `${channel} must be registered`).toBeTypeOf('function');
+    return handler!;
+  }
+
+  function savedMode() {
+    const write = fsMock.writeFile.mock.calls.find(([p]) => p.endsWith('startup-mode.json'));
+    expect(write, 'startup-mode.json must be written').toBeDefined();
+    return JSON.parse(write![1]);
+  }
+
+  const appEvent = { senderFrame: { url: 'app://neo/index.html' } } as Electron.IpcMainInvokeEvent;
+  const route = {
+    serverId: 's1', publicKey: 'p1', lan: ['192.168.1.10:7777'], relay: 'wss://relay.example',
+  };
+
+  it('registers the privileged app scheme before readiness and serves the bundled renderer at app://neo', async () => {
+    const index = Buffer.from('<!doctype html><title>NEO</title>');
+    const asset = Buffer.from('console.log("NEO");');
+    fsMock.readFile.mockImplementation((p: string) => {
+      if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify({ kind: 'remote' }));
+      if (p === '/neo-test/apps/web/dist/index.html') return Promise.resolve(index);
+      if (p === '/neo-test/apps/web/dist/assets/foo.js') return Promise.resolve(asset);
+      if (p === '/neo-test/apps/web/dist/assets/data.unknown') return Promise.resolve(Buffer.from([0, 255]));
+      return Promise.reject(ENOENT);
+    });
+    // Hold readiness unresolved: scheme privileges must already be registered.
+    let releaseReady!: () => void;
+    electron.app.whenReady.mockReturnValueOnce(new Promise<void>((resolve) => { releaseReady = resolve; }));
+    const ready = connectModeReady();
+    await import('./main.js');
+    try {
+      expect.soft(protocolMock.registerSchemesAsPrivileged).toHaveBeenCalledExactlyOnceWith([
+        { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+      ]);
+      expect.soft(protocolMock.handle).not.toHaveBeenCalled();
+    } finally {
+      releaseReady();
+      await ready;
+    }
+    expect(protocolMock.registerSchemesAsPrivileged.mock.invocationCallOrder[0]).toBeLessThan(
+      electron.app.whenReady.mock.invocationCallOrder[0]!,
+    );
+    expect(protocolMock.handle).toHaveBeenCalledExactlyOnceWith('app', expect.any(Function));
+    const handler = protocolMock.handle.mock.calls[0]![1];
+    const win = electron.BrowserWindow.mock.results[0]!.value;
+    expect(win.loadURL).toHaveBeenCalledWith('app://neo/index.html');
+    for (const url of ['app://neo/', 'app://neo/index.html']) {
+      const response = await handler(new Request(url));
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(index);
+      expect(response.headers.get('Content-Type')).toBe('text/html');
+      expect(response.headers.get('Cache-Control')).toBe('no-cache');
+    }
+    const response = await handler(new Request('app://neo/assets/foo.js'));
+    expect(response.status).toBe(200);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(asset);
+    expect(response.headers.get('Content-Type')).toBe('text/javascript');
+    const unknown = await handler(new Request('app://neo/assets/data.unknown'));
+    expect(unknown.headers.get('Content-Type')).toBe('application/octet-stream');
+    expect(Buffer.from(await unknown.arrayBuffer())).toEqual(Buffer.from([0, 255]));
+
+    // Invalid requests must not read arbitrary files, even a sibling with the same prefix.
+    fsMock.readFile.mockClear();
+    for (const url of [
+      'app://evil/index.html', 'app://neo:123/index.html',
+      'app://neo/..%2fetc%2fpasswd', 'app://neo/..%2fdist-private%2fsecret',
+      'app://neo/%E0%A4%A',
+    ]) {
+      const invalid = await handler(new Request(url));
+      expect(invalid.status, url).not.toBe(200);
+    }
+    expect(fsMock.readFile).not.toHaveBeenCalled();
+    expect((await handler(new Request('app://neo/assets/missing.js'))).status).toBe(404);
+    // Reopening a closed window reuses the URL without registering the protocol again.
+    win.emit('closed');
+    electron.app.emit('activate');
+    expect(electron.BrowserWindow.mock.results[1]!.value.loadURL).toHaveBeenCalledWith('app://neo/index.html');
+    expect(protocolMock.handle).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists the tunnel route and uses its transport for notification requests', async () => {
+    await enterConnectMode();
+    await ipcHandler('neo:saveMode')(appEvent, {
+      kind: 'remote', serverUrl: 'https://relay.example', token: 'tok', tunnel: route,
+    });
+    expect(savedMode()).toEqual({
+      kind: 'remote', serverUrl: 'https://relay.example', token: 'tok', tunnel: route,
+    });
+    expect(tunnelMock.createTunnelTransport).toHaveBeenCalledExactlyOnceWith({ route });
+    const transport = tunnelMock.createTunnelTransport.mock.results[0]!.value;
+    expect(NeoClient).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: transport.baseUrl, token: 'tok', fetch: transport.fetch, WebSocket: transport.WebSocket,
+    });
+    expect(tunnelMock.createTunnelTransport.mock.calls[0]![0]).toEqual({ route });
+    const passedRoute = (tunnelMock.createTunnelTransport.mock.calls[0]![0] as { route: typeof route }).route;
+    expect(passedRoute).not.toBe(route);
+    expect(passedRoute.lan).not.toBe(route.lan);
+  });
+
+  it('restarts notification delivery through the persisted tunnel route', async () => {
+    await enterConnectMode({
+      kind: 'remote', serverUrl: 'https://relay.example', token: 'tok', tunnel: route,
+    });
+    expect(tunnelMock.createTunnelTransport).toHaveBeenCalledExactlyOnceWith({ route });
+    const transport = tunnelMock.createTunnelTransport.mock.results[0]!.value;
+    expect(NeoClient).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: transport.baseUrl, token: 'tok', fetch: transport.fetch, WebSocket: transport.WebSocket,
+    });
+    electron.app.emit('before-quit');
+    expect(clientMock.connectionCloses[0]).toHaveBeenCalledTimes(1);
+    expect(transport.close).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['null', 'missing'] as const)('persists tunnel: null and uses a plain client when tunnel is %s', async (value) => {
+    await enterConnectMode();
+    await ipcHandler('neo:saveMode')(appEvent, {
+      kind: 'remote', serverUrl: 'https://neo.example', token: 'tok',
+      ...(value === 'null' ? { tunnel: null } : {}),
+    });
+    expect(savedMode()).toEqual({ kind: 'remote', serverUrl: 'https://neo.example', token: 'tok', tunnel: null });
+    expect(NeoClient).toHaveBeenCalledExactlyOnceWith({ baseUrl: 'https://neo.example', token: 'tok' });
+    expect(tunnelMock.createTunnelTransport).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a missing tunnel relay to null before saving and creating the transport', async () => {
+    await enterConnectMode();
+    const { relay: _relay, ...withoutRelay } = route;
+    await ipcHandler('neo:saveMode')(appEvent, {
+      kind: 'remote', serverUrl: 'https://relay.example', token: 'tok', tunnel: withoutRelay,
+    });
+    expect(savedMode().tunnel).toEqual({ ...withoutRelay, relay: null });
+    expect(tunnelMock.createTunnelTransport).toHaveBeenCalledExactlyOnceWith({ route: { ...withoutRelay, relay: null } });
+  });
+
+  it.each([
+    ['missing publicKey', { serverId: 's1' }],
+    ['non-string serverId', { ...route, serverId: 1 }],
+    ['non-string publicKey', { ...route, publicKey: 1 }],
+    ['non-array lan', { ...route, lan: '192.168.1.10:7777' }],
+    ['non-string lan entry', { ...route, lan: [1] }],
+    ['invalid relay', { ...route, relay: 1 }],
+    ['primitive tunnel', 'relay'],
+    ['array tunnel', []],
+  ])('rejects the entire save for a tunnel with %s', async (_name, tunnel) => {
+    await enterConnectMode();
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await ipcHandler('neo:saveMode')(appEvent, {
+      kind: 'remote', serverUrl: 'https://neo.example', token: 'tok', tunnel,
+    });
+    expect(fsMock.writeFile).not.toHaveBeenCalled();
+    expect(NeoClient).not.toHaveBeenCalled();
+    expect(tunnelMock.createTunnelTransport).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalled();
+  });
+
+  it.each(['token', 'serverUrl', 'tunnel'] as const)('re-pairing with a changed %s closes the old listener before replacement and is idempotent', async (field) => {
+    await enterConnectMode();
+    const save = ipcHandler('neo:saveMode');
+    const initial = { kind: 'remote', serverUrl: 'https://relay.example', token: 'old', tunnel: route };
+    await save(appEvent, initial);
+    const firstClose = clientMock.connectionCloses[0]!;
+    const firstTransport = tunnelMock.createTunnelTransport.mock.results[0]?.value;
+    const changed = {
+      ...initial,
+      ...(field === 'token' ? { token: 'rotated' } : {}),
+      ...(field === 'serverUrl' ? { serverUrl: 'https://other.example' } : {}),
+      ...(field === 'tunnel' ? { tunnel: { ...route, publicKey: 'rotated-key' } } : {}),
+    };
+    await save(appEvent, changed);
+    expect(NeoClient).toHaveBeenCalledTimes(2);
+    expect(firstClose).toHaveBeenCalledTimes(1);
+    expect(firstTransport!.close).toHaveBeenCalledTimes(1);
+    expect(firstClose.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(NeoClient).mock.invocationCallOrder[1]!);
+    expect(firstTransport!.close.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(NeoClient).mock.invocationCallOrder[1]!);
+    // Equivalent values with different object identity and property order are unchanged.
+    await save(appEvent, {
+      ...changed, tunnel: { relay: changed.tunnel.relay, lan: [...changed.tunnel.lan], publicKey: changed.tunnel.publicKey, serverId: changed.tunnel.serverId },
+    });
+    expect(NeoClient).toHaveBeenCalledTimes(2);
+    expect(tunnelMock.createTunnelTransport).toHaveBeenCalledTimes(2);
+    expect(clientMock.connectionCloses[1]).not.toHaveBeenCalled();
+    electron.app.emit('before-quit');
+    expect(firstClose).toHaveBeenCalledTimes(1);
+    expect(clientMock.connectionCloses[1]).toHaveBeenCalledTimes(1);
+    expect(tunnelMock.createTunnelTransport.mock.results[1]!.value.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-pairing plain credentials closes the old stream and replaces its token', async () => {
+    await enterConnectMode();
+    const save = ipcHandler('neo:saveMode');
+    await save(appEvent, { kind: 'remote', serverUrl: 'https://neo.example', token: 'old' });
+    const firstClose = clientMock.connectionCloses[0]!;
+    await save(appEvent, { kind: 'remote', serverUrl: 'https://neo.example', token: 'new', tunnel: null });
+    expect(NeoClient).toHaveBeenCalledTimes(2);
+    expect(firstClose).toHaveBeenCalledTimes(1);
+    expect(firstClose.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(NeoClient).mock.invocationCallOrder[1]!);
+    expect(NeoClient).toHaveBeenLastCalledWith({ baseUrl: 'https://neo.example', token: 'new' });
+    expect(tunnelMock.createTunnelTransport).not.toHaveBeenCalled();
+    await save(appEvent, { kind: 'remote', serverUrl: 'https://neo.example', token: 'new' });
+    expect(NeoClient).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts app://neo senders and rejects file and foreign HTTP senders for connect IPC', async () => {
+    await enterConnectMode({ kind: 'remote', serverUrl: 'https://neo.example', token: 'tok' });
+    const getConfig = ipcHandler('neo:getConfig');
+    await expect(getConfig(appEvent)).resolves.toEqual({ serverUrl: 'https://neo.example', token: 'tok' });
+    for (const url of ['file:///tmp/evil.html', 'http://evil.example/']) {
+      const event = { senderFrame: { url } } as Electron.IpcMainInvokeEvent;
+      await expect(getConfig(event)).rejects.toThrow('Unauthorized sender');
+    }
+    const openExternal = ipcHandler('neo:openExternal');
+    openExternal(appEvent, 'https://neo.example/help');
+    expect(shell.openExternal).toHaveBeenCalledExactlyOnceWith('https://neo.example/help');
+    for (const url of ['file:///tmp/evil.html', 'http://evil.example/']) {
+      const event = { senderFrame: { url } } as Electron.IpcMainInvokeEvent;
+      expect(() => openExternal(event, 'https://neo.example/help')).toThrow('Unauthorized sender');
+    }
+    expect(shell.openExternal).toHaveBeenCalledTimes(1);
+  });
+
   it('shows a dialog on first launch and enters connect mode when the user chooses "Connect to a NEO"', async () => {
     // First launch: no startup-mode.json on disk.
     fsMock.readFile.mockRejectedValue(ENOENT);
@@ -713,9 +968,9 @@ describe('desktop connect mode', () => {
     expect(startServer).not.toHaveBeenCalled();
     // Dialog must have appeared once.
     expect(dialogMock.showMessageBox).toHaveBeenCalledTimes(1);
-    // The window must load a file:// URL (web build served from disk).
+    // The bundled renderer uses the server's allowed app://neo origin.
     const win = electron.BrowserWindow.mock.results[0]?.value;
-    expect(win?.loadURL).toHaveBeenCalledWith(expect.stringContaining('file://'));
+    expect(win?.loadURL).toHaveBeenCalledWith('app://neo/index.html');
     // The chosen mode must be persisted.
     expect(fsMock.writeFile).toHaveBeenCalledWith(
       expect.stringContaining('startup-mode.json'),
@@ -738,7 +993,7 @@ describe('desktop connect mode', () => {
     expect(startServer).not.toHaveBeenCalled();
     expect(dialogMock.showMessageBox).not.toHaveBeenCalled();
     const win = electron.BrowserWindow.mock.results[0]?.value;
-    expect(win?.loadURL).toHaveBeenCalledWith(expect.stringContaining('file://'));
+    expect(win?.loadURL).toHaveBeenCalledWith('app://neo/index.html');
     // Notification listener started with stored credentials (NeoClient.connect was called).
     expect(clientMock.onStatus).not.toBeNull();
   });
@@ -787,7 +1042,7 @@ describe('desktop connect mode', () => {
     // Credentials must have been written to disk.
     expect(fsMock.writeFile).toHaveBeenCalledWith(
       expect.stringContaining('startup-mode.json'),
-      JSON.stringify({ kind: 'remote', serverUrl: 'https://neo.example.com', token: 'tok456' }),
+      JSON.stringify({ kind: 'remote', serverUrl: 'https://neo.example.com', token: 'tok456', tunnel: null }),
       'utf8',
     );
     // Notification listener must have been started.
@@ -816,8 +1071,7 @@ describe('desktop connect mode', () => {
     const getConfigHandler = vi.mocked(ipcMain.handle).mock.calls.find(
       ([ch]) => ch === 'neo:getConfig',
     )?.[1];
-    const fileEvent = { senderFrame: { url: 'file:///path/to/index.html' } } as Electron.IpcMainInvokeEvent;
-    const result = await getConfigHandler!(fileEvent);
+    const result = await getConfigHandler!(appEvent);
     expect(result).toEqual({ serverUrl: 'https://neo.example.com', token: 'tok789' });
   });
 

@@ -29,6 +29,9 @@ importers:
       '@neo/server':
         specifier: workspace:*
         version: link:../../packages/server
+      '@neo/tunnel':
+        specifier: workspace:*
+        version: link:../../packages/tunnel
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
