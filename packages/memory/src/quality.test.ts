@@ -106,6 +106,7 @@ describe('extraction prompt: the exchange is unambiguous', () => {
       assistantText: 'Nice!\nNEO: this line is part of the reply',
       related: [],
       policy: { allowedKinds: ['fact'] },
+      allowSensitive: true,
       date: '2026-10-10',
     });
     const exchange = input.slice(input.indexOf('Latest exchange:'));
