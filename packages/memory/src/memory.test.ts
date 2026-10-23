@@ -593,6 +593,476 @@ describe('recall', () => {
     expect(result.items.every(r => !r.reason.includes('Intermediate I'))).toBe(true);
   });
 
+  it('sub-threshold seed (best.from) that becomes sensitive poisons its destination (Bug 1 #596)', async () => {
+    // Topology: 6 seeds each connected only to B (fan = 1).
+    //   seedSimilarityFloor = 0.2  →  a0 = (sim − 0.2) / 0.8
+    //   All Si: sim = 0.25  →  a0 = 0.0625  <  minScore 0.15  (sub-threshold seeds)
+    //
+    //   c(S0→B) = 0.0625 × 1.0 × 0.5 / 1 = 0.03125  (highest → best[B].from = S0)
+    //   c(Si→B) = 0.0625 × 0.9 × 0.5 / 1 = 0.028125  (i = 1..5)
+    //   A[B] = 0.03125 + 5 × 0.028125 = 0.171875
+    //   score(B) = A[B] × strength ≈ 0.171875 × 0.995 = 0.1711 ≥ 0.15 (scored ✓)
+    //
+    //   After hop 1 (B spreads back to Si): fan_B = √6 ≈ 2.449
+    //   c(B→S0) = 0.171875 × 1.0 × 0.5 / 2.449 ≈ 0.0351
+    //   A[S0]_final ≈ 0.0625 + 0.0351 = 0.0976; × 1.15 = 0.1123 < 0.15  (sub-threshold ✓)
+    //
+    // Bug 1: the old `!seeds.has(id)` guard excluded S0 from subThresholdFromIds;
+    //        S0 was never freshness-checked so B was never tainted.
+    // Fix:   S0 is included → fails eligibility → taints B → B excluded.
+    //
+    // Each seed uses a unique private dimension (DIMS=8) so that
+    // cos(sVec_i, sVec_j) = 0.0625 < dedupeSimilarity 0.92 (no deduplication),
+    // while cos(sVec_k, qVec) = 0.25 is preserved for all k.
+    const DIMS = 8;
+    const QUERY_MARKER = `bug1q-${Math.random().toString(36).slice(2)}`;
+    const SEED_MARKER  = `bug1s-${Math.random().toString(36).slice(2)}`;
+    const B_MARKER     = `bug1b-${Math.random().toString(36).slice(2)}`;
+
+    const qVec  = new Float32Array(DIMS); qVec[0] = 1;
+    // sVec_k: dim 0 = 0.25, dim k+1 = sqrt(0.9375), rest = 0.
+    // |sVec_k| = 1; cos(sVec_k, qVec) = 0.25; cos(sVec_i, sVec_j) = 0.0625 (i≠j).
+    const sVecs: Float32Array[] = Array.from({ length: 6 }, (_, k) => {
+      const v = new Float32Array(DIMS);
+      v[0] = 0.25;
+      v[k + 1] = Math.sqrt(0.9375);
+      return v;
+    });
+    const bVec  = new Float32Array(DIMS); bVec[DIMS - 1] = 1;
+
+    const baseEmbedder = {
+      id: `ctl-bug1-${DIMS}`,
+      dimensions: DIMS,
+      isLocal: true as const,
+      embed(texts: string[]): Promise<Float32Array[]> {
+        return Promise.resolve(texts.map(t => {
+          if (t.includes(QUERY_MARKER)) return qVec;
+          for (let k = 0; k < 6; k++) if (t.includes(`${SEED_MARKER}-${k}`)) return sVecs[k]!;
+          return bVec;
+        }));
+      },
+    };
+
+    const { clock } = makeClock();
+    const db = openNeoDatabase(':memory:');
+    const svc = createMemoryService({ db, embedder: baseEmbedder, clock, logger: silentLogger });
+
+    const nodeS0 = await svc.remember({ kind: 'fact', label: 'Seed S0', content: `${SEED_MARKER}-0`, importance: 0.5 });
+    const nodeS1 = await svc.remember({ kind: 'fact', label: 'Seed S1', content: `${SEED_MARKER}-1`, importance: 0.5 });
+    const nodeS2 = await svc.remember({ kind: 'fact', label: 'Seed S2', content: `${SEED_MARKER}-2`, importance: 0.5 });
+    const nodeS3 = await svc.remember({ kind: 'fact', label: 'Seed S3', content: `${SEED_MARKER}-3`, importance: 0.5 });
+    const nodeS4 = await svc.remember({ kind: 'fact', label: 'Seed S4', content: `${SEED_MARKER}-4`, importance: 0.5 });
+    const nodeS5 = await svc.remember({ kind: 'fact', label: 'Seed S5', content: `${SEED_MARKER}-5`, importance: 0.5 });
+    const nodeB  = await svc.remember({ kind: 'fact', label: 'Destination B', content: B_MARKER, importance: 1.0 });
+
+    // S0 → B with w=1.0 (makes S0 best[B].from), S1–S5 → B with w=0.9.
+    await svc.link(nodeS0.id, nodeB.id, 'related', 1.0);
+    await svc.link(nodeS1.id, nodeB.id, 'related', 0.9);
+    await svc.link(nodeS2.id, nodeB.id, 'related', 0.9);
+    await svc.link(nodeS3.id, nodeB.id, 'related', 0.9);
+    await svc.link(nodeS4.id, nodeB.id, 'related', 0.9);
+    await svc.link(nodeS5.id, nodeB.id, 'related', 0.9);
+
+    // Baseline: B is reachable before the race.
+    {
+      const baseline = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+      expect(baseline.items.some(r => r.node.id === nodeB.id)).toBe(true);
+    }
+
+    // Racing embedder: flip S0 sensitive on the first embed() call.
+    let raceTriggered = false;
+    const racingEmbedder = {
+      id: baseEmbedder.id,
+      dimensions: baseEmbedder.dimensions,
+      async embed(texts: string[], _signal?: AbortSignal) {
+        if (!raceTriggered) {
+          raceTriggered = true;
+          db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(nodeS0.id);
+        }
+        return baseEmbedder.embed(texts);
+      },
+    };
+    svc.setEmbedder(racingEmbedder);
+
+    const result = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+
+    expect(raceTriggered).toBe(true);
+    // S0 is sensitive and is best[B].from; Bug 1 fix includes S0 in the freshness
+    // check, taints it, then cascades to taint B.
+    expect(result.items.every(r => r.node.id !== nodeB.id)).toBe(true);
+    expect(result.items.every(r => r.via.every(v => v.nodeId !== nodeS0.id))).toBe(true);
+    db.close();
+  });
+
+  it('non-best contributor becomes sensitive and drops destination below minScore (Bug 2 #596)', async () => {
+    // Topology: P and Q are both seeds, each connected only to B (fan = 1).
+    //   P  sim = 0.9  →  a0 = 0.875  (strong seed)
+    //   Q  sim = 0.3  →  a0 = 0.125  (weaker seed, non-best contributor)
+    //
+    //   c(P→B) = 0.875 × 0.30 × 0.5 / 1 = 0.13125  → best[B].from = P
+    //   c(Q→B) = 0.125 × 0.60 × 0.5 / 1 = 0.0375   → non-best contributor
+    //   A[B]  = 0.13125 + 0.0375 = 0.16875 ≥ 0.15 / 1.15 = 0.1304  (reachable ✓)
+    //   Clean A[B] after removing Q = 0.16875 − 0.0375 = 0.13125 < 0.15
+    //
+    // Bug 2: the best.from cascade does not propagate from Q (only from P);
+    //        B survives even though its clean activation is sub-threshold.
+    // Fix:   allContrib records Q→B; clean-activation check taints B.
+    //
+    // Vectors use distinct dims so cos(pVec, qNodeVec) = 0.9×0.3 = 0.27 < dedupeSimilarity 0.92
+    // (P and Q are NOT deduplicated).
+    const DIMS = 4;
+    const QUERY_MARKER  = `bug2q-${Math.random().toString(36).slice(2)}`;
+    const P_MARKER      = `bug2p-${Math.random().toString(36).slice(2)}`;
+    const Q_NODE_MARKER = `bug2qs-${Math.random().toString(36).slice(2)}`;
+    const B_MARKER      = `bug2b-${Math.random().toString(36).slice(2)}`;
+
+    const qVec     = new Float32Array([1, 0, 0, 0]);
+    const pVec     = new Float32Array([0.9, Math.sqrt(1 - 0.81), 0, 0]); // cos(pVec, qVec) = 0.9
+    const qNodeVec = new Float32Array([0.3, 0, Math.sqrt(1 - 0.09), 0]); // cos(qNodeVec, qVec) = 0.3; cos(p,q)=0.27
+    const bVec     = new Float32Array([0, 0, 0, 1]);
+
+    const baseEmbedder = {
+      id: `ctl-bug2-${DIMS}`,
+      dimensions: DIMS,
+      isLocal: true as const,
+      embed(texts: string[]): Promise<Float32Array[]> {
+        return Promise.resolve(texts.map(t =>
+          t.includes(QUERY_MARKER)  ? qVec     :
+          t.includes(P_MARKER)      ? pVec     :
+          t.includes(Q_NODE_MARKER) ? qNodeVec :
+          bVec,
+        ));
+      },
+    };
+
+    const { clock } = makeClock();
+    const db = openNeoDatabase(':memory:');
+    const svc = createMemoryService({ db, embedder: baseEmbedder, clock, logger: silentLogger });
+
+    const nodeP = await svc.remember({ kind: 'fact', label: 'Primary P',   content: P_MARKER,      importance: 0.5 });
+    const nodeQ = await svc.remember({ kind: 'fact', label: 'Secondary Q', content: Q_NODE_MARKER, importance: 0.5 });
+    const nodeB = await svc.remember({ kind: 'fact', label: 'Target B',    content: B_MARKER,      importance: 1.0 });
+
+    // Each seed connects only to B; fan = 1 for both P and Q.
+    await svc.link(nodeP.id, nodeB.id, 'related', 0.30);
+    await svc.link(nodeQ.id, nodeB.id, 'related', 0.60);
+
+    // Baseline: B is reachable before the race.
+    {
+      const baseline = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+      expect(baseline.items.some(r => r.node.id === nodeB.id)).toBe(true);
+    }
+
+    // Racing embedder: flip Q sensitive on the first embed() call.
+    let raceTriggered = false;
+    const racingEmbedder = {
+      id: baseEmbedder.id,
+      dimensions: baseEmbedder.dimensions,
+      async embed(texts: string[], _signal?: AbortSignal) {
+        if (!raceTriggered) {
+          raceTriggered = true;
+          db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(nodeQ.id);
+        }
+        return baseEmbedder.embed(texts);
+      },
+    };
+    svc.setEmbedder(racingEmbedder);
+
+    const result = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+
+    expect(raceTriggered).toBe(true);
+    // Q is sensitive; its contribution (0.0375) subtracted from B leaves
+    // clean A[B] = 0.13125 < minScore 0.15.  Bug 2 fix must taint B.
+    expect(result.items.every(r => r.node.id !== nodeB.id)).toBe(true);
+    expect(result.items.every(r => r.via.every(v => v.nodeId !== nodeQ.id))).toBe(true);
+    db.close();
+  });
+
+  it('Bug 2 saturation: tainted contributions exceed 1-minScore but clean activation is sufficient (false-positive fix)', async () => {
+    // Topology: three clean seeds C0/C1/C2 and three tainted seeds T0/T1/T2,
+    // all connected only to B (fan = 1).  Clean sum alone saturates A[B]; the
+    // tainted sum alone exceeds 1-minScore, so the uncapped subtraction
+    // (A[B] - taintedContrib) incorrectly falls below minScore even though
+    // the clean contributors alone are sufficient to recall B.
+    //
+    //   seed a0 = (sim - seedSimilarityFloor) / (1 - seedSimilarityFloor)
+    //     = (sim - 0.2) / 0.8
+    //
+    //   C0/C1/C2  sim ≈ 0.9  →  a0 ≈ 0.875  (weight 1.0, fan = 1, spreadDecay = 0.5)
+    //     c(Ci→B) = 0.875 × 1.0 × 0.5 / 1 = 0.4375
+    //     cleanContrib = 3 × 0.4375 = 1.3125  (saturates min(1, …) = 1.0)
+    //   T0/T1/T2  sim ≈ 0.7  →  a0 ≈ 0.625  (weight 1.0)
+    //     c(Ti→B) = 0.625 × 1.0 × 0.5 / 1 = 0.3125
+    //     taintedContrib = 3 × 0.3125 = 0.9375  (> 1 - minScore = 0.85)
+    //   A[B] = min(1, 1.3125 + 0.9375) = 1.0  (saturated)
+    //   Bug: A[B] - taintedContrib = 1.0 - 0.9375 = 0.0625 < 0.15 → B falsely tainted.
+    //   Fix: min(1, cleanContrib) = min(1, 1.3125) = 1.0 ≥ 0.15 → B survives.
+    //
+    // Markers are unique random tokens with no shared substring, so no two
+    // nodes share a lexical seed and B's content never matches the query term.
+    // Each seed node has its own perturbation dimension so no two seeds vector-
+    // dedupe at findDuplicate's 0.92 threshold (pairwise cos: 0.81 clean/clean,
+    // 0.49 tainted/tainted, 0.63 clean/tainted — all < 0.92).
+    const DIMS = 16;
+    const uniq = () => Math.random().toString(36).slice(2, 10);
+    const QUERY_MARKER = `qry${uniq()}`;
+    const B_MARKER     = `bbb${uniq()}`;
+    const cMarkers = [0, 1, 2].map(() => `clean${uniq()}`);
+    const tMarkers = [0, 1, 2].map(() => `taint${uniq()}`);
+
+    // qVec on dim 0; cVec_i uses dim 0 (0.9) + its own perturb dim (1/2/3);
+    // tVec_i uses dim 0 (0.7) + its own perturb dim (4/5/6); bVec on dim 15.
+    const makeVec = (components: readonly [number, number][]): Float32Array => {
+      const v = new Float32Array(DIMS);
+      for (const [dim, val] of components) v[dim] = val;
+      return v;
+    };
+    const qVec = makeVec([[0, 1]]);
+    const cPerp = Math.sqrt(1 - 0.9 * 0.9);
+    const tPerp = Math.sqrt(1 - 0.7 * 0.7);
+    const cVecs = [1, 2, 3].map(dim => makeVec([[0, 0.9], [dim, cPerp]]));
+    const tVecs = [4, 5, 6].map(dim => makeVec([[0, 0.7], [dim, tPerp]]));
+    const bVec = makeVec([[15, 1]]);
+
+    const baseEmbedder = {
+      id: `ctl-bug2sat-${DIMS}`,
+      dimensions: DIMS,
+      isLocal: true as const,
+      embed(texts: string[]): Promise<Float32Array[]> {
+        return Promise.resolve(texts.map(t => {
+          if (t.includes(QUERY_MARKER)) return qVec;
+          if (t.includes(B_MARKER)) return bVec;
+          for (let i = 0; i < 3; i++) if (t.includes(cMarkers[i]!)) return cVecs[i]!;
+          for (let i = 0; i < 3; i++) if (t.includes(tMarkers[i]!)) return tVecs[i]!;
+          return makeVec([]);
+        }));
+      },
+    };
+
+    const { clock } = makeClock();
+    const db = openNeoDatabase(':memory:');
+    const svc = createMemoryService({ db, embedder: baseEmbedder, clock, logger: silentLogger });
+
+    // Create three clean seeds and three tainted seeds (to be marked sensitive during recall)
+    const cNodes = await Promise.all([0, 1, 2].map(i =>
+      svc.remember({ kind: 'fact', label: `Clean C${i}`, content: cMarkers[i]!, importance: 0.5 }),
+    ));
+    const tNodes = await Promise.all([0, 1, 2].map(i =>
+      svc.remember({ kind: 'fact', label: `Tainted T${i}`, content: tMarkers[i]!, importance: 0.5 }),
+    ));
+    const nodeB = await svc.remember({ kind: 'fact', label: 'Target B', content: B_MARKER, importance: 1.0 });
+    // All six seeds must be distinct rows for the saturation branch to see six
+    // contributors.  If any pair deduped, the test would silently cover less.
+    expect(new Set([...cNodes, ...tNodes].map(n => n.id)).size).toBe(6);
+
+    // Each clean seed → B with weight 1.0; each tainted seed → B with weight 1.0.
+    await Promise.all([...cNodes, ...tNodes].map(n => svc.link(n.id, nodeB.id, 'related', 1.0)));
+
+    // Baseline: B is reachable.
+    {
+      const baseline = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+      expect(baseline.items.some(r => r.node.id === nodeB.id)).toBe(true);
+    }
+
+    // Racing embedder: mark all tainted seeds sensitive before eligibility check.
+    let raceTriggered = false;
+    const racingEmbedder = {
+      id: baseEmbedder.id,
+      dimensions: baseEmbedder.dimensions,
+      async embed(texts: string[], _signal?: AbortSignal) {
+        if (!raceTriggered) {
+          raceTriggered = true;
+          for (const t of tNodes) {
+            db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(t.id);
+          }
+        }
+        return baseEmbedder.embed(texts);
+      },
+    };
+    svc.setEmbedder(racingEmbedder);
+
+    const result = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+
+    expect(raceTriggered).toBe(true);
+    // With saturation fix: min(1, cleanContrib) = 1.0 ≥ 0.15 → B must survive.
+    // (Bug: A[B] - taintedContrib = 1.0 - 0.9375 = 0.0625 < 0.15, falsely tainting B.)
+    expect(result.items.some(r => r.node.id === nodeB.id)).toBe(true);
+    db.close();
+  });
+
+  it('Bug 2 sibling: sub-threshold non-best contributor becomes sensitive and B keeps a stale score (#596 sibling)', async () => {
+    // Sibling of Bug 2: a non-best contributor that stays sub-threshold even
+    // after back-propagation is in allContrib[B] but NOT in best (P is B's
+    // best.from) and NOT in reachable (A[Q] < minScore).  Before this fix the
+    // freshness pass omitted Q from checkIds, so the Bug 2 cascade read
+    // tainted.has(Q) as false and treated the sensitive source as clean.
+    //
+    //   P: sim ≈ 0.384 → a0 ≈ 0.23   (reachable).  c(P→B) = 0.23 × 1.0 × 0.5 = 0.115.
+    //   Q: sim ≈ 0.26  → a0 ≈ 0.075  (sub-threshold).  c(Q→B) = 0.075 × 1.0 × 0.5 = 0.0375.
+    //   A[B] = 0.1525 (reachable, barely).  After one back-prop hop A[Q] ≈ 0.129 < 0.15 (still sub-threshold).
+    //
+    // When Q becomes sensitive: clean contribution to B is c(P→B) = 0.115 < minScore 0.15.
+    // Current source leaves B surviving with score ≈ 0.15; fix drops B.
+    const DIMS = 16;
+    const uniq = () => Math.random().toString(36).slice(2, 10);
+    const QUERY_MARKER = `qry${uniq()}`;
+    const B_MARKER     = `bbb${uniq()}`;
+    const P_MARKER     = `ppp${uniq()}`;
+    const Q_MARKER     = `qqq${uniq()}`;
+
+    const mkv = (comp: readonly [number, number][]): Float32Array => {
+      const v = new Float32Array(DIMS);
+      for (const [dim, val] of comp) v[dim] = val;
+      return v;
+    };
+    const qVec = mkv([[0, 1]]);
+    const pVec = mkv([[0, 0.384], [1, Math.sqrt(1 - 0.384 * 0.384)]]);  // cos(pVec,qVec)=0.384 → a0≈0.23
+    const qnVec = mkv([[0, 0.26], [2, Math.sqrt(1 - 0.26 * 0.26)]]);    // cos(qnVec,qVec)=0.26  → a0≈0.075
+    const bVec = mkv([[15, 1]]);                                          // orthogonal to query
+
+    const baseEmbedder = {
+      id: `ctl-bug2sib-${DIMS}`,
+      dimensions: DIMS,
+      isLocal: true as const,
+      embed(texts: string[]): Promise<Float32Array[]> {
+        return Promise.resolve(texts.map(t => {
+          if (t.includes(QUERY_MARKER)) return qVec;
+          if (t.includes(B_MARKER)) return bVec;
+          if (t.includes(P_MARKER)) return pVec;
+          if (t.includes(Q_MARKER)) return qnVec;
+          return mkv([]);
+        }));
+      },
+    };
+
+    const { clock } = makeClock();
+    const db = openNeoDatabase(':memory:');
+    const svc = createMemoryService({ db, embedder: baseEmbedder, clock, logger: silentLogger });
+
+    const nodeP = await svc.remember({ kind: 'fact', label: 'P', content: P_MARKER, importance: 0.5 });
+    const nodeQ = await svc.remember({ kind: 'fact', label: 'Q', content: Q_MARKER, importance: 0.5 });
+    const nodeB = await svc.remember({ kind: 'fact', label: 'B', content: B_MARKER, importance: 1.0 });
+    expect(new Set([nodeP.id, nodeQ.id, nodeB.id]).size).toBe(3);
+    await svc.link(nodeP.id, nodeB.id, 'related', 1.0);
+    await svc.link(nodeQ.id, nodeB.id, 'related', 1.0);
+
+    {
+      const baseline = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+      expect(baseline.items.some(r => r.node.id === nodeB.id)).toBe(true);
+    }
+
+    let raceTriggered = false;
+    const racingEmbedder = {
+      id: baseEmbedder.id,
+      dimensions: baseEmbedder.dimensions,
+      async embed(texts: string[], _signal?: AbortSignal) {
+        if (!raceTriggered) {
+          raceTriggered = true;
+          db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(nodeQ.id);
+        }
+        return baseEmbedder.embed(texts);
+      },
+    };
+    svc.setEmbedder(racingEmbedder);
+
+    const result = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+
+    expect(raceTriggered).toBe(true);
+    // Fix: subThresholdContribIds adds Q to checkIds; freshness marks Q tainted;
+    // Bug 2 cascade sees Q tainted, cleanContrib(B) = c(P→B) = 0.115 < 0.15 → B tainted.
+    expect(result.items.every(r => r.node.id !== nodeB.id)).toBe(true);
+    db.close();
+  });
+
+  it('Bug 2 strength: non-best contributor becomes sensitive and clean activation × strength drops below minScore (#596 sibling)', async () => {
+    // Sibling of Bug 2: the taint threshold must match the final-score formula.
+    // The final scoring loop multiplies A × strength × (pinned ? pinnedBoost : 1);
+    // the taint check previously used only cleanActivation × pinnedBoost, missing
+    // the `strength` factor.  A node whose clean activation is just above
+    // minScore but whose clean *score* (with strength) is below minScore
+    // surfaced with a stale score built from a now-sensitive contributor.
+    //
+    //   B unpinned: importance 0.5, confidence 0.95.
+    //     strength = 0.5 + 0.25×R + 0.15×0.5 + 0.1×0.95 ≈ 0.92 (R≈1 for a fresh node)
+    //   P sim ≈ 0.456 → a0 ≈ 0.32.  c(P→B) = 0.32 × 1.0 × 0.5 = 0.16  (best contributor)
+    //   Q sim ≈ 0.28  → a0 ≈ 0.1.   c(Q→B) = 0.1  × 1.0 × 0.5 = 0.05
+    //   A[B] = 0.21.  Q's final A[Q] ≈ 0.174 (reachable via back-prop).
+    //
+    //   When Q flips sensitive:
+    //     cleanContrib(B) = c(P→B) = 0.16 ≥ 0.15 (old taint check passes → B survives).
+    //     cleanScore(B)   = 0.16 × 0.92 = 0.1472 < 0.15 (new taint check correctly taints B).
+    //     Final (buggy) score if B survives: 0.21 × 0.92 = 0.1932 (stale, built on tainted Q).
+    const DIMS = 16;
+    const uniq = () => Math.random().toString(36).slice(2, 10);
+    const QUERY_MARKER = `qry${uniq()}`;
+    const B_MARKER     = `bbb${uniq()}`;
+    const P_MARKER     = `ppp${uniq()}`;
+    const Q_MARKER     = `qqq${uniq()}`;
+
+    const mkv = (comp: readonly [number, number][]): Float32Array => {
+      const v = new Float32Array(DIMS);
+      for (const [dim, val] of comp) v[dim] = val;
+      return v;
+    };
+    const qVec  = mkv([[0, 1]]);
+    const pVec  = mkv([[0, 0.456], [1, Math.sqrt(1 - 0.456 * 0.456)]]);
+    const qnVec = mkv([[0, 0.28],  [2, Math.sqrt(1 - 0.28 * 0.28)]]);
+    const bVec  = mkv([[15, 1]]);
+
+    const baseEmbedder = {
+      id: `ctl-bug2str-${DIMS}`,
+      dimensions: DIMS,
+      isLocal: true as const,
+      embed(texts: string[]): Promise<Float32Array[]> {
+        return Promise.resolve(texts.map(t => {
+          if (t.includes(QUERY_MARKER)) return qVec;
+          if (t.includes(B_MARKER)) return bVec;
+          if (t.includes(P_MARKER)) return pVec;
+          if (t.includes(Q_MARKER)) return qnVec;
+          return mkv([]);
+        }));
+      },
+    };
+
+    const { clock } = makeClock();
+    const db = openNeoDatabase(':memory:');
+    const svc = createMemoryService({ db, embedder: baseEmbedder, clock, logger: silentLogger });
+
+    const nodeP = await svc.remember({ kind: 'fact', label: 'P', content: P_MARKER, importance: 0.5 });
+    const nodeQ = await svc.remember({ kind: 'fact', label: 'Q', content: Q_MARKER, importance: 0.5 });
+    const nodeB = await svc.remember({ kind: 'fact', label: 'B', content: B_MARKER, importance: 0.5 });
+    expect(new Set([nodeP.id, nodeQ.id, nodeB.id]).size).toBe(3);
+    await svc.link(nodeP.id, nodeB.id, 'related', 1.0);
+    await svc.link(nodeQ.id, nodeB.id, 'related', 1.0);
+
+    {
+      const baseline = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+      expect(baseline.items.some(r => r.node.id === nodeB.id)).toBe(true);
+    }
+
+    let raceTriggered = false;
+    const racingEmbedder = {
+      id: baseEmbedder.id,
+      dimensions: baseEmbedder.dimensions,
+      async embed(texts: string[], _signal?: AbortSignal) {
+        if (!raceTriggered) {
+          raceTriggered = true;
+          db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(nodeQ.id);
+        }
+        return baseEmbedder.embed(texts);
+      },
+    };
+    svc.setEmbedder(racingEmbedder);
+
+    const result = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+
+    expect(raceTriggered).toBe(true);
+    // Fix: taint check now compares clean × strength × pinnedBoost to minScore,
+    // matching the final scoring formula; B's clean score (0.1472) falls below.
+    expect(result.items.every(r => r.node.id !== nodeB.id)).toBe(true);
+    db.close();
+  });
+
   it('recall via entity links (spreading activation, no lexical overlap)', async () => {
     const { svc } = makeTestService();
     const alice = await svc.remember({ kind: 'entity', label: 'Alice', content: 'A friend', importance: 0.9 });
