@@ -46,7 +46,11 @@ export function createElectronBridge(desktop: NeoDesktopBridge): PlatformBridge 
       // Notification clicks are routed by the main process by setting the hash.
       const onFocus = () => ctx.onResume();
       window.addEventListener('focus', onFocus);
-      return () => window.removeEventListener('focus', onFocus);
+      const offPairLinks = desktop.watchPairLinks?.((url) => ctx.onPairLink(url)) ?? (() => {});
+      return () => {
+        window.removeEventListener('focus', onFocus);
+        offPairLinks();
+      };
     },
 
     setLocale() {

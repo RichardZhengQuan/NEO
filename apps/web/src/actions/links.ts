@@ -15,7 +15,6 @@ import { pairWithLink, pairingOutcomeKey } from './pairing.js';
 
 /** Pair in the background, retaining the current session if it fails. */
 export function openPairLink(url: string): void {
-  if (getPlatform().kind === 'electron') return; // the desktop app always uses its embedded server
   void pairWithLink(url).then((outcome) => {
     const locale = resolveLocale(useSession.getState().settings?.locale ?? readString(STORAGE_KEYS.locale));
     const messages = buildMessages(locale, appDictionaries);
