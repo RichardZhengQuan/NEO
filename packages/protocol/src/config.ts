@@ -92,12 +92,24 @@ export type NeoSettingsPatch = DeepPartial<NeoSettings> & {
 
 /** Upgrade legacy refs before overlaying defaults, which already contain an empty ai object. */
 export function migrateSettings(input: unknown): unknown {
-  if (!isPlainObject(input) || input.ai !== undefined) return input;
-  if (!['defaultModel', 'memoryModel', 'embedding'].some(key => input[key] !== undefined)) return input;
-  return {
-    ...input,
-    ai: { mode: 'simple', capabilities: { text: input.defaultModel ?? input.memoryModel ?? null, embedding: input.embedding ?? null } },
-  };
+  if (!isPlainObject(input)) return input;
+
+  let out: Record<string, unknown> = input;
+
+  // Coerce an invalid stored timezone to UTC rather than letting safeParse fail and wipe all settings.
+  if (typeof out.timezone === 'string' && !isValidTimeZone(out.timezone)) {
+    out = { ...out, timezone: 'UTC' };
+  }
+
+  // Migrate pre-ai-object schema (legacy defaultModel / memoryModel / embedding fields).
+  if (out.ai === undefined && ['defaultModel', 'memoryModel', 'embedding'].some(key => out[key] !== undefined)) {
+    out = {
+      ...out,
+      ai: { mode: 'simple', capabilities: { text: out.defaultModel ?? out.memoryModel ?? null, embedding: out.embedding ?? null } },
+    };
+  }
+
+  return out;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {

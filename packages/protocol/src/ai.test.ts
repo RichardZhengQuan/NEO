@@ -155,6 +155,16 @@ describe('AI settings compatibility', () => {
   it('validates every reserved capability now', () => {
     expect(() => applySettingsPatch(DEFAULT_SETTINGS, { ai: { capabilities: { video: { provider: '', model: '' } } } })).toThrow();
   });
+
+  it('coerces an invalid stored timezone to UTC instead of wiping all settings', () => {
+    const stored = { locale: 'zh', timezone: 'Not/A_Zone' };
+    const parsed = NeoSettingsSchema.safeParse(deepMerge(DEFAULT_SETTINGS, migrateSettings(stored)));
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.timezone).toBe('UTC');
+      expect(parsed.data.locale).toBe('zh');
+    }
+  });
 });
 
 describe('search mode resolution', () => {
