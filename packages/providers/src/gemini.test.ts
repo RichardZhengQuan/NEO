@@ -136,6 +136,31 @@ describe('Gemini request', () => {
     expect(parameters['type']).toBe('object');
     expect(parameters['properties']).not.toHaveProperty('value');
   });
+
+  it.each([
+    ['union', z.union([z.object({ kind: z.literal('a'), x: z.string() }), z.object({ kind: z.literal('b'), y: z.number() })]), { kind: 'a', x: 'hello' }],
+    ['string', z.string(), 'raw-value'],
+  ] as const)('unwraps {value:...} from model-emitted %s tool call inputs', async (_name, schema, actual) => {
+    const inputSchema = toolInputJsonSchema(schema as z.ZodType);
+    const wire = { value: actual };
+    const { a } = make(stream(
+      cand([{ functionCall: { name: 'plugin_tool', args: wire } }], 'STOP'),
+    ));
+    const events = await collect(a.chat(req({ tools: [{ name: 'plugin_tool', description: 'Plugin', inputSchema }] })));
+    const toolCall = events.find((e) => e.type === 'tool_call');
+    expect(toolCall).toMatchObject({ type: 'tool_call', name: 'plugin_tool', input: actual });
+  });
+
+  it('does not unwrap {value:...} for object-root tool schemas (Gemini)', async () => {
+    const inputSchema = toolInputJsonSchema(z.object({ city: z.string() }));
+    const wire = { city: 'Paris' };
+    const { a } = make(stream(
+      cand([{ functionCall: { name: 'get_weather', args: wire } }], 'STOP'),
+    ));
+    const events = await collect(a.chat(req({ tools: [{ name: 'get_weather', description: 'Weather', inputSchema }] })));
+    const toolCall = events.find((e) => e.type === 'tool_call');
+    expect(toolCall).toMatchObject({ type: 'tool_call', name: 'get_weather', input: { city: 'Paris' } });
+  });
 });
 
 describe('sanitizeGeminiSchema', () => {

@@ -120,6 +120,33 @@ describe('OpenAI request shape', () => {
     expect(sent[0]!.function.parameters).toEqual({ type: 'object', properties: { value: schema }, required: ['value'] });
   });
 
+  it.each([
+    ['union', z.union([z.object({ kind: z.literal('a'), x: z.string() }), z.object({ kind: z.literal('b'), y: z.number() })]), { kind: 'a', x: 'hello' }],
+    ['string', z.string(), 'raw-value'],
+  ] as const)('unwraps {value:...} from model-emitted %s tool call inputs', async (_name, schema, actual) => {
+    const inputSchema = toolInputJsonSchema(schema as z.ZodType);
+    const wire = { value: actual };
+    const { a } = make(stream(
+      chunk({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'plugin_tool', arguments: JSON.stringify(wire) } }] }),
+      chunk({}, 'tool_calls'),
+    ));
+    const events = await collect(a.chat(req({ tools: [{ name: 'plugin_tool', description: 'Plugin', inputSchema }] })));
+    const toolCall = events.find((e) => e.type === 'tool_call');
+    expect(toolCall).toMatchObject({ type: 'tool_call', name: 'plugin_tool', input: actual });
+  });
+
+  it('does not unwrap {value:...} for object-root tool schemas (OpenAI)', async () => {
+    const inputSchema = toolInputJsonSchema(z.object({ city: z.string() }));
+    const wire = { city: 'Paris' };
+    const { a } = make(stream(
+      chunk({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'get_weather', arguments: JSON.stringify(wire) } }] }),
+      chunk({}, 'tool_calls'),
+    ));
+    const events = await collect(a.chat(req({ tools: [{ name: 'get_weather', description: 'Weather', inputSchema }] })));
+    const toolCall = events.find((e) => e.type === 'tool_call');
+    expect(toolCall).toMatchObject({ type: 'tool_call', name: 'get_weather', input: { city: 'Paris' } });
+  });
+
   it('json mode: response_format for openai/ollama plus the system instruction everywhere', async () => {
     const { a, f } = make([okReply, okReply]);
     await collect(a.chat(req({ responseFormat: 'json', system: 'Extract.' })));

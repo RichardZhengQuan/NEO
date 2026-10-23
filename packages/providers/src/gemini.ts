@@ -42,6 +42,8 @@ import {
   resolveApiKey,
   testByListingModels,
   throwIfAborted,
+  unwrapToolInput,
+  wrappedToolSet,
 } from './shared.js';
 
 const DEFAULT_BASE = PROVIDER_PRESETS.gemini.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
@@ -416,6 +418,8 @@ export class GeminiAdapter implements ProviderAdapter {
     let usage: Usage | null = null;
     const calls: ChatStreamEvent[] = [];
     const sources: Source[] = [];
+    // Track tools whose schemas were wrapped by ensureObjectSchema at the API boundary.
+    const wrapped = wrappedToolSet(request.tools);
 
     try {
       for await (const msg of parseSSE(response.body, request.signal)) {
@@ -460,11 +464,14 @@ export class GeminiAdapter implements ProviderAdapter {
           }
           if (isPlainObject(raw['functionCall'])) {
             const fc = raw['functionCall'];
+            const toolName = typeof fc['name'] === 'string' ? fc['name'] : '';
+            const rawInput: unknown = isPlainObject(fc['args']) ? fc['args'] : {};
             const call: ChatStreamEvent = {
               type: 'tool_call',
               id: typeof fc['id'] === 'string' && fc['id'] ? fc['id'] : newCallId('call'),
-              name: typeof fc['name'] === 'string' ? fc['name'] : '',
-              input: isPlainObject(fc['args']) ? fc['args'] : {},
+              name: toolName,
+              // Strip the {value} wrapper added by ensureObjectSchema for non-object-rooted schemas.
+              input: unwrapToolInput(rawInput, toolName, wrapped),
             };
             if (signature) call.data = { thoughtSignature: signature, model: request.model };
             calls.push(call);

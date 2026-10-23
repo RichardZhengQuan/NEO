@@ -134,6 +134,25 @@ export function parseToolInput(raw: string): unknown {
   }
 }
 
+/**
+ * Build a set of tool names whose input schemas were wrapped by `ensureObjectSchema`
+ * (i.e. had a non-object root). The model returns `{value: <actual>}` for these
+ * tools, so callers must strip the wrapper before handing inputs to registry.execute.
+ */
+export function wrappedToolSet(tools: readonly { name: string; inputSchema: Record<string, unknown> }[] | undefined): Set<string> {
+  if (!tools?.length) return new Set();
+  return new Set(tools.filter((t) => t.inputSchema['type'] !== 'object').map((t) => t.name));
+}
+
+/**
+ * Strip the `{value: <actual>}` wrapper that `ensureObjectSchema` added at the
+ * provider boundary, but only for tools whose schema was actually wrapped.
+ */
+export function unwrapToolInput(input: unknown, toolName: string, wrapped: Set<string>): unknown {
+  if (!wrapped.has(toolName) || !isPlainObject(input) || !('value' in input)) return input;
+  return (input as Record<string, unknown>)['value'];
+}
+
 /** A unique id for tool calls whose provider did not supply one. */
 export function newCallId(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 24)}`;

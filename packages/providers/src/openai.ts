@@ -44,6 +44,8 @@ import {
   systemWithJsonInstruction,
   testByListingModels,
   throwIfAborted,
+  unwrapToolInput,
+  wrappedToolSet,
 } from './shared.js';
 
 type OpenAIKind = 'openai' | 'openai-compatible' | 'ollama';
@@ -243,6 +245,8 @@ export class OpenAIAdapter implements ProviderAdapter {
     const tools: ToolAccumulator[] = [];
     const byIndex = new Map<number, ToolAccumulator>();
     const sources: Source[] = [];
+    // Track tools whose schemas were wrapped by ensureObjectSchema at the API boundary.
+    const wrapped = wrappedToolSet(request.tools);
     let finishReason: string | null = null;
     let sawText = false;
     let refused = false;
@@ -310,7 +314,7 @@ export class OpenAIAdapter implements ProviderAdapter {
 
     for (const tc of tools) {
       throwIfAborted(request.signal);
-      yield { type: 'tool_call', id: tc.id ?? newCallId('call'), name: tc.name, input: parseToolInput(tc.args) };
+      yield { type: 'tool_call', id: tc.id ?? newCallId('call'), name: tc.name, input: unwrapToolInput(parseToolInput(tc.args), tc.name, wrapped) };
     }
 
     let stopReason: StopReason;

@@ -117,6 +117,40 @@ describe('Anthropic request shape', () => {
     expect(tools[0]!.input_schema).toEqual(inputSchema);
   });
 
+  it.each([
+    ['union', z.union([z.object({ kind: z.literal('a'), x: z.string() }), z.object({ kind: z.literal('b'), y: z.number() })])],
+    ['string', z.string()],
+  ])('unwraps {value:...} from model-emitted %s tool call inputs', async (_name, schema) => {
+    const inputSchema = toolInputJsonSchema(schema as z.ZodType);
+    // Simulate the model returning {value: <actual>} which is what the API sends
+    // when the schema was wrapped in an object root.
+    const actual = _name === 'union' ? { kind: 'a', x: 'hello' } : 'raw-value';
+    const wire = { value: actual };
+    const { a } = adapter(stream(
+      messageStart(),
+      toolBlock(0, 'toolu_1', 'plugin_tool', JSON.stringify(wire)),
+      messageDelta('tool_use'),
+      messageStop,
+    ));
+    const events = await collect(a.chat(req({ tools: [{ name: 'plugin_tool', description: 'Plugin', inputSchema }] })));
+    const toolCall = events.find((e) => e.type === 'tool_call');
+    expect(toolCall).toMatchObject({ type: 'tool_call', name: 'plugin_tool', input: actual });
+  });
+
+  it('does not unwrap {value:...} for object-root tool schemas', async () => {
+    const inputSchema = toolInputJsonSchema(z.object({ city: z.string() }));
+    const wire = { city: 'Paris' };
+    const { a } = adapter(stream(
+      messageStart(),
+      toolBlock(0, 'toolu_1', 'get_weather', JSON.stringify(wire)),
+      messageDelta('tool_use'),
+      messageStop,
+    ));
+    const events = await collect(a.chat(req({ tools: [{ name: 'get_weather', description: 'Weather', inputSchema }] })));
+    const toolCall = events.find((e) => e.type === 'tool_call');
+    expect(toolCall).toMatchObject({ type: 'tool_call', name: 'get_weather', input: { city: 'Paris' } });
+  });
+
   it('claude-opus-5-5: adaptive summarized thinking, effort, no sampling params, top-level cache_control, refusal fallback', async () => {
     const { a, f } = adapter(simpleReply);
     await collect(a.chat(req({ system: 'Be nice.', temperature: 0.2, reasoning: 'high', tools: TOOLS, toolChoice: 'auto' })));
