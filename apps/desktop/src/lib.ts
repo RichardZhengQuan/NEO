@@ -4,7 +4,8 @@
  */
 import { deflateSync } from 'node:zlib';
 import * as path from 'node:path';
-import type { Notification, ReminderFiring } from '@neo/protocol';
+import { readFile, writeFile } from 'node:fs/promises';
+import type { Notification, ReminderFiring, TunnelRoute } from '@neo/protocol';
 
 // ───────────────────────────── web directory ─────────────────────────────
 
@@ -208,4 +209,84 @@ export function createTrayIconPng(): Buffer {
     pngChunk('IDAT', compressed),
     pngChunk('IEND', Buffer.alloc(0)),
   ]);
+}
+
+// ───────────────────────────── startup mode ─────────────────────────────
+
+export interface RemoteMode {
+  kind: 'remote';
+  serverUrl?: string;
+  token?: string;
+  tunnel?: TunnelRoute | null;
+}
+
+export type StartupMode = 'local' | RemoteMode;
+
+export function parseStartupMode(raw: string): StartupMode | null {
+  try {
+    const data: unknown = JSON.parse(raw);
+    if (data === 'local') return 'local';
+    if (data !== null && typeof data === 'object' && (data as Record<string, unknown>).kind === 'remote') {
+      const d = data as Partial<RemoteMode>;
+      const result: RemoteMode = { kind: 'remote' };
+      if (typeof d.serverUrl === 'string') result.serverUrl = d.serverUrl;
+      if (typeof d.token === 'string') result.token = d.token;
+      if (d.tunnel !== undefined) result.tunnel = d.tunnel as TunnelRoute | null;
+      return result;
+    }
+    return null;
+  } catch { return null; }
+}
+
+export async function loadStartupMode(userData: string): Promise<StartupMode | null> {
+  try {
+    const raw = await readFile(path.join(userData, 'startup-mode.json'), 'utf8');
+    return parseStartupMode(raw);
+  } catch { return null; }
+}
+
+export async function saveStartupMode(userData: string, mode: StartupMode): Promise<void> {
+  await writeFile(path.join(userData, 'startup-mode.json'), JSON.stringify(mode), 'utf8');
+}
+
+// ───────────────────────────── first-launch dialog i18n ─────────────────────────────
+
+/**
+ * Strings shown in the first-launch "Run NEO on this Mac or Connect to a NEO"
+ * native dialog. The dialog runs before the renderer loads, so the web app's
+ * i18n system is not available — we pick a built-in locale table here.
+ *
+ * Supported locales mirror apps/web/src/i18n.ts (en + zh-CN).
+ */
+export interface FirstLaunchDialogStrings {
+  message: string;
+  runLocal: string;
+  connectRemote: string;
+}
+
+const FIRST_LAUNCH_STRINGS: Record<'en' | 'zh-CN', FirstLaunchDialogStrings> = {
+  'en': {
+    message: 'How would you like to use NEO?',
+    runLocal: 'Run NEO on this Mac',
+    connectRemote: 'Connect to a NEO',
+  },
+  'zh-CN': {
+    message: '你想如何使用 NEO？',
+    runLocal: '在这台 Mac 上运行 NEO',
+    connectRemote: '连接到一个 NEO',
+  },
+};
+
+/**
+ * Pick the first-launch dialog strings for the given locale. Falls back to en
+ * for any unsupported locale (including empty / unknown). zh / zh-Hans / zh-Hans-CN
+ * also map to zh-CN; other zh variants (zh-TW, zh-HK) fall back to en until
+ * their translations are added.
+ */
+export function pickFirstLaunchStrings(locale: string): FirstLaunchDialogStrings {
+  const normalized = locale.toLowerCase();
+  if (normalized === 'zh-cn' || normalized === 'zh' || normalized === 'zh-hans' || normalized.startsWith('zh-hans')) {
+    return FIRST_LAUNCH_STRINGS['zh-CN'];
+  }
+  return FIRST_LAUNCH_STRINGS['en'];
 }

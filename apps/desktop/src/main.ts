@@ -17,6 +17,7 @@ import {
   MenuItem,
   Notification as ElectronNotification,
   nativeImage,
+  protocol,
   shell,
   Tray,
 } from 'electron';
@@ -24,6 +25,7 @@ import electronUpdater from 'electron-updater';
 import { loadConfig, startServer } from '@neo/server';
 import { NeoClient } from '@neo/client';
 import type { ConnectionStatus, EventEnvelope } from '@neo/client';
+import { createTunnelTransport, type TunnelTransport } from '@neo/tunnel';
 import {
   createTrayIconPng,
   deepLinkToHash,
@@ -31,7 +33,11 @@ import {
   formatSystemNotification,
   isSafeExternalUrl,
   isSameOrigin,
+  loadStartupMode,
+  pickFirstLaunchStrings,
   resolveWebDir,
+  saveStartupMode,
+  type RemoteMode,
 } from './lib.js';
 import {
   attachUpdaterErrorHandler,
@@ -39,7 +45,20 @@ import {
   createCheckForUpdatesHandler,
 } from './updater.js';
 import type { NeoServer } from '@neo/server';
-import type { ServerEvent } from '@neo/protocol';
+import type { ServerEvent, TunnelRoute } from '@neo/protocol';
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'app',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
 
 const { autoUpdater } = electronUpdater;
 
@@ -64,11 +83,79 @@ let neoServer: NeoServer | null = null;
 let isQuitting = false;
 let shutdownPromise: Promise<void> | null = null;
 let shutdownDone = false;
+/** URL of the web build's index.html; app:// in connect mode, http:// in local mode. */
+let currentWebFileUrl: string | null = null;
+let appProtocolRegistered = false;
+/** In connect mode: true once the OS-notification listener has been started. */
+let notifListenerActive = false;
+let currentNotifConnection: { close: () => void } | null = null;
+let currentNotifTransport: TunnelTransport | null = null;
+let notifCleanupRegistered = false;
+/** In connect mode: the credentials remembered after saveMode is called. */
+let connectCredentials: { serverUrl: string; token: string; tunnel: TunnelRoute | null } | null = null;
+/**
+ * A neo://pair?... URL that arrived via open-url before the window was ready.
+ * Delivered to the renderer once it is created.
+ */
+let pendingPairUrl: string | null = null;
 
 // ───────────────────────────── web directory ─────────────────────────────
 
 function getWebDir(): string {
   return resolveWebDir(app.getAppPath(), process.resourcesPath ?? '', app.isPackaged);
+}
+
+function registerAppProtocol(webDir: string): void {
+  if (appProtocolRegistered) return;
+  const webRoot = path.resolve(webDir);
+  const mimeTypes: Record<string, string> = {
+    '.html': 'text/html',
+    '.js': 'text/javascript',
+    '.mjs': 'text/javascript',
+    '.css': 'text/css',
+    '.json': 'application/json',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.ico': 'image/x-icon',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf',
+    '.wasm': 'application/wasm',
+    '.map': 'application/json',
+    '.webmanifest': 'application/manifest+json',
+  };
+  protocol.handle('app', async (req) => {
+    let filePath: string;
+    try {
+      const url = new URL(req.url);
+      if (url.protocol !== 'app:' || url.host !== 'neo') {
+        return new Response('Forbidden', { status: 403 });
+      }
+      const relativePath = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html';
+      filePath = path.resolve(webRoot, relativePath);
+      if (!filePath.startsWith(webRoot + path.sep)) {
+        return new Response('Forbidden', { status: 403 });
+      }
+    } catch {
+      return new Response('Bad request', { status: 400 });
+    }
+    try {
+      const data = await readFile(filePath);
+      return new Response(new Uint8Array(data), {
+        headers: {
+          'Content-Type': mimeTypes[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream',
+          'Cache-Control': 'no-cache',
+        },
+      });
+    } catch {
+      return new Response('Not found', { status: 404 });
+    }
+  });
+  appProtocolRegistered = true;
 }
 
 // ───────────────────────────── missing web build ─────────────────────────────
@@ -133,6 +220,11 @@ function createWindow(serverUrl: string): void {
   // Show only when the renderer signals it is ready to avoid a flash of blank white.
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    // Deliver any pairing link that arrived before the window existed.
+    if (pendingPairUrl) {
+      mainWindow?.webContents.send('neo:pairLink', pendingPairUrl);
+      pendingPairUrl = null;
+    }
   });
 
   // Block or redirect navigation events.
@@ -327,6 +419,98 @@ function buildAppMenu(): Menu {
 
 // ───────────────────────────── IPC handlers ─────────────────────────────
 
+/**
+ * IPC handlers for connect mode (no embedded server).
+ * Exposes neo:getConfig (throws until credentials are saved), neo:openExternal,
+ * and neo:saveMode (persists credentials and starts the notification listener).
+ */
+function registerConnectIpcHandlers(userData: string, initialMode: RemoteMode): void {
+  if (initialMode.serverUrl && initialMode.token) {
+    connectCredentials = {
+      serverUrl: initialMode.serverUrl,
+      token: initialMode.token,
+      tunnel: initialMode.tunnel ?? null,
+    };
+  }
+
+  ipcMain.handle('neo:getConfig', async (event) => {
+    const senderUrl = event.senderFrame?.url ?? '';
+    if (!senderUrl.startsWith('app://neo/')) {
+      throw new Error('Unauthorized sender');
+    }
+    if (!connectCredentials) throw new Error('Not connected: no credentials saved yet');
+    return { serverUrl: connectCredentials.serverUrl, token: connectCredentials.token };
+  });
+
+  ipcMain.handle('neo:openExternal', (event, url: unknown) => {
+    const senderUrl = event.senderFrame?.url ?? '';
+    if (!senderUrl.startsWith('app://neo/')) {
+      throw new Error('Unauthorized sender');
+    }
+    if (typeof url !== 'string') return;
+    if (!isSafeExternalUrl(url)) return;
+    void shell.openExternal(url);
+  });
+
+  ipcMain.handle('neo:saveMode', (_event, mode: unknown) => {
+    if (!mode || typeof mode !== 'object') return;
+    const m = mode as Record<string, unknown>;
+    if (m['kind'] !== 'remote' || typeof m['serverUrl'] !== 'string' || typeof m['token'] !== 'string') return;
+    const serverUrl = m['serverUrl'];
+    const token = m['token'];
+    let tunnel: TunnelRoute | null = null;
+    if (m['tunnel'] !== null && m['tunnel'] !== undefined) {
+      const value = m['tunnel'];
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        console.error('[NEO desktop] Refusing to save an invalid tunnel route');
+        return;
+      }
+      const route = value as Record<string, unknown>;
+      if (
+        typeof route['serverId'] !== 'string' ||
+        typeof route['publicKey'] !== 'string' ||
+        !Array.isArray(route['lan']) ||
+        !route['lan'].every((address: unknown) => typeof address === 'string') ||
+        (route['relay'] !== undefined && route['relay'] !== null && typeof route['relay'] !== 'string')
+      ) {
+        console.error('[NEO desktop] Refusing to save an invalid tunnel route');
+        return;
+      }
+      tunnel = {
+        serverId: route['serverId'],
+        publicKey: route['publicKey'],
+        lan: [...route['lan']],
+        relay: route['relay'] ?? null,
+      };
+    }
+    const oldTunnel = connectCredentials?.tunnel ?? null;
+    const sameTunnel = oldTunnel === null || tunnel === null
+      ? oldTunnel === tunnel
+      : oldTunnel.serverId === tunnel.serverId &&
+        oldTunnel.publicKey === tunnel.publicKey &&
+        (oldTunnel.relay ?? null) === tunnel.relay &&
+        oldTunnel.lan.length === tunnel.lan.length &&
+        oldTunnel.lan.every((address, index) => address === tunnel.lan[index]);
+    if (
+      connectCredentials?.serverUrl === serverUrl &&
+      connectCredentials.token === token &&
+      sameTunnel
+    ) return;
+
+    stopCurrentNotificationListener();
+    notifListenerActive = false;
+    connectCredentials = { serverUrl, token, tunnel };
+    const saved: RemoteMode = { kind: 'remote', serverUrl, token, tunnel };
+    void saveStartupMode(userData, saved).catch(() => {
+      // Best-effort: if saving fails the credentials are still in memory.
+    });
+    if (!notifListenerActive) {
+      notifListenerActive = true;
+      startNotificationListener(serverUrl, token, tunnel);
+    }
+  });
+}
+
 function registerIpcHandlers(serverUrl: string, ownerToken: string): void {
   ipcMain.handle('neo:getConfig', (event) => {
     // Validate that the request comes from our own renderer window.
@@ -346,6 +530,10 @@ function registerIpcHandlers(serverUrl: string, ownerToken: string): void {
     if (!isSafeExternalUrl(url)) return;
     void shell.openExternal(url);
   });
+
+  // In local mode, saveMode is a no-op: credentials are already baked in at
+  // server start and there is no startup-mode.json to update.
+  ipcMain.handle('neo:saveMode', () => undefined);
 }
 
 // ───────────────────────────── OS notifications ─────────────────────────────
@@ -362,8 +550,43 @@ function focusWindowAtHash(hash: string): void {
   }
 }
 
-function startNotificationListener(serverUrl: string, ownerToken: string): void {
-  const client = new NeoClient({ baseUrl: serverUrl, token: ownerToken });
+function stopCurrentNotificationListener(): void {
+  const connection = currentNotifConnection;
+  const transport = currentNotifTransport;
+  currentNotifConnection = null;
+  currentNotifTransport = null;
+  try {
+    connection?.close();
+  } finally {
+    transport?.close();
+  }
+}
+
+function registerNotificationCleanup(): void {
+  if (notifCleanupRegistered) return;
+  app.on('before-quit', stopCurrentNotificationListener);
+  notifCleanupRegistered = true;
+}
+
+function startNotificationListener(
+  serverUrl: string,
+  ownerToken: string,
+  tunnel: TunnelRoute | null,
+): void {
+  let client: NeoClient;
+  if (tunnel) {
+    const route = { ...tunnel, lan: [...tunnel.lan] };
+    const transport = createTunnelTransport({ route });
+    currentNotifTransport = transport;
+    client = new NeoClient({
+      baseUrl: transport.baseUrl,
+      token: ownerToken,
+      fetch: transport.fetch,
+      WebSocket: transport.WebSocket,
+    });
+  } else {
+    client = new NeoClient({ baseUrl: serverUrl, token: ownerToken });
+  }
 
   // Record the time before connecting so we can detect reminders that fired
   // during the startup gap (after the scheduler tick but before the WS opens).
@@ -399,7 +622,7 @@ function startNotificationListener(serverUrl: string, ownerToken: string): void 
     });
   };
 
-  const connection = client.connect({
+  currentNotifConnection = client.connect({
     onEvent(envelope: EventEnvelope) {
       const event = envelope.event as ServerEvent;
 
@@ -484,8 +707,8 @@ function startNotificationListener(serverUrl: string, ownerToken: string): void 
     reconnect: true,
   });
 
-  // Close when the app quits.
-  app.on('before-quit', () => connection.close());
+  // Close the current connection and its tunnel when the app quits.
+  registerNotificationCleanup();
 }
 
 // ───────────────────────────── app lifecycle ─────────────────────────────
@@ -499,12 +722,29 @@ app.on('second-instance', () => {
   }
 });
 
+// macOS: handle neo://pair?... deep links (the custom URL scheme must be
+// registered in the app's Info.plist via electron-builder's protocols config).
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  if (!url.startsWith('neo://pair')) return;
+  if (mainWindow) {
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send('neo:pairLink', url);
+  } else {
+    // Window not yet created (app launched via the URL); queue for delivery.
+    pendingPairUrl = url;
+  }
+});
+
 app.on('activate', () => {
   // macOS: re-open the window when clicking the dock icon.
   if (mainWindow) {
     mainWindow.show();
   } else if (neoServer) {
     createWindow(neoServer.url);
+  } else if (currentWebFileUrl) {
+    createWindow(currentWebFileUrl);
   }
 });
 
@@ -526,8 +766,47 @@ app.on('before-quit', () => {
 async function main(): Promise<void> {
   await app.whenReady();
 
-  const dataDir = path.join(app.getPath('userData'), 'data');
+  const userData = app.getPath('userData');
   const webDir = getWebDir();
+
+  // ── Determine startup mode (first launch shows a dialog) ────────────────
+  let mode = await loadStartupMode(userData);
+  if (mode === null) {
+    const strings = pickFirstLaunchStrings(app.getLocale());
+    const { response } = await dialog.showMessageBox({
+      type: 'question',
+      buttons: [strings.runLocal, strings.connectRemote],
+      message: strings.message,
+      defaultId: 0,
+      cancelId: 0,
+    });
+    mode = response === 0 ? 'local' : { kind: 'remote' };
+    await saveStartupMode(userData, mode);
+  }
+
+  // ── Connect mode (no embedded server) ───────────────────────────────────
+  if (mode !== 'local') {
+    registerAppProtocol(webDir);
+    currentWebFileUrl = 'app://neo/index.html';
+
+    registerConnectIpcHandlers(userData, mode);
+    Menu.setApplicationMenu(buildAppMenu());
+    createWindow('app://neo/index.html');
+
+    if (mode.serverUrl && mode.token && !notifListenerActive) {
+      // Credentials are already saved — start the OS notification listener
+      // immediately, using the encrypted transport when one was paired.
+      notifListenerActive = true;
+      startNotificationListener(mode.serverUrl, mode.token, mode.tunnel ?? null);
+    } else {
+      // Register cleanup before pairing, ready for the first saved connection.
+      registerNotificationCleanup();
+    }
+    return;
+  }
+
+  // ── Local (embedded server) mode ────────────────────────────────────────
+  const dataDir = path.join(userData, 'data');
 
   const config = loadConfig({
     overrides: {
@@ -569,7 +848,7 @@ async function main(): Promise<void> {
   checkForUpdatesOnReady({ autoUpdater, isPackaged: app.isPackaged });
 
   // Start listening for server events to show OS notifications.
-  startNotificationListener(serverUrl, ownerToken);
+  startNotificationListener(serverUrl, ownerToken, null);
 
   // Graceful shutdown: stop the server when the app quits.
   app.on('before-quit', (event) => {

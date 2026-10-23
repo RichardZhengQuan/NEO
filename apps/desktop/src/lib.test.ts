@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { ReminderFiring, Notification } from '@neo/protocol';
 import {
   resolveWebDir,
@@ -8,7 +8,21 @@ import {
   formatSystemNotification,
   deepLinkToHash,
   createTrayIconPng,
+  parseStartupMode,
+  loadStartupMode,
+  saveStartupMode,
+  pickFirstLaunchStrings,
 } from './lib.js';
+
+// ─────────────────────────── fs/promises mock ───────────────────────────
+
+const fsMock = vi.hoisted(() => ({
+  readFile: vi.fn<(p: string, enc: string) => Promise<string>>().mockRejectedValue(
+    Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+  ),
+  writeFile: vi.fn<(p: string, d: string, enc: string) => Promise<void>>().mockResolvedValue(undefined),
+}));
+vi.mock('node:fs/promises', () => fsMock);
 
 // ───────────────────────────── resolveWebDir ─────────────────────────────
 
@@ -256,4 +270,138 @@ describe('createTrayIconPng', () => {
 
 it('maps timeline message notification links into the web timeline route', () => {
   expect(deepLinkToHash('neo://timeline?messageId=msg_1')).toBe('#/timeline?messageId=msg_1');
+});
+
+// ───────────────────────────── startup mode ─────────────────────────────
+
+describe('parseStartupMode', () => {
+  it('returns "local" for the string literal local', () => {
+    expect(parseStartupMode(JSON.stringify('local'))).toBe('local');
+  });
+
+  it('returns RemoteMode for a remote object with credentials', () => {
+    const mode = { kind: 'remote', serverUrl: 'https://neo.example.com', token: 'tok123' };
+    const result = parseStartupMode(JSON.stringify(mode));
+    expect(result).toEqual(mode);
+  });
+
+  it('returns RemoteMode with only kind when no credentials are set', () => {
+    const result = parseStartupMode(JSON.stringify({ kind: 'remote' }));
+    expect(result).toEqual({ kind: 'remote' });
+  });
+
+  it('returns null for invalid JSON', () => {
+    expect(parseStartupMode('not json')).toBeNull();
+  });
+
+  it('returns null for unrecognised value', () => {
+    expect(parseStartupMode(JSON.stringify({ kind: 'other' }))).toBeNull();
+    expect(parseStartupMode(JSON.stringify(42))).toBeNull();
+    expect(parseStartupMode(JSON.stringify(null))).toBeNull();
+  });
+
+  it('strips unknown fields from RemoteMode', () => {
+    const raw = JSON.stringify({ kind: 'remote', serverUrl: 'https://neo.example.com', token: 'tok', extra: 'ignored' });
+    const result = parseStartupMode(raw);
+    expect(result).not.toBeNull();
+    expect((result as unknown as Record<string, unknown>)['extra']).toBeUndefined();
+  });
+});
+
+describe('loadStartupMode', () => {
+  it('returns null when the file does not exist', async () => {
+    fsMock.readFile.mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    const result = await loadStartupMode('/neo-test');
+    expect(result).toBeNull();
+  });
+
+  it('returns parsed StartupMode from file', async () => {
+    fsMock.readFile.mockResolvedValueOnce(JSON.stringify('local'));
+    const result = await loadStartupMode('/neo-test');
+    expect(result).toBe('local');
+  });
+
+  it('reads from the correct path', async () => {
+    fsMock.readFile.mockResolvedValueOnce(JSON.stringify({ kind: 'remote' }));
+    await loadStartupMode('/my-data');
+    expect(fsMock.readFile).toHaveBeenCalledWith(
+      expect.stringContaining('startup-mode.json'),
+      'utf8',
+    );
+  });
+});
+
+describe('saveStartupMode', () => {
+  it('writes the mode as JSON to startup-mode.json', async () => {
+    await saveStartupMode('/neo-test', 'local');
+    expect(fsMock.writeFile).toHaveBeenCalledWith(
+      expect.stringContaining('startup-mode.json'),
+      JSON.stringify('local'),
+      'utf8',
+    );
+  });
+
+  it('writes RemoteMode with credentials', async () => {
+    const mode = { kind: 'remote' as const, serverUrl: 'https://neo.example.com', token: 'tok' };
+    await saveStartupMode('/neo-test', mode);
+    expect(fsMock.writeFile).toHaveBeenCalledWith(
+      expect.stringContaining('startup-mode.json'),
+      JSON.stringify(mode),
+      'utf8',
+    );
+  });
+});
+
+// ──────────────────────── pickFirstLaunchStrings ────────────────────────
+
+describe('pickFirstLaunchStrings', () => {
+  it('returns en strings for an en locale', () => {
+    const s = pickFirstLaunchStrings('en-US');
+    expect(s.message).toBe('How would you like to use NEO?');
+    expect(s.runLocal).toBe('Run NEO on this Mac');
+    expect(s.connectRemote).toBe('Connect to a NEO');
+  });
+
+  it('returns zh-CN strings for zh-CN', () => {
+    const s = pickFirstLaunchStrings('zh-CN');
+    expect(s.message).toBe('你想如何使用 NEO？');
+    expect(s.runLocal).toBe('在这台 Mac 上运行 NEO');
+    expect(s.connectRemote).toBe('连接到一个 NEO');
+  });
+
+  it('maps bare zh to zh-CN', () => {
+    expect(pickFirstLaunchStrings('zh').message).toBe('你想如何使用 NEO？');
+  });
+
+  it('maps zh-Hans and zh-Hans-CN to zh-CN', () => {
+    expect(pickFirstLaunchStrings('zh-Hans').runLocal).toBe('在这台 Mac 上运行 NEO');
+    expect(pickFirstLaunchStrings('zh-Hans-CN').runLocal).toBe('在这台 Mac 上运行 NEO');
+  });
+
+  it('falls back to en for traditional Chinese locales', () => {
+    expect(pickFirstLaunchStrings('zh-TW').runLocal).toBe('Run NEO on this Mac');
+    expect(pickFirstLaunchStrings('zh-HK').runLocal).toBe('Run NEO on this Mac');
+  });
+
+  it('falls back to en for other locales and for empty / unknown input', () => {
+    expect(pickFirstLaunchStrings('fr-FR').message).toBe('How would you like to use NEO?');
+    expect(pickFirstLaunchStrings('').message).toBe('How would you like to use NEO?');
+    expect(pickFirstLaunchStrings('xx-YY').message).toBe('How would you like to use NEO?');
+  });
+
+  it('is case-insensitive for the locale tag', () => {
+    expect(pickFirstLaunchStrings('ZH-CN').runLocal).toBe('在这台 Mac 上运行 NEO');
+    expect(pickFirstLaunchStrings('zh-cn').runLocal).toBe('在这台 Mac 上运行 NEO');
+  });
+
+  it('returns no stray "Settings" promise in either locale', () => {
+    // Finding B from the Agent review on head 1cc8ad0: the dialog previously
+    // claimed "You can change this later in Settings." but no Settings UI
+    // existed. The fix removed the detail line, so neither locale has it.
+    const en = pickFirstLaunchStrings('en');
+    const zh = pickFirstLaunchStrings('zh-CN');
+    const combined = `${en.message}|${en.runLocal}|${en.connectRemote}|${zh.message}|${zh.runLocal}|${zh.connectRemote}`;
+    expect(combined.toLowerCase()).not.toContain('settings');
+    expect(combined).not.toContain('设置');
+  });
 });
