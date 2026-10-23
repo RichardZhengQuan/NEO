@@ -974,6 +974,95 @@ describe('recall', () => {
     db.close();
   });
 
+  it('Bug 2 strength: non-best contributor becomes sensitive and clean activation × strength drops below minScore (#596 sibling)', async () => {
+    // Sibling of Bug 2: the taint threshold must match the final-score formula.
+    // The final scoring loop multiplies A × strength × (pinned ? pinnedBoost : 1);
+    // the taint check previously used only cleanActivation × pinnedBoost, missing
+    // the `strength` factor.  A node whose clean activation is just above
+    // minScore but whose clean *score* (with strength) is below minScore
+    // surfaced with a stale score built from a now-sensitive contributor.
+    //
+    //   B unpinned: importance 0.5, confidence 0.95.
+    //     strength = 0.5 + 0.25×R + 0.15×0.5 + 0.1×0.95 ≈ 0.92 (R≈1 for a fresh node)
+    //   P sim ≈ 0.456 → a0 ≈ 0.32.  c(P→B) = 0.32 × 1.0 × 0.5 = 0.16  (best contributor)
+    //   Q sim ≈ 0.28  → a0 ≈ 0.1.   c(Q→B) = 0.1  × 1.0 × 0.5 = 0.05
+    //   A[B] = 0.21.  Q's final A[Q] ≈ 0.174 (reachable via back-prop).
+    //
+    //   When Q flips sensitive:
+    //     cleanContrib(B) = c(P→B) = 0.16 ≥ 0.15 (old taint check passes → B survives).
+    //     cleanScore(B)   = 0.16 × 0.92 = 0.1472 < 0.15 (new taint check correctly taints B).
+    //     Final (buggy) score if B survives: 0.21 × 0.92 = 0.1932 (stale, built on tainted Q).
+    const DIMS = 16;
+    const uniq = () => Math.random().toString(36).slice(2, 10);
+    const QUERY_MARKER = `qry${uniq()}`;
+    const B_MARKER     = `bbb${uniq()}`;
+    const P_MARKER     = `ppp${uniq()}`;
+    const Q_MARKER     = `qqq${uniq()}`;
+
+    const mkv = (comp: readonly [number, number][]): Float32Array => {
+      const v = new Float32Array(DIMS);
+      for (const [dim, val] of comp) v[dim] = val;
+      return v;
+    };
+    const qVec  = mkv([[0, 1]]);
+    const pVec  = mkv([[0, 0.456], [1, Math.sqrt(1 - 0.456 * 0.456)]]);
+    const qnVec = mkv([[0, 0.28],  [2, Math.sqrt(1 - 0.28 * 0.28)]]);
+    const bVec  = mkv([[15, 1]]);
+
+    const baseEmbedder = {
+      id: `ctl-bug2str-${DIMS}`,
+      dimensions: DIMS,
+      isLocal: true as const,
+      embed(texts: string[]): Promise<Float32Array[]> {
+        return Promise.resolve(texts.map(t => {
+          if (t.includes(QUERY_MARKER)) return qVec;
+          if (t.includes(B_MARKER)) return bVec;
+          if (t.includes(P_MARKER)) return pVec;
+          if (t.includes(Q_MARKER)) return qnVec;
+          return mkv([]);
+        }));
+      },
+    };
+
+    const { clock } = makeClock();
+    const db = openNeoDatabase(':memory:');
+    const svc = createMemoryService({ db, embedder: baseEmbedder, clock, logger: silentLogger });
+
+    const nodeP = await svc.remember({ kind: 'fact', label: 'P', content: P_MARKER, importance: 0.5 });
+    const nodeQ = await svc.remember({ kind: 'fact', label: 'Q', content: Q_MARKER, importance: 0.5 });
+    const nodeB = await svc.remember({ kind: 'fact', label: 'B', content: B_MARKER, importance: 0.5 });
+    expect(new Set([nodeP.id, nodeQ.id, nodeB.id]).size).toBe(3);
+    await svc.link(nodeP.id, nodeB.id, 'related', 1.0);
+    await svc.link(nodeQ.id, nodeB.id, 'related', 1.0);
+
+    {
+      const baseline = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+      expect(baseline.items.some(r => r.node.id === nodeB.id)).toBe(true);
+    }
+
+    let raceTriggered = false;
+    const racingEmbedder = {
+      id: baseEmbedder.id,
+      dimensions: baseEmbedder.dimensions,
+      async embed(texts: string[], _signal?: AbortSignal) {
+        if (!raceTriggered) {
+          raceTriggered = true;
+          db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(nodeQ.id);
+        }
+        return baseEmbedder.embed(texts);
+      },
+    };
+    svc.setEmbedder(racingEmbedder);
+
+    const result = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+
+    expect(raceTriggered).toBe(true);
+    // Fix: taint check now compares clean × strength × pinnedBoost to minScore,
+    // matching the final scoring formula; B's clean score (0.1472) falls below.
+    expect(result.items.every(r => r.node.id !== nodeB.id)).toBe(true);
+    db.close();
+  });
+
   it('recall via entity links (spreading activation, no lexical overlap)', async () => {
     const { svc } = makeTestService();
     const alice = await svc.remember({ kind: 'entity', label: 'Alice', content: 'A friend', importance: 0.9 });

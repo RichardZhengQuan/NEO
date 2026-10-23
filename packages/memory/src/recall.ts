@@ -453,9 +453,22 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
           if (tainted.has(src)) hasTaint = true;
           else cleanContrib += c;
         }
-        if (hasTaint && Math.min(1, cleanContrib) * (nodes.get(id)?.pinned ? C.pinnedBoost : 1) < minScore) {
-          tainted.add(id);
-          newTaint = true;
+        if (hasTaint) {
+          const node = nodes.get(id);
+          if (node) {
+            // Compare against the SAME formula the final scoring loop uses
+            // (A × strength × (pinned ? pinnedBoost : 1)); otherwise a
+            // destination can keep a stale score when strength drops its
+            // clean activation below minScore, surfacing a memory that
+            // depended on a now-sensitive contributor.
+            const R = retention(node, now);
+            const strength = C.strengthBase + C.weightRetention * R + C.weightImportance * node.importance + C.weightConfidence * node.confidence;
+            const cleanScore = Math.min(1, cleanContrib) * strength * (node.pinned ? C.pinnedBoost : 1);
+            if (cleanScore < minScore) {
+              tainted.add(id);
+              newTaint = true;
+            }
+          }
         }
       }
     }
