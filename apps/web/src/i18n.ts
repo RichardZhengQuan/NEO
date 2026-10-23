@@ -51,6 +51,8 @@ const en: Messages = {
   // ── connect / offline ──
   'connect.title': 'Connect to your NEO',
   'connect.subtitle': 'Your assistant lives on your own computer or server. Tell this device where to find it.',
+  'connect.switch_to_local': 'Run NEO on this Mac',
+  'connect.switch_to_local_help': "If this remote can't be reached, start NEO on this Mac instead. The remote stays untouched.",
   'connect.method': 'How to connect',
   'connect.method_manual': 'Address & token',
   'connect.method_link': 'Pairing link',
@@ -885,6 +887,8 @@ const zhCN: Messages = {
 
   'connect.title': '连接你的 NEO',
   'connect.subtitle': '你的助手运行在你自己的电脑或服务器上，告诉这台设备去哪里找它。',
+  'connect.switch_to_local': '在这台 Mac 上运行 NEO',
+  'connect.switch_to_local_help': '如果无法连接到这个远程 NEO，可以改为在这台 Mac 上运行。远程 NEO 不会受到影响。',
   'connect.method': '连接方式',
   'connect.method_manual': '地址和令牌',
   'connect.method_link': '配对链接',

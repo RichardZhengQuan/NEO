@@ -1,5 +1,6 @@
 import { useState, type ReactElement } from 'react';
 import { Button, EmptyState, Skeleton, useConfirm, useT } from '@neo/ui';
+import { clearCredentials } from '../../connection.js';
 import { useLoader } from '../../hooks/useLoader.js';
 import { errorMessage } from '../../lib/errors.js';
 import { getPlatform } from '../../platform/index.js';
@@ -22,7 +23,10 @@ function DesktopModeSettings(): ReactElement {
         message: t(`desktop.confirm_body_to_${target}`),
         confirmLabel: t('desktop.switch'),
       });
-      if (ok) await window.neoDesktop?.switchMode?.(target);
+      if (ok) {
+        if (target === 'remote') clearCredentials();
+        await window.neoDesktop?.switchMode?.(target);
+      }
     } catch (err) {
       pushToast({ tone: 'error', title: errorMessage(err, t) });
     } finally {

@@ -51,6 +51,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   delete window.neoDesktop;
+  localStorage.removeItem('neo.connection');
   vi.clearAllMocks();
 });
 
@@ -67,6 +68,7 @@ describe('Settings desktop mode', () => {
   });
 
   it('shows this Mac and confirms its memories and phone access before switching to a different NEO', async () => {
+    localStorage.setItem('neo.connection', JSON.stringify({ serverUrl: 'https://old', token: 'old-tok' }));
     renderSection();
     expect(await screen.findByText('NEO on this Mac')).toBeDefined();
     expect(window.neoDesktop!.getMode).toHaveBeenCalledTimes(1);
@@ -76,6 +78,21 @@ describe('Settings desktop mode', () => {
     expect(window.neoDesktop!.switchMode).not.toHaveBeenCalled();
     await confirmSwitch();
     await waitFor(() => expect(window.neoDesktop!.switchMode).toHaveBeenCalledExactlyOnceWith('remote'));
+    expect(localStorage.getItem('neo.connection')).toBeNull();
+  });
+
+  it('clears saved renderer credentials before switching to a new remote NEO', async () => {
+    localStorage.setItem('neo.connection', JSON.stringify({ serverUrl: 'https://old', token: 'old-tok' }));
+    let credentialsAtSwitch: string | null | undefined;
+    vi.mocked(window.neoDesktop!.switchMode!).mockImplementation(async () => {
+      credentialsAtSwitch = localStorage.getItem('neo.connection');
+    });
+    renderSection();
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect to a NEO' }));
+    await confirmSwitch();
+    await waitFor(() => expect(window.neoDesktop!.switchMode).toHaveBeenCalledExactlyOnceWith('remote'));
+    expect(localStorage.getItem('neo.connection')).toBeNull();
+    expect(credentialsAtSwitch).toBeNull();
   });
 
   it('shows the remote address and confirms before running NEO on this Mac', async () => {

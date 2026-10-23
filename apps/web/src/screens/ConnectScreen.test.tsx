@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
   cleanup: vi.fn(),
   onLink: null as ((url: string) => void) | null,
-  platform: { kind: 'browser' as 'browser' | 'capacitor', scanQrCode: vi.fn(), watchPairLinks: vi.fn(), setLocale: vi.fn() },
+  platform: { kind: 'browser' as 'browser' | 'capacitor' | 'electron', scanQrCode: vi.fn(), watchPairLinks: vi.fn(), setLocale: vi.fn() },
 }));
 vi.mock('../platform/index.js', () => ({ getPlatform: () => mocks.platform }));
 vi.mock('../actions/session.js', () => ({ connectWith: mocks.connect }));
@@ -47,7 +47,11 @@ beforeEach(() => {
   mocks.connect.mockResolvedValue(undefined);
   useSession.setState({ connectHint: null });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  delete window.neoDesktop;
+  vi.restoreAllMocks();
+});
 
 describe('ConnectScreen pairing', () => {
   it('makes a pasted link primary in browsers and keeps credentials collapsed', async () => {
@@ -110,6 +114,65 @@ describe('ConnectScreen pairing', () => {
       const messages = buildMessages(locale, appDictionaries);
       for (const outcome of outcomes) expect(messages[pairingOutcomeKey(outcome)]).toBeTruthy();
     }
+  });
+});
+
+describe('electron local-mode escape hatch', () => {
+  beforeEach(() => {
+    window.neoDesktop = {
+      platform: 'darwin',
+      getConfig: vi.fn().mockResolvedValue({ serverUrl: 'https://remote.example.com', token: 'tok' }),
+      openExternal: vi.fn(),
+      switchMode: vi.fn().mockResolvedValue(undefined),
+    };
+  });
+
+  it('switches from ConnectScreen to local mode without confirmation on electron', async () => {
+    mocks.platform.kind = 'electron';
+    const confirm = vi.spyOn(window, 'confirm');
+    show();
+    fireEvent.click(screen.getByRole('button', { name: 'Run NEO on this Mac' }));
+    await act(async () => undefined);
+    expect(window.neoDesktop!.switchMode).toHaveBeenCalledExactlyOnceWith('local');
+    expect(confirm).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('hides the ConnectScreen action on electron when the desktop bridge is missing', () => {
+    mocks.platform.kind = 'electron';
+    const { rerender } = show();
+    expect(screen.getByRole('button', { name: 'Run NEO on this Mac' })).toBeTruthy();
+    delete window.neoDesktop;
+    rerender(<I18nProvider locale="en" messages={appDictionaries}><ConnectScreen /></I18nProvider>);
+    expect(screen.queryByRole('button', { name: 'Run NEO on this Mac' })).toBeNull();
+  });
+
+  it('hides the ConnectScreen action in browsers even when the desktop bridge is present', () => {
+    mocks.platform.kind = 'electron';
+    const { rerender } = show();
+    expect(screen.getByRole('button', { name: 'Run NEO on this Mac' })).toBeTruthy();
+    mocks.platform.kind = 'browser';
+    rerender(<I18nProvider locale="en" messages={appDictionaries}><ConnectScreen /></I18nProvider>);
+    expect(screen.queryByRole('button', { name: 'Run NEO on this Mac' })).toBeNull();
+    expect(window.neoDesktop!.switchMode).not.toHaveBeenCalled();
+  });
+
+  it('switches from OfflineScreen to local mode on electron', async () => {
+    mocks.platform.kind = 'electron';
+    showOffline();
+    fireEvent.click(screen.getByRole('button', { name: 'Run NEO on this Mac' }));
+    await act(async () => undefined);
+    expect(window.neoDesktop!.switchMode).toHaveBeenCalledExactlyOnceWith('local');
+  });
+
+  it('shows a rejected ConnectScreen mode switch inline', async () => {
+    mocks.platform.kind = 'electron';
+    vi.mocked(window.neoDesktop!.switchMode!).mockRejectedValue(new Error('Could not save startup mode'));
+    show();
+    fireEvent.click(screen.getByRole('button', { name: 'Run NEO on this Mac' }));
+    await act(async () => undefined);
+    expect(window.neoDesktop!.switchMode).toHaveBeenCalledExactlyOnceWith('local');
+    expect(screen.getByRole('alert').textContent).toBe('Could not save startup mode');
   });
 });
 
