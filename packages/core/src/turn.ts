@@ -89,6 +89,7 @@ import type { ConfirmationManager, ConfirmationOutcome } from './confirmations.j
 import { EventQueue } from './event-queue.js';
 import { trimHistory } from './history.js';
 import { buildContextBlock, buildSystemPrompt } from './prompt.js';
+import { patchWidgetBlock } from './ui-actions.js';
 
 /** Streaming text is persisted at most this often; structural parts and step ends are persisted immediately. */
 const PERSIST_INTERVAL_MS = 250;
@@ -817,6 +818,13 @@ class TurnRunner {
     this.addToolResult(call, result, def);
     if (call.name === 'forget' && !result.isError) {
       this.services.patchConversationWidgets(this.conversationId, result);
+      for (let i = 0; i < this.parts.length; i++) {
+        const p = this.parts[i]!;
+        if (p.type !== 'ui') continue;
+        const patched = patchWidgetBlock(p.block, result.output);
+        if (!patched) continue;
+        this.replacePart(i, { ...p, block: patched });
+      }
     }
   }
 
