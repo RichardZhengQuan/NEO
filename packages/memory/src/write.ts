@@ -91,6 +91,8 @@ export class WriteSession {
   readonly created = new Set<string>();
   readonly updated = new Set<string>();
   readonly deleted = new Set<string>();
+  /** Nodes whose embedding failed this write and whose vector row was deleted. */
+  readonly vectorClears = new Set<string>();
   /** Vectors of entity names, computed before the transaction, by normalized name. */
   readonly entityVectors = new Map<string, Float32Array | null>();
   missingVectors = false;
@@ -127,6 +129,8 @@ export class WriteSession {
       return model;
     }
     this.ctx.db.prepare('UPDATE memory_nodes SET embedding_model = NULL WHERE id = ?').run(id);
+    this.ctx.db.prepare('DELETE FROM memory_vectors WHERE node_id = ?').run(id);
+    this.vectorClears.add(id);
     this.missingVectors = true;
     return null;
   }
@@ -158,6 +162,7 @@ export function runWrite<T>(ctx: MemoryContext, now: number, fn: (s: WriteSessio
   const result = ctx.db.transaction(() => fn(s));
   for (const [id, vec] of s.staged) if (!s.deleted.has(id)) ctx.vectors.remember(vectorModel(vec) ?? s.model, id, vec);
   for (const id of s.deleted) ctx.vectors.drop(id);
+  for (const id of s.vectorClears) if (!s.deleted.has(id)) ctx.vectors.drop(id);
   if (s.missingVectors) void ctx.vectors.reembedStale(ctx.embedder);
   const fresh = new Set([...s.created, ...s.deleted]);
   const updated = [...s.updated].filter((id) => !fresh.has(id));

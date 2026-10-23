@@ -256,3 +256,48 @@ describe('recall privacy under concurrent writes', () => {
     }
   });
 });
+
+describe('stale-vector on failed update', () => {
+  it('cleared embedding_model does not surface the stale vector in semantic recall', async () => {
+    const { db, memory: svc } = setup(new HashingEmbedder(64));
+
+    // 1. Remember a fact with a known embedding.
+    // Label 'Zeta' is chosen deliberately: it does not contain any non-stopword
+    // from the recall query 'alpha only' (only non-stopword is 'alpha'), so that
+    // after the vector is cleared, FTS cannot resurrect the node via its label.
+    const node = await svc.remember({
+      kind: 'fact', label: 'Zeta', content: 'alpha only', source: { by: 'user' },
+    });
+    const id = node.id;
+
+    // Precondition: the node has an embedding_model and a vector row.
+    expect(db.prepare('SELECT embedding_model FROM memory_nodes WHERE id = ?').get(id)).toMatchObject({ embedding_model: expect.stringContaining('hash') });
+    expect(db.prepare('SELECT * FROM memory_vectors WHERE node_id = ?').get(id)).not.toBeUndefined();
+
+    // 2. Wrap the embedder so that embedding 'beta only' returns an empty array,
+    //    causing embedTexts to produce a null vector and writeVector to clear embedding_model.
+    const inner = new HashingEmbedder(64);
+    const failing: Embedder = {
+      id: inner.id,
+      dimensions: inner.dimensions,
+      embed: async (texts: string[]) => {
+        if (texts.some(t => t.includes('beta only'))) return [];
+        return inner.embed(texts);
+      },
+    };
+    svc.setEmbedder(failing);
+
+    // 3. Update the node's content — the new embedding will fail.
+    await svc.update(id, { content: 'beta only' });
+
+    // 4. Assert embedding_model was cleared.
+    expect(db.prepare('SELECT embedding_model FROM memory_nodes WHERE id = ?').get(id)).toEqual({ embedding_model: null });
+
+    // 5. Assert the stale vector row was deleted from memory_vectors.
+    expect(db.prepare('SELECT * FROM memory_vectors WHERE node_id = ?').get(id)).toBeUndefined();
+
+    // 6. Assert recall for the old text does NOT return this node.
+    const result = await svc.recall({ text: 'alpha only', reinforce: false });
+    expect(result.items.map(item => item.node.id)).not.toContain(id);
+  });
+});
