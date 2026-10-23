@@ -176,6 +176,7 @@ afterEach(() => {
   vi.clearAllMocks();
   vi.resetModules();
   electron.app.removeAllListeners();
+  electron.app.isPackaged = false;
   clientMock.onStatus = null;
   clientMock.onEvent = null;
   clientMock.connectionCloses = [];
@@ -830,6 +831,17 @@ describe('desktop connect mode', () => {
     await expect(ipcHandler('neo:getMode')(appEvent)).resolves.toStrictEqual({
       kind: 'remote', serverUrl: 'https://saved.example',
     });
+  });
+
+  it('checks for updates exactly once on packaged connect-mode startup with saved credentials', async () => {
+    const { default: { autoUpdater } } = await import('electron-updater');
+    electron.app.isPackaged = true;
+    vi.mocked(autoUpdater.checkForUpdatesAndNotify).mockResolvedValueOnce(null);
+
+    await enterConnectMode({ kind: 'remote', serverUrl: 'https://saved.example', token: 'private-token' });
+
+    expect(autoUpdater.on).toHaveBeenCalledTimes(1);
+    expect(autoUpdater.checkForUpdatesAndNotify).toHaveBeenCalledTimes(1);
   });
 
   it('neo:switchMode persists local mode then relaunches and quits from connect mode', async () => {

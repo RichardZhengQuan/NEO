@@ -844,6 +844,8 @@ async function main(): Promise<void> {
       // Register cleanup before pairing, ready for the first saved connection.
       registerNotificationCleanup();
     }
+    attachUpdaterErrorHandler({ autoUpdater });
+    checkForUpdatesOnReady({ autoUpdater, isPackaged: app.isPackaged });
     return;
   }
 
