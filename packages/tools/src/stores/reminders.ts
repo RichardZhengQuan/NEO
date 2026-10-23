@@ -225,7 +225,17 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
       // Preserve the original occurrence time so markFired can distinguish a
       // snoozed redelivery from a true occurrence.  If the reminder is already
       // snoozed, keep the first snooze's anchor rather than overwriting it.
-      const snoozedDueAt = toNumOrNull(r.snoozed_due_at) ?? existing.dueAt;
+      const existingSnoozedDueAt = toNumOrNull(r.snoozed_due_at);
+      // Only mark as a snoozed redelivery when the reminder has already been delivered
+      // (lastFiredAt is set).  A pre-fire snooze just moves the due time; it must not
+      // set snoozed_due_at so that markFired treats the eventual delivery as a normal
+      // first occurrence rather than a redelivery, which would restore the original
+      // dueAt (now in the past) and cause a double notification.
+      const snoozedDueAt = existingSnoozedDueAt !== null
+        ? existingSnoozedDueAt
+        : existing.lastFiredAt !== null
+          ? existing.dueAt
+          : null;
       const updated: Reminder = { ...existing, dueAt, status: 'scheduled', updatedAt: now };
       db.prepare('UPDATE reminders SET due_at = ?, snoozed_due_at = ?, status = ?, updated_at = ? WHERE id = ?').run(dueAt, snoozedDueAt, 'scheduled', now, id);
       emit({ type: 'upsert', reminder: updated });
@@ -322,10 +332,15 @@ export function createReminderStore(db: NeoDatabase, options: { clock?: Clock; d
           }
         } else {
           const firedCount = existing.firedCount + 1;
+          const anchorAt = toNum(r.anchor_at);
           // Advance past both the occurrence and the firing time, so a long downtime
           // collapses every missed occurrence into this one firing.
+          // Also advance past the anchor: a pre-fire snooze can fire before the anchor
+          // (e.g. snooze to 08:10 on a 09:00 anchor).  Without the anchor in the max,
+          // nextOccurrence(afterMs=08:10) returns anchorMs=09:00 (the same occurrence),
+          // which gets consumed as a second firing and silently drops a series occurrence.
           const nextDueAt = existing.recurrence
-            ? nextOccurrence(existing.recurrence, toNum(r.anchor_at), Math.max(firedAt, existing.dueAt), existing.timezone, firedCount)
+            ? nextOccurrence(existing.recurrence, anchorAt, Math.max(firedAt, existing.dueAt, anchorAt), existing.timezone, firedCount)
             : null;
           const reminder: Reminder = {
             ...existing,
