@@ -389,6 +389,7 @@ export class GeminiAdapter implements ProviderAdapter {
 
   async *chat(request: ChatRequest): AsyncIterable<ChatStreamEvent> {
     throwIfAborted(request.signal);
+    const secrets = this.captureSecrets();
     const headers = this.headers();
     const model = modelPath(request.model);
     const body = this.buildBody(request, model);
@@ -407,9 +408,9 @@ export class GeminiAdapter implements ProviderAdapter {
         { signal: request.signal, sleep: this.options.sleep, discard: (r) => void r.body?.cancel().catch(() => {}) },
       );
     } catch (err) {
-      throw asCancelled(err, request.signal) ?? this.networkError(err);
+      throw asCancelled(err, request.signal) ?? this.networkError(err, secrets);
     }
-    if (!response.ok) throw await this.httpError(response, request.signal);
+    if (!response.ok) throw await this.httpError(response, request.signal, secrets);
     if (!response.body) throw new NeoError('provider_error', 'Gemini returned an empty response.', { retryable: true });
 
     let thought = '';
@@ -430,7 +431,7 @@ export class GeminiAdapter implements ProviderAdapter {
         } catch {
           continue;
         }
-        if (chunk['error']) throw this.streamError(chunk['error']);
+        if (chunk['error']) throw this.streamError(chunk['error'], secrets);
         if (isPlainObject(chunk['usageMetadata'])) usage = toUsage(chunk['usageMetadata']);
         if (isPlainObject(chunk['promptFeedback']) && chunk['promptFeedback']['blockReason']) blocked = true;
 
@@ -485,7 +486,7 @@ export class GeminiAdapter implements ProviderAdapter {
       const cancelled = asCancelled(err, request.signal);
       if (cancelled) throw cancelled;
       if (err instanceof NeoError) throw err;
-      throw new NeoError('provider_error', this.clean(`The connection to Gemini was interrupted: ${describeNetworkError(err)}`), { retryable: true, cause: err });
+      throw new NeoError('provider_error', this.clean(`The connection to Gemini was interrupted: ${describeNetworkError(err)}`, secrets), { retryable: true, cause: err });
     }
 
     throwIfAborted(request.signal);
@@ -545,20 +546,21 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   async listModels(signal?: AbortSignal): Promise<ModelInfo[]> {
+    const secrets = this.captureSecrets();
     const headers = this.headers();
     const models: ModelInfo[] = [];
     this.listedCapabilities.clear();
     let pageToken: string | undefined;
     for (let page = 0; page < 20; page++) {
       const url = `${this.baseUrl}/models?pageSize=200${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
-      const json = await readModelData(await this.get(url, headers, signal), 'Gemini', 'models', signal);
+      const json = await readModelData(await this.get(url, headers, signal, secrets), 'Gemini', 'models', signal);
       for (const m of (json['models'] as unknown[]).filter(isPlainObject)) {
         const methods = Array.isArray(m['supportedGenerationMethods']) ? (m['supportedGenerationMethods'] as string[]) : [];
         const generatesContent = methods.includes('generateContent') || methods.includes('streamGenerateContent');
         const embeddings = methods.includes('embedContent') || methods.includes('batchEmbedContents');
         const id = typeof m['name'] === 'string' ? modelPath(m['name']) : '';
         if (!id) continue;
-        if (this.clean(id) !== id) throw new NeoError('provider_error', 'Gemini returned invalid model data.');
+        if (this.clean(id, secrets) !== id) throw new NeoError('provider_error', 'Gemini returned invalid model data.');
         const caps = this.capabilities(id);
         if (!generatesContent && !embeddings && !(caps.image && methods.includes('predict')) && !(caps.video && methods.includes('predictLongRunning'))) continue;
         const text = generatesContent && caps.text !== false;
@@ -577,18 +579,19 @@ export class GeminiAdapter implements ProviderAdapter {
         models.push({
           id,
           provider: this.id,
-          label: this.clean(typeof m['displayName'] === 'string' ? m['displayName'] : id),
+          label: this.clean(typeof m['displayName'] === 'string' ? m['displayName'] : id, secrets),
           capabilities,
         });
       }
       pageToken = typeof json['nextPageToken'] === 'string' ? json['nextPageToken'] || undefined : undefined;
-      if (pageToken && this.clean(pageToken) !== pageToken) throw new NeoError('provider_error', 'Gemini returned invalid model data.');
+      if (pageToken && this.clean(pageToken, secrets) !== pageToken) throw new NeoError('provider_error', 'Gemini returned invalid model data.');
       if (!pageToken) break;
     }
     return models;
   }
 
   async embed(request: EmbedRequest): Promise<number[][]> {
+    const secrets = this.captureSecrets();
     const headers = { ...this.headers(), 'content-type': 'application/json' };
     const model = modelPath(request.model);
     const body = { requests: request.texts.map((text) => ({ model: `models/${model}`, content: { parts: [{ text }] } })) };
@@ -596,9 +599,9 @@ export class GeminiAdapter implements ProviderAdapter {
     try {
       response = await this.fetchImpl(`${this.baseUrl}/models/${model}:batchEmbedContents`, { method: 'POST', headers, body: JSON.stringify(body), signal: request.signal });
     } catch (err) {
-      throw asCancelled(err, request.signal) ?? this.networkError(err);
+      throw asCancelled(err, request.signal) ?? this.networkError(err, secrets);
     }
-    if (!response.ok) throw await this.httpError(response, request.signal);
+    if (!response.ok) throw await this.httpError(response, request.signal, secrets);
     const json = await response.json().catch((err: unknown) => {
       throw asCancelled(err, request.signal) ?? err;
     });
@@ -624,30 +627,34 @@ export class GeminiAdapter implements ProviderAdapter {
     return headers;
   }
 
-  private async get(url: string, headers: Record<string, string>, signal: AbortSignal | undefined): Promise<Response> {
+  private async get(url: string, headers: Record<string, string>, signal: AbortSignal | undefined, secrets: (string | undefined)[]): Promise<Response> {
     let response: Response;
     try {
       response = await this.fetchImpl(url, { headers, signal });
     } catch (err) {
-      throw asCancelled(err, signal) ?? this.networkError(err);
+      throw asCancelled(err, signal) ?? this.networkError(err, secrets);
     }
-    if (!response.ok) throw await this.httpError(response, signal);
+    if (!response.ok) throw await this.httpError(response, signal, secrets);
     return response;
   }
 
-  private clean(text: string): string {
+  private captureSecrets(): (string | undefined)[] {
     const secrets: (string | undefined)[] = [resolveApiKey(this.config, this.options)];
     for (const [name, value] of Object.entries(this.config.headers ?? {})) {
       if (isSecretProviderHeader(name)) secrets.push(value, value.replace(/^bearer\s+/i, ''));
     }
+    return secrets;
+  }
+
+  private clean(text: string, secrets: (string | undefined)[]): string {
     return redact(text, secrets);
   }
 
-  private networkError(err: unknown): NeoError {
-    return new NeoError('provider_error', this.clean(`Can't reach Gemini at ${hostOf(this.baseUrl)}: ${describeNetworkError(err)}`), { retryable: true, cause: err });
+  private networkError(err: unknown, secrets: (string | undefined)[]): NeoError {
+    return new NeoError('provider_error', this.clean(`Can't reach Gemini at ${hostOf(this.baseUrl)}: ${describeNetworkError(err)}`, secrets), { retryable: true, cause: err });
   }
 
-  private async httpError(response: Response, signal?: AbortSignal): Promise<NeoError> {
+  private async httpError(response: Response, signal: AbortSignal | undefined, secrets: (string | undefined)[]): Promise<NeoError> {
     const text = await response.text().catch((err: unknown) => {
       const cancelled = asCancelled(err, signal);
       if (cancelled) throw cancelled;
@@ -655,7 +662,7 @@ export class GeminiAdapter implements ProviderAdapter {
     });
     const { message, reason, retryDelayMs } = parseErrorBody(text);
     const status = response.status;
-    const detail = this.clean(`Gemini error (HTTP ${status})${message ? `: ${message}` : ''}`);
+    const detail = this.clean(`Gemini error (HTTP ${status})${message ? `: ${message}` : ''}`, secrets);
     if (status === 401 || status === 403 || reason === 'API_KEY_INVALID' || /api key not valid/i.test(message)) {
       return new NeoError('provider_auth', detail, { details: { status } });
     }
@@ -666,12 +673,12 @@ export class GeminiAdapter implements ProviderAdapter {
     return new NeoError('provider_error', detail, { retryable: status >= 500, details: { status } });
   }
 
-  private streamError(error: unknown): NeoError {
+  private streamError(error: unknown, secrets: (string | undefined)[]): NeoError {
     const message = isPlainObject(error) && typeof error['message'] === 'string' ? error['message'] : JSON.stringify(error);
     const code = isPlainObject(error) && typeof error['code'] === 'number' ? error['code'] : 0;
     const status = isPlainObject(error) && typeof error['status'] === 'string' ? error['status'] : '';
     const { reason, retryDelayMs } = parseErrorBody(JSON.stringify({ error }));
-    const detail = this.clean(`Gemini error: ${message}`);
+    const detail = this.clean(`Gemini error: ${message}`, secrets);
     if (code === 401 || code === 403 || status === 'UNAUTHENTICATED' || status === 'PERMISSION_DENIED' || reason === 'API_KEY_INVALID' || /api key not valid/i.test(message)) {
       return new NeoError('provider_auth', detail, { details: { status: code } });
     }
