@@ -943,6 +943,53 @@ describe('memory', () => {
     // The current turn's assistant message is not affected
     expect(h.conversations.getMessage(message.id)).toBeDefined();
   });
+
+  it('patches memory widgets remembered and forgotten in the same turn', async () => {
+    const node = { id: 'mem_1', kind: 'fact' as const, label: 'Likes tea', status: 'active' as const };
+    const tools: ToolDefinition[] = [
+      {
+        name: 'remember',
+        title: 'Remember',
+        description: 'Remember a fact.',
+        inputSchema: z.object({}),
+        risk: 'write',
+        defaultPermission: 'auto',
+        async execute() {
+          return { output: { node }, ui: [{ type: 'memory', nodes: [node] }] };
+        },
+      },
+      {
+        name: 'forget',
+        title: 'Forget memories',
+        description: 'Forget memories.',
+        inputSchema: z.object({ ids: z.array(z.string()) }),
+        risk: 'dangerous',
+        defaultPermission: 'auto',
+        async execute() {
+          return { output: { forgotten: [node.label], ids: [node.id] }, summary: 'Forgot 1 memory' };
+        },
+      },
+    ];
+    const h = harness({ tools });
+    h.model.script(
+      [ev.call('r1', 'remember', {}), ev.done('tool_use')],
+      [ev.call('f1', 'forget', { ids: [node.id] }), ev.done('tool_use')],
+      [ev.text('Done.'), ev.done()],
+    );
+    const { handle, events, message } = await runTurn(h, 'Remember that I like tea, then forget it.');
+
+    expect(h.tools.executed.map((call) => call.name)).toEqual(['remember', 'forget']);
+    const reloaded = h.conversations.messages(h.conv.id).find((m) => m.id === message.id)!;
+    expect(reloaded).toMatchObject({ role: 'assistant', status: 'complete', turnId: handle.turnId });
+    const memPart = reloaded.parts.find((p): p is UIPart => p.type === 'ui' && p.toolCallId === 'r1');
+    expect(memPart?.block).toMatchObject({ type: 'memory', nodes: [{ ...node, status: 'forgotten' }] });
+
+    const patches = events.filter((e) => e.type === 'part.added' && e.messageId === message.id && e.part.type === 'ui' && e.part.id === memPart?.id);
+    expect(patches).toHaveLength(2);
+    expect(patches[0]).toMatchObject({ part: { block: { type: 'memory', nodes: [node] } } });
+    expect(patches[1]).toMatchObject({ part: { block: { type: 'memory', nodes: [{ ...node, status: 'forgotten' }] } } });
+    expect(replayLikeClient(events, message.id)).toEqual(reloaded.parts);
+  });
 });
 
 // ───────────────────────────── 8. unused titles ─────────────────────────────
