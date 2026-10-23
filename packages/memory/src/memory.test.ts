@@ -890,6 +890,90 @@ describe('recall', () => {
     db.close();
   });
 
+  it('Bug 2 sibling: sub-threshold non-best contributor becomes sensitive and B keeps a stale score (#596 sibling)', async () => {
+    // Sibling of Bug 2: a non-best contributor that stays sub-threshold even
+    // after back-propagation is in allContrib[B] but NOT in best (P is B's
+    // best.from) and NOT in reachable (A[Q] < minScore).  Before this fix the
+    // freshness pass omitted Q from checkIds, so the Bug 2 cascade read
+    // tainted.has(Q) as false and treated the sensitive source as clean.
+    //
+    //   P: sim ≈ 0.384 → a0 ≈ 0.23   (reachable).  c(P→B) = 0.23 × 1.0 × 0.5 = 0.115.
+    //   Q: sim ≈ 0.26  → a0 ≈ 0.075  (sub-threshold).  c(Q→B) = 0.075 × 1.0 × 0.5 = 0.0375.
+    //   A[B] = 0.1525 (reachable, barely).  After one back-prop hop A[Q] ≈ 0.129 < 0.15 (still sub-threshold).
+    //
+    // When Q becomes sensitive: clean contribution to B is c(P→B) = 0.115 < minScore 0.15.
+    // Current source leaves B surviving with score ≈ 0.15; fix drops B.
+    const DIMS = 16;
+    const uniq = () => Math.random().toString(36).slice(2, 10);
+    const QUERY_MARKER = `qry${uniq()}`;
+    const B_MARKER     = `bbb${uniq()}`;
+    const P_MARKER     = `ppp${uniq()}`;
+    const Q_MARKER     = `qqq${uniq()}`;
+
+    const mkv = (comp: readonly [number, number][]): Float32Array => {
+      const v = new Float32Array(DIMS);
+      for (const [dim, val] of comp) v[dim] = val;
+      return v;
+    };
+    const qVec = mkv([[0, 1]]);
+    const pVec = mkv([[0, 0.384], [1, Math.sqrt(1 - 0.384 * 0.384)]]);  // cos(pVec,qVec)=0.384 → a0≈0.23
+    const qnVec = mkv([[0, 0.26], [2, Math.sqrt(1 - 0.26 * 0.26)]]);    // cos(qnVec,qVec)=0.26  → a0≈0.075
+    const bVec = mkv([[15, 1]]);                                          // orthogonal to query
+
+    const baseEmbedder = {
+      id: `ctl-bug2sib-${DIMS}`,
+      dimensions: DIMS,
+      isLocal: true as const,
+      embed(texts: string[]): Promise<Float32Array[]> {
+        return Promise.resolve(texts.map(t => {
+          if (t.includes(QUERY_MARKER)) return qVec;
+          if (t.includes(B_MARKER)) return bVec;
+          if (t.includes(P_MARKER)) return pVec;
+          if (t.includes(Q_MARKER)) return qnVec;
+          return mkv([]);
+        }));
+      },
+    };
+
+    const { clock } = makeClock();
+    const db = openNeoDatabase(':memory:');
+    const svc = createMemoryService({ db, embedder: baseEmbedder, clock, logger: silentLogger });
+
+    const nodeP = await svc.remember({ kind: 'fact', label: 'P', content: P_MARKER, importance: 0.5 });
+    const nodeQ = await svc.remember({ kind: 'fact', label: 'Q', content: Q_MARKER, importance: 0.5 });
+    const nodeB = await svc.remember({ kind: 'fact', label: 'B', content: B_MARKER, importance: 1.0 });
+    expect(new Set([nodeP.id, nodeQ.id, nodeB.id]).size).toBe(3);
+    await svc.link(nodeP.id, nodeB.id, 'related', 1.0);
+    await svc.link(nodeQ.id, nodeB.id, 'related', 1.0);
+
+    {
+      const baseline = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+      expect(baseline.items.some(r => r.node.id === nodeB.id)).toBe(true);
+    }
+
+    let raceTriggered = false;
+    const racingEmbedder = {
+      id: baseEmbedder.id,
+      dimensions: baseEmbedder.dimensions,
+      async embed(texts: string[], _signal?: AbortSignal) {
+        if (!raceTriggered) {
+          raceTriggered = true;
+          db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(nodeQ.id);
+        }
+        return baseEmbedder.embed(texts);
+      },
+    };
+    svc.setEmbedder(racingEmbedder);
+
+    const result = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
+
+    expect(raceTriggered).toBe(true);
+    // Fix: subThresholdContribIds adds Q to checkIds; freshness marks Q tainted;
+    // Bug 2 cascade sees Q tainted, cleanContrib(B) = c(P→B) = 0.115 < 0.15 → B tainted.
+    expect(result.items.every(r => r.node.id !== nodeB.id)).toBe(true);
+    db.close();
+  });
+
   it('recall via entity links (spreading activation, no lexical overlap)', async () => {
     const { svc } = makeTestService();
     const alice = await svc.remember({ kind: 'entity', label: 'Alice', content: 'A friend', importance: 0.9 });

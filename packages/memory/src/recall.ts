@@ -383,17 +383,29 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   // spreading traversed a now-disallowed memory.
   const nonStyleIds = reachable.filter((id) => !styleIds.has(id));
   const nonStyleIdSet = new Set(nonStyleIds);
-  // Sub-threshold nodes (A[id] < minScore) that appear as back-pointer sources
-  // in `best` were never placed in `reachable`, so they were never checked against
-  // candidateWhere.  A race between the embedding await (line ~234) and a concurrent
-  // DB write can flip their eligibility; include them in the freshness check so the
-  // cascade actually reaches every tainted destination.
-  // Bug 1 fix: seeds are no longer excluded — a sub-threshold seed that is
-  // best[B].from was silently skipped by the old `!seeds.has(id)` guard.
-  const subThresholdFromIds = [...best.values()]
-    .map((b) => b.from)
-    .filter((id) => !nonStyleIdSet.has(id));
-  const checkIds = [...new Set([...nonStyleIds, ...subThresholdFromIds])];
+  // Sub-threshold contributors (A[id] < minScore) that fed activation into a
+  // reachable destination were never placed in `reachable`, so candidateWhere
+  // was never applied to them.  A race between the embedding await (line
+  // ~234) and a concurrent DB write can flip their eligibility; include every
+  // such contributor in the freshness check so the Bug 2 cascade below can
+  // see them.
+  //
+  // - Bug 1 (#596): a sub-threshold seed that is best[B].from was silently
+  //   excluded from the old `[...best.values()].map(b => b.from).filter(id =>
+  //   !seeds.has(id) && !nonStyleIdSet.has(id))` — those seeds are now
+  //   included via allContrib (every contributor to a non-seed destination
+  //   lands there, seeds included).
+  // - Bug 2 sibling (#596): a non-best contributor that stays sub-threshold
+  //   even after back-propagation is in `allContrib[dst]` but not in `best`.
+  //   Without it in the check list, the cascade reads `tainted.has(src)` as
+  //   false and treats the sensitive source as clean.
+  const subThresholdContribIds = new Set<string>();
+  for (const srcMap of allContrib.values()) {
+    for (const srcId of srcMap.keys()) {
+      if (!nonStyleIdSet.has(srcId)) subThresholdContribIds.add(srcId);
+    }
+  }
+  const checkIds = [...new Set([...nonStyleIds, ...subThresholdContribIds])];
   if (checkIds.length) {
     const freshWhere = candidateWhere(query, now);
     const eligibleRows = chunked(checkIds, (ph, chunk) =>
