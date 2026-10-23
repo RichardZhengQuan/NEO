@@ -42,13 +42,12 @@ afterEach(() => {
 });
 
 describe('openPairLink', () => {
-  it('ignores pairing links in Electron without a request or toast', () => {
+  it('processes pairing links in Electron and shows a localized success toast', async () => {
     platform.kind = 'electron';
-    const original = useSession.getState();
     openPairLink(pairingLink());
-    expect(globalThis.fetch).not.toHaveBeenCalled();
-    expect(useSession.getState()).toBe(original);
-    expect(useToasts.getState().toasts).toEqual([]);
+    await vi.waitFor(() => expect(useToasts.getState().toasts).toHaveLength(1));
+    expect(useSession.getState()).toMatchObject({ phase: 'ready', serverUrl: 'https://paired.example' });
+    expect(useToasts.getState().toasts[0]).toMatchObject({ tone: 'success', title: appDictionaries['zh-CN']['pairing.ok'] });
   });
 
   it('retains the connected session after a failed background claim and shows a localized toast', async () => {
