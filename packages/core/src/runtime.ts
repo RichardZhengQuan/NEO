@@ -575,8 +575,12 @@ export class AgentRuntime implements AgentRuntimeApi {
             } };
           }
           if (approval.expiresAt <= this.clock()) throw new NeoError('conflict', 'The UI confirmation token has expired; request a new confirmation.');
+          // Validation may have awaited a schema refinement; re-read the message so we use the
+          // post-await state and detect a concurrent delete that completed while we were waiting.
+          const freshMessage = this.conversations.getMessage(messageId);
+          if (!freshMessage || freshMessage.conversationId !== conversationId) throw new NeoError('not_found', `Message ${messageId} not found.`);
           // Execute the exact data covered by the approval, without a second schema transform.
-          const result = await this.runUiTool(message, action.tool, parsed.data, privateAction || this.privateEpoch !== modeVersion, def);
+          const result = await this.runUiTool(freshMessage, action.tool, parsed.data, privateAction || this.privateEpoch !== modeVersion, def);
           return { kind: 'tool', result };
         }
         const result = await this.runUiTool(message, action.tool, action.input ?? {}, privateAction || this.privateEpoch !== modeVersion);
