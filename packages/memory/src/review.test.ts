@@ -203,7 +203,7 @@ describe('privacy: sensitive memories', () => {
     // and yields at n=9 and n=19.  mergeEntities yields at i=24.  Total: 3 yields;
     // the 3rd is the critical one where the merge of entities[24] and entities[25]
     // is about to start.
-    const { svc } = setup();
+    const { svc, db } = setup();
 
     // 24 unique entities — none will be merged.
     for (let i = 0; i < 24; i++) {
@@ -212,7 +212,15 @@ describe('privacy: sensitive memories', () => {
     // Entities at indices 24 and 25 share a canonical name → they will be merged.
     // The lower-rowid entity (inserted 25th) becomes the survivor.
     const surviving = await svc.remember({ kind: 'entity', label: 'SharedName', content: 'First occurrence', source: { by: 'user' } });
-    await svc.remember({ kind: 'entity', label: 'SharedName', content: 'Second occurrence', source: { by: 'user' } });
+    // svc.remember upserts by name: a second call with the same label would return
+    // the existing entity rather than creating a new row.  Bypass upsertEntity by
+    // inserting directly into the DB so there are truly two separate entities with
+    // the same canonical name that mergeEntities will have to merge.
+    const dupNow = Date.now();
+    db.prepare(
+      `INSERT INTO memory_nodes (id, kind, label, norm_label, content, aliases, importance, confidence, stability, created_at, updated_at, status, source)
+       VALUES ('mem_dup_sharedname', 'entity', 'SharedName', 'sharedname', 'Second occurrence', '[]', 0.5, 0.8, 30, ?, ?, 'active', '{"by":"user"}')`
+    ).run(dupNow + 1, dupNow + 1);
 
     // Verify: not sensitive at the start.
     expect((await svc.get(surviving.id))!.node.sensitivity).not.toBe('sensitive');
@@ -228,13 +236,24 @@ describe('privacy: sensitive memories', () => {
         for (let i = 0; i < 50; i++) await Promise.resolve();
       };
 
-      // Fire the two discoverLinks yields (at n=9 and n=19).
+      // Four calls are needed:
+      //   call 1: vi.runOnlyPendingTimers() is a no-op (no timer exists yet); the
+      //           microtask drain triggers reembedStale (the directly-inserted entity
+      //           has no vector), which embeds it and creates timer reembed-batch.
+      //   call 2: fires timer reembed-batch; reembedStale completes, then the drain
+      //           runs fade/prune/discoverLinks n=0-8, creating timer n=9.
+      //   call 3: fires timer n=9; discoverLinks n=10-19, creating timer n=19.
+      //   call 4: fires timer n=19; discoverLinks n=20-25 (done), then mergeEntities
+      //           starts — the entities snapshot is captured here, BEFORE svc.update
+      //           is called — and the loop runs i=0-23, creating timer i=24.
+      await fireOneYield();
+      await fireOneYield();
       await fireOneYield();
       await fireOneYield();
 
       // The consolidation is now blocked at the mergeEntities yield (i=24),
       // before `let a = entities[24]` is assigned from the stale snapshot.
-      // Flip the surviving entity to sensitive while the merge is paused.
+      // The snapshot was captured with sensitivity=null; flip it in the DB while paused.
       await svc.update(surviving.id, { sensitivity: 'sensitive' });
 
       // Release the mergeEntities yield and let the merge transaction commit.
