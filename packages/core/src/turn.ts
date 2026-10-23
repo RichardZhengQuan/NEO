@@ -841,7 +841,7 @@ class TurnRunner {
   private async askConfirmation(call: ToolCallPart, def: ToolDefinition): Promise<ConfirmationOutcome> {
     const timeoutMs = this.init.plan.settings.agent.confirmationTimeoutSec * 1000;
     const requestedAt = this.services.clock();
-    const description = await this.describeCall(def, call.input);
+    const description = await raceAbort(this.describeCall(def, call.input), this.signal);
     const confirmation: ToolConfirmation = {
       id: newId('cnf', requestedAt),
       conversationId: this.conversationId,
