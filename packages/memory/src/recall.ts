@@ -320,6 +320,10 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   for (const [id, seed] of seeds) A.set(id, seed.a0);
   /** Best single contribution to each non-seed node: its `via` back-pointer. */
   const best = new Map<string, { from: string; type: EdgeType; c: number }>();
+  /** All contributions to each non-seed node, keyed by source id. Used to
+   * detect nodes whose clean activation drops below minScore when a non-best
+   * contributor is tainted (Bug 2 fix). */
+  const allContrib = new Map<string, Map<string, number>>();
   const adjacency = new Map<string, Neighbor[]>();
   const edgeStmt = db.prepare(
     `SELECT src, dst, type, weight, last_reinforced_at FROM memory_edges WHERE src = ?
@@ -355,6 +359,9 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
         if (!seeds.has(n.other)) {
           const b = best.get(n.other);
           if (!b || c > b.c) best.set(n.other, { from: i, type: n.type, c });
+          let ac = allContrib.get(n.other);
+          if (!ac) { ac = new Map(); allContrib.set(n.other, ac); }
+          ac.set(i, (ac.get(i) ?? 0) + c);
         }
       }
     }
@@ -381,9 +388,11 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   // candidateWhere.  A race between the embedding await (line ~234) and a concurrent
   // DB write can flip their eligibility; include them in the freshness check so the
   // cascade actually reaches every tainted destination.
+  // Bug 1 fix: seeds are no longer excluded — a sub-threshold seed that is
+  // best[B].from was silently skipped by the old `!seeds.has(id)` guard.
   const subThresholdFromIds = [...best.values()]
     .map((b) => b.from)
-    .filter((id) => !seeds.has(id) && !nonStyleIdSet.has(id));
+    .filter((id) => !nonStyleIdSet.has(id));
   const checkIds = [...new Set([...nonStyleIds, ...subThresholdFromIds])];
   if (checkIds.length) {
     const freshWhere = candidateWhere(query, now);
@@ -405,6 +414,28 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
         }
       }
       frontier = next;
+    }
+    // Bug 2 fix: the best.from cascade only propagates taint via the single
+    // strongest back-pointer.  A non-best contributor that is tainted never
+    // directly contaminates its destination.  Subtract every tainted source's
+    // contribution from each surviving node's activation; if the clean
+    // activation falls below minScore, taint that node too (and iterate until
+    // no new taints appear, because newly-tainted nodes may be sources for
+    // yet-unchecked nodes).
+    let newTaint = true;
+    while (newTaint) {
+      newTaint = false;
+      for (const id of nodes.keys()) {
+        if (tainted.has(id)) continue;
+        const srcMap = allContrib.get(id);
+        if (!srcMap) continue;
+        let removed = 0;
+        for (const [src, c] of srcMap) if (tainted.has(src)) removed += c;
+        if (removed > 0 && (A.get(id) ?? 0) - removed < minScore) {
+          tainted.add(id);
+          newTaint = true;
+        }
+      }
     }
     for (const id of tainted) {
       nodes.delete(id);
