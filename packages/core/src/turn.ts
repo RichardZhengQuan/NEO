@@ -158,9 +158,9 @@ export interface TurnPlan {
   timeline?: boolean;
   /**
    * Messages from the origin normal episode to prepend before the private episode's
-   * own messages on the second and subsequent turns of an off-record session.
-   * The first private turn captures this prefix inside `enterOffRecord()`; subsequent
-   * turns receive it here so `buildRequest()` keeps the normal-history prefix intact.
+   * own messages. Supplied on every turn of an off-record session — including the
+   * first turn when the session is started explicitly via `startOffRecord()` — so
+   * that `buildRequest()` keeps the normal-history prefix intact throughout.
    */
   previousHistory?: Message[];
   /** Frees the conversation for the next send(). Called exactly once, before the terminal event. */

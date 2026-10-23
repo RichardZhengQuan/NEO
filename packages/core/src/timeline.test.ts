@@ -356,6 +356,26 @@ describe('off-record lifecycle', () => {
     expect(JSON.stringify(messagesB)).toContain(normalText);
   });
 
+  it('falls back to bounded continuity when the normal-episode prefix would exceed the token budget', async () => {
+    const h = harness({ settings: { agent: { contextTokenBudget: 2000 } } });
+    const normalText = 'normal anchor for budget guard test';
+    await send(h, normalText);
+    // Store a large response that puts the normal episode well over the budget.
+    stored(h, h.conv.id, 'x'.repeat(7500));
+    await h.runtime.startOffRecord();
+
+    const result = await send(h, 'first private turn after oversized normal episode', true);
+    const messages = h.model.requests.at(-1)!.messages;
+
+    // originMessages exceed budget, so previousHistory must NOT be used.
+    // The normal-episode text may still appear via recentContext (truncated), but the
+    // raw full messages must not be prepended verbatim to the private-episode messages.
+    const rawNormalMsgCount = messages.filter((m) => m.role === 'user' && JSON.stringify(m).includes('x'.repeat(100))).length;
+    expect(rawNormalMsgCount).toBe(0);
+    // The turn must still complete successfully.
+    expect(result.handle.conversationId).toBeDefined();
+  });
+
   it('carries the normal-episode prefix into the second private turn when startOffRecord was called mid-stream', async () => {
     const local = new ScriptedAdapter({ id: 'local', isLocal: true });
     const h = harness({ adapters: [local] });

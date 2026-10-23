@@ -254,13 +254,23 @@ export class AgentRuntime implements AgentRuntimeApi {
           }).sort((a, b) => (b.startedAt ?? b.createdAt) - (a.startedAt ?? a.createdAt))[0] ?? null
         : null;
       const originMessages = originEpisode ? this.conversations.messages(originEpisode.id) : undefined;
+      const incomingTokens = estimateMessageTokens(incoming());
+      // Guard: only use originMessages as previousHistory when they fit within the budget
+      // together with history and incoming. exceedsBudget() short-circuits to false on the
+      // first private turn (history.length === 0), so we must check independently here.
+      const originFits = !originMessages?.length ||
+        history.reduce((t, m) => t + estimateMessageTokens(m), 0) +
+        originMessages.reduce((t, m) => t + estimateMessageTokens(m), 0) +
+        incomingTokens <= settings.agent.contextTokenBudget;
       // Full previousHistory already supplies this content, so skip the redundant summary.
-      const recentContext = originMessages?.length ? undefined : continuity(previous, settings.agent.contextTokenBudget - estimateMessageTokens(incoming()));
+      const recentContext = (originMessages?.length && originFits)
+        ? undefined
+        : continuity(previous, settings.agent.contextTokenBudget - incomingTokens);
       if (created) this.broadcast({ type: 'episode.started', episodeId: current.id, episode: episodeOf(current) });
       return await this.beginTurn(current, parts, adapter, model, settings, {
         ...prepared,
         ...(recentContext ? { recentContext } : {}),
-        ...(originMessages?.length ? { previousHistory: originMessages } : {}),
+        ...((originMessages?.length && originFits) ? { previousHistory: originMessages } : {}),
         timeline: true,
       });
     } catch (err) {
