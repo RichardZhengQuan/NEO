@@ -425,6 +425,16 @@ describe('OpenAI errors and retries', () => {
     expect(e.message).not.toContain(KEY);
   });
 
+  it.each(['Cookie', 'cookie', 'COOKIE', 'Set-Cookie'])('redacts %s custom headers from error messages', async (name) => {
+    const cookie = 'session=private-cookie-value';
+    const { a, f } = make(err(401, `Unauthorized: ${cookie}`), { headers: { [name]: cookie } });
+    const e = (await collect(a.chat(req())).catch((x: unknown) => x)) as Error & { code: string };
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.headers.get(name)).toBe(cookie);
+    expect(e.code).toBe('provider_auth');
+    expect(e.message).not.toContain('private-cookie-value');
+  });
+
   it('network failures name the host and are retryable', async () => {
     const f = fakeFetch(() => {
       throw Object.assign(new TypeError('fetch failed'), { cause: new Error('connect ECONNREFUSED 10.0.0.5:443') });

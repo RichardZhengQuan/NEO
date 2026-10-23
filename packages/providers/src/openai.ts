@@ -6,6 +6,7 @@
  * - Ollama: chat on `<root>/v1`, models on `<root>/api/tags`, embeddings on `<root>/api/embed`.
  * - Tool-call fragments are accumulated per index and emitted once, complete, at the end.
  */
+import { isSecretProviderHeader } from '@neo/storage';
 import { NeoError, PROVIDER_PRESETS, isLocalUrl } from '@neo/protocol';
 import type {
   ChatMessage,
@@ -493,7 +494,7 @@ export class OpenAIAdapter implements ProviderAdapter {
   private clean(text: string): string {
     const secrets: (string | undefined)[] = [resolveApiKey(this.config, this.options)];
     for (const [name, value] of Object.entries(this.config.headers ?? {})) {
-      if (/auth|key|token|secret/i.test(name)) secrets.push(value, value.replace(/^bearer\s+/i, ''));
+      if (isSecretProviderHeader(name)) secrets.push(value, value.replace(/^bearer\s+/i, ''));
     }
     return redact(text, secrets);
   }

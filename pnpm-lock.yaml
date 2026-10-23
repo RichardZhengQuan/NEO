@@ -201,6 +201,9 @@ importers:
       '@neo/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@neo/storage':
+        specifier: workspace:*
+        version: link:../storage
       zod:
         specifier: ^4.1.0
         version: 4.6.5
