@@ -718,7 +718,9 @@ export class AgentRuntime implements AgentRuntimeApi {
       if (offRecord && !(this.conversations.get(fresh.conversationId)?.offRecord ?? false)) {
         const state = this.offRecordState();
         if (!state.active || !state.episodeId) return;
-        const now = this.clock();
+        const existing = this.conversations.messages(state.episodeId);
+        const lastCreatedAt = existing.reduce((max, m) => Math.max(max, m.createdAt), Number.NEGATIVE_INFINITY);
+        const now = Math.max(this.clock(), lastCreatedAt + 1);
         const turnId = newId('turn', now);
         const privateMessage = this.conversations.appendMessage({ ...fresh, id: newId('msg', now), conversationId: state.episodeId, episodeId: state.episodeId, parts, createdAt: now, turnId });
         this.broadcast({ type: 'message.completed', conversationId: state.episodeId, episodeId: state.episodeId, turnId, message: privateMessage });
