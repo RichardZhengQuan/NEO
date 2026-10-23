@@ -20,3 +20,4 @@ export * from './services.js';
 export * from './api.js';
 export * from './pairing.js';
 export * from './tunnel.js';
+export * from './time.js';

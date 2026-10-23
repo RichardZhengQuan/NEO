@@ -10,6 +10,7 @@ import { AiSettingsSchema, type SearchEngine } from './ai.js';
 import { MemoryPolicySchema } from './memory.js';
 import { isLanAddress } from './pairing.js';
 import { ProviderConfigSchema } from './providers.js';
+import { isValidTimeZone } from './time.js';
 import { PermissionLevelSchema } from './tools.js';
 import { DEFAULT_TUNNEL_PORT } from './tunnel.js';
 
@@ -55,7 +56,7 @@ export const NeoSettingsSchema = z.object({
   agent: AgentSettingsSchema.prefault({}),
   timeline: TimelineSettingsSchema.prefault({}),
   /** IANA timezone; the server fills this from the host at first boot. */
-  timezone: z.string().default('UTC'),
+  timezone: z.string().refine(isValidTimeZone, { message: 'Invalid IANA timezone' }).default('UTC'),
   locale: z.string().default('en'),
   theme: z.enum(['system', 'light', 'dark']).default('system'),
   onboarded: z.boolean().default(false),
