@@ -521,7 +521,7 @@ export class GeminiAdapter implements ProviderAdapter {
       body['tools'] = [
         {
           functionDeclarations: request.tools.map((t) => {
-            const parameters = sanitizeGeminiSchema(t.inputSchema) as Record<string, unknown>;
+            const parameters = sanitizeGeminiSchema(ensureObjectSchema(t.inputSchema)) as Record<string, unknown>;
             const hasParams = isPlainObject(parameters['properties']) && Object.keys(parameters['properties']).length > 0;
             return { name: t.name, description: t.description, ...(hasParams ? { parameters } : {}) };
           }),
@@ -680,6 +680,16 @@ export class GeminiAdapter implements ProviderAdapter {
 }
 
 /** Grounding metadata contains web chunks even when the final text has no inline marker. */
+/**
+ * Ensure a JSON Schema has a root `type: 'object'` as required by the Gemini API.
+ * When the schema has a non-object root (e.g. `{anyOf: [...]}` from a zod union,
+ * or `{type: 'string'}`), wrap it as `{type:'object', properties:{value:<schema>}, required:['value']}`.
+ */
+function ensureObjectSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema['type'] === 'object') return schema;
+  return { type: 'object', properties: { value: schema }, required: ['value'] };
+}
+
 function collectGrounding(sources: Source[], metadata: unknown): void {
   if (!isPlainObject(metadata) || !Array.isArray(metadata['groundingChunks'])) return;
   for (const chunk of metadata['groundingChunks']) {

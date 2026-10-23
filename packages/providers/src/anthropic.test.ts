@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { ChatMessage, ChatRequest, ProviderAdapter, ProviderConfig } from '@neo/protocol';
-import { collectChat, NeoError } from '@neo/protocol';
+import { collectChat, NeoError, toolInputJsonSchema } from '@neo/protocol';
 import { AnthropicAdapter } from './anthropic.js';
 import type { ProviderOptions } from './index.js';
 import {
@@ -93,6 +94,29 @@ const TOOLS = [{ name: 'get_weather', description: 'Weather', inputSchema: { typ
 // ───────────────────────────── request shape ─────────────────────────────
 
 describe('Anthropic request shape', () => {
+  it.each([
+    ['union', z.union([z.object({ kind: z.literal('a'), x: z.string() }), z.object({ kind: z.literal('b'), y: z.number() })])],
+    ['string', z.string()],
+  ])('wraps %s tool input schemas in an object root', async (_name, schema) => {
+    const inputSchema = toolInputJsonSchema(schema as z.ZodType);
+    const { a, f } = adapter(simpleReply);
+    await collect(a.chat(req({ tools: [{ name: 'plugin_tool', description: 'Plugin tool', inputSchema }] })));
+    expect(f.calls).toHaveLength(1);
+    const tools = f.calls[0]!.body!['tools'] as { input_schema: Record<string, unknown> }[];
+    expect(tools[0]!.input_schema['type']).toBe('object');
+    expect(tools[0]!.input_schema).toEqual({ type: 'object', properties: { value: inputSchema }, required: ['value'] });
+  });
+
+  it('preserves object-root tool input schemas', async () => {
+    const inputSchema = toolInputJsonSchema(z.object({ city: z.string() }));
+    const { a, f } = adapter(simpleReply);
+    await collect(a.chat(req({ tools: [{ name: 'get_weather', description: 'Weather', inputSchema }] })));
+    expect(f.calls).toHaveLength(1);
+    const tools = f.calls[0]!.body!['tools'] as { input_schema: Record<string, unknown> }[];
+    expect(tools[0]!.input_schema['type']).toBe('object');
+    expect(tools[0]!.input_schema).toEqual(inputSchema);
+  });
+
   it('claude-opus-5-5: adaptive summarized thinking, effort, no sampling params, top-level cache_control, refusal fallback', async () => {
     const { a, f } = adapter(simpleReply);
     await collect(a.chat(req({ system: 'Be nice.', temperature: 0.2, reasoning: 'high', tools: TOOLS, toolChoice: 'auto' })));

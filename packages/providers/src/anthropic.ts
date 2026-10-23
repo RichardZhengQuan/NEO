@@ -311,7 +311,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       params.tools = request.tools.map((t) => ({
         name: t.name,
         description: t.description,
-        input_schema: t.inputSchema as { type: 'object'; [k: string]: unknown },
+        input_schema: ensureObjectSchema(t.inputSchema) as { type: 'object'; [k: string]: unknown },
         eager_input_streaming: true,
       }));
       // `auto` is the default; forced tool choice is never sent (current models reject it).
@@ -644,6 +644,16 @@ export class AnthropicAdapter implements ProviderAdapter {
     const neo = NeoError.from(err, 'provider_error');
     return new NeoError(neo.code, this.clean(neo.message, apiKey), { retryable: neo.retryable, cause: err });
   }
+}
+
+/**
+ * Ensure a JSON Schema has a root `type: 'object'` as required by the Anthropic API.
+ * When the schema has a non-object root (e.g. `{anyOf: [...]}` from a zod union,
+ * or `{type: 'string'}`), wrap it as `{type:'object', properties:{value:<schema>}, required:['value']}`.
+ */
+function ensureObjectSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema['type'] === 'object') return schema;
+  return { type: 'object', properties: { value: schema }, required: ['value'] };
 }
 
 function collectWebCitations(sources: Source[], citations: unknown): void {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { NeoError, toolInputJsonSchema, type ChatMessage, type ChatRequest, type ProviderConfig, type MemoryService, type ProductivityStores } from '@neo/protocol';
 import { createBuiltinTools } from '../../tools/src/builtins/index.js';
 import { GeminiAdapter, sanitizeGeminiSchema } from './gemini.js';
@@ -110,6 +111,30 @@ describe('Gemini request', () => {
     await collect(a.chat(req({ tools: [{ name: 'now', description: 'time', inputSchema: { type: 'object', properties: {}, additionalProperties: false } }] })));
     const decl = ((f.calls[0]!.body!['tools'] as { functionDeclarations: Record<string, unknown>[] }[])[0]!.functionDeclarations)[0]!;
     expect(decl).toEqual({ name: 'now', description: 'time' });
+  });
+
+  it('wraps union-root tool input schemas in an object root', async () => {
+    const schema = toolInputJsonSchema(z.union([
+      z.object({ kind: z.literal('a'), x: z.string() }),
+      z.object({ kind: z.literal('b'), y: z.number() }),
+    ]));
+    const { a, f } = make(okReply);
+    await collect(a.chat(req({ tools: [{ name: 'union_tool', description: 'Union input', inputSchema: schema }] })));
+    const decl = ((f.calls[0]!.body!['tools'] as { functionDeclarations: Record<string, unknown>[] }[])[0]!.functionDeclarations)[0]! as Record<string, unknown>;
+    expect(decl['name']).toBe('union_tool');
+    const parameters = decl['parameters'] as Record<string, unknown>;
+    expect(parameters['type']).toBe('object');
+    expect(parameters['properties']).toHaveProperty('value');
+  });
+
+  it('preserves object-root tool input schemas', async () => {
+    const schema = toolInputJsonSchema(z.object({ city: z.string() }));
+    const { a, f } = make(okReply);
+    await collect(a.chat(req({ tools: [{ name: 'get_weather', description: 'Weather', inputSchema: schema }] })));
+    const decl = ((f.calls[0]!.body!['tools'] as { functionDeclarations: Record<string, unknown>[] }[])[0]!.functionDeclarations)[0]! as Record<string, unknown>;
+    const parameters = decl['parameters'] as Record<string, unknown>;
+    expect(parameters['type']).toBe('object');
+    expect(parameters['properties']).not.toHaveProperty('value');
   });
 });
 
