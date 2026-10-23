@@ -88,6 +88,7 @@ const electron = await vi.hoisted(async () => {
       requestSingleInstanceLock: vi.fn(() => true),
       getPath: vi.fn(() => '/neo-test'),
       getAppPath: vi.fn(() => '/neo-test/apps/desktop'),
+      getLocale: vi.fn(() => 'en-US'),
       setName: vi.fn(),
       isPackaged: false,
       getLoginItemSettings: vi.fn(() => ({ openAtLogin: false })),

@@ -248,3 +248,45 @@ export async function loadStartupMode(userData: string): Promise<StartupMode | n
 export async function saveStartupMode(userData: string, mode: StartupMode): Promise<void> {
   await writeFile(path.join(userData, 'startup-mode.json'), JSON.stringify(mode), 'utf8');
 }
+
+// ───────────────────────────── first-launch dialog i18n ─────────────────────────────
+
+/**
+ * Strings shown in the first-launch "Run NEO on this Mac or Connect to a NEO"
+ * native dialog. The dialog runs before the renderer loads, so the web app's
+ * i18n system is not available — we pick a built-in locale table here.
+ *
+ * Supported locales mirror apps/web/src/i18n.ts (en + zh-CN).
+ */
+export interface FirstLaunchDialogStrings {
+  message: string;
+  runLocal: string;
+  connectRemote: string;
+}
+
+const FIRST_LAUNCH_STRINGS: Record<'en' | 'zh-CN', FirstLaunchDialogStrings> = {
+  'en': {
+    message: 'How would you like to use NEO?',
+    runLocal: 'Run NEO on this Mac',
+    connectRemote: 'Connect to a NEO',
+  },
+  'zh-CN': {
+    message: '你想如何使用 NEO？',
+    runLocal: '在这台 Mac 上运行 NEO',
+    connectRemote: '连接到一个 NEO',
+  },
+};
+
+/**
+ * Pick the first-launch dialog strings for the given locale. Falls back to en
+ * for any unsupported locale (including empty / unknown). zh / zh-Hans / zh-Hans-CN
+ * also map to zh-CN; other zh variants (zh-TW, zh-HK) fall back to en until
+ * their translations are added.
+ */
+export function pickFirstLaunchStrings(locale: string): FirstLaunchDialogStrings {
+  const normalized = locale.toLowerCase();
+  if (normalized === 'zh-cn' || normalized === 'zh' || normalized === 'zh-hans' || normalized.startsWith('zh-hans')) {
+    return FIRST_LAUNCH_STRINGS['zh-CN'];
+  }
+  return FIRST_LAUNCH_STRINGS['en'];
+}

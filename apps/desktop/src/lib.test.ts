@@ -11,6 +11,7 @@ import {
   parseStartupMode,
   loadStartupMode,
   saveStartupMode,
+  pickFirstLaunchStrings,
 } from './lib.js';
 
 // ─────────────────────────── fs/promises mock ───────────────────────────
@@ -348,5 +349,59 @@ describe('saveStartupMode', () => {
       JSON.stringify(mode),
       'utf8',
     );
+  });
+});
+
+// ──────────────────────── pickFirstLaunchStrings ────────────────────────
+
+describe('pickFirstLaunchStrings', () => {
+  it('returns en strings for an en locale', () => {
+    const s = pickFirstLaunchStrings('en-US');
+    expect(s.message).toBe('How would you like to use NEO?');
+    expect(s.runLocal).toBe('Run NEO on this Mac');
+    expect(s.connectRemote).toBe('Connect to a NEO');
+  });
+
+  it('returns zh-CN strings for zh-CN', () => {
+    const s = pickFirstLaunchStrings('zh-CN');
+    expect(s.message).toBe('你想如何使用 NEO？');
+    expect(s.runLocal).toBe('在这台 Mac 上运行 NEO');
+    expect(s.connectRemote).toBe('连接到一个 NEO');
+  });
+
+  it('maps bare zh to zh-CN', () => {
+    expect(pickFirstLaunchStrings('zh').message).toBe('你想如何使用 NEO？');
+  });
+
+  it('maps zh-Hans and zh-Hans-CN to zh-CN', () => {
+    expect(pickFirstLaunchStrings('zh-Hans').runLocal).toBe('在这台 Mac 上运行 NEO');
+    expect(pickFirstLaunchStrings('zh-Hans-CN').runLocal).toBe('在这台 Mac 上运行 NEO');
+  });
+
+  it('falls back to en for traditional Chinese locales', () => {
+    expect(pickFirstLaunchStrings('zh-TW').runLocal).toBe('Run NEO on this Mac');
+    expect(pickFirstLaunchStrings('zh-HK').runLocal).toBe('Run NEO on this Mac');
+  });
+
+  it('falls back to en for other locales and for empty / unknown input', () => {
+    expect(pickFirstLaunchStrings('fr-FR').message).toBe('How would you like to use NEO?');
+    expect(pickFirstLaunchStrings('').message).toBe('How would you like to use NEO?');
+    expect(pickFirstLaunchStrings('xx-YY').message).toBe('How would you like to use NEO?');
+  });
+
+  it('is case-insensitive for the locale tag', () => {
+    expect(pickFirstLaunchStrings('ZH-CN').runLocal).toBe('在这台 Mac 上运行 NEO');
+    expect(pickFirstLaunchStrings('zh-cn').runLocal).toBe('在这台 Mac 上运行 NEO');
+  });
+
+  it('returns no stray "Settings" promise in either locale', () => {
+    // Finding B from the Agent review on head 1cc8ad0: the dialog previously
+    // claimed "You can change this later in Settings." but no Settings UI
+    // existed. The fix removed the detail line, so neither locale has it.
+    const en = pickFirstLaunchStrings('en');
+    const zh = pickFirstLaunchStrings('zh-CN');
+    const combined = `${en.message}|${en.runLocal}|${en.connectRemote}|${zh.message}|${zh.runLocal}|${zh.connectRemote}`;
+    expect(combined.toLowerCase()).not.toContain('settings');
+    expect(combined).not.toContain('设置');
   });
 });

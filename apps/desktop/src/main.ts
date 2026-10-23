@@ -34,6 +34,7 @@ import {
   isSafeExternalUrl,
   isSameOrigin,
   loadStartupMode,
+  pickFirstLaunchStrings,
   resolveWebDir,
   saveStartupMode,
   type RemoteMode,
@@ -771,11 +772,11 @@ async function main(): Promise<void> {
   // ── Determine startup mode (first launch shows a dialog) ────────────────
   let mode = await loadStartupMode(userData);
   if (mode === null) {
+    const strings = pickFirstLaunchStrings(app.getLocale());
     const { response } = await dialog.showMessageBox({
       type: 'question',
-      buttons: ['Run NEO on this Mac', 'Connect to a NEO'],
-      message: 'How would you like to use NEO?',
-      detail: 'You can change this later in Settings.',
+      buttons: [strings.runLocal, strings.connectRemote],
+      message: strings.message,
       defaultId: 0,
       cancelId: 0,
     });
