@@ -88,6 +88,25 @@ function isNullSchema(s: unknown): boolean {
   return isPlainObject(s) && (s['type'] === 'null' || (Array.isArray(s['enum']) && s['enum'].length === 1 && s['enum'][0] === null));
 }
 
+/** Merge collapsed schemas with siblings while preserving source structural constraints. */
+function mergeSchemaConstraints(source: Record<string, unknown>, siblings: Record<string, unknown>): Record<string, unknown> {
+  const merged = { ...source, ...siblings };
+  if (isPlainObject(source['properties']) || isPlainObject(siblings['properties'])) {
+    merged['properties'] = {
+      ...(isPlainObject(siblings['properties']) ? siblings['properties'] : {}),
+      ...(isPlainObject(source['properties']) ? source['properties'] : {}),
+    };
+  }
+  if (Array.isArray(source['required']) || Array.isArray(siblings['required'])) {
+    merged['required'] = Array.from(new Set([
+      ...(Array.isArray(siblings['required']) ? siblings['required'] : []),
+      ...(Array.isArray(source['required']) ? source['required'] : []),
+    ]));
+  }
+  if (source['items'] !== undefined) merged['items'] = source['items'];
+  return merged;
+}
+
 /** Returns undefined for schemas that cannot be expressed (and should be dropped by the parent). */
 function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: string[]): Record<string, unknown> | undefined {
   if (!isPlainObject(node)) return node === true || node === undefined ? {} : undefined;
@@ -99,7 +118,7 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
     const target = resolveRef(ref, defs);
     if (target === undefined) return {};
     const { $ref: _ignored, ...siblings } = node;
-    const merged = isPlainObject(target) ? { ...target, ...siblings } : siblings;
+    const merged = mergeSchemaConstraints(isPlainObject(target) ? target : {}, siblings);
     return sanitizeNode(merged, defs, [...refStack, ref]);
   }
 
@@ -109,7 +128,7 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
     const nullable = nonNull.length < variants.length;
     const { anyOf: _a, oneOf: _o, ...rest } = node;
     if (nonNull.length === 1) {
-      const inner = sanitizeNode({ ...(isPlainObject(nonNull[0]) ? nonNull[0] : {}), ...rest }, defs, refStack);
+      const inner = sanitizeNode(mergeSchemaConstraints(isPlainObject(nonNull[0]) ? nonNull[0] : {}, rest), defs, refStack);
       return inner && nullable ? { ...inner, nullable: true } : inner;
     }
     // Do not call sanitizeNode on rest as the wrapper — that infers type:'object' from
@@ -157,7 +176,7 @@ function sanitizeNode(node: unknown, defs: Record<string, unknown>, refStack: st
   }
   if (Array.isArray(node['allOf']) && node['allOf'].length === 1) {
     const { allOf, ...rest } = node;
-    return sanitizeNode({ ...(isPlainObject(allOf[0]) ? allOf[0] : {}), ...rest }, defs, refStack);
+    return sanitizeNode(mergeSchemaConstraints(isPlainObject(allOf[0]) ? allOf[0] : {}, rest), defs, refStack);
   }
 
   const out: Record<string, unknown> = {};
