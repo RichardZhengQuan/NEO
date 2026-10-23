@@ -780,47 +780,62 @@ describe('recall', () => {
 
   it('Bug 2 saturation: tainted contributions exceed 1-minScore but clean activation is sufficient (false-positive fix)', async () => {
     // Topology: three clean seeds C0/C1/C2 and three tainted seeds T0/T1/T2,
-    // all connected only to B (fan = 1).  Total contributions saturate A[B] to 1.
+    // all connected only to B (fan = 1).  Clean sum alone saturates A[B]; the
+    // tainted sum alone exceeds 1-minScore, so the uncapped subtraction
+    // (A[B] - taintedContrib) incorrectly falls below minScore even though
+    // the clean contributors alone are sufficient to recall B.
     //
-    //   C0/C1/C2  sim ≈ 0.97  →  a0 = 0.875  (weight 1.0)
-    //     c(Ci→B) = 0.875 × 0.5 × 0.5 / 1 = 0.21875  (spreadDecay=0.5, edgeW=0.5)
-    //     cleanContrib = 3 × 0.21875 = 0.65625
-    //   T0/T1/T2  sim ≈ 0.86  →  a0 = 0.875  (weight 0.8)
-    //     c(Ti→B) = 0.875 × 0.4 × 0.5 / 1 = 0.175
-    //     taIntedContrib = 3 × 0.175 = 0.525
-    //   A[B] = min(1, 0.65625 + 0.525) = 1.0  (saturated)
-    //   Bug: A[B] - taintedContrib = 1 - 0.525 = 0.475 ≥ 0.15 → B survives (BUG: should survive, actually fine here)
+    //   seed a0 = (sim - seedSimilarityFloor) / (1 - seedSimilarityFloor)
+    //     = (sim - 0.2) / 0.8
     //
-    // Use a more extreme saturation: cleanContrib already > 1.
-    //   3 clean seeds  weight=1.0  →  c = 0.875×1.0×0.5/1 = 0.4375 each  →  cleanContrib = 1.3125
-    //   3 tainted seeds weight=0.8 →  c = 0.875×0.8×0.5/1 = 0.35   each  →  taintedContrib = 1.05
-    //   A[B] = min(1, 2.3625) = 1.0  (saturated)
-    //   Bug: A[B] - taintedContrib = 1 - 1.05 = -0.05 < 0.15 → B falsely tainted
-    //   Fix: cleanA = min(1, 1.3125) = 1.0 ≥ 0.15 → B survives
-    const DIMS = 8;
-    const QUERY_MARKER = `bug2sat-q-${Math.random().toString(36).slice(2)}`;
-    const C_MARKER     = `bug2sat-c-${Math.random().toString(36).slice(2)}`;
-    const T_MARKER     = `bug2sat-t-${Math.random().toString(36).slice(2)}`;
-    const B_MARKER     = `bug2sat-b-${Math.random().toString(36).slice(2)}`;
+    //   C0/C1/C2  sim ≈ 0.9  →  a0 ≈ 0.875  (weight 1.0, fan = 1, spreadDecay = 0.5)
+    //     c(Ci→B) = 0.875 × 1.0 × 0.5 / 1 = 0.4375
+    //     cleanContrib = 3 × 0.4375 = 1.3125  (saturates min(1, …) = 1.0)
+    //   T0/T1/T2  sim ≈ 0.7  →  a0 ≈ 0.625  (weight 1.0)
+    //     c(Ti→B) = 0.625 × 1.0 × 0.5 / 1 = 0.3125
+    //     taintedContrib = 3 × 0.3125 = 0.9375  (> 1 - minScore = 0.85)
+    //   A[B] = min(1, 1.3125 + 0.9375) = 1.0  (saturated)
+    //   Bug: A[B] - taintedContrib = 1.0 - 0.9375 = 0.0625 < 0.15 → B falsely tainted.
+    //   Fix: min(1, cleanContrib) = min(1, 1.3125) = 1.0 ≥ 0.15 → B survives.
+    //
+    // Markers are unique random tokens with no shared substring, so no two
+    // nodes share a lexical seed and B's content never matches the query term.
+    // Each seed node has its own perturbation dimension so no two seeds vector-
+    // dedupe at findDuplicate's 0.92 threshold (pairwise cos: 0.81 clean/clean,
+    // 0.49 tainted/tainted, 0.63 clean/tainted — all < 0.92).
+    const DIMS = 16;
+    const uniq = () => Math.random().toString(36).slice(2, 10);
+    const QUERY_MARKER = `qry${uniq()}`;
+    const B_MARKER     = `bbb${uniq()}`;
+    const cMarkers = [0, 1, 2].map(() => `clean${uniq()}`);
+    const tMarkers = [0, 1, 2].map(() => `taint${uniq()}`);
 
-    // Query vector e0; clean seeds near e0 (cos≈0.97); tainted seeds also near e0 (cos≈0.86);
-    // B at e7 (orthogonal to query, only reachable via spreading).
-    const qVec  = new Float32Array([1, 0, 0, 0, 0, 0, 0, 0]);
-    const cVec  = new Float32Array([0.97, Math.sqrt(1 - 0.9409), 0, 0, 0, 0, 0, 0]);  // cos=0.97
-    const tVec  = new Float32Array([0.86, 0, Math.sqrt(1 - 0.7396), 0, 0, 0, 0, 0]);  // cos=0.86
-    const bVec  = new Float32Array([0, 0, 0, 0, 0, 0, 0, 1]);
+    // qVec on dim 0; cVec_i uses dim 0 (0.9) + its own perturb dim (1/2/3);
+    // tVec_i uses dim 0 (0.7) + its own perturb dim (4/5/6); bVec on dim 15.
+    const makeVec = (components: readonly [number, number][]): Float32Array => {
+      const v = new Float32Array(DIMS);
+      for (const [dim, val] of components) v[dim] = val;
+      return v;
+    };
+    const qVec = makeVec([[0, 1]]);
+    const cPerp = Math.sqrt(1 - 0.9 * 0.9);
+    const tPerp = Math.sqrt(1 - 0.7 * 0.7);
+    const cVecs = [1, 2, 3].map(dim => makeVec([[0, 0.9], [dim, cPerp]]));
+    const tVecs = [4, 5, 6].map(dim => makeVec([[0, 0.7], [dim, tPerp]]));
+    const bVec = makeVec([[15, 1]]);
 
     const baseEmbedder = {
       id: `ctl-bug2sat-${DIMS}`,
       dimensions: DIMS,
       isLocal: true as const,
       embed(texts: string[]): Promise<Float32Array[]> {
-        return Promise.resolve(texts.map(t =>
-          t.includes(QUERY_MARKER) ? qVec :
-          t.includes(C_MARKER)     ? cVec :
-          t.includes(T_MARKER)     ? tVec :
-          bVec,
-        ));
+        return Promise.resolve(texts.map(t => {
+          if (t.includes(QUERY_MARKER)) return qVec;
+          if (t.includes(B_MARKER)) return bVec;
+          for (let i = 0; i < 3; i++) if (t.includes(cMarkers[i]!)) return cVecs[i]!;
+          for (let i = 0; i < 3; i++) if (t.includes(tMarkers[i]!)) return tVecs[i]!;
+          return makeVec([]);
+        }));
       },
     };
 
@@ -830,16 +845,18 @@ describe('recall', () => {
 
     // Create three clean seeds and three tainted seeds (to be marked sensitive during recall)
     const cNodes = await Promise.all([0, 1, 2].map(i =>
-      svc.remember({ kind: 'fact', label: `Clean C${i}`, content: `${C_MARKER} c${i}`, importance: 0.5 }),
+      svc.remember({ kind: 'fact', label: `Clean C${i}`, content: cMarkers[i]!, importance: 0.5 }),
     ));
     const tNodes = await Promise.all([0, 1, 2].map(i =>
-      svc.remember({ kind: 'fact', label: `Tainted T${i}`, content: `${T_MARKER} t${i}`, importance: 0.5 }),
+      svc.remember({ kind: 'fact', label: `Tainted T${i}`, content: tMarkers[i]!, importance: 0.5 }),
     ));
     const nodeB = await svc.remember({ kind: 'fact', label: 'Target B', content: B_MARKER, importance: 1.0 });
+    // All six seeds must be distinct rows for the saturation branch to see six
+    // contributors.  If any pair deduped, the test would silently cover less.
+    expect(new Set([...cNodes, ...tNodes].map(n => n.id)).size).toBe(6);
 
-    // Each clean seed → B with weight 1.0; each tainted seed → B with weight 0.8.
-    await Promise.all(cNodes.map(n => svc.link(n.id, nodeB.id, 'related', 1.0)));
-    await Promise.all(tNodes.map(n => svc.link(n.id, nodeB.id, 'related', 0.8)));
+    // Each clean seed → B with weight 1.0; each tainted seed → B with weight 1.0.
+    await Promise.all([...cNodes, ...tNodes].map(n => svc.link(n.id, nodeB.id, 'related', 1.0)));
 
     // Baseline: B is reachable.
     {
@@ -867,8 +884,8 @@ describe('recall', () => {
     const result = await svc.recall({ text: QUERY_MARKER, limit: 20, reinforce: false, allowSensitive: false });
 
     expect(raceTriggered).toBe(true);
-    // With saturation fix: cleanA = min(1, 1.44375) = 1.0 ≥ 0.15 → B must survive.
-    // (Bug would give A[B] - taintedContrib = 1.0 - 0.99 = 0.01 < 0.15, falsely tainting B.)
+    // With saturation fix: min(1, cleanContrib) = 1.0 ≥ 0.15 → B must survive.
+    // (Bug: A[B] - taintedContrib = 1.0 - 0.9375 = 0.0625 < 0.15, falsely tainting B.)
     expect(result.items.some(r => r.node.id === nodeB.id)).toBe(true);
     db.close();
   });
