@@ -360,6 +360,44 @@ describe('conversation store', () => {
     expect(store.get(c.id)?.lastMessageAt).toBe(9_000);
   });
 
+  it('deleting an older message preserves the completion-time last-message bump', () => {
+    db = openNeoDatabase(':memory:');
+    let t = 1000;
+    const store = createConversationStore(db, { clock: () => t++ });
+    const c = store.create();
+    const a: Message = {
+      id: newId('msg'), conversationId: c.id, role: 'user', parts: [{ type: 'text', text: 'First' }], createdAt: 1000, status: 'complete',
+    };
+    const b: Message = {
+      id: newId('msg'), conversationId: c.id, role: 'user', parts: [{ type: 'text', text: 'Latest' }], createdAt: 2000, status: 'complete',
+    };
+    store.appendMessage(a);
+    store.appendMessage(b);
+    store.update(c.id, { lastMessageAt: 9_000 });
+    expect(store.get(c.id)?.lastMessageAt).toBe(9_000);
+    store.deleteMessage(a.id);
+    expect(store.get(c.id)?.lastMessageAt).toBe(9_000);
+  });
+
+  it('deleteRange preserves the completion-time last-message bump when only older messages are removed', () => {
+    db = openNeoDatabase(':memory:');
+    let t = 1000;
+    const store = createConversationStore(db, { clock: () => t++ });
+    const c = store.create();
+    const a: Message = {
+      id: newId('msg'), conversationId: c.id, role: 'user', parts: [{ type: 'text', text: 'First' }], createdAt: 1000, status: 'complete',
+    };
+    const b: Message = {
+      id: newId('msg'), conversationId: c.id, role: 'user', parts: [{ type: 'text', text: 'Latest' }], createdAt: 2000, status: 'complete',
+    };
+    store.appendMessage(a);
+    store.appendMessage(b);
+    store.update(c.id, { lastMessageAt: 9_000 });
+    expect(store.get(c.id)?.lastMessageAt).toBe(9_000);
+    store.deleteRange({ to: 1000 });
+    expect(store.get(c.id)?.lastMessageAt).toBe(9_000);
+  });
+
   it('deleting the latest message restores the previous episode preview and timestamp', () => {
     db = openNeoDatabase(':memory:');
     let t = 3000;

@@ -360,8 +360,18 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
         const message = getMessage(id);
         if (!message) return false;
         if (hasEpisodes()) closeEpisode(message.conversationId);
+        const latestRow = db.prepare(
+          'SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+        ).get(message.conversationId) as Row | undefined;
+        const deletingLatest = latestRow?.id === id;
         const deleted = toNum(db.prepare('DELETE FROM messages WHERE id = ?').run(id).changes) > 0;
-        if (deleted) refreshEpisodePreview(message.conversationId);
+        if (deleted) {
+          if (deletingLatest) {
+            refreshEpisodePreview(message.conversationId);
+          } else {
+            refreshEpisodePreviewOnly(message.conversationId);
+          }
+        }
         return deleted;
       });
     },
@@ -496,8 +506,22 @@ export function createConversationStore(db: NeoDatabase, options: { clock?: Cloc
         const messages = messagesInRange(range);
         const episodeIds = new Set(messages.map((message) => message.conversationId));
         for (const id of episodeIds) closeEpisode(id);
+        const deletedIds = new Set(messages.map((message) => message.id));
+        const latestIsDeleted = new Map<string, boolean>();
+        for (const id of episodeIds) {
+          const latestRow = db.prepare(
+            'SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+          ).get(id) as Row | undefined;
+          latestIsDeleted.set(id, latestRow !== undefined && deletedIds.has(latestRow.id as string));
+        }
         db.prepare(`DELETE FROM messages${clause}`).run(...args);
-        for (const id of episodeIds) refreshEpisodePreview(id);
+        for (const id of episodeIds) {
+          if (latestIsDeleted.get(id)) {
+            refreshEpisodePreview(id);
+          } else {
+            refreshEpisodePreviewOnly(id);
+          }
+        }
         return messages;
       });
     },
