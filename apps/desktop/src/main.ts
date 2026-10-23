@@ -808,6 +808,10 @@ app.on('before-quit', () => {
 async function main(): Promise<void> {
   await app.whenReady();
 
+  // Register neo:// so deep links work in dev builds. Packaged apps also
+  // declare the scheme via electron-builder's protocols config in the Info.plist.
+  app.setAsDefaultProtocolClient('neo');
+
   const userData = app.getPath('userData');
   const webDir = getWebDir();
 
