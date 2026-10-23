@@ -547,6 +547,133 @@ describe('Gemini streaming', () => {
   });
 });
 
+describe('Gemini request-time secrets', () => {
+  const initialKey = 'keyA-secret';
+  const replacementKey = 'keyB-secret';
+
+  function pendingBody() {
+    let controller: ReadableStreamDefaultController<Uint8Array>;
+    let onRead!: () => void;
+    const reading = new Promise<void>((resolve) => { onRead = resolve; });
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) { controller = ctrl; },
+      pull() { onRead(); },
+    }, { highWaterMark: 0 });
+    return {
+      body,
+      reading,
+      complete(text: string) {
+        controller.enqueue(new TextEncoder().encode(text));
+        controller.close();
+      },
+    };
+  }
+
+  for (const operation of ['chat', 'listModels', 'embed'] as const) {
+    it.each([undefined, replacementKey])(`redacts the ${operation} HTTP error after the stored key changes to %s`, async (nextKey) => {
+      let secret: string | undefined = initialKey;
+      const pending = pendingBody();
+      const f = fakeFetch(() => new Response(pending.body, { status: 401 }));
+      const a = new GeminiAdapter(cfg({ apiKey: undefined, apiKeySecret: 'g' }), { fetch: f, resolveSecret: () => secret });
+      const result = operation === 'chat' ? collect(a.chat(req()))
+        : operation === 'listModels' ? a.listModels()
+        : a.embed({ model: 'gemini-embedding-001', texts: ['hello'] });
+      const error = result.catch((err: unknown) => err);
+      await pending.reading;
+      expect(f.calls[0]!.headers.get('x-goog-api-key')).toBe(initialKey);
+      secret = nextKey;
+      pending.complete(JSON.stringify({ error: { message: `Invalid API key: ${initialKey}` } }));
+      const e = await error;
+      expect(e).toBeInstanceOf(NeoError);
+      expect(e).toMatchObject({ code: 'provider_auth', message: expect.stringContaining('[redacted]') });
+      expect((e as NeoError).message).not.toContain(initialKey);
+    });
+
+    it(`redacts the ${operation} network error after the stored key changes`, async () => {
+      let secret: string | undefined = initialKey;
+      let onFetch!: () => void;
+      let rejectFetch!: (err: Error) => void;
+      const fetching = new Promise<void>((resolve) => { onFetch = resolve; });
+      const response = new Promise<Response>((_resolve, reject) => { rejectFetch = reject; });
+      const f = fakeFetch(() => { onFetch(); return response; });
+      const a = new GeminiAdapter(cfg({ apiKey: undefined, apiKeySecret: 'g' }), { fetch: f, resolveSecret: () => secret, sleep: recordingSleep() });
+      const result = operation === 'chat' ? collect(a.chat(req()))
+        : operation === 'listModels' ? a.listModels()
+        : a.embed({ model: 'gemini-embedding-001', texts: ['hello'] });
+      const error = result.catch((err: unknown) => err);
+      await fetching;
+      expect(f.calls[0]!.headers.get('x-goog-api-key')).toBe(initialKey);
+      secret = replacementKey;
+      rejectFetch(new Error(`Connection failed for ${initialKey}`));
+      const e = await error;
+      expect(e).toBeInstanceOf(NeoError);
+      expect(e).toMatchObject({ code: 'provider_error', message: expect.stringContaining('[redacted]') });
+      expect((e as NeoError).message).not.toContain(initialKey);
+      expect(f.calls.every((call) => call.headers.get('x-goog-api-key') === initialKey)).toBe(true);
+    });
+  }
+
+  it('redacts a stream error chunk after the stored key changes', async () => {
+    let secret: string | undefined = initialKey;
+    const pending = pendingBody();
+    const f = fakeFetch(() => new Response(pending.body, { headers: { 'content-type': 'text/event-stream' } }));
+    const a = new GeminiAdapter(cfg({ apiKey: undefined, apiKeySecret: 'g' }), { fetch: f, resolveSecret: () => secret });
+    const error = collect(a.chat(req())).catch((err: unknown) => err);
+    await pending.reading;
+    expect(f.calls[0]!.headers.get('x-goog-api-key')).toBe(initialKey);
+    secret = undefined;
+    pending.complete(dataFrames([{ error: { code: 401, message: `Invalid API key: ${initialKey}` } }]));
+    const e = await error;
+    expect(e).toBeInstanceOf(NeoError);
+    expect(e).toMatchObject({ code: 'provider_auth', message: expect.stringContaining('[redacted]') });
+    expect((e as NeoError).message).not.toContain(initialKey);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('redacts a stream consumer error after the stored key changes', async () => {
+    let secret: string | undefined = initialKey;
+    const f = fakeFetch(okReply);
+    const a = new GeminiAdapter(cfg({ apiKey: undefined, apiKeySecret: 'g' }), { fetch: f, resolveSecret: () => secret });
+    const iterator = a.chat(req())[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toEqual({ type: 'text', text: 'Hi' });
+    expect(f.calls[0]!.headers.get('x-goog-api-key')).toBe(initialKey);
+    secret = undefined;
+    const e = await iterator.throw!(new Error(`Consumer failure for ${initialKey}`)).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(NeoError);
+    expect(e).toMatchObject({ code: 'provider_error', message: expect.stringContaining('[redacted]') });
+    expect((e as NeoError).message).not.toContain(initialKey);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it.each(['label', 'id', 'page token'] as const)('sanitises a model %s with the request-time key after it changes', async (field) => {
+    let secret: string | undefined = initialKey;
+    const pending = pendingBody();
+    const f = fakeFetch(() => new Response(pending.body));
+    const a = new GeminiAdapter(cfg({ apiKey: undefined, apiKeySecret: 'g' }), { fetch: f, resolveSecret: () => secret });
+    const result = a.listModels();
+    const error = result.catch((err: unknown) => err);
+    await pending.reading;
+    expect(f.calls[0]!.headers.get('x-goog-api-key')).toBe(initialKey);
+    secret = replacementKey;
+    pending.complete(JSON.stringify({
+      models: [{
+        name: `models/${field === 'id' ? initialKey : 'gemini-2.5-flash'}`,
+        displayName: `Model ${initialKey}`,
+        supportedGenerationMethods: ['generateContent'],
+      }],
+      ...(field === 'page token' ? { nextPageToken: initialKey } : {}),
+    }));
+    if (field === 'label') {
+      const models = await result;
+      expect(models[0]!.label).toBe('Model [redacted]');
+      expect(JSON.stringify(models)).not.toContain(initialKey);
+    } else {
+      expect(await error).toMatchObject({ code: 'provider_error', message: 'Gemini returned invalid model data.' });
+    }
+    expect(f.calls).toHaveLength(1);
+  });
+});
+
 describe('Gemini errors, keys, models, embeddings', () => {
   it('abort while reading error body throws cancelled, not provider_error', async () => {
     const controller = new AbortController();

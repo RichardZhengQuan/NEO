@@ -439,6 +439,138 @@ describe('OpenAI errors and retries', () => {
   });
 });
 
+describe.each([
+  ['deleted', undefined],
+  ['replaced', 'keyB-secret'],
+] as const)('OpenAI secret snapshots when the key is %s', (_change, nextSecret) => {
+  const keyA = 'keyA-secret';
+
+  function pendingResponse(status = 200) {
+    let controller: ReadableStreamDefaultController<Uint8Array>;
+    let onRead: () => void;
+    const reading = new Promise<void>((resolve) => { onRead = resolve; });
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) { controller = ctrl; },
+      pull() { onRead(); },
+    }, { highWaterMark: 0 });
+    return {
+      response: new Response(body, { status }),
+      reading,
+      send(text: string) {
+        controller.enqueue(new TextEncoder().encode(text));
+        controller.close();
+      },
+    };
+  }
+
+  it.each([
+    ['chat', 'openai-compatible'],
+    ['listModels', 'openai-compatible'],
+    ['embed', 'openai-compatible'],
+    ['listModels', 'ollama'],
+    ['embed', 'ollama'],
+  ] as const)('redacts the request key in a stalled HTTP error from %s (%s)', async (method, kind) => {
+    let secret: string | undefined = keyA;
+    const pending = pendingResponse(401);
+    const f = fakeFetch(() => pending.response);
+    const a = new OpenAIAdapter(cfg({ kind, apiKey: undefined, apiKeySecret: 's' }), { fetch: f, resolveSecret: () => secret });
+    const result = (method === 'chat' ? collect(a.chat(req())) : method === 'listModels' ? a.listModels() : a.embed({ model: 'embed', texts: ['x'] }))
+      .catch((error: unknown) => error);
+
+    await pending.reading;
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.headers.get('authorization')).toBe(`Bearer ${keyA}`);
+    secret = nextSecret;
+    pending.send(JSON.stringify({ error: { message: `Invalid API key: ${keyA}` } }));
+
+    const error = await result;
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'provider_auth', message: expect.stringContaining('Invalid API key: [redacted]') });
+    expect((error as NeoError).message).not.toContain(keyA);
+  });
+
+  it('redacts the request key in network errors after retries', async () => {
+    let secret: string | undefined = keyA;
+    let onRequest: () => void;
+    let fail: (error: Error) => void;
+    const requested = new Promise<void>((resolve) => { onRequest = resolve; });
+    const failure = new Promise<Response>((_resolve, reject) => { fail = reject; });
+    const f = fakeFetch(() => {
+      onRequest();
+      return failure;
+    });
+    const a = new OpenAIAdapter(cfg({ apiKey: undefined, apiKeySecret: 's' }), { fetch: f, resolveSecret: () => secret, sleep: recordingSleep() });
+    const result = collect(a.chat(req())).catch((error: unknown) => error);
+
+    await requested;
+    secret = nextSecret;
+    fail!(new Error(`Connection rejected ${keyA}`));
+
+    const error = await result;
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'provider_error', message: expect.stringContaining('Connection rejected [redacted]') });
+    expect((error as NeoError).message).not.toContain(keyA);
+    expect(f.calls).toHaveLength(3);
+    expect(f.calls.every((call) => call.headers.get('authorization') === `Bearer ${keyA}`)).toBe(true);
+  });
+
+  it('redacts the request key in a stalled stream error event', async () => {
+    let secret: string | undefined = keyA;
+    const pending = pendingResponse();
+    const f = fakeFetch(() => pending.response);
+    const a = new OpenAIAdapter(cfg({ apiKey: undefined, apiKeySecret: 's' }), { fetch: f, resolveSecret: () => secret });
+    const result = collect(a.chat(req())).catch((error: unknown) => error);
+
+    await pending.reading;
+    expect(f.calls[0]!.headers.get('authorization')).toBe(`Bearer ${keyA}`);
+    secret = nextSecret;
+    pending.send(dataFrames([{ error: { code: 401, message: `Invalid API key: ${keyA}` } }]));
+
+    const error = await result;
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'provider_auth', message: expect.stringContaining('Invalid API key: [redacted]') });
+    expect((error as NeoError).message).not.toContain(keyA);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('redacts the request key when a stream consumer throws', async () => {
+    let secret: string | undefined = keyA;
+    const f = fakeFetch(okReply);
+    const a = new OpenAIAdapter(cfg({ apiKey: undefined, apiKeySecret: 's' }), { fetch: f, resolveSecret: () => secret });
+    const iterator = a.chat(req())[Symbol.asyncIterator]();
+    expect(await iterator.next()).toMatchObject({ done: false, value: { type: 'text', text: 'Hi' } });
+    expect(f.calls[0]!.headers.get('authorization')).toBe(`Bearer ${keyA}`);
+    secret = nextSecret;
+
+    const error = await iterator.throw!(new Error(`Consumer failure ${keyA}`)).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(NeoError);
+    expect(error).toMatchObject({ code: 'provider_error', message: expect.stringContaining('Consumer failure [redacted]') });
+    expect((error as NeoError).message).not.toContain(keyA);
+  });
+
+  it.each(['id', 'label', 'ollama id'] as const)('sanitises the request key in a stalled model %s', async (field) => {
+    let secret: string | undefined = keyA;
+    const pending = pendingResponse();
+    const f = fakeFetch(() => pending.response);
+    const a = new OpenAIAdapter(cfg({ kind: field === 'ollama id' ? 'ollama' : 'openai-compatible', apiKey: undefined, apiKeySecret: 's' }), { fetch: f, resolveSecret: () => secret });
+    const result = a.listModels().catch((error: unknown) => error);
+
+    await pending.reading;
+    expect(f.calls[0]!.headers.get('authorization')).toBe(`Bearer ${keyA}`);
+    secret = nextSecret;
+    pending.send(JSON.stringify(field === 'ollama id' ? { models: [{ name: `model-${keyA}` }] } : { data: [{ id: field === 'id' ? `model-${keyA}` : 'gpt-5', display_name: `Model ${keyA}` }] }));
+
+    const resultValue = await result;
+    if (field === 'label') {
+      expect(resultValue).toMatchObject([{ id: 'gpt-5', label: 'Model [redacted]' }]);
+    } else {
+      expect(resultValue).toBeInstanceOf(NeoError);
+      expect(resultValue).toMatchObject({ code: 'provider_error', message: expect.stringContaining('returned invalid model data') });
+    }
+    expect(JSON.stringify(resultValue)).not.toContain(keyA);
+  });
+});
+
 describe('Ollama', () => {
   const ollama = (over: Partial<ProviderConfig> = {}): ProviderConfig => ({ id: 'ollama', kind: 'ollama', enabled: true, ...over });
 

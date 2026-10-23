@@ -234,10 +234,11 @@ export class OpenAIAdapter implements ProviderAdapter {
 
   async *chat(request: ChatRequest): AsyncIterable<ChatStreamEvent> {
     throwIfAborted(request.signal);
+    const secrets = this.captureSecrets();
     const headers = this.headers({ 'content-type': 'application/json', accept: 'text/event-stream' });
     const body = this.buildBody(request);
 
-    const response = await this.request(`${this.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, request.signal, true);
+    const response = await this.request(`${this.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, request.signal, true, secrets);
     if (!response.body) throw new NeoError('provider_error', `${this.label()} returned an empty response.`, { retryable: true });
 
     const tools: ToolAccumulator[] = [];
@@ -261,7 +262,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         } catch {
           continue; // keep-alive noise from some servers
         }
-        if (chunk['error']) throw this.streamError(chunk['error']);
+        if (chunk['error']) throw this.streamError(chunk['error'], secrets);
         if (isPlainObject(chunk['usage'])) usage = toUsage(chunk['usage']);
 
         const choice = Array.isArray(chunk['choices']) ? (chunk['choices'][0] as Record<string, unknown> | undefined) : undefined;
@@ -297,7 +298,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       const cancelled = asCancelled(err, request.signal);
       if (cancelled) throw cancelled;
       if (err instanceof NeoError) throw err;
-      throw new NeoError('provider_error', this.clean(`The connection to ${this.label()} was interrupted: ${describeNetworkError(err)}`), {
+      throw new NeoError('provider_error', this.clean(`The connection to ${this.label()} was interrupted: ${describeNetworkError(err)}`, secrets), {
         retryable: true,
         cause: err,
       });
@@ -367,20 +368,21 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   async listModels(signal?: AbortSignal): Promise<ModelInfo[]> {
+    const secrets = this.captureSecrets();
     if (this.kind === 'ollama') {
-      const resp = await this.request(`${this.ollamaRoot}/api/tags`, { headers: this.headers({}) }, signal, false);
+      const resp = await this.request(`${this.ollamaRoot}/api/tags`, { headers: this.headers({}) }, signal, false, secrets);
       const json = await readModelData(resp, 'Ollama', 'models', signal);
       return (json['models'] as unknown[])
         .filter(isPlainObject)
         .map((m) => typeof m['name'] === 'string' ? m['name'] : typeof m['model'] === 'string' ? m['model'] : '')
         .filter(Boolean)
         .map((id) => {
-          if (this.clean(id) !== id) throw new NeoError('provider_error', 'Ollama returned invalid model data.');
+          if (this.clean(id, secrets) !== id) throw new NeoError('provider_error', 'Ollama returned invalid model data.');
           return { id, provider: this.id, label: id, capabilities: this.capabilities(id) };
         });
     }
-    const resp = await this.request(`${this.baseUrl}/models`, { headers: this.headers({}) }, signal, false);
-    const label = this.clean(this.label());
+    const resp = await this.request(`${this.baseUrl}/models`, { headers: this.headers({}) }, signal, false, secrets);
+    const label = this.clean(this.label(), secrets);
     const json = await readModelData(resp, label, 'data', signal);
     this.listedCapabilities.clear();
     return (json['data'] as unknown[])
@@ -388,10 +390,10 @@ export class OpenAIAdapter implements ProviderAdapter {
       .filter((m) => typeof m['id'] === 'string' && m['id'] !== '')
       .map((m) => {
         const id = m['id'] as string;
-        if (this.clean(id) !== id) throw new NeoError('provider_error', `${label} returned invalid model data.`);
+        if (this.clean(id, secrets) !== id) throw new NeoError('provider_error', `${label} returned invalid model data.`);
         const capabilities = this.modelCapabilities(m, id);
         this.listedCapabilities.set(id, capabilities);
-        return { id, provider: this.id, label: this.clean(typeof m['display_name'] === 'string' ? m['display_name'] : typeof m['name'] === 'string' ? m['name'] : id), capabilities };
+        return { id, provider: this.id, label: this.clean(typeof m['display_name'] === 'string' ? m['display_name'] : typeof m['name'] === 'string' ? m['name'] : id, secrets), capabilities };
       });
   }
 
@@ -421,11 +423,12 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   async embed(request: EmbedRequest): Promise<number[][]> {
+    const secrets = this.captureSecrets();
     const headers = this.headers({ 'content-type': 'application/json' });
     const body = JSON.stringify({ model: request.model, input: request.texts });
     let vectors: number[][];
     if (this.kind === 'ollama') {
-      const resp = await this.request(`${this.ollamaRoot}/api/embed`, { method: 'POST', headers, body }, request.signal, false);
+      const resp = await this.request(`${this.ollamaRoot}/api/embed`, { method: 'POST', headers, body }, request.signal, false, secrets);
       const json = await resp.json().catch((err: unknown) => {
         const cancelled = asCancelled(err, request.signal);
         if (cancelled) throw cancelled;
@@ -433,7 +436,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       });
       vectors = (json as { embeddings?: number[][] }).embeddings ?? [];
     } else {
-      const resp = await this.request(`${this.baseUrl}/embeddings`, { method: 'POST', headers, body }, request.signal, false);
+      const resp = await this.request(`${this.baseUrl}/embeddings`, { method: 'POST', headers, body }, request.signal, false, secrets);
       const json = await resp.json().catch((err: unknown) => {
         const cancelled = asCancelled(err, request.signal);
         if (cancelled) throw cancelled;
@@ -471,7 +474,7 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   /** fetch (with pre-first-byte retries for chat) + error mapping. Returns an OK response. */
-  private async request(url: string, init: RequestInit, signal: AbortSignal | undefined, retry: boolean): Promise<Response> {
+  private async request(url: string, init: RequestInit, signal: AbortSignal | undefined, retry: boolean, secrets: (string | undefined)[]): Promise<Response> {
     const attempt = () => this.fetchImpl(url, { ...init, signal });
     let response: Response;
     try {
@@ -479,9 +482,9 @@ export class OpenAIAdapter implements ProviderAdapter {
     } catch (err) {
       const cancelled = asCancelled(err, signal);
       if (cancelled) throw cancelled;
-      throw this.networkError(err);
+      throw this.networkError(err, secrets);
     }
-    if (!response.ok) throw await this.httpError(response, signal);
+    if (!response.ok) throw await this.httpError(response, signal, secrets);
     return response;
   }
 
@@ -489,25 +492,30 @@ export class OpenAIAdapter implements ProviderAdapter {
     return this.kind === 'ollama' ? 'Ollama' : this.kind === 'openai' ? 'OpenAI' : (this.config.label ?? hostOf(this.baseUrl));
   }
 
-  /** Redact the API key and credential-looking custom headers from user-visible text. */
-  private clean(text: string): string {
+  /** Capture request credentials before awaiting so rotation cannot change redaction. */
+  private captureSecrets(): (string | undefined)[] {
     const secrets: (string | undefined)[] = [resolveApiKey(this.config, this.options)];
     for (const [name, value] of Object.entries(this.config.headers ?? {})) {
       if (/auth|key|token|secret/i.test(name)) secrets.push(value, value.replace(/^bearer\s+/i, ''));
     }
+    return secrets;
+  }
+
+  /** Redact the API key and credential-looking custom headers from user-visible text. */
+  private clean(text: string, secrets: (string | undefined)[]): string {
     return redact(text, secrets);
   }
 
-  private networkError(err: unknown): NeoError {
+  private networkError(err: unknown, secrets: (string | undefined)[]): NeoError {
     const detail = err instanceof NeoError ? err.message.replace(/^Network error: /, '') : describeNetworkError(err);
     const message =
       this.kind === 'ollama'
         ? `Can't reach Ollama at ${this.ollamaRoot}. Is it running? (\`ollama serve\`) — ${detail}`
         : `Can't reach ${this.label()} at ${hostOf(this.baseUrl)}: ${detail}`;
-    return new NeoError('provider_error', this.clean(message), { retryable: true, cause: err });
+    return new NeoError('provider_error', this.clean(message, secrets), { retryable: true, cause: err });
   }
 
-  private async httpError(response: Response, signal?: AbortSignal): Promise<NeoError> {
+  private async httpError(response: Response, signal: AbortSignal | undefined, secrets: (string | undefined)[]): Promise<NeoError> {
     const text = await response.text().catch((err: unknown) => {
       const cancelled = asCancelled(err, signal);
       if (cancelled) throw cancelled;
@@ -524,7 +532,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       /* not JSON: keep the text */
     }
     const status = response.status;
-    const detail = this.clean(`${this.label()} error (HTTP ${status})${message ? `: ${message}` : ''}`);
+    const detail = this.clean(`${this.label()} error (HTTP ${status})${message ? `: ${message}` : ''}`, secrets);
     if (status === 401 || status === 403) return new NeoError('provider_auth', detail, { details: { status } });
     if (status === 429) {
       const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
@@ -536,12 +544,12 @@ export class OpenAIAdapter implements ProviderAdapter {
     return new NeoError('provider_error', detail, { retryable: status >= 500, details: { status } });
   }
 
-  private streamError(error: unknown): NeoError {
+  private streamError(error: unknown, secrets: (string | undefined)[]): NeoError {
     const message = isPlainObject(error) && typeof error['message'] === 'string' ? error['message'] : typeof error === 'string' ? error : JSON.stringify(error);
     const e = isPlainObject(error) ? error : {};
     const code = typeof e['code'] === 'number' ? e['code'] : 0;
     const codeStr = typeof e['code'] === 'string' ? e['code'] : '';
-    const detail = this.clean(`${this.label()} error: ${message}`);
+    const detail = this.clean(`${this.label()} error: ${message}`, secrets);
     if (code === 401 || code === 403 || codeStr === 'invalid_api_key' || codeStr === 'invalid_organization' || codeStr === 'account_deactivated') {
       return new NeoError('provider_auth', detail, { details: code ? { status: code } : {} });
     }
