@@ -92,7 +92,7 @@ export class VectorCache {
   all(model: string): Map<string, Float32Array> {
     const cache = this.cache(model);
     if (!this.loaded.has(model)) {
-      const rows = this.db.prepare('SELECT node_id, vector FROM memory_vectors WHERE model = ?').all(model) as { node_id: string; vector: Uint8Array }[];
+      const rows = this.db.prepare('SELECT v.node_id, v.vector FROM memory_vectors v JOIN memory_nodes n ON n.id = v.node_id WHERE v.model = ? AND n.embedding_model IS NOT NULL').all(model) as { node_id: string; vector: Uint8Array }[];
       for (const row of rows) {
         if (cache.has(row.node_id)) continue;
         try {

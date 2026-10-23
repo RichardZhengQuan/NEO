@@ -662,6 +662,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
     /** Live-swap the embedder without restarting the service.
      *  Updates the routing table and re-embeds any stale vectors in the background. */
     setEmbedder(newEmbedder: Embedder): void {
+      const oldEmbedderId = embedder.id;
       if (embedder.id === newEmbedder.id && 'settingsFingerprint' in embedder && 'settingsFingerprint' in newEmbedder &&
           embedder.settingsFingerprint !== newEmbedder.settingsFingerprint) {
         db.prepare('UPDATE memory_nodes SET embedding_model = NULL WHERE embedding_model = ?').run(embedder.id);
@@ -677,6 +678,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
       ctx.localEmbedder = newLocalEmbedder;
       ctx.keepLocal = newKeepLocal;
       vectors.setRouting({ main: newEmbedder, local: newLocalEmbedder, keepLocal: newKeepLocal });
+      if (newEmbedder.id !== oldEmbedderId) vectors.evictAll(oldEmbedderId);
       void vectors.reembedStale(newEmbedder);
     },
 

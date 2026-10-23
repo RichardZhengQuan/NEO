@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Embedder, ProviderAdapter } from '@neo/protocol';
-import { silentLogger } from '@neo/protocol';
+import type { ChatModel, ChatRequest, ChatStreamEvent, Embedder, ObservedTurn, ProviderAdapter } from '@neo/protocol';
+import { DEFAULT_MEMORY_POLICY, newId, silentLogger } from '@neo/protocol';
 import { openNeoDatabase, type NeoDatabase } from '@neo/storage';
 import { createMemoryService, HashingEmbedder } from './index.js';
 import { createProviderEmbedder } from './embedder.js';
@@ -254,5 +254,151 @@ describe('recall privacy under concurrent writes', () => {
       }
       expect(item.reason).not.toContain(sensitiveLabel);
     }
+  });
+});
+
+describe('stale-vector on failed update', () => {
+  it('cleared embedding_model does not surface the stale vector in semantic recall', async () => {
+    const { db, memory: svc } = setup(new HashingEmbedder(64));
+
+    // 1. Remember a fact with a known embedding.
+    // Label 'Zeta' is chosen deliberately: it does not contain any non-stopword
+    // from the recall query 'alpha only' (only non-stopword is 'alpha'), so that
+    // after the vector is cleared, FTS cannot resurrect the node via its label.
+    const node = await svc.remember({
+      kind: 'fact', label: 'Zeta', content: 'alpha only', source: { by: 'user' },
+    });
+    const id = node.id;
+
+    // Precondition: the node has an embedding_model and a vector row.
+    expect(db.prepare('SELECT embedding_model FROM memory_nodes WHERE id = ?').get(id)).toMatchObject({ embedding_model: expect.stringContaining('hash') });
+    expect(db.prepare('SELECT * FROM memory_vectors WHERE node_id = ?').get(id)).not.toBeUndefined();
+
+    // 2. Wrap the embedder so that embedding 'beta only' returns an empty array,
+    //    causing embedTexts to produce a null vector and writeVector to clear embedding_model.
+    const inner = new HashingEmbedder(64);
+    const failing: Embedder = {
+      id: inner.id,
+      dimensions: inner.dimensions,
+      embed: async (texts: string[]) => {
+        if (texts.some(t => t.includes('beta only'))) return [];
+        return inner.embed(texts);
+      },
+    };
+    svc.setEmbedder(failing);
+
+    // 3. Update the node's content — the new embedding will fail.
+    await svc.update(id, { content: 'beta only' });
+
+    // 4. Assert embedding_model was cleared.
+    expect(db.prepare('SELECT embedding_model FROM memory_nodes WHERE id = ?').get(id)).toEqual({ embedding_model: null });
+
+    // 5. Assert the stale vector row was deleted from memory_vectors.
+    expect(db.prepare('SELECT * FROM memory_vectors WHERE node_id = ?').get(id)).toBeUndefined();
+
+    // 6. Assert recall for the old text does NOT return this node.
+    const result = await svc.recall({ text: 'alpha only', reinforce: false });
+    expect(result.items.map(item => item.node.id)).not.toContain(id);
+  });
+
+  // Sibling of the above (Codex P2 on bdac9fd): one extraction may apply several writes to the
+  // same node. An earlier failed embedding adds the id to `vectorClears`; a later successful
+  // `writeVector()` on the same id in the same transaction must cancel that clear, or the
+  // post-transaction drop evicts the valid vector from the cache. The DB row then has the
+  // current `embedding_model` set, so background re-embedding skips it and recall misses
+  // the node via the semantic path until service restart.
+  it('a later successful write cancels an earlier pending vector-clear on the same node', async () => {
+    const db = openNeoDatabase(':memory:');
+    databases.push(db);
+
+    // Controlled embedder with hand-picked vectors. Mapping the "fail" text to a zero-length
+    // vector makes `writeVector()` take the failure path (vectors.write rejects empty
+    // vectors). Mapping "gamma only" and the lexically-disjoint recall query "xenon" to the
+    // SAME vector lets the semantic path alone decide whether the updated node surfaces.
+    let failUpdate = false;
+    const embedder: Embedder & { isLocal: true } = {
+      id: 'test-embedder',
+      dimensions: 4,
+      isLocal: true,
+      embed: async (texts: string[]): Promise<Float32Array[]> =>
+        texts.map((t) => {
+          if (failUpdate && t.includes('beta only')) return new Float32Array(0);
+          if (t.includes('gamma only') || t.includes('xenon')) return new Float32Array([1, 0, 0, 0]);
+          return new Float32Array([0, 1, 0, 0]);
+        }),
+    };
+
+    // Scripted extraction: returns two update ops for the same target id in one `memories`
+    // array (one extraction, one runWrite transaction). The LLM runs locally so sensitive
+    // routing cannot change the picture.
+    let targetId = '';
+    const llm: ChatModel = {
+      async *chat(req: ChatRequest): AsyncIterable<ChatStreamEvent> {
+        if (req.metadata?.['purpose'] === 'memory-consolidate') {
+          yield { type: 'text', text: '{"summary":null,"facts":[]}' };
+          yield { type: 'done', stopReason: 'end' };
+          return;
+        }
+        yield {
+          type: 'text',
+          text: JSON.stringify({
+            episode: null,
+            memories: [
+              { op: 'update', id: targetId, content: 'beta only' },
+              { op: 'update', id: targetId, content: 'gamma only' },
+            ],
+            links: [],
+          }),
+        };
+        yield { type: 'done', stopReason: 'end' };
+      },
+    };
+
+    const svc = createMemoryService({
+      db,
+      embedder,
+      llm: () => ({ model: llm, name: 'fake', isLocal: true }),
+      policy: { ...DEFAULT_MEMORY_POLICY },
+      clock: () => 1_800_000_000_000,
+      logger: silentLogger,
+    });
+
+    // Seed: a node whose initial content embeds fine (fail flag not set yet).
+    const node = await svc.remember({
+      kind: 'fact', label: 'Zeta', content: 'alpha only', source: { by: 'user' },
+    });
+    targetId = node.id;
+
+    // Flip the embedder: only `beta only` texts now return an unusable vector; everything
+    // else (extraction's own embeddings, "gamma only", "xenon") still embeds.
+    failUpdate = true;
+
+    const now = 1_800_000_000_000;
+    const observedTurn: ObservedTurn = {
+      conversationId: 'conv',
+      userMessage: { id: newId('msg', now), conversationId: 'conv', role: 'user', parts: [{ type: 'text', text: 'something new' }], createdAt: now, status: 'complete' },
+      assistantMessage: { id: newId('msg', now + 1), conversationId: 'conv', role: 'assistant', parts: [{ type: 'text', text: 'ok' }], createdAt: now + 1, status: 'complete' },
+      now,
+    };
+    const observeResult = await svc.observe(observedTurn);
+    // Premise check: the extraction's two update ops reach the single runWrite transaction.
+    expect(observeResult.updated.map((n) => n.id)).toEqual([node.id]);
+    expect(observeResult.skipped).toBeUndefined();
+
+    // The second update wins. Its text (`gamma only`) embeds fine, so the final DB row is
+    // consistent: content is `gamma only`, `embedding_model` is the test embedder's id, and
+    // `memory_vectors` has a row for it.
+    expect(db.prepare('SELECT content FROM memory_nodes WHERE id = ?').get(node.id)).toEqual({ content: 'gamma only' });
+    expect(db.prepare('SELECT embedding_model FROM memory_nodes WHERE id = ?').get(node.id)).toEqual({ embedding_model: 'test-embedder' });
+    expect(db.prepare('SELECT * FROM memory_vectors WHERE node_id = ?').get(node.id)).not.toBeUndefined();
+
+    // The real check: recall with text that only matches semantically — `xenon` shares no
+    // non-stopword with the node's label (`Zeta`) or final content (`gamma only`), so FTS
+    // cannot seed it. The embedder maps `xenon` to the same vector as `gamma only`, so a
+    // present vector cache entry seeds the node with maximum cosine. On unfixed code the
+    // second write stages the vector but the first write's leftover `vectorClears` entry
+    // drops it from the cache after the transaction, so the semantic seed is missing.
+    const result = await svc.recall({ text: 'xenon', reinforce: false });
+    expect(result.items.map((item) => item.node.id)).toContain(node.id);
   });
 });
