@@ -126,6 +126,11 @@ export class WriteSession {
     const stored = vector ? this.ctx.vectors.write(model, id, vector) : null;
     if (stored) {
       this.staged.set(id, stored);
+      // One extraction can apply several writes to the same node. If an earlier write failed
+      // and queued a vector-clear, this later successful write replaced the DB row and must
+      // cancel that clear: otherwise the post-transaction `drop(id)` evicts the vector we
+      // just cached, and recall misses the node via the semantic path.
+      this.vectorClears.delete(id);
       return model;
     }
     this.ctx.db.prepare('UPDATE memory_nodes SET embedding_model = NULL WHERE id = ?').run(id);
