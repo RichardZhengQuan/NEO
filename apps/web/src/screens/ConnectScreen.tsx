@@ -7,6 +7,7 @@ import { Button, Icon, IconButton, NeoAvatar, TextArea, TextField, useLocale, us
 import { pairWithLink, pairingOutcomeKey } from '../actions/pairing.js';
 import { connectWith } from '../actions/session.js';
 import { credentialsFromInput, verifyCredentials } from '../connection.js';
+import { errorMessage } from '../lib/errors.js';
 import { getPlatform } from '../platform/index.js';
 import { currentSessionEpoch, isCurrentSession, showConnect, useSession } from '../state/session.js';
 
@@ -83,6 +84,15 @@ export function ConnectScreen(): ReactElement {
     }
   };
 
+  const switchToLocal = async () => {
+    setError(null);
+    try {
+      await window.neoDesktop?.switchMode?.('local');
+    } catch (err) {
+      setError(errorMessage(err, t));
+    }
+  };
+
   const notice =
     hint?.reason === 'unauthorized'
       ? { tone: 'warning', icon: 'key', text: t('connect.hint_unauthorized') }
@@ -146,6 +156,12 @@ export function ConnectScreen(): ReactElement {
               <Button type="submit" variant="secondary" block loading={busy} iconRight="arrow-right">{t('connect.submit')}</Button>
             </form>
           </details>
+          {platform.kind === 'electron' && window.neoDesktop?.switchMode && (
+            <div style={{ textAlign: 'center' }}>
+              <Button variant="ghost" size="sm" onClick={() => void switchToLocal()}>{t('connect.switch_to_local')}</Button>
+              <p className="neo-help">{t('connect.switch_to_local_help')}</p>
+            </div>
+          )}
         </div>
       </div>
       <p className="neo-help" style={{ maxWidth: '26rem', textAlign: 'center', marginTop: '1rem' }}>{t('connect.footer')}</p>
@@ -155,8 +171,19 @@ export function ConnectScreen(): ReactElement {
 
 export function OfflineScreen(): ReactElement {
   const t = useT();
+  const platform = getPlatform();
   const hint = useSession((s) => s.connectHint);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const switchToLocal = async () => {
+    setError(null);
+    try {
+      await window.neoDesktop?.switchMode?.('local');
+    } catch (err) {
+      setError(errorMessage(err, t));
+    }
+  };
 
   const retry = async () => {
     if (!hint?.serverUrl || !hint.token) return;
@@ -200,6 +227,13 @@ export function OfflineScreen(): ReactElement {
           <Button variant="ghost" block onClick={() => showConnect({ reason: 'manual', serverUrl: hint?.serverUrl, tunnel: hint?.tunnel })}>
             {t('offline.change')}
           </Button>
+          {platform.kind === 'electron' && window.neoDesktop?.switchMode && (
+            <div>
+              <Button variant="ghost" size="sm" onClick={() => void switchToLocal()}>{t('connect.switch_to_local')}</Button>
+              <p className="neo-help">{t('connect.switch_to_local_help')}</p>
+            </div>
+          )}
+          {error && <p className="neo-error-text" role="alert" style={{ margin: 0 }}>{error}</p>}
         </div>
       </div>
     </main>

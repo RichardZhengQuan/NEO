@@ -34,9 +34,11 @@ import {
   isSafeExternalUrl,
   isSameOrigin,
   loadStartupMode,
+  nextStartupModeForSwitch,
   pickFirstLaunchStrings,
   resolveWebDir,
   saveStartupMode,
+  type DesktopMode,
   type RemoteMode,
 } from './lib.js';
 import {
@@ -419,6 +421,30 @@ function buildAppMenu(): Menu {
 
 // ───────────────────────────── IPC handlers ─────────────────────────────
 
+function registerModeIpcHandlers(
+  userData: string,
+  getMode: () => DesktopMode,
+  isAuthorized: (senderUrl: string) => boolean,
+  lifecycle: Pick<typeof app, 'relaunch' | 'quit'>,
+): void {
+  const relaunch = lifecycle.relaunch.bind(lifecycle);
+  const quit = lifecycle.quit.bind(lifecycle);
+
+  ipcMain.handle('neo:getMode', async (event): Promise<DesktopMode> => {
+    if (!isAuthorized(event.senderFrame?.url ?? '')) throw new Error('Unauthorized sender');
+    return getMode();
+  });
+
+  ipcMain.handle('neo:switchMode', async (event, target: 'local' | 'remote') => {
+    if (!isAuthorized(event.senderFrame?.url ?? '')) throw new Error('Unauthorized sender');
+    const nextMode = nextStartupModeForSwitch(target);
+    await saveStartupMode(userData, nextMode);
+    relaunch();
+    isQuitting = true;
+    quit();
+  });
+}
+
 /**
  * IPC handlers for connect mode (no embedded server).
  * Exposes neo:getConfig (throws until credentials are saved), neo:openExternal,
@@ -432,6 +458,15 @@ function registerConnectIpcHandlers(userData: string, initialMode: RemoteMode): 
       tunnel: initialMode.tunnel ?? null,
     };
   }
+
+  registerModeIpcHandlers(
+    userData,
+    () => connectCredentials
+      ? { kind: 'remote', serverUrl: connectCredentials.serverUrl }
+      : { kind: 'remote' },
+    (senderUrl) => senderUrl.startsWith('app://neo/'),
+    app,
+  );
 
   ipcMain.handle('neo:getConfig', async (event) => {
     const senderUrl = event.senderFrame?.url ?? '';
@@ -511,7 +546,14 @@ function registerConnectIpcHandlers(userData: string, initialMode: RemoteMode): 
   });
 }
 
-function registerIpcHandlers(serverUrl: string, ownerToken: string): void {
+function registerIpcHandlers(userData: string, serverUrl: string, ownerToken: string): void {
+  registerModeIpcHandlers(
+    userData,
+    () => ({ kind: 'local' }),
+    (senderUrl) => isSameOrigin(senderUrl, serverUrl),
+    app,
+  );
+
   ipcMain.handle('neo:getConfig', (event) => {
     // Validate that the request comes from our own renderer window.
     const senderUrl = event.senderFrame?.url ?? '';
@@ -834,7 +876,7 @@ async function main(): Promise<void> {
   const { url: serverUrl, ownerToken } = neoServer;
 
   // Register IPC channels before creating the window.
-  registerIpcHandlers(serverUrl, ownerToken);
+  registerIpcHandlers(userData, serverUrl, ownerToken);
 
   // Set up the app menu.
   Menu.setApplicationMenu(buildAppMenu());
