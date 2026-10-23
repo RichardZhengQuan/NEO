@@ -123,6 +123,38 @@ describe('sensitive historical memory context', () => {
 });
 
 describe('permission revocation after tool approval', () => {
+  it('emits tool.confirmation when inputSchema has an async refinement (describeCall must not use safeParse)', async () => {
+    const h = harness({
+      tools: [
+        {
+          name: 'async_schema_confirm',
+          title: 'Async confirm',
+          description: 'A tool with an async schema.',
+          inputSchema: z.object({ x: z.string() }).refine(async () => true),
+          risk: 'dangerous',
+          defaultPermission: 'confirm',
+          describeCall: (v: { x: string }) => String(v.x),
+          async execute() { return { output: { done: true } }; },
+        },
+      ],
+    });
+    h.model.script([ev.call('async_schema_call', 'async_schema_confirm', { x: 'hello' }), ev.done('tool_use')]);
+    const confirmations: ToolConfirmation[] = [];
+    h.runtime.subscribe((event) => {
+      if (event.type === 'tool.confirmation') {
+        confirmations.push(event.confirmation);
+        h.runtime.confirm(event.confirmation.id, { approve: false });
+      }
+    });
+    const turn = await runTurn(h, 'trigger it');
+
+    expect(confirmations).toHaveLength(1);
+    expect(confirmations[0]).toMatchObject({ name: 'async_schema_confirm', description: 'hello' });
+    expect(turn.message.status).toBe('complete');
+    expect(h.tools.executed).toEqual([]);
+    expect(resultFor(turn.message, 'async_schema_call')).toMatchObject({ isError: true, summary: 'Declined' });
+  });
+
   it.each([false, true])('declines an approved call when permission is revoked before execution (always=%s)', async (always) => {
     const h = harness({ settings: { agent: { } } });
     h.model.script([ev.call('delete_call', 'delete_thing', { msg: 'Groceries' }), ev.done('tool_use')]);
@@ -191,7 +223,14 @@ describe('permission revocation after tool approval', () => {
       h.settings.update({ tools: { permissions: { delete_thing: 'deny' } } });
       validationGate.resolve();
       const turn = await turnPromise;
-      await executionSettled.promise;
+      // For 'confirm': describeCall now calls safeParseAsync (fix for async-schema
+      // confirmation), so the intercepted gate fires during askConfirmation before
+      // execution starts; h.tools.execute is never called and executionSettled never
+      // resolves. For 'auto': no confirmation path, execution starts normally and the
+      // gate fires inside h.tools.execute.
+      if (permission !== 'confirm') {
+        await executionSettled.promise;
+      }
 
       expect(h.tools.executed).toEqual([]);
       expect(resultFor(turn.message, 'delete_async_call')).toMatchObject({
