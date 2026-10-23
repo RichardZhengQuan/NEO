@@ -152,11 +152,39 @@ describe('sanitizeGeminiSchema', () => {
     });
   });
 
+  it('preserves enum restriction on a mixed-type union', () => {
+    const out = sanitizeGeminiSchema({ type: ['string', 'number'], enum: ['ready'] }) as { enum: unknown[] };
+    expect(out).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      enum: ['ready'],
+    });
+    expect(out.enum).toContain('ready');
+    expect(out.enum).not.toContain('other');
+    expect(out.enum).not.toContain(5);
+  });
+
   it('preserves all non-null types and sets nullable when null is in the type-union array', () => {
     expect(sanitizeGeminiSchema({ type: ['string', 'number', 'null'] })).toEqual({
       anyOf: [{ type: 'string' }, { type: 'number' }],
       nullable: true,
     });
+  });
+
+  it('preserves const restriction (normalized to enum) on a nullable string union', () => {
+    const nullableString = sanitizeGeminiSchema({ type: ['string', 'null'], const: 'ready' }) as { enum: unknown[] };
+    expect(nullableString).toEqual({ type: 'string', nullable: true, enum: ['ready'] });
+    expect(nullableString.enum).toContain('ready');
+    expect(nullableString.enum).not.toContain('other');
+
+    const out = sanitizeGeminiSchema({ type: ['string', 'number', 'null'], const: 'ready' }) as { enum: unknown[] };
+    expect(out).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
+      nullable: true,
+      enum: ['ready'],
+    });
+    expect(out.enum).toContain('ready');
+    expect(out.enum).not.toContain('other');
+    expect(out.enum).not.toContain(5);
   });
 
   it('preserves sibling constraints in object/string type-union', () => {
