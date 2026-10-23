@@ -35,16 +35,7 @@ function formatterFor(timezone: string): Intl.DateTimeFormat {
   return fmt;
 }
 
-/** True when `timezone` is an IANA zone (or alias) this runtime knows. */
-export function isValidTimeZone(timezone: unknown): timezone is string {
-  if (typeof timezone !== 'string' || !timezone) return false;
-  try {
-    formatterFor(timezone);
-    return true;
-  } catch {
-    return false;
-  }
-}
+export { isValidTimeZone } from '@neo/protocol';
 
 /** Throw NeoError('bad_request') unless `timezone` is a known IANA zone. */
 export function assertTimeZone(timezone: unknown): string {

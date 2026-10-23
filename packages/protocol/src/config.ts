@@ -10,6 +10,7 @@ import { AiSettingsSchema, type SearchEngine } from './ai.js';
 import { MemoryPolicySchema } from './memory.js';
 import { isLanAddress } from './pairing.js';
 import { ProviderConfigSchema } from './providers.js';
+import { isValidTimeZone } from './time.js';
 import { PermissionLevelSchema } from './tools.js';
 import { DEFAULT_TUNNEL_PORT } from './tunnel.js';
 
@@ -55,7 +56,7 @@ export const NeoSettingsSchema = z.object({
   agent: AgentSettingsSchema.prefault({}),
   timeline: TimelineSettingsSchema.prefault({}),
   /** IANA timezone; the server fills this from the host at first boot. */
-  timezone: z.string().default('UTC'),
+  timezone: z.string().refine(isValidTimeZone, { message: 'Invalid IANA timezone' }).default('UTC'),
   locale: z.string().default('en'),
   theme: z.enum(['system', 'light', 'dark']).default('system'),
   onboarded: z.boolean().default(false),
@@ -91,12 +92,24 @@ export type NeoSettingsPatch = DeepPartial<NeoSettings> & {
 
 /** Upgrade legacy refs before overlaying defaults, which already contain an empty ai object. */
 export function migrateSettings(input: unknown): unknown {
-  if (!isPlainObject(input) || input.ai !== undefined) return input;
-  if (!['defaultModel', 'memoryModel', 'embedding'].some(key => input[key] !== undefined)) return input;
-  return {
-    ...input,
-    ai: { mode: 'simple', capabilities: { text: input.defaultModel ?? input.memoryModel ?? null, embedding: input.embedding ?? null } },
-  };
+  if (!isPlainObject(input)) return input;
+
+  let out: Record<string, unknown> = input;
+
+  // Coerce an invalid stored timezone to UTC rather than letting safeParse fail and wipe all settings.
+  if (typeof out.timezone === 'string' && !isValidTimeZone(out.timezone)) {
+    out = { ...out, timezone: 'UTC' };
+  }
+
+  // Migrate pre-ai-object schema (legacy defaultModel / memoryModel / embedding fields).
+  if (out.ai === undefined && ['defaultModel', 'memoryModel', 'embedding'].some(key => out[key] !== undefined)) {
+    out = {
+      ...out,
+      ai: { mode: 'simple', capabilities: { text: out.defaultModel ?? out.memoryModel ?? null, embedding: out.embedding ?? null } },
+    };
+  }
+
+  return out;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
