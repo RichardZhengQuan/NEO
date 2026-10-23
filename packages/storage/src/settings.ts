@@ -52,7 +52,15 @@ export function createSettingsStore(db: NeoDatabase, defaults: NeoSettings = DEF
         if (gen <= publishGen) return;
         publishGen = gen;
         current = next;
-        for (const l of listeners) l(next);
+        for (const l of listeners) {
+          // Re-check before each delivery: a listener may call update() reentantly,
+          // which fires its own afterCommit immediately (depth === 0), bumps publishGen
+          // and notifies all listeners with the newer snapshot.  If that happened, this
+          // publish has been superseded and the remaining listeners must not receive the
+          // stale `next` — they already got the correct value from the nested publish.
+          if (gen < publishGen) break;
+          l(next);
+        }
       });
       return next;
     },
