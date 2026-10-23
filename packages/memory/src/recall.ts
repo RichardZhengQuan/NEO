@@ -441,7 +441,7 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
           if (tainted.has(src)) hasTaint = true;
           else cleanContrib += c;
         }
-        if (hasTaint && Math.min(1, cleanContrib) < minScore) {
+        if (hasTaint && Math.min(1, cleanContrib) * (nodes.get(id)?.pinned ? C.pinnedBoost : 1) < minScore) {
           tainted.add(id);
           newTaint = true;
         }
