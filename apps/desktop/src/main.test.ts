@@ -87,6 +87,7 @@ const electron = await vi.hoisted(async () => {
       relaunch: vi.fn(),
       quit: vi.fn(),
       requestSingleInstanceLock: vi.fn(() => true),
+      setAsDefaultProtocolClient: vi.fn(() => true),
       getPath: vi.fn(() => '/neo-test'),
       getAppPath: vi.fn(() => '/neo-test/apps/desktop'),
       getLocale: vi.fn(() => 'en-US'),
@@ -213,6 +214,26 @@ describe('desktop startup failure', () => {
     electron.app.emit('activate');
 
     expect(electron.app.quit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('neo:// URL scheme registration', () => {
+  it('calls setAsDefaultProtocolClient("neo") on startup', async () => {
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7777',
+      ownerToken: 'test-token',
+      stop: server.stopServer,
+    });
+    const ready = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === 2) resolve();
+      });
+    });
+    await import('./main.js');
+    await ready;
+
+    expect(electron.app.setAsDefaultProtocolClient).toHaveBeenCalledTimes(1);
+    expect(electron.app.setAsDefaultProtocolClient).toHaveBeenCalledWith('neo');
   });
 });
 
