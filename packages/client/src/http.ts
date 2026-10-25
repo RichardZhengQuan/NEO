@@ -72,6 +72,7 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
   // Build a combined signal with timeout when requested.
   let combinedSignal: AbortSignal | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
 
   if (signal || timeout) {
     if (timeout) {
@@ -87,9 +88,10 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
         } else {
           // Fallback: chain abort events manually.
           const combined = new AbortController();
-          const onAbort = () => combined.abort(signal.reason);
+          onAbort = () => combined.abort(signal.reason);
           const onTimeout = () => combined.abort(timeoutSignal.reason);
           signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) combined.abort(signal.reason);
           timeoutSignal.addEventListener('abort', onTimeout, { once: true });
           combinedSignal = combined.signal;
         }
@@ -193,5 +195,6 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
     }, { cause: err });
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
   }
 }
