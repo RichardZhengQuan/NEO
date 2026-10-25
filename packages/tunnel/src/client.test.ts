@@ -352,3 +352,67 @@ describe('tunnel client upload backpressure', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 });
+
+describe('tunnel client abort race', () => {
+  it('rejects with the caller\'s abort reason when Reset send closes the channel', async () => {
+    const { transport, client, handler } = await session();
+
+    let notifyHandlerCalled!: () => void;
+    const handlerReady = new Promise<void>(resolve => { notifyHandlerCalled = resolve; });
+    handler.mockImplementation(async () => {
+      notifyHandlerCalled();
+      return new Promise<Response>(() => {});
+    });
+
+    const origSend = client.send.bind(client);
+    vi.spyOn(client, 'send').mockImplementation(frame => {
+      if (frame.type === TunnelFrameType.Reset) throw new Error('Reset failed');
+      return origSend(frame);
+    });
+
+    const abort = new AbortController();
+    const fetchPromise = transport.fetch(`${transport.baseUrl}/api/test`, { signal: abort.signal });
+    void fetchPromise.catch(() => {});
+
+    await handlerReady;
+
+    const reason = new Error('Stopped');
+    abort.abort(reason);
+    await expect(fetchPromise).rejects.toBe(reason);
+  });
+
+  it('body reader throws abort reason when aborted after ResponseEnd', async () => {
+    let serverChannel!: SecureChannel;
+    let streamId = 0;
+
+    const { transport } = environment({ accept(link, identity) {
+      void acceptChannel(link, { serverId: identity.serverId, staticKey: identity.dh }).then(ch => {
+        serverChannel = ch;
+        ch.onFrame = frame => {
+          if (frame.type === TunnelFrameType.RequestEnd) {
+            streamId = frame.stream;
+            ch.send({ type: TunnelFrameType.Response, stream: streamId,
+              payload: encodeJson({ status: 200, headers: [] }) });
+          }
+        };
+      }).catch(() => {});
+      return { close() { link.close(); } };
+    } });
+
+    const abort = new AbortController();
+    const response = await transport.fetch(`${transport.baseUrl}/api/test`, { signal: abort.signal });
+
+    const bodyPayload = new Uint8Array([1, 2, 3]);
+    serverChannel.send({ type: TunnelFrameType.ResponseBody, stream: streamId, payload: bodyPayload });
+    serverChannel.send({ type: TunnelFrameType.ResponseEnd, stream: streamId, payload: EMPTY });
+
+    // Deliver both frames to the client (each linkPair.send queues one microtask).
+    await Promise.resolve();
+
+    const reader = response.body!.getReader();
+    const reason = new DOMException('Aborted', 'AbortError');
+    abort.abort(reason);
+
+    await expect(reader.read()).rejects.toBe(reason);
+  });
+});
