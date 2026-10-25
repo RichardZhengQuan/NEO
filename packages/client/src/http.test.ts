@@ -43,6 +43,28 @@ describe('AbortSignal.any fallback', () => {
     });
   });
 
+  it('removes the caller abort listener when ctx.fetch() rejects (fetch-phase failure)', async () => {
+    // Three sequential fetch-phase rejections on a shared signal must not grow the
+    // listener count. Before the fix the onAbort listener leaked because the outer
+    // finally only existed on the body-processing block; a fetch-phase rejection
+    // exited through the first catch and never reached that finally.
+    const baseline = getEventListeners(controller.signal, 'abort').length;
+    expect(baseline).toBe(0);
+
+    const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(new TypeError('network error'));
+    const ctx = {
+      baseUrl: 'http://localhost:7777',
+      token: undefined,
+      fetch: fetchFn,
+      timeoutMs: 30_000,
+    };
+
+    for (let i = 0; i < 3; i++) {
+      await expect(apiRequest(ctx, { path: '/health', signal: controller.signal })).rejects.toBeInstanceOf(NeoApiError);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(baseline);
+    }
+  });
+
   it('removes the caller abort listener after each of 100 successful requests', async () => {
     const baseline = getEventListeners(controller.signal, 'abort').length;
     expect(baseline).toBe(0);
