@@ -300,10 +300,9 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         else { try { controller?.error(error); } catch { /* The reader may have cancelled. */ } }
       };
       const abort = () => {
-        reset();
         const reason = signal.reason ?? new DOMException('Aborted', 'AbortError');
-        cancelBodyReader(reason);
         fail(reason);
+        reset();
       };
       signal.addEventListener('abort', abort, { once: true });
       if (signal.aborted) { abort(); return; }
@@ -342,8 +341,22 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
                 break;
               case TunnelFrameType.ResponseEnd:
                 if (!hasHead) { fail(networkError()); break; }
-                controller?.close();
-                cleanup();
+                // Remove from the session map so no further frames are routed here.
+                // Set id to null to prevent reset() from sending a spurious Reset after a
+                // server-initiated stream end.
+                if (id !== null) current?.streams.delete(id);
+                id = null;
+                if (signal.aborted) {
+                  controller?.error(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+                  cleanup();
+                } else {
+                  controller?.close();
+                  // Deliberately omit cleanup(): the abort listener must stay registered so that
+                  // an abort concurrent with ResponseEnd (between the frame arriving and the
+                  // consumer draining the body) can still cancel the stream via
+                  // fail() → controller.error(reason). cleanup() runs via fail() when abort
+                  // fires, or via the stream's cancel handler if the consumer abandons the body.
+                }
                 break;
               case TunnelFrameType.Reset: fail(networkError()); break;
               default: throw new TunnelProtocolError('Unexpected HTTP frame');
