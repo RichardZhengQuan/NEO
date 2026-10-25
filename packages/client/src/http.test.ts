@@ -1,6 +1,89 @@
-import { describe, it, expect, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NeoClient, NeoApiError } from './index.js';
 import { apiRequest } from './http.js';
+
+describe('AbortSignal.any fallback', () => {
+  let originalAny: PropertyDescriptor | undefined;
+  let controller: AbortController;
+
+  beforeEach(() => {
+    originalAny = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
+    Object.defineProperty(AbortSignal, 'any', { configurable: true, writable: true, value: undefined });
+    controller = new AbortController();
+  });
+
+  afterEach(() => {
+    controller.abort();
+    if (originalAny) {
+      Object.defineProperty(AbortSignal, 'any', originalAny);
+    } else {
+      Reflect.deleteProperty(AbortSignal, 'any');
+    }
+  });
+
+  it('rejects with AbortError when the caller signal is already aborted', async () => {
+    controller.abort();
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+      if (init?.signal?.aborted) throw init.signal.reason;
+      return new Response('{}');
+    });
+
+    await expect(apiRequest({
+      baseUrl: 'http://localhost:7777',
+      token: undefined,
+      fetch: fetchFn,
+      timeoutMs: 30_000,
+    }, { path: '/health', signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(fetchFn.mock.calls[0]?.[1]?.signal).toMatchObject({
+      aborted: true,
+      reason: controller.signal.reason,
+    });
+  });
+
+  it('removes the caller abort listener when ctx.fetch() rejects (fetch-phase failure)', async () => {
+    // Three sequential fetch-phase rejections on a shared signal must not grow the
+    // listener count. Before the fix the onAbort listener leaked because the outer
+    // finally only existed on the body-processing block; a fetch-phase rejection
+    // exited through the first catch and never reached that finally.
+    const baseline = getEventListeners(controller.signal, 'abort').length;
+    expect(baseline).toBe(0);
+
+    const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(new TypeError('network error'));
+    const ctx = {
+      baseUrl: 'http://localhost:7777',
+      token: undefined,
+      fetch: fetchFn,
+      timeoutMs: 30_000,
+    };
+
+    for (let i = 0; i < 3; i++) {
+      await expect(apiRequest(ctx, { path: '/health', signal: controller.signal })).rejects.toBeInstanceOf(NeoApiError);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(baseline);
+    }
+  });
+
+  it('removes the caller abort listener after each of 100 successful requests', async () => {
+    const baseline = getEventListeners(controller.signal, 'abort').length;
+    expect(baseline).toBe(0);
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async () => new Response('{}'));
+    const ctx = {
+      baseUrl: 'http://localhost:7777',
+      token: undefined,
+      fetch: fetchFn,
+      timeoutMs: 30_000,
+    };
+
+    for (let i = 0; i < 100; i++) {
+      await expect(apiRequest(ctx, { path: '/health', signal: controller.signal })).resolves.toEqual({});
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(baseline);
+    }
+
+    expect(fetchFn).toHaveBeenCalledTimes(100);
+  });
+});
 
 describe('Error cause preservation', () => {
   it('preserves TimeoutError as cause on a headers-phase timeout', async () => {
