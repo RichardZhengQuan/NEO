@@ -42,8 +42,10 @@ function makeChannel(link: MessageLink, transport: NoiseTransport): SecureChanne
     close(reason = 'Channel closed') { fail(1000, reason); },
     send(frame) {
       if (closed) throw new TunnelProtocolError('Channel is closed');
+      // Invalid local frames must not tear down the shared channel.
+      const encoded = encodeFrame(frame);
       try {
-        link.send(transport.encrypt(encodeFrame(frame)));
+        link.send(transport.encrypt(encoded));
       } catch (error) {
         fail(error instanceof NoiseError ? TunnelCloseCode.CryptoError : TunnelCloseCode.ProtocolError,
           error instanceof Error ? error.message : 'Send failed');

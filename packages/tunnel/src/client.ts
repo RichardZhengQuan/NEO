@@ -1,5 +1,5 @@
 import {
-  RELAY_CONNECT_PATH, TUNNEL_BODY_CHUNK, TUNNEL_LAN_PATH, TunnelFrameType,
+  RELAY_CONNECT_PATH, TUNNEL_BODY_CHUNK, TUNNEL_FRAME_HEADER, TUNNEL_LAN_PATH, TUNNEL_MAX_FRAME, TunnelFrameType,
 } from '@neo/protocol';
 import type { TunnelRoute, TunnelResponseHead, TunnelReset, TunnelWsClose } from '@neo/protocol';
 import { equalBytes, fromBase64Url, fromUtf8, utf8 } from './bytes.js';
@@ -252,6 +252,19 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
     return id;
   }
 
+  function sendStreamFrame(current: Session, frame: Frame): void {
+    if (frame.payload.length + TUNNEL_FRAME_HEADER > TUNNEL_MAX_FRAME) {
+      const error = new TunnelProtocolError('Frame is too large');
+      try {
+        current.channel.send({ type: TunnelFrameType.Reset, stream: frame.stream, payload: encodeJson({ code: 'too_large' }) });
+      } finally {
+        current.streams.get(frame.stream)?.fail(error);
+      }
+      throw error;
+    }
+    current.channel.send(frame);
+  }
+
   async function waitForClientBuffer(ch: SecureChannel, active: () => boolean): Promise<void> {
     while (active() && !ch.closed && ch.bufferedAmount > 1024 * 1024) {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -395,20 +408,20 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         request.headers.forEach((value, name) => {
           if (!excluded.has(name.toLowerCase())) headers.push([name, value]);
         });
-        current.channel.send({ type: TunnelFrameType.Request, stream: id, payload: encodeJson({
+        sendStreamFrame(current, { type: TunnelFrameType.Request, stream: id, payload: encodeJson({
           method: request.method, path: url.pathname + url.search, headers,
         }) });
         const active = () => !done && !signal.aborted;
         for (let offset = 0; offset < body.length && active(); offset += TUNNEL_BODY_CHUNK) {
           await waitForClientBuffer(current.channel, active);
           if (!active()) return;
-          current.channel.send({ type: TunnelFrameType.RequestBody, stream: id, payload: body.subarray(offset, offset + TUNNEL_BODY_CHUNK) });
+          sendStreamFrame(current, { type: TunnelFrameType.RequestBody, stream: id, payload: body.subarray(offset, offset + TUNNEL_BODY_CHUNK) });
         }
         if (active()) {
           await waitForClientBuffer(current.channel, active);
-          if (active()) current.channel.send({ type: TunnelFrameType.RequestEnd, stream: id, payload: EMPTY });
+          if (active()) sendStreamFrame(current, { type: TunnelFrameType.RequestEnd, stream: id, payload: EMPTY });
         }
-      })().catch(() => { reset(); fail(signal.aborted ? signal.reason : networkError()); });
+      })().catch(() => { if (!done) { reset(); fail(signal.aborted ? signal.reason : networkError()); } });
     });
   };
 
@@ -445,7 +458,8 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         if (this.readyState !== this.CONNECTING) return;
         this.current = current;
         this.id = allocate(current, {
-          fail: () => this.finish(1006, 'Channel lost', false),
+          fail: error => this.finish(error instanceof TunnelProtocolError ? 1009 : 1006,
+            error instanceof TunnelProtocolError ? error.message : 'Channel lost', false),
           frame: frame => {
             switch (frame.type) {
               case TunnelFrameType.WsOpened:
@@ -470,7 +484,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
             }
           },
         });
-        current.channel.send({ type: TunnelFrameType.WsOpen, stream: this.id, payload: encodeJson({ path: '/api/ws' }) });
+        sendStreamFrame(current, { type: TunnelFrameType.WsOpen, stream: this.id, payload: encodeJson({ path: '/api/ws' }) });
       }).catch(() => this.finish(1006, 'Connection failed', false));
     }
 
@@ -480,7 +494,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
       if (this.readyState === this.CONNECTING) throw new DOMException('WebSocket is connecting', 'InvalidStateError');
       if (this.readyState !== this.OPEN) return;
       if (typeof data !== 'string') throw new TypeError('Only text messages are supported');
-      this.current!.channel.send({ type: TunnelFrameType.WsMessage, stream: this.id!, payload: utf8(data) });
+      sendStreamFrame(this.current!, { type: TunnelFrameType.WsMessage, stream: this.id!, payload: utf8(data) });
     }
 
     close(code = 1000, reason = ''): void {
@@ -491,7 +505,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
       if (this.readyState >= this.CLOSING) return;
       this.readyState = this.CLOSING;
       if (this.id !== null && this.current && !this.current.channel.closed) {
-        try { this.current.channel.send({ type: TunnelFrameType.WsClose, stream: this.id, payload: encodeJson({ code, reason }) }); }
+        try { sendStreamFrame(this.current, { type: TunnelFrameType.WsClose, stream: this.id, payload: encodeJson({ code, reason }) }); }
         catch { this.finish(1006, 'Channel lost', false); return; }
         return;
       }
