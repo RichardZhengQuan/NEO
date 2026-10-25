@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TUNNEL_BODY_CHUNK, TunnelFrameType } from '@neo/protocol';
+import { TUNNEL_BODY_CHUNK, TUNNEL_MAX_FRAME, TunnelFrameType } from '@neo/protocol';
 import type { TunnelReset } from '@neo/protocol';
 import { toBase64Url } from './bytes.js';
 import { acceptChannel } from './channel.js';
@@ -181,6 +181,89 @@ function stallUpload(client: SecureChannel, after: number) {
   });
   return { frames, stalled, release, drained, bufferedAmount };
 }
+
+describe('tunnel client isolates oversized stream from channel-wide failure', () => {
+  it('resets an oversized WebSocket while another WebSocket and an in-flight fetch complete', async () => {
+    let releaseResponse!: () => void;
+    const responseReady = new Promise<void>(resolve => { releaseResponse = resolve; });
+    let requestStarted!: () => void;
+    const started = new Promise<void>(resolve => { requestStarted = resolve; });
+    const messages: string[] = [];
+    const socketCloses: ReturnType<typeof vi.fn>[] = [];
+    const accept = vi.fn((link: MessageLink, identity: ServerIdentity) => serveTunnel(link, {
+      identity,
+      peer: { ip: '192.0.2.1', via: 'lan' },
+      handler: {
+        async fetch(request) {
+          expect(request.headers.get('authorization')).toBe('Bearer test-token');
+          requestStarted();
+          await responseReady;
+          return new Response('fetch completed');
+        },
+        openWebSocket(_path, _peer, socket) {
+          let authenticated = false;
+          const close = vi.fn();
+          socketCloses.push(close);
+          return {
+            message(text) {
+              if (!authenticated) {
+                expect(text).toBe('auth:test-token');
+                authenticated = true;
+                socket.send('authenticated');
+              } else {
+                messages.push(text);
+                socket.send(text);
+              }
+            },
+            close,
+          };
+        },
+      },
+    }));
+    const { transport } = environment({ accept });
+    const url = transport.baseUrl.replace('https:', 'wss:') + '/api/ws';
+    const a = new transport.WebSocket(url);
+    const b = new transport.WebSocket(url);
+    await Promise.all([a, b].map(socket => new Promise<void>(resolve => {
+      socket.addEventListener('open', () => resolve(), { once: true });
+    })));
+    const authenticated = Promise.all([a, b].map(socket => new Promise<void>(resolve => {
+      socket.addEventListener('message', event => {
+        expect(event.data).toBe('authenticated');
+        resolve();
+      }, { once: true });
+    })));
+    a.send('auth:test-token');
+    b.send('auth:test-token');
+    await authenticated;
+
+    const response = transport.fetch(`${transport.baseUrl}/api/pending`, {
+      headers: { authorization: 'Bearer test-token' },
+    });
+    // The red check closes the channel and rejects this pending request.
+    void response.catch(() => {});
+    await started;
+
+    expect(() => a.send('x'.repeat(TUNNEL_MAX_FRAME + 1))).toThrow('Frame is too large');
+    expect(a.readyState).toBe(a.CLOSED);
+    expect(b.readyState).toBe(b.OPEN);
+    const delivered = new Promise<string>(resolve => {
+      b.addEventListener('message', event => resolve(event.data), { once: true });
+    });
+    b.send('hello');
+    expect(await delivered).toBe('hello');
+    expect(messages).toEqual(['hello']);
+    expect(socketCloses[0]).toHaveBeenCalledExactlyOnceWith(1006, 'WebSocket reset');
+    expect(socketCloses[1]).not.toHaveBeenCalled();
+
+    releaseResponse();
+    const completed = await response;
+    expect(completed.status).toBe(200);
+    expect(await completed.text()).toBe('fetch completed');
+    expect(transport.via).toBe('lan');
+    expect(accept).toHaveBeenCalledOnce();
+  });
+});
 
 describe('tunnel client response body budget', () => {
   it.each(['never', 'slow'] as const)('resets an over-budget response for a %s reader and errors its body', async kind => {
