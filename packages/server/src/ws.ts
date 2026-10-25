@@ -8,9 +8,9 @@ import { IpFailureLimiter } from './auth.js';
 
 export const WS_MAX_PAYLOAD = 64 * 1024;
 export const WS_MAX_UNAUTHENTICATED_PER_IP = 5;
+export const PING_INTERVAL_MS = 30_000;
 
 const AUTH_TIMEOUT_MS = 10_000;
-const PING_INTERVAL_MS = 30_000;
 const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('auth'), token: z.string().min(1), device: z.string().optional() }),
   z.object({ type: z.literal('subscribe'), conversations: z.union([z.literal('all'), z.array(z.string())]) }),
@@ -18,9 +18,10 @@ const ClientMessageSchema = z.discriminatedUnion('type', [
 ]);
 
 interface RawSocket {
+  readonly bufferedAmount?: number;
   ping(): void;
   terminate(): void;
-  once?(event: 'error', listener: () => void): void;
+  once?(event: 'error' | 'pong', listener: () => void): void;
 }
 
 interface Connection {
@@ -32,6 +33,7 @@ interface Connection {
   subscription: string[] | 'all';
   authTimer: ReturnType<typeof setTimeout> | null;
   pingTimer: ReturnType<typeof setInterval> | null;
+  pongPending: boolean;
   unsubscribe: (() => void) | null;
   closed: Set<() => void>;
   cleanup(): void;
@@ -104,6 +106,7 @@ export function createWsHandler(devices: DeviceStore, events: EventHub, logger: 
         subscription: 'all',
         authTimer: null,
         pingTimer: null,
+        pongPending: false,
         unsubscribe: null,
         closed: new Set(),
         cleanup() {
@@ -176,16 +179,33 @@ export function createWsHandler(devices: DeviceStore, events: EventHub, logger: 
             reject(state, { code: 'unauthorized', message: 'Device revoked' });
             return;
           }
+          const raw = rawSocket(state.ws);
+          if ((raw?.bufferedAmount ?? 0) > WS_MAX_PAYLOAD) {
+            logger.warn('WebSocket outbound buffer limit exceeded; dropping slow client');
+            state.cleanup();
+            raw?.terminate();
+            return;
+          }
           if (shouldDeliver(envelope, state.subscription)) send(ws, { type: 'event', envelope });
         });
         state.pingTimer = setInterval(() => {
           if (ws.readyState !== 1) return;
+          const raw = rawSocket(ws);
+          if (state.pongPending) {
+            logger.debug('WebSocket pong timeout; dropping silent client');
+            state.cleanup();
+            raw?.terminate();
+            return;
+          }
           try {
-            rawSocket(ws)?.ping();
+            // Tunnel adapters have no native ping/pong frames to observe.
+            state.pongPending = typeof raw?.once === 'function';
+            raw?.once?.('pong', () => { state.pongPending = false; });
+            raw?.ping();
           } catch (error) {
             logger.debug('WebSocket ping failed', { error: String(error) });
             state.cleanup();
-            rawSocket(ws)?.terminate();
+            raw?.terminate();
           }
         }, PING_INTERVAL_MS);
         state.pingTimer.unref();

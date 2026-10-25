@@ -52,7 +52,7 @@ export function createApp(services: NeoServices): NeoApp {
   wss.options.maxPayload = WS_MAX_PAYLOAD;
   const limiter = new IpFailureLimiter(services.clock);
   const pairing = new PairingService(services.clock);
-  const handler = createTunnelHandler({ app, wsEvents: (peer) => createWsHandler(devices, services.events, services.logger, {
+  const handler = createTunnelHandler({ app, logger: services.logger, wsEvents: (peer) => createWsHandler(devices, services.events, services.logger, {
     ip: peer.via === 'relay' ? `relay:${peer.ip}` : peer.ip, limiter,
   }) });
   const phoneAccess = createPhoneAccess({ services, handler });
