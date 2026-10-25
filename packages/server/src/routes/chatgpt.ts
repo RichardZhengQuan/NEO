@@ -38,6 +38,7 @@ export function registerChatGPT(app: Hono, services: NeoServices): void {
   const attempts = new Map<string, Attempt>();
   const active = new Set<Promise<void>>();
   let closing = false;
+  let pendingCount = 0;
   const stopListener = (attempt: Attempt) => {
     clearTimeout(attempt.timer);
     attempt.server.close();
@@ -127,93 +128,98 @@ export function registerChatGPT(app: Hono, services: NeoServices): void {
   app.post('/api/auth/chatgpt/start', ownerOnly(), async (c) => {
     if (services.config.mode !== 'local') throw new NeoError('forbidden', 'Available when NEO runs on this computer; use an API key or OpenRouter on a remote server.');
     prune();
-    if (closing || attempts.size >= 100) throw new NeoError('rate_limited', 'Too many pending sign-ins. Cancel one or try again later.');
-    let body: unknown = {};
-    const ct = c.req.header('content-type');
-    const mediaType = ct ? ct.split(';')[0]!.trim().toLowerCase() : '';
-    if (mediaType === 'application/json') body = await c.req.json().catch(() => { throw new NeoError('bad_request', 'Invalid ChatGPT sign-in request.'); });
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'providerId')) throw new NeoError('bad_request', 'Invalid ChatGPT sign-in request.');
-    const providerId = 'providerId' in body ? body.providerId : undefined;
-    if (providerId !== undefined && (typeof providerId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(providerId))) throw new NeoError('bad_request', 'Invalid ChatGPT provider id.');
-    const config = typeof providerId === 'string' ? services.providerConfigs.get(providerId) : services.providerConfigs.list().find(config => config.kind === 'chatgpt');
-    if (providerId && config?.kind !== 'chatgpt') throw new NeoError('not_found', 'ChatGPT provider not found.');
-    const previous = config ? readChatGPTCredentials(services.secrets, config.id) : undefined;
-    const hostId = services.secrets.get('chatgpt:host-id') ?? randomBytes(32).toString('base64url');
-    services.secrets.set('chatgpt:host-id', hostId);
-    const state = randomBytes(32).toString('base64url');
-    const nonce = randomBytes(32).toString('base64url');
-    const verifier = randomBytes(48).toString('base64url');
-    const controller = new AbortController();
-    let attempt: Attempt;
-    const server = createServer((req, res) => {
-      res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('Referrer-Policy', 'no-referrer');
-      res.setHeader('X-Frame-Options', 'DENY');
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      let url: URL;
-      try { url = new URL(req.url ?? '/', attempt.redirectUri); }
-      catch { res.statusCode = 400; res.end(FAILURE_HTML); return; }
-      if (req.method !== 'GET' || url.pathname !== '/callback') { res.statusCode = 404; res.end(FAILURE_HTML); return; }
-      if (attempt.expiresAt <= services.clock()) cancel(attempt, true);
-      // Re-authorisation launches here so id_token_hint is sent only to the browser, never in API JSON.
-      if (url.searchParams.get('launch') === state && previous && !attempt.launched && !attempt.consumed) {
-        attempt.launched = true;
-        res.statusCode = 302;
-        res.setHeader('Location', attempt.authorizationUrl);
-        res.end();
-        return;
-      }
-      if (attempt.consumed || url.searchParams.getAll('state').length !== 1 || url.searchParams.get('state') !== state) { res.statusCode = 400; res.end(FAILURE_HTML); return; }
-      // Single use, including failed callbacks; consume synchronously before token exchange.
-      attempt.consumed = true;
-      const completing = (async () => {
-        try {
-          if (url.searchParams.has('error')) throw new NeoError('provider_auth', 'ChatGPT sign-in was not authorised. Start again in NEO.');
-          await connect(attempt, url.searchParams);
-          res.end(SUCCESS_HTML);
-        } catch (error) {
-          const neo = error instanceof NeoError ? error : new NeoError('provider_error', 'ChatGPT sign-in could not be completed. Try again.');
-          const reason = neo.details && typeof neo.details === 'object' && 'reason' in neo.details ? neo.details.reason : undefined;
-          if (attempt.providerId && attempt.previous && (reason === 'subscription_sharing_invalid_user' || reason === 'invalid_grant')) {
-            services.chatGPTTokens?.markNeedsReauthorization(attempt.providerId, attempt.previous.accessToken);
-          }
-          if (attempt.result.status === 'waiting') attempt.result = { status: 'failed', error: neo.toJSON() };
-          res.statusCode = neo.status;
-          res.end(FAILURE_HTML);
-        } finally { stopListener(attempt); }
-      })();
-      active.add(completing);
-      void completing.finally(() => active.delete(completing));
-    });
-    server.requestTimeout = 15_000;
-    server.headersTimeout = 15_000;
+    if (closing || attempts.size + pendingCount >= 100) throw new NeoError('rate_limited', 'Too many pending sign-ins. Cancel one or try again later.');
+    pendingCount++;
     try {
-      await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-    } catch {
-      server.close();
-      throw new NeoError('provider_error', 'Could not start the local ChatGPT sign-in listener. Try again.');
+      let body: unknown = {};
+      const ct = c.req.header('content-type');
+      const mediaType = ct ? ct.split(';')[0]!.trim().toLowerCase() : '';
+      if (mediaType === 'application/json') body = await c.req.json().catch(() => { throw new NeoError('bad_request', 'Invalid ChatGPT sign-in request.'); });
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'providerId')) throw new NeoError('bad_request', 'Invalid ChatGPT sign-in request.');
+      const providerId = 'providerId' in body ? body.providerId : undefined;
+      if (providerId !== undefined && (typeof providerId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(providerId))) throw new NeoError('bad_request', 'Invalid ChatGPT provider id.');
+      const config = typeof providerId === 'string' ? services.providerConfigs.get(providerId) : services.providerConfigs.list().find(config => config.kind === 'chatgpt');
+      if (providerId && config?.kind !== 'chatgpt') throw new NeoError('not_found', 'ChatGPT provider not found.');
+      const previous = config ? readChatGPTCredentials(services.secrets, config.id) : undefined;
+      const hostId = services.secrets.get('chatgpt:host-id') ?? randomBytes(32).toString('base64url');
+      services.secrets.set('chatgpt:host-id', hostId);
+      const state = randomBytes(32).toString('base64url');
+      const nonce = randomBytes(32).toString('base64url');
+      const verifier = randomBytes(48).toString('base64url');
+      const controller = new AbortController();
+      let attempt: Attempt;
+      const server = createServer((req, res) => {
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Referrer-Policy', 'no-referrer');
+        res.setHeader('X-Frame-Options', 'DENY');
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        let url: URL;
+        try { url = new URL(req.url ?? '/', attempt.redirectUri); }
+        catch { res.statusCode = 400; res.end(FAILURE_HTML); return; }
+        if (req.method !== 'GET' || url.pathname !== '/callback') { res.statusCode = 404; res.end(FAILURE_HTML); return; }
+        if (attempt.expiresAt <= services.clock()) cancel(attempt, true);
+        // Re-authorisation launches here so id_token_hint is sent only to the browser, never in API JSON.
+        if (url.searchParams.get('launch') === state && previous && !attempt.launched && !attempt.consumed) {
+          attempt.launched = true;
+          res.statusCode = 302;
+          res.setHeader('Location', attempt.authorizationUrl);
+          res.end();
+          return;
+        }
+        if (attempt.consumed || url.searchParams.getAll('state').length !== 1 || url.searchParams.get('state') !== state) { res.statusCode = 400; res.end(FAILURE_HTML); return; }
+        // Single use, including failed callbacks; consume synchronously before token exchange.
+        attempt.consumed = true;
+        const completing = (async () => {
+          try {
+            if (url.searchParams.has('error')) throw new NeoError('provider_auth', 'ChatGPT sign-in was not authorised. Start again in NEO.');
+            await connect(attempt, url.searchParams);
+            res.end(SUCCESS_HTML);
+          } catch (error) {
+            const neo = error instanceof NeoError ? error : new NeoError('provider_error', 'ChatGPT sign-in could not be completed. Try again.');
+            const reason = neo.details && typeof neo.details === 'object' && 'reason' in neo.details ? neo.details.reason : undefined;
+            if (attempt.providerId && attempt.previous && (reason === 'subscription_sharing_invalid_user' || reason === 'invalid_grant')) {
+              services.chatGPTTokens?.markNeedsReauthorization(attempt.providerId, attempt.previous.accessToken);
+            }
+            if (attempt.result.status === 'waiting') attempt.result = { status: 'failed', error: neo.toJSON() };
+            res.statusCode = neo.status;
+            res.end(FAILURE_HTML);
+          } finally { stopListener(attempt); }
+        })();
+        active.add(completing);
+        void completing.finally(() => active.delete(completing));
+      });
+      server.requestTimeout = 15_000;
+      server.headersTimeout = 15_000;
+      try {
+        await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+      } catch {
+        server.close();
+        throw new NeoError('provider_error', 'Could not start the local ChatGPT sign-in listener. Try again.');
+      }
+      if (closing) {
+        server.close();
+        server.closeAllConnections();
+        throw new NeoError('cancelled', 'NEO closed before ChatGPT sign-in could start.');
+      }
+      const redirectUri = `http://127.0.0.1:${(server.address() as { port: number }).port}/callback`;
+      let authorizationUrl: string;
+      try { authorizationUrl = createChatGPTAuthorization({ hostId, state, nonce, verifier, redirectUri, ...(previous ? { previous } : {}) }, services.chatGPT); }
+      catch {
+        server.close();
+        throw new NeoError('config_error', 'ChatGPT sign-in configuration is invalid.');
+      }
+      const expiresAt = services.clock() + TTL_MS;
+      const timer = setTimeout(() => cancel(attempt, true), services.chatGPT?.timeoutMs ?? TTL_MS);
+      timer.unref();
+      attempt = { state, nonce, verifier, hostId, expiresAt, redirectUri, authorizationUrl, ...(previous ? { previous } : {}), ...(config ? { providerId: config.id } : {}), server, timer, controller, consumed: false, launched: false, result: { status: 'waiting' } };
+      attempts.set(state, attempt);
+      c.header('Cache-Control', 'no-store');
+      return c.json({ url: previous ? `${redirectUri}?${new URLSearchParams({ launch: state })}` : authorizationUrl, state, expiresAt });
+    } finally {
+      pendingCount--;
     }
-    if (closing) {
-      server.close();
-      server.closeAllConnections();
-      throw new NeoError('cancelled', 'NEO closed before ChatGPT sign-in could start.');
-    }
-    const redirectUri = `http://127.0.0.1:${(server.address() as { port: number }).port}/callback`;
-    let authorizationUrl: string;
-    try { authorizationUrl = createChatGPTAuthorization({ hostId, state, nonce, verifier, redirectUri, ...(previous ? { previous } : {}) }, services.chatGPT); }
-    catch {
-      server.close();
-      throw new NeoError('config_error', 'ChatGPT sign-in configuration is invalid.');
-    }
-    const expiresAt = services.clock() + TTL_MS;
-    const timer = setTimeout(() => cancel(attempt, true), services.chatGPT?.timeoutMs ?? TTL_MS);
-    timer.unref();
-    attempt = { state, nonce, verifier, hostId, expiresAt, redirectUri, authorizationUrl, ...(previous ? { previous } : {}), ...(config ? { providerId: config.id } : {}), server, timer, controller, consumed: false, launched: false, result: { status: 'waiting' } };
-    attempts.set(state, attempt);
-    c.header('Cache-Control', 'no-store');
-    return c.json({ url: previous ? `${redirectUri}?${new URLSearchParams({ launch: state })}` : authorizationUrl, state, expiresAt });
   });
 
   app.get('/api/auth/chatgpt/status', ownerOnly(), (c) => {
