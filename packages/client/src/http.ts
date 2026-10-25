@@ -72,6 +72,7 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
   // Build a combined signal with timeout when requested.
   let combinedSignal: AbortSignal | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
 
   if (signal || timeout) {
     if (timeout) {
@@ -87,9 +88,10 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
         } else {
           // Fallback: chain abort events manually.
           const combined = new AbortController();
-          const onAbort = () => combined.abort(signal.reason);
+          onAbort = () => combined.abort(signal.reason);
           const onTimeout = () => combined.abort(timeoutSignal.reason);
           signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) combined.abort(signal.reason);
           timeoutSignal.addEventListener('abort', onTimeout, { once: true });
           combinedSignal = combined.signal;
         }
@@ -101,97 +103,102 @@ export async function apiRequest<T>(ctx: HttpContext, opts: RequestOptions): Pro
     }
   }
 
+  // Outer try/finally ensures clearTimeout and removeEventListener always run,
+  // including when ctx.fetch() itself rejects (network failure, headers-phase
+  // abort, pre-aborted signal). Without this, onAbort would leak on fetch-phase
+  // failures because the inner finally of the body-processing block is never
+  // reached.
   let response: Response;
   try {
-    response = await ctx.fetch(url, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: combinedSignal,
-    });
-  } catch (err) {
-    // Clear the timeout handle if set.
-    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    try {
+      response = await ctx.fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: combinedSignal,
+      });
+    } catch (err) {
+      // Let pre-classified errors propagate unchanged (e.g. from an injected fetch).
+      if (err instanceof NeoError) throw err;
 
-    // Let pre-classified errors propagate unchanged (e.g. from an injected fetch).
-    if (err instanceof NeoError) throw err;
+      // Check for timeout/abort errors.
+      if (
+        err instanceof Error &&
+        (err.name === 'TimeoutError' || err.name === 'AbortError')
+      ) {
+        // Re-throw as NeoApiError only if it's the timeout (not a user abort).
+        if (err.name === 'TimeoutError') {
+          throw new NeoApiError(504, { code: 'timeout', message: 'Request timed out.', retryable: true }, { cause: err });
+        }
+        // User abort — let the AbortError propagate naturally (caller checks signal).
+        throw err;
+      }
 
-    // Check for timeout/abort errors.
-    if (
-      err instanceof Error &&
-      (err.name === 'TimeoutError' || err.name === 'AbortError')
-    ) {
-      // Re-throw as NeoApiError only if it's the timeout (not a user abort).
-      if (err.name === 'TimeoutError') {
+      // Network failure.
+      throw new NeoApiError(0, {
+        code: 'internal',
+        message: err instanceof Error ? err.message : 'Network error',
+        retryable: true,
+      }, { cause: err });
+    }
+
+    try {
+      if (response.status === 204) {
+        return undefined as unknown as T;
+      }
+
+      if (!response.ok) {
+        // Try to parse the error body as ErrorShape.
+        let shape: ErrorShape;
+        let bodyParseErr: unknown;
+        try {
+          shape = (await response.json()) as ErrorShape;
+          // Validate that shape has the required fields.
+          if (typeof shape.code !== 'string' || typeof shape.message !== 'string') {
+            throw new Error('invalid shape');
+          }
+        } catch (bodyErr) {
+          bodyParseErr = bodyErr;
+          // Let abort/timeout errors propagate to the outer catch for proper mapping.
+          if (
+            bodyErr instanceof Error &&
+            (bodyErr.name === 'AbortError' || bodyErr.name === 'TimeoutError')
+          ) {
+            throw bodyErr;
+          }
+          shape = {
+            code: 'internal',
+            message: `HTTP ${response.status}`,
+            retryable: response.status >= 500,
+          };
+        }
+        throw new NeoApiError(response.status, shape, { cause: bodyParseErr });
+      }
+
+      // 202 or other 2xx with a body.
+      const text = await response.text();
+      if (!text) return undefined as unknown as T;
+      return JSON.parse(text) as T;
+    } catch (err) {
+      // Let pre-classified errors propagate unchanged.
+      if (err instanceof NeoError) throw err;
+
+      if (err instanceof Error && err.name === 'TimeoutError') {
         throw new NeoApiError(504, { code: 'timeout', message: 'Request timed out.', retryable: true }, { cause: err });
       }
-      // User abort — let the AbortError propagate naturally (caller checks signal).
-      throw err;
+
+      // User abort — let AbortError propagate naturally (caller checks signal).
+      if (err instanceof Error && err.name === 'AbortError') throw err;
+
+      // Any other body-read failure (e.g. TCP reset mid-body, TypeError: terminated).
+      throw new NeoApiError(0, {
+        code: 'internal',
+        message: err instanceof Error ? err.message : 'Network error',
+        retryable: true,
+      }, { cause: err });
     }
-
-    // Network failure.
-    throw new NeoApiError(0, {
-      code: 'internal',
-      message: err instanceof Error ? err.message : 'Network error',
-      retryable: true,
-    }, { cause: err });
-  }
-
-  try {
-    if (response.status === 204) {
-      return undefined as unknown as T;
-    }
-
-    if (!response.ok) {
-      // Try to parse the error body as ErrorShape.
-      let shape: ErrorShape;
-      let bodyParseErr: unknown;
-      try {
-        shape = (await response.json()) as ErrorShape;
-        // Validate that shape has the required fields.
-        if (typeof shape.code !== 'string' || typeof shape.message !== 'string') {
-          throw new Error('invalid shape');
-        }
-      } catch (bodyErr) {
-        bodyParseErr = bodyErr;
-        // Let abort/timeout errors propagate to the outer catch for proper mapping.
-        if (
-          bodyErr instanceof Error &&
-          (bodyErr.name === 'AbortError' || bodyErr.name === 'TimeoutError')
-        ) {
-          throw bodyErr;
-        }
-        shape = {
-          code: 'internal',
-          message: `HTTP ${response.status}`,
-          retryable: response.status >= 500,
-        };
-      }
-      throw new NeoApiError(response.status, shape, { cause: bodyParseErr });
-    }
-
-    // 202 or other 2xx with a body.
-    const text = await response.text();
-    if (!text) return undefined as unknown as T;
-    return JSON.parse(text) as T;
-  } catch (err) {
-    // Let pre-classified errors propagate unchanged.
-    if (err instanceof NeoError) throw err;
-
-    if (err instanceof Error && err.name === 'TimeoutError') {
-      throw new NeoApiError(504, { code: 'timeout', message: 'Request timed out.', retryable: true }, { cause: err });
-    }
-
-    // User abort — let AbortError propagate naturally (caller checks signal).
-    if (err instanceof Error && err.name === 'AbortError') throw err;
-
-    // Any other body-read failure (e.g. TCP reset mid-body, TypeError: terminated).
-    throw new NeoApiError(0, {
-      code: 'internal',
-      message: err instanceof Error ? err.message : 'Network error',
-      retryable: true,
-    }, { cause: err });
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
   }
 }

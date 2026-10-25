@@ -14,6 +14,7 @@ import { linkPair } from './link.js';
 import type { MessageLink, WebSocketLike } from './link.js';
 import { generateKeyPair } from './noise.js';
 import { serveTunnel } from './server.js';
+import * as links from './link.js';
 
 const cleanup: (() => void)[] = [];
 const EMPTY = new Uint8Array();
@@ -414,5 +415,88 @@ describe('tunnel client abort race', () => {
     abort.abort(reason);
 
     await expect(reader.read()).rejects.toBe(reason);
+  });
+});
+
+describe('tunnel client handshake budget is monotonic', () => {
+  it('uses the elapsed-time budget when Date.now() jumps forward before openChannel', async () => {
+    const connectTimeoutMs = 5_000;
+    // Fake wall-clock time and timers, leaving performance.now() monotonic.
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(0);
+
+    const [phone, serverLink] = linkPair();
+    const dh = generateKeyPair();
+    const server = serveTunnel(serverLink, {
+      identity: { serverId: uploadServerId, dh },
+      handler: { fetch: vi.fn(async () => new Response()), openWebSocket: () => null },
+      peer: { ip: '192.0.2.1', via: 'lan' },
+    });
+    cleanups.push(server.close);
+
+    let capturedTimeoutMs: number | undefined;
+    let handshakeError: unknown;
+    const realOpenChannel = channels.openChannel;
+    vi.spyOn(channels, 'openChannel').mockImplementation(async (link, options) => {
+      capturedTimeoutMs = options.timeoutMs;
+      try {
+        return await realOpenChannel(link, options);
+      } catch (error) {
+        handshakeError = error;
+        throw error;
+      }
+    });
+
+    const realWebSocketLink = links.webSocketLink;
+    vi.spyOn(links, 'webSocketLink').mockImplementation((socket) => {
+      vi.setSystemTime(connectTimeoutMs + 1_000);
+      return realWebSocketLink(socket);
+    });
+
+    let releaseHandshake!: () => void;
+    let handshakeSent!: () => void;
+    const sent = new Promise<void>((resolve) => { handshakeSent = resolve; });
+    class FakeSocket implements WebSocketLike {
+      readyState = 1;
+      binaryType = 'blob';
+      onmessage: WebSocketLike['onmessage'] = null;
+      onclose: WebSocketLike['onclose'] = null;
+      onerror: WebSocketLike['onerror'] = null;
+      onopen: WebSocketLike['onopen'] = null;
+      get bufferedAmount() { return phone.bufferedAmount; }
+      constructor(_url: string) {
+        phone.onMessage = (data) => this.onmessage?.({ data });
+        phone.onClose = (code, reason) => {
+          this.readyState = 3;
+          this.onclose?.({ code, reason });
+        };
+      }
+      send(data: Uint8Array) {
+        // Keep the handshake pending so a collapsed 1-ms budget really expires.
+        releaseHandshake = () => phone.send(data);
+        handshakeSent();
+      }
+      close(code?: number, reason?: string) {
+        this.readyState = 3;
+        phone.close(code, reason);
+      }
+    }
+
+    const transport = createTunnelTransport({
+      route: { serverId: uploadServerId, publicKey: toBase64Url(dh.publicKey), lan: ['lan:7778'], relay: null },
+      WebSocket: FakeSocket,
+      connectTimeoutMs,
+    });
+    cleanups.push(() => transport.close());
+
+    const connectP = transport.connect();
+    void connectP.catch(() => {});
+    await sent;
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(handshakeError, `openChannel timeoutMs: ${capturedTimeoutMs}`).toBeUndefined();
+    expect(capturedTimeoutMs).toBeGreaterThan(connectTimeoutMs / 2);
+    releaseHandshake();
+    await expect(connectP).resolves.toBe('lan');
   });
 });

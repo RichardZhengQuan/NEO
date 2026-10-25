@@ -149,7 +149,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
       let relayStarted = false;
       const cancellations = new Set<() => void>();
       let lanTimer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = Date.now() + connectTimeoutMs;
+      const deadline = performance.now() + connectTimeoutMs;
       const wholeTimer = setTimeout(() => finish(null), connectTimeoutMs);
 
       function finish(winner: { channel: SecureChannel; via: 'lan' | 'relay'; cancel: () => void } | null) {
@@ -211,7 +211,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
           const link = webSocketLink(socket);
           channel = await openChannel(link, {
             serverId: route.serverId, serverPublicKey: pinnedKey,
-            timeoutMs: Math.max(1, deadline - Date.now()),
+            timeoutMs: Math.max(1, deadline - performance.now()),
           });
           if (cancelled || finished || channel.closed) { channel.close('Connection race lost'); return; }
           finish({ channel, via, cancel });

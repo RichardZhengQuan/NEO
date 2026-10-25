@@ -1,11 +1,13 @@
 import { Hono } from 'hono';
+import type { WSContext } from 'hono/ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { NeoConfigSchema, silentLogger, TunnelFrameType } from '@neo/protocol';
+import { NeoConfigSchema, silentLogger, TUNNEL_FRAME_HEADER, TUNNEL_MAX_FRAME, TunnelFrameType } from '@neo/protocol';
+import type { WsServerMessage } from '@neo/protocol';
 import { decodeJson, encodeJson, generateServerIdentity, linkPair, openChannel, serveTunnel } from '@neo/tunnel';
 import { getClientIp, IpFailureLimiter } from '../auth.js';
 import { createServices } from '../services.js';
 import type { NeoServices } from '../index.js';
-import { createWsHandler, revokeDeviceWebSockets } from '../ws.js';
+import { createWsHandler, PING_INTERVAL_MS, revokeDeviceWebSockets } from '../ws.js';
 import { createTunnelHandler } from './dispatch.js';
 
 let services: NeoServices | null = null;
@@ -82,5 +84,61 @@ describe('tunnel dispatch', () => {
     socket.message(JSON.stringify({ type: 'auth', token: services.ownerToken }));
     expect(send).toHaveBeenCalledTimes(count);
     socket.close(4401, 'Closed');
+  });
+
+  it.each([
+    ['ASCII', 'x'.repeat(70_000)],
+    ['multibyte UTF-8', '😀'.repeat(18_000)],
+  ])('keeps the socket alive when a serialised %s event exceeds the tunnel frame cap', async (_encoding, bigText) => {
+    services = await createServices(NeoConfigSchema.parse({}), { inMemory: true });
+    const { devices, events } = services;
+    const device = devices.create({ name: 'Phone', platform: 'ios' });
+    const sent: string[] = [];
+    let ws: WSContext | undefined;
+    const handler = createTunnelHandler({
+      app: new Hono(),
+      wsEvents(peer) {
+        const handlers = createWsHandler(devices, events, silentLogger, { ip: peer.ip, limiter: new IpFailureLimiter() });
+        return {
+          ...handlers,
+          onOpen(event, context) {
+            ws = context;
+            handlers.onOpen?.(event, context);
+          },
+        };
+      },
+    });
+    let socketHandler: NonNullable<ReturnType<typeof handler.openWebSocket>> | null = null;
+    const mockSocket = {
+      send(text: string) {
+        if (new TextEncoder().encode(text).byteLength + TUNNEL_FRAME_HEADER > TUNNEL_MAX_FRAME) {
+          socketHandler?.close(1009, 'Message too large');
+          return;
+        }
+        sent.push(text);
+      },
+      close: vi.fn(),
+    };
+    vi.useFakeTimers();
+    socketHandler = handler.openWebSocket('/api/ws', { ip: '10.0.0.1', via: 'lan' }, mockSocket)!;
+    try {
+      socketHandler.message(JSON.stringify({ type: 'auth', token: device.token }));
+      expect(JSON.parse(sent[0]!)).toMatchObject({ type: 'ready' });
+      const envelope = events.publish({ type: 'settings.updated', settings: { ...services.settings.get(), locale: bigText } });
+      const message: WsServerMessage = { type: 'event', envelope };
+      expect(new TextEncoder().encode(JSON.stringify(message)).byteLength).toBeGreaterThanOrEqual(70_000);
+      expect(ws?.readyState).toBe(1);
+      expect(mockSocket.close).not.toHaveBeenCalledWith(1009, expect.anything());
+      expect(sent).toHaveLength(1);
+
+      vi.advanceTimersByTime(PING_INTERVAL_MS * 2);
+      expect(ws?.readyState).toBe(1);
+      expect(mockSocket.close).not.toHaveBeenCalled();
+      const smallEnvelope = events.publish({ type: 'settings.updated', settings: services.settings.get() });
+      expect(JSON.parse(sent[1]!)).toEqual({ type: 'event', envelope: smallEnvelope });
+    } finally {
+      socketHandler.close(1000, 'Done');
+      vi.useRealTimers();
+    }
   });
 });
