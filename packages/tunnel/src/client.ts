@@ -105,25 +105,30 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
   }
 
   function install(channel: SecureChannel, via: 'lan' | 'relay'): Session {
-    let unanswered = 0;
-    let ping: Uint8Array = EMPTY;
+    const pingIntervalMs = 25_000;
+    const pings: { payload: Uint8Array; deadline: number }[] = [];
     let pingSequence = 0;
     const current: Session = {
       channel, via, nextStream: 1, streams: new Map(),
       pingTimer: setInterval(() => {
-        if (unanswered >= 2) { channel.close('Keepalive timeout'); return; }
-        unanswered++;
-        ping = utf8(String(++pingSequence));
-        try { channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: ping }); }
+        const now = performance.now();
+        if (pings.some(ping => now >= ping.deadline)) { channel.close('Keepalive timeout'); return; }
+        // Keep at most two outstanding Pings, even if a timer fires early.
+        if (pings.length >= 2) return;
+        const payload = utf8(String(++pingSequence));
+        pings.push({ payload, deadline: now + 2 * pingIntervalMs });
+        try { channel.send({ type: TunnelFrameType.Ping, stream: 0, payload }); }
         catch { channel.close('Keepalive failed'); }
-      }, 25_000),
+      }, pingIntervalMs),
     };
     channel.onFrame = frame => {
       try {
         if (frame.type === TunnelFrameType.Ping || frame.type === TunnelFrameType.Pong) {
           if (frame.stream !== 0) throw new TunnelProtocolError('Session frame on a stream');
-          if (frame.type === TunnelFrameType.Pong && equalBytes(frame.payload, ping)) unanswered = 0;
-          else if (frame.type === TunnelFrameType.Ping) {
+          if (frame.type === TunnelFrameType.Pong) {
+            const index = pings.findIndex(ping => equalBytes(frame.payload, ping.payload));
+            if (index !== -1) pings.splice(index, 1);
+          } else if (frame.type === TunnelFrameType.Ping) {
             channel.send({ type: TunnelFrameType.Pong, stream: 0, payload: frame.payload });
           }
           return;
