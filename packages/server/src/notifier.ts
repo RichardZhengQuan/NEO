@@ -67,7 +67,7 @@ export interface NotifierOptions {
 export function createNotifier(opts: NotifierOptions): Notifier {
   const { notifications, push, events, logger, vapidKeys, pushSubject } = opts;
   return {
-    async notify(input): Promise<Notification> {
+    async notify(input, options): Promise<Notification> {
       let stored: Notification;
       try {
         const data = input.data ? { ...input.data } : null;
@@ -77,7 +77,14 @@ export function createNotifier(opts: NotifierOptions): Notifier {
           delete data.conversationId;
         }
         if (data && typeof data.messageId === 'string') data.url = `neo://timeline/${encodeURIComponent(data.messageId)}`;
-        stored = notifications.create({ ...input, createdAt: input.createdAt ?? opts.clock(), data });
+        const prepared = { ...input, createdAt: input.createdAt ?? opts.clock(), data };
+        if (options?.idempotencyKey !== undefined) {
+          const result = notifications.createOnce(options.idempotencyKey, prepared);
+          stored = result.notification;
+          if (!result.created) return stored;
+        } else {
+          stored = notifications.create(prepared);
+        }
       } catch (error) {
         throw NeoError.from(error);
       }

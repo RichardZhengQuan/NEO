@@ -119,6 +119,8 @@ User interactions go to `POST /api/timeline/ui-action` with `{messageId, uiId, a
 3. the **desktop** app shows an OS notification from its main process,
 4. the **mobile** app also schedules reminders as on-device local notifications, so they fire even when the server is unreachable.
 
+A durable pending-firing ID also keys atomic notification creation. Replaying an already persisted firing returns its original notification (including read state) without publishing another `notification.created` event or repeating Web Push; the journal is acknowledged only after the notifier succeeds. A crash before the first delivery is persisted remains retryable. This prevents duplicate persisted notifications, but does not claim exactly-once delivery to an external push service across a crash.
+
 Reminder and notification links use `{ messageId }` and `neo://timeline/<messageId>`, so following a source opens the message in the timeline instead of a chat. Legacy reminder links are backfilled by tools migration v6, retaining their original storage column.
 
 ### Memory

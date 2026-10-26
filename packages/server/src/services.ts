@@ -219,7 +219,7 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
     } catch (err) { logger.warn('Failed to load VAPID keys', { error: String(err) }); }
     const notifier = createNotifier({ notifications: stores.notifications, push, devices, conversations, events, logger, clock, vapidKeys, pushSubject: config.push.subject, allowedHosts: pushAllowedHosts(config) });
     const notify = notifier.notify.bind(notifier);
-    notifier.notify = input => track(notify(input));
+    notifier.notify = (input, options) => track(notify(input, options));
     scheduler = createReminderScheduler({ reminders: stores.reminders, clock, logger });
 
     subscriptions.push(runtime.subscribe(event => { events.publish(event); }));
@@ -254,7 +254,7 @@ export async function createServices(input: NeoConfig, options: CreateServicesOp
           ...(firing.reminder.messageId ? { messageId: firing.reminder.messageId, url: `neo://timeline/${encodeURIComponent(firing.reminder.messageId)}` }
             : { url: `neo://reminders/${firing.reminder.id}` }),
         },
-      }).then(() => {
+      }, firing.pendingFiringId ? { idempotencyKey: firing.pendingFiringId } : undefined).then(() => {
         if (firing.pendingFiringId) stores.reminders.clearPendingFiring?.(firing.pendingFiringId);
       }).catch(err => { logger.warn('Reminder notification failed', { error: String(err) }); });
     }));

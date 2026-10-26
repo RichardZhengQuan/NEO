@@ -320,3 +320,30 @@ describe('locale detection', () => {
     [{ LANG: 'C.UTF-8' }, 'en'], [{ LANG: 'POSIX' }, 'en'], [{ LANG: 'invalid_locale!' }, 'en'], [{}, 'en'],
   ])('canonicalizes %j', (env, expected) => { expect(environmentLocale(env)).toBe(expected); });
 });
+
+
+it('replaying a durable unacknowledged firing preserves its notification and clears the journal', async () => {
+  const dataDir = join(temp(), 'replay-data');
+  const first = await services({ dataDir }, false);
+  const reminder = first.stores.reminders.create({ title: 'One durable occurrence', dueAt: clock() });
+  // Crash checkpoint: persistence succeeds, but its acknowledgement never commits.
+  first.stores.reminders.clearPendingFiring = () => {};
+  first.scheduler.tick(clock());
+  const original = first.stores.notifications.list()[0]!;
+  expect(original.data?.['reminderId']).toBe(reminder.id);
+  first.stores.notifications.markRead([original.id]);
+  await first.close();
+  const restarted = await services({ dataDir }, false);
+  expect(restarted.stores.reminders.pendingFirings?.()).toHaveLength(1);
+  let acknowledge!: () => void;
+  const acknowledged = new Promise<void>(resolve => { acknowledge = resolve; });
+  const clear = restarted.stores.reminders.clearPendingFiring!.bind(restarted.stores.reminders);
+  restarted.stores.reminders.clearPendingFiring = (id: string) => { clear(id); acknowledge(); };
+  restarted.scheduler.start();
+  await acknowledged;
+  restarted.scheduler.stop();
+  expect(restarted.stores.reminders.pendingFirings?.()).toEqual([]);
+  expect(restarted.stores.reminders.get(reminder.id)?.firedCount).toBe(1);
+  expect(restarted.stores.notifications.list()).toEqual([{ ...original, readAt: clock() }]);
+  expect(restarted.events.since(0).filter(envelope => envelope.event.type === 'notification.created')).toEqual([]);
+});

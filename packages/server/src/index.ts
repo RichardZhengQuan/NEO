@@ -56,7 +56,7 @@ export interface LoadConfigOptions {
 
 /** Delivers notifications: stores them, publishes to sockets, sends Web Push. */
 export interface Notifier {
-  notify(notification: import('@neo/protocol').NotificationInput): Promise<import('@neo/protocol').Notification>;
+  notify(notification: import('@neo/protocol').NotificationInput, options?: { idempotencyKey?: string }): Promise<import('@neo/protocol').Notification>;
 }
 
 export interface OpenRouterOptions {
