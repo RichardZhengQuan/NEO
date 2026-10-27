@@ -1,6 +1,7 @@
 /**
  * NotificationStore: ephemeral in-app notifications.
  */
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   NotificationSchema,
@@ -64,6 +65,21 @@ export function createNotificationStore(db: NeoDatabase, options: { clock?: Cloc
       ).run(notif.id, notif.kind, notif.title, notif.body, notif.createdAt, null, notif.data !== null ? JSON.stringify(notif.data) : null);
 
       return notif;
+    },
+
+    createOnce(key: string, input: NotificationInput): { notification: Notification; created: boolean } {
+      const identity = parseInput(z.string().min(1).max(1024), key, 'notification identity');
+      const data = parseInput(NotificationInputSchema, input, 'notification');
+      // Separate from random ntf IDs; a bounded opaque ID survives restart without a migration.
+      const id = `ntf_once_${createHash('sha256').update(identity).digest('base64url')}`;
+      return db.transaction(() => {
+        const inserted = db.prepare(
+          `INSERT INTO notifications (id, kind, title, body, created_at, read_at, data)
+           VALUES (?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(id) DO NOTHING RETURNING *`,
+        ).get(id, data.kind, data.title, data.body, data.createdAt ?? clock(), data.data == null ? null : JSON.stringify(data.data)) as Row | undefined;
+        const stored = inserted ?? db.prepare('SELECT * FROM notifications WHERE id = ?').get(id) as Row;
+        return { notification: toNotification(stored), created: inserted !== undefined };
+      });
     },
 
     markRead(ids: string[] | 'all'): number {

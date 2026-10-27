@@ -82,3 +82,51 @@ it('notification payloads target timeline message ids and convert legacy convers
   expect(legacy.data).toEqual({ messageId: 'source-message', url: 'neo://timeline/source-message' });
   expect(events.since(0)).toHaveLength(2);
 });
+
+
+it('replayed firing identities preserve read state without republishing or resending push', async () => {
+  db = openNeoDatabase(':memory:');
+  migrate(db, 'tools', toolsMigrations);
+  const notifications = createProductivityStores(db, { clock: () => 1234 }).notifications;
+  const push = createPushSubscriptionStore(db);
+  push.add({ endpoint: 'https://fcm.googleapis.com/fcm/send/once', keys: { p256dh: 'test-key', auth: 'test-auth' } });
+  const events = new EventHub();
+  const send = vi.mocked(webpush.sendNotification).mockResolvedValue({ statusCode: 201, headers: {}, body: '' });
+  const notifier = createNotifier({ notifications, push, events, clock: () => 1234, logger: silentLogger, vapidKeys: webpush.generateVAPIDKeys(), pushSubject: 'mailto:test@example.com' });
+  const input = { kind: 'reminder' as const, title: 'First occurrence', body: 'Original', data: null, createdAt: 100 };
+  const [first, concurrent] = await Promise.all([
+    notifier.notify(input, { idempotencyKey: 'firing-1' }),
+    notifier.notify({ ...input, title: 'Must not overwrite' }, { idempotencyKey: 'firing-1' }),
+  ]);
+  expect(concurrent).toEqual(first);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(events.since(0)).toHaveLength(1);
+  notifications.markRead([first.id]);
+  const replay = await notifier.notify({ ...input, body: 'Changed', createdAt: 999 }, { idempotencyKey: 'firing-1' });
+  expect(replay).toEqual({ ...first, readAt: 1234 });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(events.since(0)).toHaveLength(1);
+  await notifier.notify(input, { idempotencyKey: 'firing-2' });
+  await notifier.notify(input);
+  expect(notifications.list()).toHaveLength(3);
+  expect(send).toHaveBeenCalledTimes(3);
+  expect(events.since(0)).toHaveLength(3);
+});
+
+it('storage failure leaves a firing retryable and emits no notification or push', async () => {
+  db = openNeoDatabase(':memory:');
+  migrate(db, 'tools', toolsMigrations);
+  const notifications = createProductivityStores(db).notifications;
+  const events = new EventHub();
+  const send = vi.mocked(webpush.sendNotification).mockResolvedValue({ statusCode: 201, headers: {}, body: '' });
+  const notifier = createNotifier({ notifications, push: createPushSubscriptionStore(db), events, clock: () => 1234, logger: silentLogger, vapidKeys: null, pushSubject: 'mailto:test@example.com' });
+  vi.spyOn(notifications, 'createOnce').mockImplementationOnce(() => { throw new Error('storage unavailable'); });
+  const input = { kind: 'reminder' as const, title: 'Retry me', body: 'Details', data: null };
+  await expect(notifier.notify(input, { idempotencyKey: 'retry-firing' })).rejects.toThrow('storage unavailable');
+  expect(notifications.list()).toEqual([]);
+  expect(events.since(0)).toEqual([]);
+  expect(send).not.toHaveBeenCalled();
+  await notifier.notify(input, { idempotencyKey: 'retry-firing' });
+  expect(notifications.list()).toHaveLength(1);
+  expect(events.since(0)).toHaveLength(1);
+});

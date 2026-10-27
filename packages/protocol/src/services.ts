@@ -246,6 +246,8 @@ export interface NoteStore {
 export interface NotificationStore {
   list(query?: { unread?: boolean; limit?: number }): Notification[];
   create(input: NotificationInput): Notification;
+  /** Atomically insert an identity once; replays preserve the complete original record. */
+  createOnce(key: string, input: NotificationInput): { notification: Notification; created: boolean };
   markRead(ids: string[] | 'all'): number;
 }
 
