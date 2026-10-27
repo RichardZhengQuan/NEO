@@ -5,6 +5,7 @@
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
 const require = createRequire(import.meta.url);
@@ -47,11 +48,31 @@ export function openDatabase(path: string): NeoDatabase {
   const { DatabaseSync } = loadSqlite();
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const raw = new DatabaseSync(path);
-  raw.exec('PRAGMA foreign_keys = ON;');
-  raw.exec('PRAGMA busy_timeout = 5000;');
-  if (path !== ':memory:') {
-    raw.exec('PRAGMA journal_mode = WAL;');
-    raw.exec('PRAGMA synchronous = NORMAL;');
+  try {
+    raw.exec('PRAGMA foreign_keys = ON;');
+    raw.exec('PRAGMA busy_timeout = 5000;');
+    if (path !== ':memory:') {
+      // SQLite can reject competing journal-mode changes without invoking its
+      // busy handler. Own this one idempotent operation's total five-second
+      // budget; disabling the native wait prevents each retry adding five more.
+      raw.exec('PRAGMA busy_timeout = 0;');
+      const deadline = performance.now() + 5000;
+      const signal = new Int32Array(new SharedArrayBuffer(4));
+      for (;;) {
+        try { raw.exec('PRAGMA journal_mode = WAL;'); break; }
+        catch (error) {
+          const code = typeof error === 'object' && error !== null && 'errcode' in error ? error.errcode : undefined;
+          const remaining = deadline - performance.now();
+          if (typeof code !== 'number' || (code & 0xff) !== 5 || remaining <= 0) throw error;
+          Atomics.wait(signal, 0, 0, Math.min(10, remaining));
+        }
+      }
+      raw.exec('PRAGMA busy_timeout = 5000;');
+      raw.exec('PRAGMA synchronous = NORMAL;');
+    }
+  } catch (error) {
+    raw.close();
+    throw error;
   }
   const cache = new Map<string, StatementSync>();
   let depth = 0;
@@ -144,7 +165,10 @@ export function migrate(db: NeoDatabase, namespace: string, migrations: readonly
   const applied: number[] = [];
   for (const m of [...migrations].sort((a, b) => a.version - b.version)) {
     if (done.has(m.version)) continue;
-    db.transaction(() => {
+    const changed = db.transaction(() => {
+      // Another starter may have committed while this connection waited for
+      // BEGIN IMMEDIATE. Never run its callback from the earlier snapshot.
+      if (db.prepare('SELECT 1 FROM _migrations WHERE namespace = ? AND version = ?').get(namespace, m.version)) return false;
       if (typeof m.up === 'string') db.exec(m.up);
       else m.up(db);
       db.prepare('INSERT INTO _migrations (namespace, version, name, applied_at) VALUES (?, ?, ?, ?)').run(
@@ -153,8 +177,9 @@ export function migrate(db: NeoDatabase, namespace: string, migrations: readonly
         m.name,
         Date.now(),
       );
+      return true;
     });
-    applied.push(m.version);
+    if (changed) applied.push(m.version);
   }
   return { applied };
 }

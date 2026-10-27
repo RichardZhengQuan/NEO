@@ -57,6 +57,10 @@ protocol ← tunnel ──────────┬─ server
 - Tests: vitest, **offline**, colocated as `src/**/*.test.ts(x)`.
 - `node:sqlite` (Node ≥ 22.13) is the only database. No native modules.
 
+### Concurrent storage startup
+
+File-backed connections use WAL, foreign keys and a five-second busy timeout. Initial WAL selection retries only native SQLITE_BUSY for a total monotonic five-second budget, with native waiting disabled for that operation; other errors propagate and close the connection. Each migration rechecks its receipt after acquiring BEGIN IMMEDIATE, so concurrent starters do not replay a callback from a stale version snapshot. Completed migrations remain committed if a later migration fails; the failing migration rolls back atomically.
+
 ## One timeline, bounded episodes
 
 NEO has one continuous timeline: a relationship with one assistant does not need a chat list, new chats, pins or archives. Memory carries long-term context. Internally, each `conversations` row is an **episode** and its `messages` stay together as a contiguous block. Episodes bound model context and give prompt caches a stable system prompt and toolset without making the user manage threads.
