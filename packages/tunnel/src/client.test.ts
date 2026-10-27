@@ -33,6 +33,7 @@ afterEach(async () => {
 function environment(input: {
   accept: (link: MessageLink, identity: ServerIdentity) => { close(): void };
   relayOnly?: boolean;
+  onStatus?: (status: { state: string }) => void;
 }) {
   const identity = generateServerIdentity();
   const peers: { close(): void }[] = [];
@@ -78,35 +79,70 @@ function environment(input: {
       lan: input.relayOnly ? [] : ['lan:7778'], relay: input.relayOnly ? 'wss://relay.example' : null,
     },
     WebSocket: FakeSocket,
+    onStatus: input.onStatus,
   });
   cleanup.push(() => { transport.close(); for (const peer of peers) peer.close(); });
   return { transport };
 }
 
-async function streamingResponse() {
+function trackedAbortController() {
+  const controller = new AbortController();
+  const tracked = new WeakSet<AbortSignal>();
+  const listeners = new Set<EventListenerOrEventListenerObject>();
+  let adds = 0;
+  let removes = 0;
+  const getSignal = Object.getOwnPropertyDescriptor(Request.prototype, 'signal')!.get!;
+  // Request derives a signal; wrap its public signal without changing abort propagation.
+  vi.spyOn(Request.prototype, 'signal', 'get').mockImplementation(function(this: Request) {
+    const signal = getSignal.call(this) as AbortSignal;
+    if (!tracked.has(signal)) {
+      tracked.add(signal);
+      const add = signal.addEventListener.bind(signal);
+      const remove = signal.removeEventListener.bind(signal);
+      vi.spyOn(signal, 'addEventListener').mockImplementation((type, listener, options) => {
+        if (type === 'abort' && listener) { adds++; listeners.add(listener); }
+        add(type, listener, options);
+      });
+      vi.spyOn(signal, 'removeEventListener').mockImplementation((type, listener, options) => {
+        if (type === 'abort' && listener) { removes++; listeners.delete(listener); }
+        remove(type, listener, options);
+      });
+    }
+    return signal;
+  });
+  return { controller, signal: controller.signal,
+    get listeners() { return listeners.size; }, get adds() { return adds; }, get removes() { return removes; } };
+}
+
+async function streamingResponse(init: RequestInit = {}, status = 200, respondOn: Frame['type'] = TunnelFrameType.RequestEnd) {
   let channel!: SecureChannel;
   let stream = 0;
-  let observe: ((frame: Frame) => void) | null = null;
-  const { transport } = environment({ accept(link, identity) {
+  let observe: { resolve(frame: Frame): void; type?: Frame['type'] } | null = null;
+  const controls: Frame[] = [];
+  let notifyClosed!: () => void;
+  const closed = new Promise<void>(resolve => { notifyClosed = resolve; });
+  const { transport } = environment({ onStatus({ state }) { if (state === 'closed') notifyClosed(); }, accept(link, identity) {
     void acceptChannel(link, { serverId: identity.serverId, staticKey: identity.dh }).then(value => {
       channel = value;
       channel.onFrame = frame => {
-        if (frame.type === TunnelFrameType.RequestEnd) {
+        if (frame.type === respondOn) {
           stream = frame.stream;
-          channel.send({ type: TunnelFrameType.Response, stream, payload: encodeJson({ status: 200, headers: [] }) });
+          channel.send({ type: TunnelFrameType.Response, stream, payload: encodeJson({ status, headers: [] }) });
         } else if (frame.type === TunnelFrameType.Reset || frame.type === TunnelFrameType.Pong) {
+          controls.push(frame);
+          if (observe?.type !== undefined && observe.type !== frame.type) return;
           const listener = observe;
           observe = null;
-          listener?.(frame);
+          listener?.resolve(frame);
         }
       };
     }).catch(() => {});
     return { close() { link.close(); } };
   } });
-  const response = await transport.fetch(`${transport.baseUrl}/api/stream`);
+  const response = await transport.fetch(`${transport.baseUrl}/api/stream`, init);
   return {
-    transport, response, channel, stream,
-    nextControl(): Promise<Frame> { return new Promise(resolve => { observe = resolve; }); },
+    transport, response, channel, stream, controls, closed,
+    nextControl(type?: Frame['type']): Promise<Frame> { return new Promise(resolve => { observe = { resolve, type }; }); },
   };
 }
 
@@ -359,9 +395,153 @@ describe('tunnel client isolates oversized stream from channel-wide failure', ()
   });
 });
 
+describe('tunnel client abort listener lifecycle', () => {
+  it.each(['text', 'reader', 'empty'] as const)('removes the listener after %s reaches EOF and never resets the completed response', async kind => {
+    const abort = trackedAbortController();
+    const { response, channel, stream, nextControl, controls } = await streamingResponse({ signal: abort.signal });
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([1, 1, 0]);
+    const delivered = nextControl(TunnelFrameType.Pong);
+    if (kind !== 'empty') {
+      channel.send({ type: TunnelFrameType.ResponseBody, stream, payload: utf8('hello') });
+      channel.send({ type: TunnelFrameType.ResponseBody, stream, payload: utf8(' world') });
+    }
+    channel.send({ type: TunnelFrameType.ResponseBody, stream, payload: EMPTY });
+    channel.send({ type: TunnelFrameType.ResponseEnd, stream, payload: EMPTY });
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await delivered;
+    if (kind === 'text') {
+      expect(await response.text()).toBe('hello world');
+    } else {
+      const reader = response.body!.getReader();
+      const chunks: Uint8Array[] = [];
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        chunks.push(chunk.value);
+      }
+      expect(Buffer.concat(chunks).toString()).toBe(kind === 'empty' ? '' : 'hello world');
+      reader.releaseLock();
+      await response.body!.cancel();
+    }
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    const alive = nextControl(TunnelFrameType.Pong);
+    abort.controller.abort(new Error('Already drained'));
+    channel.send({ type: TunnelFrameType.Reset, stream, payload: encodeJson({ code: 'aborted' }) });
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await alive;
+    expect(abort.removes).toBe(1);
+    expect(controls.filter(frame => frame.type === TunnelFrameType.Reset)).toHaveLength(0);
+  });
+
+  it('balances listeners across requests sharing one signal', async () => {
+    const { transport } = await session();
+    const abort = trackedAbortController();
+    for (let index = 1; index <= 3; index++) {
+      const response = await transport.fetch(`${transport.baseUrl}/api/echo`, {
+        method: 'POST', body: 'shared signal', signal: abort.signal,
+      });
+      expect(await response.text()).toBe('shared signal');
+      expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, index, index]);
+    }
+  });
+
+  it.each([
+    ['HEAD', 200], ['GET', 204], ['GET', 205], ['GET', 304],
+  ] as const)('removes the listener when %s %i ends without a body', async (method, status) => {
+    const abort = trackedAbortController();
+    const { response, channel, stream, nextControl, controls } = await streamingResponse({ method, signal: abort.signal }, status);
+    expect(response.body).toBeNull();
+    expect(abort.listeners).toBe(1);
+    const delivered = nextControl(TunnelFrameType.Pong);
+    channel.send({ type: TunnelFrameType.ResponseEnd, stream, payload: EMPTY });
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await delivered;
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    const alive = nextControl(TunnelFrameType.Pong);
+    abort.controller.abort();
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await alive;
+    expect(abort.removes).toBe(1);
+    expect(controls.filter(frame => frame.type === TunnelFrameType.Reset)).toHaveLength(0);
+  });
+
+  it.each([101, 103])('rejects informational status %i and removes the listener', async status => {
+    const abort = trackedAbortController();
+    await expect(streamingResponse({ signal: abort.signal }, status)).rejects.toEqual(new TypeError('Failed to fetch'));
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+  });
+
+  it.each(['reset', 'channel close', 'transport close', 'cancel', 'abort'] as const)('cleans up once for %s while bytes are queued before ResponseEnd', async exit => {
+    const abort = trackedAbortController();
+    const { transport, response, channel, stream, nextControl, controls, closed } = await streamingResponse({ signal: abort.signal });
+    const delivered = nextControl(TunnelFrameType.Pong);
+    channel.send({ type: TunnelFrameType.ResponseBody, stream, payload: utf8('queued') });
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await delivered;
+    const reason = new Error('Stopped');
+    const alive = nextControl(TunnelFrameType.Pong);
+    if (exit === 'reset') channel.send({ type: TunnelFrameType.Reset, stream, payload: encodeJson({ code: 'aborted' }) });
+    else if (exit === 'channel close') channel.close();
+    else if (exit === 'transport close') transport.close();
+    else if (exit === 'cancel') await response.body!.cancel(reason);
+    else abort.controller.abort(reason);
+    if (exit === 'channel close' || exit === 'transport close') await closed;
+    else {
+      channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+      await alive;
+    }
+    if (exit !== 'cancel') await expect(response.text()).rejects.toEqual(exit === 'abort' ? reason : new TypeError('Failed to fetch'));
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    abort.controller.abort();
+    expect(abort.removes).toBe(1);
+    expect(controls.filter(frame => frame.type === TunnelFrameType.Reset)).toHaveLength(exit === 'cancel' || exit === 'abort' ? 1 : 0);
+  });
+
+  it.each(['channel', 'transport'] as const)('drains a queued response after ResponseEnd and %s close, then removes the listener', async close => {
+    const abort = trackedAbortController();
+    const { transport, response, channel, stream, nextControl, closed } = await streamingResponse({ signal: abort.signal });
+    const delivered = nextControl(TunnelFrameType.Pong);
+    channel.send({ type: TunnelFrameType.ResponseBody, stream, payload: utf8('queued') });
+    channel.send({ type: TunnelFrameType.ResponseEnd, stream, payload: EMPTY });
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await delivered;
+    if (close === 'channel') channel.close();
+    else transport.close();
+    await closed;
+    expect(abort.listeners).toBe(1);
+    expect(await response.text()).toBe('queued');
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    abort.controller.abort();
+    expect(abort.removes).toBe(1);
+  });
+
+  it.each(['cancel', 'abort'] as const)('cleans up a queued response on %s after ResponseEnd without sending Reset', async exit => {
+    const abort = trackedAbortController();
+    const { response, channel, stream, nextControl, controls } = await streamingResponse({ signal: abort.signal });
+    const delivered = nextControl(TunnelFrameType.Pong);
+    channel.send({ type: TunnelFrameType.ResponseBody, stream, payload: utf8('queued') });
+    channel.send({ type: TunnelFrameType.ResponseEnd, stream, payload: EMPTY });
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await delivered;
+    expect(abort.listeners).toBe(1);
+    const reason = new Error('Stopped');
+    const alive = nextControl(TunnelFrameType.Pong);
+    if (exit === 'cancel') await response.body!.cancel(reason);
+    else {
+      abort.controller.abort(reason);
+      await expect(response.text()).rejects.toBe(reason);
+    }
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await alive;
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    expect(controls.filter(frame => frame.type === TunnelFrameType.Reset)).toHaveLength(0);
+  });
+});
+
 describe('tunnel client response body budget', () => {
   it.each(['never', 'slow'] as const)('resets an over-budget response for a %s reader and errors its body', async kind => {
-    const { transport, response, channel, stream, nextControl } = await streamingResponse();
+    const abort = trackedAbortController();
+    const { transport, response, channel, stream, nextControl, controls } = await streamingResponse({ signal: abort.signal });
     const payload = new Uint8Array(TUNNEL_BODY_CHUNK);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     if (kind === 'slow') {
@@ -394,6 +574,9 @@ describe('tunnel client response body budget', () => {
     expect((await alive).type).toBe(TunnelFrameType.Pong);
     expect(channel.closed).toBe(false);
     expect(transport.via).toBe('lan');
+    abort.controller.abort();
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    expect(controls.filter(frame => frame.type === TunnelFrameType.Reset)).toHaveLength(1);
   });
 
   it('allows a response exactly at the byte budget', async () => {
@@ -462,7 +645,7 @@ describe('tunnel client upload abort body cancellation', () => {
     });
     cleanups.push(() => transport.close());
 
-    const abort = new AbortController();
+    const abort = trackedAbortController();
     const response = transport.fetch(`${transport.baseUrl}/api/upload`, {
       method: 'POST', body, duplex: 'half', signal: abort.signal,
     } as RequestInit);
@@ -473,23 +656,25 @@ describe('tunnel client upload abort body cancellation', () => {
     expect(openChannel).toHaveBeenCalledOnce();
     expect(body.locked).toBe(false);
     const reason = new DOMException('User abort', 'AbortError');
-    abort.abort(reason);
+    abort.controller.abort(reason);
     await Promise.resolve();
     await Promise.resolve();
 
     expect(await cancelCalled).toBe(reason);
     await expect(response).rejects.toBe(reason);
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
   });
 });
 
 describe('tunnel client upload backpressure', () => {
   it.each([1, 4])('waits for the queue to drain after body chunk %i before sending more body or RequestEnd', async (after) => {
     const { transport, client, handler } = await session();
+    const abort = trackedAbortController();
     const { frames, stalled, release, drained } = stallUpload(client, after);
     const body = new Uint8Array(TUNNEL_BODY_CHUNK * 4);
     for (let i = 0; i < body.length; i++) body[i] = i % 251;
 
-    const response = transport.fetch(`${transport.baseUrl}/api/echo`, { method: 'POST', body });
+    const response = transport.fetch(`${transport.baseUrl}/api/echo`, { method: 'POST', body, signal: abort.signal });
     // Cleanup can reject this promise if the regression assertion fails first.
     void response.catch(() => {});
     await stalled;
@@ -498,6 +683,7 @@ describe('tunnel client upload backpressure', () => {
     await vi.advanceTimersByTimeAsync(30);
     expect(frames.map(frame => frame.type)).toEqual(Array(after).fill(TunnelFrameType.RequestBody));
     expect(handler).not.toHaveBeenCalled();
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([1, 1, 0]);
 
     release();
     await drained;
@@ -507,12 +693,13 @@ describe('tunnel client upload backpressure', () => {
       ...Array(4).fill(TunnelFrameType.RequestBody), TunnelFrameType.RequestEnd,
     ]);
     expect(handler).toHaveBeenCalledOnce();
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
   });
 
   it('stops draining and sends no further upload frames when aborted while the queue is full', async () => {
     const { transport, client, handler } = await session();
     const { frames, stalled, bufferedAmount } = stallUpload(client, 1);
-    const abort = new AbortController();
+    const abort = trackedAbortController();
     const response = transport.fetch(`${transport.baseUrl}/api/echo`, {
       method: 'POST', body: new Uint8Array(TUNNEL_BODY_CHUNK * 4), signal: abort.signal,
     });
@@ -520,7 +707,7 @@ describe('tunnel client upload backpressure', () => {
     await stalled;
     expect(frames.map(frame => frame.type)).toEqual([TunnelFrameType.RequestBody]);
     const rejected = expect(response).rejects.toMatchObject({ name: 'AbortError' });
-    abort.abort();
+    abort.controller.abort();
     await rejected;
 
     const reads = bufferedAmount.mock.calls.length;
@@ -528,6 +715,64 @@ describe('tunnel client upload backpressure', () => {
     expect(bufferedAmount).toHaveBeenCalledTimes(reads);
     expect(frames.map(frame => frame.type)).toEqual([TunnelFrameType.RequestBody]);
     expect(handler).not.toHaveBeenCalled();
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    expect(vi.mocked(client.send).mock.calls.filter(([frame]) => frame.type === TunnelFrameType.Reset)).toHaveLength(1);
+  });
+
+  it('stops the upload at an early ResponseEnd and cleans up when its queued response drains', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    const abort = trackedAbortController();
+    const openChannel = channels.openChannel;
+    let client!: SecureChannel;
+    let upload!: ReturnType<typeof stallUpload>;
+    vi.spyOn(channels, 'openChannel').mockImplementation(async (link, options) => {
+      client = await openChannel(link, options);
+      upload = stallUpload(client, 1);
+      return client;
+    });
+    const { response, channel, stream, nextControl, controls } = await streamingResponse({
+      method: 'POST', body: new Uint8Array(TUNNEL_BODY_CHUNK * 4), signal: abort.signal,
+    }, 200, TunnelFrameType.Request);
+    await upload.stalled;
+    const delivered = nextControl(TunnelFrameType.Pong);
+    channel.send({ type: TunnelFrameType.ResponseBody, stream, payload: utf8('early response') });
+    channel.send({ type: TunnelFrameType.ResponseEnd, stream, payload: EMPTY });
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: EMPTY });
+    await delivered;
+    expect(abort.listeners).toBe(1);
+    upload.release();
+    await upload.drained;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(vi.mocked(client.send).mock.calls.filter(([frame]) =>
+      frame.type === TunnelFrameType.RequestBody || frame.type === TunnelFrameType.RequestEnd)).toHaveLength(1);
+    expect(await response.text()).toBe('early response');
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    expect(controls.filter(frame => frame.type === TunnelFrameType.Reset)).toHaveLength(0);
+  });
+
+  it.each(['read', 'chunk', 'send'] as const)('removes the listener and sends one Reset when the upload fails at %s', async failure => {
+    const { transport, client, handler } = await session();
+    const abort = trackedAbortController();
+    const send = client.send.bind(client);
+    const sent = vi.spyOn(client, 'send').mockImplementation(frame => {
+      if (failure === 'send' && frame.type === TunnelFrameType.RequestBody) throw new Error('Upload failed');
+      send(frame);
+    });
+    const body = new ReadableStream<Uint8Array>({ start(controller) {
+      if (failure === 'read') controller.error(new Error('Read failed'));
+      else {
+        controller.enqueue(failure === 'chunk' ? 'invalid' as unknown as Uint8Array : utf8('upload'));
+        controller.close();
+      }
+    } });
+    await expect(transport.fetch(`${transport.baseUrl}/api/upload`, {
+      method: 'POST', body, duplex: 'half', signal: abort.signal,
+    } as RequestInit)).rejects.toEqual(new TypeError('Failed to fetch'));
+    abort.controller.abort();
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    expect(sent.mock.calls.filter(([frame]) => frame.type === TunnelFrameType.Reset)).toHaveLength(1);
+    expect(handler).not.toHaveBeenCalled();
+    expect(body.locked).toBe(false);
   });
 });
 
@@ -548,15 +793,36 @@ describe('tunnel client abort race', () => {
       return origSend(frame);
     });
 
-    const abort = new AbortController();
+    const abort = trackedAbortController();
     const fetchPromise = transport.fetch(`${transport.baseUrl}/api/test`, { signal: abort.signal });
     void fetchPromise.catch(() => {});
 
     await handlerReady;
 
     const reason = new Error('Stopped');
-    abort.abort(reason);
+    abort.controller.abort(reason);
     await expect(fetchPromise).rejects.toBe(reason);
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    expect(vi.mocked(client.send).mock.calls.filter(([frame]) => frame.type === TunnelFrameType.Reset)).toHaveLength(1);
+  });
+
+  it('removes the listener once when cancelling the body closes the channel during Reset', async () => {
+    const { transport, client, handler } = await session();
+    const abort = trackedAbortController();
+    handler.mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(utf8('queued')); },
+    })));
+    const send = client.send.bind(client);
+    const sent = vi.spyOn(client, 'send').mockImplementation(frame => {
+      if (frame.type === TunnelFrameType.Reset) throw new Error('Reset failed');
+      send(frame);
+    });
+    const response = await transport.fetch(`${transport.baseUrl}/api/test`, { signal: abort.signal });
+    await response.body!.cancel();
+    abort.controller.abort();
+    expect(client.closed).toBe(true);
+    expect([abort.listeners, abort.adds, abort.removes]).toEqual([0, 1, 1]);
+    expect(sent.mock.calls.filter(([frame]) => frame.type === TunnelFrameType.Reset)).toHaveLength(1);
   });
 
   it('body reader throws abort reason when aborted after ResponseEnd', async () => {

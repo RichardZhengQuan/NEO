@@ -288,13 +288,21 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
       let id: number | null = null;
       let done = false;
       let hasHead = false;
+      let ended = false;
       let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
       let bodyReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
       const signal = request.signal;
       const cleanup = () => {
+        if (done) return;
         done = true;
         signal.removeEventListener('abort', abort);
         if (id !== null) current?.streams.delete(id);
+      };
+      const finishBody = () => {
+        if (!done && ended && (!controller || controller.desiredSize === BODY_QUEUE_BUDGET)) {
+          controller?.close();
+          cleanup();
+        }
       };
       const reset = (code: TunnelReset['code'] = 'aborted') => {
         if (id !== null && current && !current.channel.closed) {
@@ -318,6 +326,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         else { try { controller?.error(error); } catch { /* The reader may have cancelled. */ } }
       };
       const abort = () => {
+        if (done) return;
         const reason = signal.reason ?? new DOMException('Aborted', 'AbortError');
         fail(reason);
         reset();
@@ -338,7 +347,8 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
                 const noBody = NULL_BODY.has(head.status) || request.method === 'HEAD';
                 const bodyStream = noBody ? null : new ReadableStream<Uint8Array>({
                   start(value) { controller = value; },
-                  cancel() { reset(); cleanup(); },
+                  pull() { finishBody(); },
+                  cancel() { if (!done) { cleanup(); reset(); } },
                 }, new ByteLengthQueuingStrategy({ highWaterMark: BODY_QUEUE_BUDGET }));
                 const response = new Response(bodyStream, { status: head.status, headers: head.headers });
                 hasHead = true;
@@ -347,7 +357,8 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
               }
               case TunnelFrameType.ResponseBody:
                 if (!hasHead) throw new TunnelProtocolError('Body before response head');
-                controller?.enqueue(frame.payload);
+                // Empty chunks are invisible to the byte-count drain check.
+                if (frame.payload.length) controller?.enqueue(frame.payload);
                 // Bound current queue occupancy, including when the caller never reads the body.
                 // ByteLengthQueuingStrategy tracks actual bytes in the queue; desiredSize goes
                 // negative only when the consumer is slow and the queue exceeds the budget,
@@ -364,16 +375,12 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
                 // server-initiated stream end.
                 if (id !== null) current?.streams.delete(id);
                 id = null;
+                ended = true;
                 if (signal.aborted) {
-                  controller?.error(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-                  cleanup();
+                  fail(signal.reason ?? new DOMException('Aborted', 'AbortError'));
                 } else {
-                  controller?.close();
-                  // Deliberately omit cleanup(): the abort listener must stay registered so that
-                  // an abort concurrent with ResponseEnd (between the frame arriving and the
-                  // consumer draining the body) can still cancel the stream via
-                  // fail() → controller.error(reason). cleanup() runs via fail() when abort
-                  // fires, or via the stream's cancel handler if the consumer abandons the body.
+                  // Keep queued bytes abortable until pull observes their final drain.
+                  finishBody();
                 }
                 break;
               case TunnelFrameType.Reset: fail(networkError()); break;
@@ -416,7 +423,7 @@ export function createTunnelTransport(options: TunnelTransportOptions): TunnelTr
         sendStreamFrame(current, { type: TunnelFrameType.Request, stream: id, payload: encodeJson({
           method: request.method, path: url.pathname + url.search, headers,
         }) });
-        const active = () => !done && !signal.aborted;
+        const active = () => !done && !ended && !signal.aborted;
         for (let offset = 0; offset < body.length && active(); offset += TUNNEL_BODY_CHUNK) {
           await waitForClientBuffer(current.channel, active);
           if (!active()) return;
