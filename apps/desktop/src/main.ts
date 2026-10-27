@@ -222,6 +222,7 @@ function createWindow(serverUrl: string): void {
   // Show only when the renderer signals it is ready to avoid a flash of blank white.
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    mainWindow?.focus();
     // Deliver any pairing link that arrived before the window existed.
     if (pendingPairUrl) {
       mainWindow?.webContents.send('neo:pairLink', pendingPairUrl);
@@ -260,28 +261,30 @@ function createWindow(serverUrl: string): void {
   void mainWindow.loadURL(serverUrl);
 }
 
+/** Restore the existing window, or reopen the renderer for the active mode. */
+function restoreMainWindow(): void {
+  if (isQuitting) return;
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+  const url = neoServer?.url ?? currentWebFileUrl;
+  if (url) {
+    createWindow(url);
+  } else if (process.platform === 'darwin') {
+    // The native first-launch choice can still be awaiting the user's answer.
+    app.focus({ steal: true });
+  }
+}
+
 // ───────────────────────────── tray ─────────────────────────────
 
-function buildTrayMenu(serverUrl: string): Menu {
+function buildTrayMenu(): Menu {
   const openItem = new MenuItem({
     label: 'Open NEO',
-    click() {
-      if (mainWindow) {
-        mainWindow.show();
-        mainWindow.focus();
-      } else {
-        createWindow(serverUrl);
-      }
-    },
-  });
-
-  const newChatItem = new MenuItem({
-    label: 'New chat',
-    click() {
-      mainWindow?.show();
-      mainWindow?.focus();
-      mainWindow?.webContents.loadURL(`${serverUrl}#/chat`);
-    },
+    click: restoreMainWindow,
   });
 
   const loginItem = new MenuItem({
@@ -304,7 +307,6 @@ function buildTrayMenu(serverUrl: string): Menu {
 
   return Menu.buildFromTemplate([
     openItem,
-    newChatItem,
     { type: 'separator' },
     loginItem,
     { type: 'separator' },
@@ -312,7 +314,8 @@ function buildTrayMenu(serverUrl: string): Menu {
   ]);
 }
 
-function createTray(serverUrl: string): void {
+function createTray(): void {
+  if (tray) return;
   const iconBuf = createTrayIconPng();
   const iconImage = nativeImage.createFromBuffer(iconBuf);
   if (process.platform === 'darwin') {
@@ -321,15 +324,10 @@ function createTray(serverUrl: string): void {
 
   tray = new Tray(iconImage);
   tray.setToolTip('NEO');
-  tray.setContextMenu(buildTrayMenu(serverUrl));
+  if (process.platform === 'darwin') tray.setTitle('NEO');
+  tray.setContextMenu(buildTrayMenu());
 
-  tray.on('click', () => {
-    if (mainWindow?.isVisible()) {
-      mainWindow.focus();
-    } else {
-      mainWindow?.show();
-    }
-  });
+  tray.on('click', restoreMainWindow);
 }
 
 // ───────────────────────────── app menu ─────────────────────────────
@@ -755,14 +753,7 @@ function startNotificationListener(
 
 // ───────────────────────────── app lifecycle ─────────────────────────────
 
-app.on('second-instance', () => {
-  // Someone tried to launch another instance; focus our window instead.
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-  }
-});
+app.on('second-instance', restoreMainWindow);
 
 // macOS: handle neo://pair?... deep links (the custom URL scheme must be
 // registered in the app's Info.plist via electron-builder's protocols config).
@@ -779,16 +770,8 @@ app.on('open-url', (event, url) => {
   }
 });
 
-app.on('activate', () => {
-  // macOS: re-open the window when clicking the dock icon.
-  if (mainWindow) {
-    mainWindow.show();
-  } else if (neoServer) {
-    createWindow(neoServer.url);
-  } else if (currentWebFileUrl) {
-    createWindow(currentWebFileUrl);
-  }
-});
+// macOS: re-open and focus the window when clicking the Dock icon.
+app.on('activate', restoreMainWindow);
 
 app.on('window-all-closed', () => {
   // On non-macOS platforms, quit when all windows are closed.
@@ -807,6 +790,7 @@ app.on('before-quit', () => {
 
 async function main(): Promise<void> {
   await app.whenReady();
+  if (isQuitting) return;
 
   // Register neo:// so deep links work in dev builds. Packaged apps also
   // declare the scheme via electron-builder's protocols config in the Info.plist.
@@ -815,8 +799,12 @@ async function main(): Promise<void> {
   const userData = app.getPath('userData');
   const webDir = getWebDir();
 
+  // The menu bar remains available in either mode and during the first choice.
+  createTray();
+
   // ── Determine startup mode (first launch shows a dialog) ────────────────
   let mode = await loadStartupMode(userData);
+  if (isQuitting) return;
   if (mode === null) {
     const strings = pickFirstLaunchStrings(app.getLocale());
     const { response } = await dialog.showMessageBox({
@@ -826,8 +814,10 @@ async function main(): Promise<void> {
       defaultId: 0,
       cancelId: 0,
     });
+    if (isQuitting) return;
     mode = response === 0 ? 'local' : { kind: 'remote' };
     await saveStartupMode(userData, mode);
+    if (isQuitting) return;
   }
 
   // ── Connect mode (no embedded server) ───────────────────────────────────
@@ -873,9 +863,15 @@ async function main(): Promise<void> {
   try {
     neoServer = await startServer(config);
   } catch (err) {
+    if (isQuitting) return;
     console.error('[NEO desktop] Failed to start embedded server:', err);
     app.setName('NEO');
     showMissingWebBuildWindow();
+    return;
+  }
+
+  if (isQuitting) {
+    await neoServer.stop();
     return;
   }
 
@@ -886,9 +882,6 @@ async function main(): Promise<void> {
 
   // Set up the app menu.
   Menu.setApplicationMenu(buildAppMenu());
-
-  // Create the tray.
-  createTray(serverUrl);
 
   // Open the main window.
   createWindow(serverUrl);

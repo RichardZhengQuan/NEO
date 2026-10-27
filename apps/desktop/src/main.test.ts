@@ -92,6 +92,8 @@ const electron = await vi.hoisted(async () => {
       getAppPath: vi.fn(() => '/neo-test/apps/desktop'),
       getLocale: vi.fn(() => 'en-US'),
       setName: vi.fn(),
+      focus: vi.fn(),
+      setLoginItemSettings: vi.fn(),
       isPackaged: false,
       getLoginItemSettings: vi.fn(() => ({ openAtLogin: false })),
     }),
@@ -99,6 +101,7 @@ const electron = await vi.hoisted(async () => {
     Tray: vi.fn(function () {
       return Object.assign(new EventEmitter(), {
         setToolTip: vi.fn(),
+        setTitle: vi.fn(),
         setContextMenu: vi.fn(),
       });
     }),
@@ -131,8 +134,8 @@ vi.mock('electron', () => {
     BrowserWindow: electron.BrowserWindow,
     dialog: { showMessageBox: dialogMock.showMessageBox },
     ipcMain: { handle: vi.fn() },
-    Menu: { buildFromTemplate: vi.fn(), setApplicationMenu: vi.fn() },
-    MenuItem: vi.fn(),
+    Menu: { buildFromTemplate: vi.fn((items: Electron.MenuItemConstructorOptions[]) => ({ items })), setApplicationMenu: vi.fn() },
+    MenuItem: vi.fn(function (this: Electron.MenuItem, options: Electron.MenuItemConstructorOptions) { Object.assign(this, options); }),
     Notification,
     nativeImage: { createFromBuffer: vi.fn(() => ({ setTemplateImage: vi.fn() })) },
     protocol: protocolMock,
@@ -268,6 +271,237 @@ describe('desktop window lifecycle', () => {
     expect(electron.BrowserWindow).toHaveBeenCalledTimes(2);
     const reopenedWindow = electron.BrowserWindow.mock.results[1]!.value;
     expect(reopenedWindow.loadURL).toHaveBeenCalledWith(serverUrl);
+  });
+});
+
+describe('desktop menu bar', () => {
+  const localUrl = 'http://127.0.0.1:7777';
+  const modes = [
+    { name: 'local', mode: 'local', url: localUrl },
+    { name: 'saved remote', mode: { kind: 'remote', serverUrl: 'https://saved.example', token: 'test-token' }, url: 'app://neo/index.html' },
+    { name: 'unpaired remote', mode: { kind: 'remote' }, url: 'app://neo/index.html' },
+  ] as const;
+
+  function startupComplete(local: boolean): Promise<void> {
+    return new Promise((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === (local ? 2 : 1)) resolve();
+      });
+    });
+  }
+
+  async function startMode(mode: (typeof modes)[number]): Promise<void> {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+    fsMock.readFile.mockImplementation((p: string) => p.endsWith('startup-mode.json')
+      ? Promise.resolve(JSON.stringify(mode.mode)) : Promise.reject(ENOENT));
+    if (mode.mode === 'local') {
+      server.startServer.mockResolvedValueOnce({ url: localUrl, ownerToken: 'test-owner', stop: server.stopServer });
+    }
+    const ready = startupComplete(mode.mode === 'local');
+    await import('./main.js');
+    await ready;
+  }
+
+  function currentTray() {
+    expect(electron.Tray).toHaveBeenCalledTimes(1);
+    return electron.Tray.mock.results[0]!.value;
+  }
+
+  function menuItem(label: string): Electron.MenuItemConstructorOptions {
+    const menu = currentTray().setContextMenu.mock.calls[0]?.[0] as { items: Electron.MenuItemConstructorOptions[] };
+    expect(menu).toBeDefined();
+    const item = menu.items.find((item) => item.label === label);
+    expect(item, `${label} must be a native menu command`).toBeDefined();
+    return item!;
+  }
+
+  function invokeMenu(label: string): void {
+    const item = menuItem(label);
+    expect(item.click).toBeTypeOf('function');
+    item.click!(item as unknown as Electron.MenuItem, undefined, {} as Electron.KeyboardEvent);
+  }
+
+  it.each(modes)('creates one labelled native menu bar item in $name mode', async (mode) => {
+    await startMode(mode);
+    const tray = currentTray();
+    expect(tray.setTitle).toHaveBeenCalledExactlyOnceWith('NEO');
+    expect(tray.setToolTip).toHaveBeenCalledExactlyOnceWith('NEO');
+    expect(menuItem('Open NEO').label).toBe('Open NEO');
+    expect(menuItem('Quit NEO').accelerator).toBe('CmdOrCtrl+Q');
+    const menu = tray.setContextMenu.mock.calls[0]![0] as { items: Electron.MenuItemConstructorOptions[] };
+    expect(menu.items.map((item) => item.label).filter(Boolean)).toEqual(['Open NEO', 'Launch at login', 'Quit NEO']);
+  });
+
+  it.each(modes.flatMap((mode) => ['tray click', 'Open NEO'].map((action) => ({ ...mode, action }))))(
+    'restores, focuses and recreates the correct $name window from $action', async (mode) => {
+      await startMode(mode);
+      const tray = currentTray();
+      const open = () => mode.action === 'tray click' ? tray.emit('click') : invokeMenu('Open NEO');
+      const win = electron.BrowserWindow.mock.results[0]!.value;
+      win.isMinimized.mockReturnValue(true);
+      win.isVisible.mockReturnValue(false);
+      win.show.mockClear();
+      win.focus.mockClear();
+      open();
+      expect(win.restore).toHaveBeenCalledTimes(1);
+      expect(win.show).toHaveBeenCalledTimes(1);
+      expect(win.focus).toHaveBeenCalledTimes(1);
+      expect(win.loadURL).toHaveBeenCalledExactlyOnceWith(mode.url);
+
+      win.emit('closed');
+      expect(() => win.show()).toThrow('Object has been destroyed');
+      expect(open).not.toThrow();
+      expect(electron.BrowserWindow).toHaveBeenCalledTimes(2);
+      const reopened = electron.BrowserWindow.mock.results[1]!.value;
+      expect(reopened.loadURL).toHaveBeenCalledExactlyOnceWith(mode.url);
+      expect(reopened.show).not.toHaveBeenCalled();
+      reopened.emit('ready-to-show');
+      expect(reopened.show).toHaveBeenCalledTimes(1);
+      expect(reopened.focus).toHaveBeenCalledTimes(1);
+      expect(electron.Tray).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(modes)('keeps $name running after window close and permits explicit Quit NEO', async (mode) => {
+    await startMode(mode);
+    const win = electron.BrowserWindow.mock.results[0]!.value;
+    const close = { preventDefault: vi.fn() };
+    win.emit('close', close);
+    electron.app.emit('window-all-closed');
+    expect(close.preventDefault).toHaveBeenCalledTimes(1);
+    expect(win.hide).toHaveBeenCalledTimes(1);
+    expect(electron.app.quit).not.toHaveBeenCalled();
+    invokeMenu('Quit NEO');
+    expect(electron.app.quit).toHaveBeenCalledTimes(1);
+    const quittingClose = { preventDefault: vi.fn() };
+    win.emit('close', quittingClose);
+    expect(quittingClose.preventDefault).not.toHaveBeenCalled();
+    win.emit('closed');
+    currentTray().emit('click');
+    invokeMenu('Open NEO');
+    electron.app.emit('activate');
+    electron.app.emit('second-instance');
+    expect(electron.BrowserWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([0, 1])('keeps NEO available while first-launch choice %i is pending', async (response) => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+    fsMock.readFile.mockRejectedValue(ENOENT);
+    let finishChoice!: (result: { response: number; checkboxChecked: boolean }) => void;
+    const choice = new Promise<{ response: number; checkboxChecked: boolean }>((resolve) => { finishChoice = resolve; });
+    let dialogShown!: () => void;
+    const shown = new Promise<void>((resolve) => { dialogShown = resolve; });
+    dialogMock.showMessageBox.mockImplementationOnce(() => { dialogShown(); return choice; });
+    if (response === 0) server.startServer.mockResolvedValueOnce({ url: localUrl, ownerToken: 'test-owner', stop: server.stopServer });
+    const ready = startupComplete(response === 0);
+    await import('./main.js');
+    await shown;
+    expect.soft(electron.Tray).toHaveBeenCalledTimes(1);
+    expect.soft(electron.BrowserWindow).not.toHaveBeenCalled();
+    if (electron.Tray.mock.results.length === 1) {
+      currentTray().emit('click');
+      invokeMenu('Open NEO');
+    }
+    expect.soft(electron.app.focus).toHaveBeenCalledTimes(2);
+    expect.soft(electron.app.focus).toHaveBeenLastCalledWith({ steal: true });
+    finishChoice({ response, checkboxChecked: false });
+    await ready;
+    expect(electron.Tray).toHaveBeenCalledTimes(1);
+    expect(electron.BrowserWindow.mock.results[0]!.value.loadURL).toHaveBeenCalledWith(response === 0 ? localUrl : 'app://neo/index.html');
+  });
+
+  describe('startup Quit', () => {
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+      return { promise, resolve, reject };
+    }
+
+    // A single native event-loop checkpoint settles the released startup promise
+    // and its microtask continuations without polling or a wall-clock sleep.
+    const settleStartup = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const stoppedServer = () => ({ url: localUrl, ownerToken: 'test-owner', stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined) });
+
+    it('does not continue after Quit while the saved mode is loading', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+      const mode = deferred<string>();
+      const reading = deferred<void>();
+      fsMock.readFile.mockImplementation((p: string) => {
+        if (p.endsWith('startup-mode.json')) { reading.resolve(); return mode.promise; }
+        return Promise.reject(ENOENT);
+      });
+      server.startServer.mockResolvedValueOnce(stoppedServer());
+      await import('./main.js');
+      await reading.promise;
+      invokeMenu('Quit NEO');
+      mode.resolve(JSON.stringify('local'));
+      await settleStartup();
+      expect(fsMock.writeFile).not.toHaveBeenCalled();
+      expect(startServer).not.toHaveBeenCalled();
+      expect(electron.BrowserWindow).not.toHaveBeenCalled();
+    });
+
+    it.each([0, 1])('does not save mode or open anything after Quit during first choice %i', async (response) => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+      fsMock.readFile.mockRejectedValue(ENOENT);
+      const choice = deferred<{ response: number; checkboxChecked: boolean }>();
+      const shown = deferred<void>();
+      dialogMock.showMessageBox.mockImplementationOnce(() => { shown.resolve(); return choice.promise; });
+      if (response === 0) server.startServer.mockResolvedValueOnce(stoppedServer());
+      await import('./main.js');
+      await shown.promise;
+      invokeMenu('Quit NEO');
+      choice.resolve({ response, checkboxChecked: false });
+      await settleStartup();
+      expect(fsMock.writeFile).not.toHaveBeenCalled();
+      expect(startServer).not.toHaveBeenCalled();
+      expect(electron.BrowserWindow).not.toHaveBeenCalled();
+    });
+
+    it('does not start a server after Quit while the chosen mode is being saved', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+      fsMock.readFile.mockRejectedValue(ENOENT);
+      const saving = deferred<void>();
+      const saved = deferred<void>();
+      fsMock.writeFile.mockImplementationOnce(() => { saving.resolve(); return saved.promise; });
+      server.startServer.mockResolvedValueOnce(stoppedServer());
+      await import('./main.js');
+      await saving.promise;
+      invokeMenu('Quit NEO');
+      saved.resolve();
+      await settleStartup();
+      expect(fsMock.writeFile).toHaveBeenCalledTimes(1);
+      expect(startServer).not.toHaveBeenCalled();
+      expect(electron.BrowserWindow).not.toHaveBeenCalled();
+    });
+
+    it.each(['resolve', 'reject'] as const)('cleans up a late server %s after Quit without opening an error window', async (outcome) => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+      const pending = deferred<ReturnType<typeof stoppedServer>>();
+      const starting = deferred<void>();
+      server.startServer.mockImplementationOnce(() => { starting.resolve(); return pending.promise; });
+      const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      await import('./main.js');
+      await starting.promise;
+      invokeMenu('Quit NEO');
+      const started = stoppedServer();
+      if (outcome === 'resolve') pending.resolve(started);
+      else pending.reject(new Error('late startup failure'));
+      await settleStartup();
+      expect(started.stop).toHaveBeenCalledTimes(outcome === 'resolve' ? 1 : 0);
+      expect(electron.BrowserWindow).not.toHaveBeenCalled();
+      expect(logError).not.toHaveBeenCalled();
+    });
+  });
+
+  it('keeps the native launch-at-login checkbox connected to Electron', async () => {
+    await startMode(modes[0]);
+    const item = menuItem('Launch at login');
+    expect(item.type).toBe('checkbox');
+    expect(item.checked).toBe(false);
+    item.click!({ ...item, checked: true } as unknown as Electron.MenuItem, undefined, {} as Electron.KeyboardEvent);
+    expect(electron.app.setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({ openAtLogin: true });
   });
 });
 

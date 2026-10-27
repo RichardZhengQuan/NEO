@@ -31,6 +31,11 @@ The **NEO desktop app** embeds the server.  No separate installation is needed.
    the web UI in a native window. The onboarding wizard then guides you
    through adding an AI provider and configuring memory settings.
 
+On macOS, **NEO** stays in the menu bar while running on this Mac or connecting
+to another NEO, including the first-launch choice. Use **Open NEO** to restore
+or reopen its window. Closing the window keeps NEO running; choose **Quit NEO**
+(or press **Command-Q**) to quit. The Dock icon remains available.
+
 Packaged Windows and Linux builds are planned but not shipped yet; macOS is the only platform on the Releases page today.
 
 Data is stored in the platform userData directory:
