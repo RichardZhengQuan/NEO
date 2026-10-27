@@ -101,7 +101,15 @@ export function sleepUnlessAborted(sleep: SleepFn, ms: number, signal: AbortSign
   return new Promise<void>((resolve, reject) => {
     const onAbort = () => reject(cancelledError(signal.reason));
     signal.addEventListener('abort', onAbort, { once: true });
-    sleep(ms, signal).then(
+    let pending: Promise<void>;
+    try {
+      pending = sleep(ms, signal);
+    } catch (err) {
+      signal.removeEventListener('abort', onAbort);
+      reject(err);
+      return;
+    }
+    pending.then(
       () => {
         signal.removeEventListener('abort', onAbort);
         resolve();
