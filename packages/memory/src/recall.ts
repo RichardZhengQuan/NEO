@@ -12,7 +12,7 @@ import { fromJson, toNum, type SqlValue } from '@neo/storage';
 import { MEMORY_CONSTANTS } from './constants.js';
 import { ASSISTANT_STYLE_TAG } from './assistant-style.js';
 import type { MemoryContext } from './context.js';
-import { chunked, getNodes } from './db-helpers.js';
+import { getNodes } from './db-helpers.js';
 import { containsTerm, estimateTokens, hasCJK, isBroadSelfQuery, normalizeText, recallTerms, wordMatchExpression } from './text.js';
 import { dot, effectiveEdgeWeight, normalized, retention } from './utils.js';
 import { sameSpace } from './vectors.js';
@@ -211,6 +211,14 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   if (limit === 0) return finish([], 0, 0);
 
   // ── 1. candidates ──
+  const initialWhere = candidateWhere(query, now);
+  const initialCandidates = new Set((db.prepare(`SELECT id FROM memory_nodes WHERE ${initialWhere.sql}`).all(...initialWhere.params) as { id: string }[]).map((r) => r.id));
+  if (!initialCandidates.size) return finish([], 0, 0);
+
+  const spaces = text ? await querySpaces(ctx, query, text, (query.context ?? '').trim()) : new Map<string, QuerySpace>();
+  if (query.signal?.aborted) throw new NeoError('cancelled', 'Memory recall was cancelled.');
+  // Re-read eligibility after embedding. All node reads and activation work below
+  // are synchronous, so an in-process write cannot interleave with this snapshot.
   const where = candidateWhere(query, now);
   const candidates = new Set((db.prepare(`SELECT id FROM memory_nodes WHERE ${where.sql}`).all(...where.params) as { id: string }[]).map((r) => r.id));
   if (!candidates.size) return finish([], 0, 0);
@@ -231,8 +239,6 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   };
 
   // Vector: top seedTopK with sim ≥ floor, a₀ = (sim − floor) / (1 − floor).
-  const spaces = text ? await querySpaces(ctx, query, text, (query.context ?? '').trim()) : new Map<string, QuerySpace>();
-  if (query.signal?.aborted) throw new NeoError('cancelled', 'Memory recall was cancelled.');
   if (spaces.size) {
     const main = ctx.vectors.all(ctx.embedder.id);
     const onDevice = ctx.localEmbedder !== ctx.embedder ? ctx.vectors.all(ctx.localEmbedder.id) : null;
@@ -320,10 +326,6 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   for (const [id, seed] of seeds) A.set(id, seed.a0);
   /** Best single contribution to each non-seed node: its `via` back-pointer. */
   const best = new Map<string, { from: string; type: EdgeType; c: number }>();
-  /** All contributions to each non-seed node, keyed by source id. Used to
-   * detect nodes whose clean activation drops below minScore when a non-best
-   * contributor is tainted (Bug 2 fix). */
-  const allContrib = new Map<string, Map<string, number>>();
   const adjacency = new Map<string, Neighbor[]>();
   const edgeStmt = db.prepare(
     `SELECT src, dst, type, weight, last_reinforced_at FROM memory_edges WHERE src = ?
@@ -359,9 +361,6 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
         if (!seeds.has(n.other)) {
           const b = best.get(n.other);
           if (!b || c > b.c) best.set(n.other, { from: i, type: n.type, c });
-          let ac = allContrib.get(n.other);
-          if (!ac) { ac = new Map(); allContrib.set(n.other, ac); }
-          ac.set(i, (ac.get(i) ?? 0) + c);
         }
       }
     }
@@ -376,108 +375,6 @@ export async function recall(ctx: MemoryContext, query: RecallQuery): Promise<Re
   const minScore = policy.minScore;
   const reachable = [...A.entries()].filter(([id, a]) => styleIds.has(id) || (a * C.pinnedBoost >= minScore && !allStyleIds.has(id))).map(([id]) => id);
   const nodes = new Map(getNodes(db, reachable).map((n) => [n.id, n]));
-  // Writes may have changed eligibility while the query embedding was in flight.
-  // Drop ineligible nodes and cascade taint through `best`: any node whose
-  // single strongest contribution came from an ineligible one is also removed,
-  // so a cloud caller never sees a memory that was only recalled because
-  // spreading traversed a now-disallowed memory.
-  const nonStyleIds = reachable.filter((id) => !styleIds.has(id));
-  const nonStyleIdSet = new Set(nonStyleIds);
-  // Sub-threshold contributors (A[id] < minScore) that fed activation into a
-  // reachable destination were never placed in `reachable`, so candidateWhere
-  // was never applied to them.  A race between the embedding await (line
-  // ~234) and a concurrent DB write can flip their eligibility; include every
-  // such contributor in the freshness check so the Bug 2 cascade below can
-  // see them.
-  //
-  // - Bug 1 (#596): a sub-threshold seed that is best[B].from was silently
-  //   excluded from the old `[...best.values()].map(b => b.from).filter(id =>
-  //   !seeds.has(id) && !nonStyleIdSet.has(id))` — those seeds are now
-  //   included via allContrib (every contributor to a non-seed destination
-  //   lands there, seeds included).
-  // - Bug 2 sibling (#596): a non-best contributor that stays sub-threshold
-  //   even after back-propagation is in `allContrib[dst]` but not in `best`.
-  //   Without it in the check list, the cascade reads `tainted.has(src)` as
-  //   false and treats the sensitive source as clean.
-  const subThresholdContribIds = new Set<string>();
-  for (const srcMap of allContrib.values()) {
-    for (const srcId of srcMap.keys()) {
-      if (!nonStyleIdSet.has(srcId)) subThresholdContribIds.add(srcId);
-    }
-  }
-  const checkIds = [...new Set([...nonStyleIds, ...subThresholdContribIds])];
-  if (checkIds.length) {
-    const freshWhere = candidateWhere(query, now);
-    const eligibleRows = chunked(checkIds, (ph, chunk) =>
-      db
-        .prepare(`SELECT id FROM memory_nodes WHERE id IN (${ph}) AND ${freshWhere.sql}`)
-        .all(...chunk, ...freshWhere.params) as { id: string }[],
-    );
-    const eligibleIds = new Set(eligibleRows.map((row) => row.id));
-    const tainted = new Set<string>();
-    for (const id of checkIds) if (!eligibleIds.has(id)) tainted.add(id);
-    let frontier: Set<string> = tainted;
-    while (frontier.size) {
-      const next = new Set<string>();
-      for (const [id, entry] of best) {
-        if (!tainted.has(id) && frontier.has(entry.from)) {
-          tainted.add(id);
-          next.add(id);
-        }
-      }
-      frontier = next;
-    }
-    // Bug 2 fix: the best.from cascade only propagates taint via the single
-    // strongest back-pointer.  A non-best contributor that is tainted never
-    // directly contaminates its destination.  Subtract every tainted source's
-    // contribution from each surviving node's activation; if the clean
-    // activation falls below minScore, taint that node too (and iterate until
-    // no new taints appear, because newly-tainted nodes may be sources for
-    // yet-unchecked nodes).
-    let newTaint = true;
-    while (newTaint) {
-      newTaint = false;
-      for (const id of nodes.keys()) {
-        if (tainted.has(id)) continue;
-        const srcMap = allContrib.get(id);
-        if (!srcMap) continue;
-        // Bug 2 fix (saturation): A[id] is capped at 1 during spreading, but
-        // allContrib stores raw uncapped values.  Subtracting removed (tainted
-        // raw contributions) from the capped activation produces a value that
-        // can be arbitrarily negative under saturation, causing false-positive
-        // exclusion of valid memories.  Instead sum only the non-tainted
-        // contributions and apply the same cap to get the true clean activation.
-        let cleanContrib = 0;
-        let hasTaint = false;
-        for (const [src, c] of srcMap) {
-          if (tainted.has(src)) hasTaint = true;
-          else cleanContrib += c;
-        }
-        if (hasTaint) {
-          const node = nodes.get(id);
-          if (node) {
-            // Compare against the SAME formula the final scoring loop uses
-            // (A × strength × (pinned ? pinnedBoost : 1)); otherwise a
-            // destination can keep a stale score when strength drops its
-            // clean activation below minScore, surfacing a memory that
-            // depended on a now-sensitive contributor.
-            const R = retention(node, now);
-            const strength = C.strengthBase + C.weightRetention * R + C.weightImportance * node.importance + C.weightConfidence * node.confidence;
-            const cleanScore = Math.min(1, cleanContrib) * strength * (node.pinned ? C.pinnedBoost : 1);
-            if (cleanScore < minScore) {
-              tainted.add(id);
-              newTaint = true;
-            }
-          }
-        }
-      }
-    }
-    for (const id of tainted) {
-      nodes.delete(id);
-      A.delete(id);
-      best.delete(id);
-    }
-  }
   const scored: { node: MemoryNode; score: number; R: number }[] = [];
   for (const node of nodes.values()) {
     const R = retention(node, now);

@@ -8,7 +8,7 @@
  *  - fake LLMs implementing ChatModel
  */
 import { describe, it, expect } from 'vitest';
-import type { ChatRequest, ChatStreamEvent, ChatModel, ObservedTurn, RememberInput, ToolDefinition } from '@neo/protocol';
+import type { ChatRequest, ChatStreamEvent, ChatModel, ObservedTurn, RecallQuery, RememberInput, ToolDefinition } from '@neo/protocol';
 import { silentLogger, newId, DEFAULT_MEMORY_POLICY, NeoError, SELF_MEMORY_ID } from '@neo/protocol';
 import { openNeoDatabase } from '@neo/storage';
 import {
@@ -1073,6 +1073,208 @@ describe('recall', () => {
     const birthdayFound = result.items.some(r => r.node.id === birthday.id);
     expect(birthdayFound).toBe(true);
   });
+});
+
+// ─── recall freshness ─────────────────────────────────────────────────────────
+
+describe('recall freshness (#636)', () => {
+  it('excludes a seed destination boosted by a seed made sensitive during embedding', async () => {
+    const db = openNeoDatabase(':memory:');
+    const { clock } = makeClock();
+    const qVec = new Float32Array([1, 0, 0, 0]);
+    const strongVec = new Float32Array([0.9, Math.sqrt(0.19), 0, 0]);
+    const weakVec = new Float32Array([0.28, 0, Math.sqrt(0.9216), 0]);
+    let duringEmbed: (() => void) | null = null;
+    const embedder = {
+      id: 'recall-freshness-exact-4',
+      dimensions: 4,
+      isLocal: true as const,
+      async embed(texts: string[]): Promise<Float32Array[]> {
+        if (texts.includes('needle') && duringEmbed) {
+          const write = duringEmbed;
+          duringEmbed = null;
+          write();
+        }
+        return texts.map(t => t === 'needle' ? qVec : t.includes('strongvector') ? strongVec : weakVec);
+      },
+    };
+    const svc = createMemoryService({ db, embedder, clock, logger: silentLogger });
+    try {
+      const nodeQ = await svc.remember({ kind: 'fact', label: 'Q', content: 'strongvector', importance: 0.5 });
+      const nodeB = await svc.remember({ kind: 'fact', label: 'B', content: 'weakvector', importance: 0.5 });
+      expect(nodeQ.id).not.toBe(nodeB.id);
+      expect([nodeQ, nodeB].every(n => !n.pinned && n.sensitivity === 'normal')).toBe(true);
+      await svc.link(nodeQ.id, nodeB.id, 'related', 1);
+      const query = { text: 'needle', limit: 20, reinforce: false, allowSensitive: false };
+      const baseline = await svc.recall(query);
+      const baselineB = baseline.items.find(r => r.node.id === nodeB.id)!;
+      expect(baselineB.similarity).toBeCloseTo(0.28, 6);
+      expect(baselineB.score).toBeCloseTo(0.92, 6);
+
+      let writes = 0;
+      duringEmbed = () => {
+        writes++;
+        db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(nodeQ.id);
+      };
+      const result = await svc.recall(query);
+      expect(writes).toBe(1);
+      expect(result.items.map(r => r.node.id)).not.toContain(nodeQ.id);
+      // B's own activation is only 0.1; Q must never contribute to this recall.
+      expect(result.items.map(r => r.node.id)).not.toContain(nodeB.id);
+    } finally {
+      db.close();
+    }
+  });
+
+  const changes = [
+    'sensitivity',
+    'archived',
+    'superseded with includeArchived',
+    'expiry from null',
+    'expiry from future',
+    'kind filter',
+    'episode source',
+    'episode kind',
+    'forgotten',
+  ] as const;
+  type Change = (typeof changes)[number];
+  type Position = 'seed' | 'spread-only';
+
+  async function run(change: Change, position: Position, when: 'never' | 'before' | 'during') {
+    const db = openNeoDatabase(':memory:');
+    const { clock } = makeClock();
+    let duringEmbed: (() => Promise<void>) | null = null;
+    let writes = 0;
+    const embedder = {
+      id: 'recall-freshness-siblings-4',
+      dimensions: 4,
+      isLocal: true as const,
+      async embed(texts: string[]): Promise<Float32Array[]> {
+        if (texts.includes('cobalt') && duringEmbed) {
+          const write = duringEmbed;
+          duringEmbed = null;
+          await write();
+        }
+        return texts.map(t => {
+          if (t === 'cobalt') return new Float32Array([1, 0, 0, 0]);
+          if (t.includes('anchorvector') || (position === 'seed' && t.includes('flipvector'))) return new Float32Array([0.9, Math.sqrt(0.19), 0, 0]);
+          if (t.includes('weakvector')) return new Float32Array([0.28, 0, Math.sqrt(0.9216), 0]);
+          if (t.includes('untouchedvector')) return new Float32Array([0.65, 0, 0, Math.sqrt(1 - 0.65 ** 2)]);
+          return new Float32Array(4);
+        });
+      },
+    };
+    const svc = createMemoryService({ db, embedder, clock, logger: silentLogger });
+    try {
+      const flipped = await svc.remember({
+        kind: change === 'episode source' ? 'episode' : 'fact',
+        label: 'Flipped', content: 'flipvector', importance: 0.5,
+        source: { by: 'user', conversationId: change === 'episode kind' ? 'conv_current' : 'conv_other' },
+        validUntil: change === 'expiry from future' ? clock() + 1000 : undefined,
+      });
+      const descendant = await svc.remember({ kind: 'fact', label: 'Descendant', content: 'distantvector', importance: 1 });
+      const untouched = await svc.remember({ kind: 'fact', label: 'Untouched', content: 'untouchedvector', importance: 0.5 });
+      // These two keyword seeds also expose a stale candidate count after a hard forget:
+      // lexical IDF must use the post-embedding population, just like vector seeds.
+      await svc.remember({ kind: 'fact', label: 'Amber', content: 'cobalt amber', importance: 0.5 });
+      await svc.remember({ kind: 'fact', label: 'Ochre', content: 'cobalt ochre', importance: 0.5 });
+      let weakId: string | undefined;
+      if (position === 'seed') {
+        const weak = await svc.remember({ kind: 'fact', label: 'Weak seed', content: 'weakvector', importance: 0.5 });
+        weakId = weak.id;
+        await svc.link(flipped.id, weak.id, 'related', 1);
+        await svc.link(flipped.id, descendant.id, 'related', 1);
+      } else {
+        const anchor = await svc.remember({ kind: 'fact', label: 'Anchor', content: 'anchorvector', importance: 0.5 });
+        await svc.link(anchor.id, flipped.id, 'related', 1);
+        await svc.link(flipped.id, descendant.id, 'related', 1);
+      }
+      const query: RecallQuery = {
+        text: 'cobalt', limit: 20, tokenBudget: 10000, reinforce: false, allowSensitive: false,
+        kinds: change === 'kind filter' ? ['fact'] : undefined,
+        conversationId: change.startsWith('episode') ? 'conv_current' : undefined,
+        includeArchived: change === 'superseded with includeArchived',
+      };
+      const write = async () => {
+        writes++;
+        switch (change) {
+          case 'sensitivity':
+            db.prepare("UPDATE memory_nodes SET sensitivity = 'sensitive' WHERE id = ?").run(flipped.id);
+            break;
+          case 'archived':
+          case 'superseded with includeArchived':
+            db.prepare('UPDATE memory_nodes SET status = ? WHERE id = ?').run(change === 'archived' ? 'archived' : 'superseded', flipped.id);
+            break;
+          case 'expiry from null':
+          case 'expiry from future':
+            db.prepare('UPDATE memory_nodes SET valid_until = ? WHERE id = ?').run(clock(), flipped.id);
+            break;
+          case 'kind filter':
+            db.prepare("UPDATE memory_nodes SET kind = 'skill' WHERE id = ?").run(flipped.id);
+            break;
+          case 'episode source':
+            db.prepare('UPDATE memory_nodes SET source = ? WHERE id = ?').run(JSON.stringify({ by: 'user', conversationId: 'conv_current' }), flipped.id);
+            break;
+          case 'episode kind':
+            db.prepare("UPDATE memory_nodes SET kind = 'episode' WHERE id = ?").run(flipped.id);
+            break;
+          case 'forgotten':
+            await svc.forget([flipped.id]);
+            break;
+        }
+      };
+      if (when === 'before') await write();
+      if (when === 'during') duringEmbed = write;
+      const result = await svc.recall(query);
+      const flippedItem = result.items.find(r => r.node.id === flipped.id);
+      const descendantItem = result.items.find(r => r.node.id === descendant.id);
+      return {
+        writes,
+        flippedItem,
+        descendantItem,
+        weakPresent: weakId !== undefined && result.items.some(r => r.node.id === weakId),
+        untouchedScore: result.items.find(r => r.node.id === untouched.id)!.score,
+        items: result.items.map(r => ({
+          label: r.node.label, score: r.score, activation: r.activation,
+          via: r.via.map(v => v.label), reason: r.reason,
+        })).sort((a, b) => a.label.localeCompare(b.label)),
+        seeds: result.seeds,
+        considered: result.considered,
+      };
+    } finally {
+      db.close();
+    }
+  }
+
+  for (const position of ['seed', 'spread-only'] as const) {
+    it.each(changes)(`refreshes %s changed during embedding for a ${position}`, async change => {
+      const baseline = await run(change, position, 'never');
+      expect(baseline.flippedItem).toBeDefined();
+      expect(baseline.descendantItem).toBeDefined();
+      expect(baseline.descendantItem!.via.some(v => v.label === 'Flipped')).toBe(true);
+      if (position === 'seed') {
+        expect(baseline.flippedItem!.similarity).toBeCloseTo(0.9, 6);
+        expect(baseline.weakPresent).toBe(true);
+      } else {
+        expect(baseline.flippedItem!.similarity).toBe(0);
+        expect(baseline.flippedItem!.reason).toBe('linked via Anchor (related)');
+      }
+
+      const expected = await run(change, position, 'before');
+      const result = await run(change, position, 'during');
+      expect(result.writes).toBe(1);
+      expect(result.flippedItem).toBeUndefined();
+      expect(result.descendantItem).toBeUndefined();
+      expect(result.weakPresent).toBe(false);
+      expect(result.items.every(r => !r.via.includes('Flipped') && !r.reason.includes('Flipped'))).toBe(true);
+      expect(result.untouchedScore).toBe(baseline.untouchedScore);
+      // Recalling after the write must match a run where the write was already
+      // committed before recall, including fan normalization and lexical IDF.
+      expect(result.items).toEqual(expected.items);
+      expect(result.seeds).toBe(expected.seeds);
+      expect(result.considered).toBe(expected.considered);
+    });
+  }
 });
 
 // ─── dedupe / merge ──────────────────────────────────────────────────────────
