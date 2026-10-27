@@ -1,9 +1,177 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NeoError } from '@neo/protocol';
 import type { ProviderConfig } from '@neo/protocol';
 import { createProvider, createProviderRegistry, parseSSE, withRetry } from './index.js';
-import { parseRetryAfter, redact } from './shared.js';
+import { abortableSleep, parseRetryAfter, raceAbort, redact, sleepUnlessAborted } from './shared.js';
 import { abortError, byteStream } from './testing/http.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+function trackedAbortController() {
+  const controller = new AbortController();
+  const signal = controller.signal;
+  type Listener = NonNullable<Parameters<AbortSignal['addEventListener']>[1]>;
+  type Registration = { listener: Listener; capture: boolean; wrapper: (event: Event) => void };
+  const listeners = new Set<Registration>();
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  vi.spyOn(signal, 'addEventListener').mockImplementation((type, listener, options) => {
+    if (type !== 'abort' || !listener) return add(type, listener, options);
+    const capture = typeof options === 'boolean' ? options : options?.capture ?? false;
+    if ([...listeners].some(entry => entry.listener === listener && entry.capture === capture)) return;
+    const once = typeof options === 'object' && options.once;
+    const entry: Registration = { listener, capture, wrapper(event) {
+      // Native once-listeners are removed before their callback is invoked.
+      if (once) listeners.delete(entry);
+      if (typeof listener === 'function') listener.call(signal, event);
+      else listener.handleEvent(event);
+    } };
+    listeners.add(entry);
+    add(type, entry.wrapper, options);
+  });
+  vi.spyOn(signal, 'removeEventListener').mockImplementation((type, listener, options) => {
+    const capture = typeof options === 'boolean' ? options : options?.capture ?? false;
+    const entry = type === 'abort' && [...listeners].find(item => item.listener === listener && item.capture === capture);
+    if (!entry) return remove(type, listener, options);
+    listeners.delete(entry);
+    remove(type, entry.wrapper, options);
+  });
+  return { controller, signal, get remaining() { return listeners.size; } };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+describe('abort listener balance', () => {
+  it.each(['resolve', 'reject'] as const)('raceAbort leaves no listener after promise %s', async (exit) => {
+    const abort = trackedAbortController();
+    const failure = new Error('Promise failed');
+    const pending = deferred<string | undefined>();
+    const result = raceAbort(pending.promise, abort.signal);
+    if (exit === 'resolve') {
+      pending.resolve(undefined);
+      await expect(result).resolves.toBeUndefined();
+    } else {
+      if (exit === 'reject') pending.reject(failure);
+      await expect(result).rejects.toBe(failure);
+    }
+    expect(abort.remaining).toBe(0);
+    abort.controller.abort();
+    expect(abort.remaining).toBe(0);
+  });
+
+  it.each(['resolve', 'reject', 'never'] as const)('raceAbort leaves no listener after abort before a promise that will %s', async (exit) => {
+    const abort = trackedAbortController();
+    const pending = deferred<string>();
+    const result = raceAbort(pending.promise, abort.signal);
+    expect(abort.remaining).toBe(1);
+    abort.controller.abort();
+    await expect(result).rejects.toMatchObject({ code: 'cancelled' });
+    expect(abort.remaining).toBe(0);
+    if (exit === 'resolve') pending.resolve('late');
+    if (exit === 'reject') pending.reject(new Error('Late failure'));
+    if (exit !== 'never') await pending.promise.catch(() => {});
+    expect(abort.remaining).toBe(0);
+  });
+
+  it('raceAbort registers no listener without a signal or when already aborted', async () => {
+    const pending = Promise.resolve('value');
+    expect(raceAbort(pending, undefined)).toBe(pending);
+    const abort = trackedAbortController();
+    abort.controller.abort();
+    await expect(raceAbort(pending, abort.signal)).rejects.toMatchObject({ code: 'cancelled' });
+    expect(abort.remaining).toBe(0);
+  });
+
+  it.each(['timeout', 'abort'] as const)('abortableSleep leaves no listener after %s', async (exit) => {
+    vi.useFakeTimers();
+    const abort = trackedAbortController();
+    const result = abortableSleep(100, abort.signal);
+    expect(abort.remaining).toBe(1);
+    if (exit === 'abort') {
+      abort.controller.abort();
+      await expect(result).rejects.toMatchObject({ code: 'cancelled' });
+    } else {
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(result).resolves.toBeUndefined();
+    }
+    expect(abort.remaining).toBe(0);
+    abort.controller.abort();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(abort.remaining).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('abortableSleep skips registration when already aborted and supports no signal', async () => {
+    vi.useFakeTimers();
+    const abort = trackedAbortController();
+    abort.controller.abort();
+    await expect(abortableSleep(100, abort.signal)).rejects.toMatchObject({ code: 'cancelled' });
+    expect(abort.remaining).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    const result = abortableSleep(100);
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(result).resolves.toBeUndefined();
+  });
+
+  it.each(['resolve', 'reject'] as const)('sleepUnlessAborted leaves no listener after sleep %s', async (exit) => {
+    const abort = trackedAbortController();
+    const failure = new Error('Sleep failed');
+    const pending = deferred<void>();
+    const result = sleepUnlessAborted(() => pending.promise, 100, abort.signal);
+    if (exit === 'resolve') {
+      pending.resolve();
+      await expect(result).resolves.toBeUndefined();
+    } else {
+      if (exit === 'reject') pending.reject(failure);
+      await expect(result).rejects.toBe(failure);
+    }
+    expect(abort.remaining).toBe(0);
+    abort.controller.abort();
+    expect(abort.remaining).toBe(0);
+  });
+
+  it('sleepUnlessAborted releases its listener when the injected sleep throws synchronously', async () => {
+    const abort = trackedAbortController();
+    const failure = new Error('Sleep failed');
+    const result = sleepUnlessAborted(() => { throw failure; }, 100, abort.signal);
+    await expect(result).rejects.toBe(failure);
+    expect(abort.signal.aborted).toBe(false);
+    expect(abort.remaining).toBe(0);
+  });
+
+  it.each(['resolve', 'reject', 'never'] as const)('sleepUnlessAborted leaves no listener after abort before a sleep that will %s', async (exit) => {
+    const abort = trackedAbortController();
+    const pending = deferred<void>();
+    const result = sleepUnlessAborted(() => pending.promise, 100, abort.signal);
+    expect(abort.remaining).toBe(1);
+    abort.controller.abort();
+    await expect(result).rejects.toMatchObject({ code: 'cancelled' });
+    expect(abort.remaining).toBe(0);
+    if (exit === 'resolve') pending.resolve();
+    if (exit === 'reject') pending.reject(new Error('Late failure'));
+    if (exit !== 'never') await pending.promise.catch(() => {});
+    expect(abort.remaining).toBe(0);
+  });
+
+  it('sleepUnlessAborted skips registration when already aborted or without a signal', async () => {
+    const pending = Promise.resolve();
+    const abort = trackedAbortController();
+    abort.controller.abort();
+    const sleep = vi.fn(() => pending);
+    expect(() => sleepUnlessAborted(sleep, 100, abort.signal)).toThrow(expect.objectContaining({ code: 'cancelled' }));
+    expect(sleep).not.toHaveBeenCalled();
+    expect(abort.remaining).toBe(0);
+    expect(sleepUnlessAborted(sleep, 100, undefined)).toBe(pending);
+  });
+});
 
 async function messages(chunks: string[]) {
   const out: { data: string; event?: string; id?: string }[] = [];
@@ -32,8 +200,9 @@ describe('parseSSE edge cases', () => {
     const ac = new AbortController();
     const it = parseSSE(byteStream(['data: one\n\n'], { hang: true }), ac.signal)[Symbol.asyncIterator]();
     expect((await it.next()).value).toEqual({ data: 'one' });
-    setTimeout(() => ac.abort(), 5);
-    await expect(it.next()).rejects.toMatchObject({ code: 'cancelled' });
+    const pending = it.next();
+    ac.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
   });
 
   it('abort stops yielding buffered events in the current chunk', async () => {
@@ -102,10 +271,19 @@ describe('withRetry', () => {
 
   it('abort during the backoff wait ends immediately with cancelled', async () => {
     const ac = new AbortController();
-    const started = Date.now();
-    setTimeout(() => ac.abort(), 5);
-    await expect(withRetry({ attempt: async () => resp(503), signal: ac.signal })).rejects.toMatchObject({ code: 'cancelled' });
-    expect(Date.now() - started).toBeLessThan(400);
+    let onSleep!: () => void;
+    const sleeping = new Promise<void>((resolve) => { onSleep = resolve; });
+    const pending = withRetry({
+      attempt: async () => resp(503),
+      signal: ac.signal,
+      sleep: (ms) => {
+        onSleep();
+        return abortableSleep(ms, ac.signal);
+      },
+    });
+    await sleeping;
+    ac.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
   });
 
   it('an aborted fetch is cancelled, not retried', async () => {
