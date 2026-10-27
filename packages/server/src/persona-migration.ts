@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { NeoError, silentLogger } from '@neo/protocol';
 import type { Clock, Logger, MemoryService, RememberInput, SettingsStore } from '@neo/protocol';
-import { assistantStyleTags } from '@neo/memory';
+import { assistantStyleTags, type MemoryReceiptWriter } from '@neo/memory';
 import { fromJson, type NeoDatabase } from '@neo/storage';
 
 export const PERSONA_MEMORY_MIGRATION = 'persona-settings-to-memory:v1';
@@ -57,22 +57,26 @@ export function storedPersona(db: NeoDatabase): unknown {
 
 /** Keep legacy settings until every preference has reached the normal memory write path. */
 export async function migratePersonaSettings(
-  db: NeoDatabase, memory: MemoryService, settings: SettingsStore, persona: unknown, clock: Clock, logger: Logger = silentLogger,
+  db: NeoDatabase, memory: MemoryService & MemoryReceiptWriter, settings: SettingsStore, persona: unknown, clock: Clock, logger: Logger = silentLogger,
 ): Promise<void> {
   if (db.prepare('SELECT 1 FROM memory_meta WHERE key = ?').get(PERSONA_MEMORY_MIGRATION)) return;
   for (const input of preferences(persona)) {
     const key = `${PERSONA_MEMORY_MIGRATION}:${createHash('sha256').update(input.content).digest('hex')}`;
     if (db.prepare('SELECT 1 FROM memory_meta WHERE key = ?').get(key)) continue;
     try {
-      const node = await memory.remember(input);
-      db.prepare('INSERT INTO memory_meta (key, value) VALUES (?, ?)').run(key, node.id);
+      await memory.rememberOnce(input, key);
     } catch (err) {
       if (!(err instanceof NeoError) || err.code !== 'bad_request' || !err.message.includes('NEO never stores secrets in memory')) throw err;
-      logger.warn('A legacy persona preference contained credentials and was skipped.');
-      db.prepare('INSERT INTO memory_meta (key, value) VALUES (?, ?)').run(key, 'skipped:credentials');
+      const skipped = db.transaction(() => {
+        if (db.prepare('SELECT 1 FROM memory_meta WHERE key = ?').get(key)) return false;
+        db.prepare('INSERT INTO memory_meta (key, value) VALUES (?, ?)').run(key, 'skipped:credentials');
+        return true;
+      });
+      if (skipped) logger.warn('A legacy persona preference contained credentials and was skipped.');
     }
   }
   db.transaction(() => {
+    if (db.prepare('SELECT 1 FROM memory_meta WHERE key = ?').get(PERSONA_MEMORY_MIGRATION)) return;
     settings.update({});
     db.prepare('INSERT INTO memory_meta (key, value) VALUES (?, ?)').run(PERSONA_MEMORY_MIGRATION, String(clock()));
   });

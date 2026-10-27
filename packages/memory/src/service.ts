@@ -124,7 +124,13 @@ function badRequest(message: string, issues: { path: PropertyKey[]; message: str
   return new NeoError('bad_request', `${message}: ${issues.map((i) => `${i.path.map(String).join('.') || 'input'}: ${i.message}`).join('; ')}`);
 }
 
-export function createMemoryServiceImpl(options: MemoryServiceOptions): MemoryService & { setEmbedder(embedder: Embedder): void } {
+/** Concrete startup-migration capability; the shared MemoryService contract stays unchanged. */
+export interface MemoryReceiptWriter {
+  /** Atomically remember and receipt a namespaced operation; an existing receipt never replays it. */
+  rememberOnce(input: RememberInput, receiptKey: string, signal?: AbortSignal): Promise<void>;
+}
+
+export function createMemoryServiceImpl(options: MemoryServiceOptions): MemoryService & MemoryReceiptWriter & { setEmbedder(embedder: Embedder): void } {
   const { db } = options;
   const clock: Clock = options.clock ?? (() => Date.now());
   const logger: Logger = options.logger ?? silentLogger;
@@ -280,7 +286,7 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
     };
   }
 
-  const svc: MemoryService & { setEmbedder(embedder: Embedder): void } = {
+  const svc: MemoryService & MemoryReceiptWriter & { setEmbedder(embedder: Embedder): void } = {
     recall: recallImpl,
 
     observe(turn: ObservedTurn): Promise<MemoryWriteResult> {
@@ -300,6 +306,10 @@ export function createMemoryServiceImpl(options: MemoryServiceOptions): MemorySe
     },
 
     remember: (input: RememberInput, signal?: AbortSignal) => runRemember(ctx, input, signal),
+
+    async rememberOnce(input: RememberInput, receiptKey: string, signal?: AbortSignal): Promise<void> {
+      await runRemember(ctx, input, signal, receiptKey);
+    },
 
     async findBySource(messageIds: string[]): Promise<MemoryNode[]> {
       if (!messageIds.length) return [];

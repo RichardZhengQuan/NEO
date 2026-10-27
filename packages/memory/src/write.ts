@@ -1023,7 +1023,9 @@ export async function observe(ctx: MemoryContext, turn: ObservedTurn, deps: Obse
 // ─────────────────────────────── remember ────────────────────────────────
 
 /** Explicit "remember this" (memory UI or the remember tool). */
-export async function remember(ctx: MemoryContext, input: RememberInput, signal?: AbortSignal): Promise<MemoryNode> {
+export function remember(ctx: MemoryContext, input: RememberInput, signal?: AbortSignal): Promise<MemoryNode>;
+export function remember(ctx: MemoryContext, input: RememberInput, signal: AbortSignal | undefined, receiptKey: string): Promise<MemoryNode | undefined>;
+export async function remember(ctx: MemoryContext, input: RememberInput, signal?: AbortSignal, receiptKey?: string): Promise<MemoryNode | undefined> {
   if (signal?.aborted) throw new NeoError('cancelled', 'The operation was cancelled.');
   const parsed = RememberInputSchema.safeParse(input);
   if (!parsed.success) throw new NeoError('bad_request', `Invalid memory: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ')}`);
@@ -1061,8 +1063,11 @@ export async function remember(ctx: MemoryContext, input: RememberInput, signal?
   if (signal?.aborted) throw new NeoError('cancelled', 'The operation was cancelled.');
 
   return runWrite(ctx, now, (s) => {
+    // Embedding is async; another starter may have completed this directive while we waited.
+    // Check under the same write lock as createOrMerge, before reinforcement or revisions.
+    if (receiptKey !== undefined && ctx.db.prepare('SELECT 1 FROM memory_meta WHERE key = ?').get(receiptKey)) return undefined;
     for (const [k, v] of entityVectors) s.entityVectors.set(k, v);
-    return createOrMerge(s, {
+    const node = createOrMerge(s, {
       kind,
       label,
       content,
@@ -1077,6 +1082,9 @@ export async function remember(ctx: MemoryContext, input: RememberInput, signal?
       validUntil: data.validUntil ?? undefined,
       vector: vector ?? null,
     }).node;
+    // Failure rolls back memory, vectors and receipt together; runWrite publishes only after commit.
+    if (receiptKey !== undefined) ctx.db.prepare('INSERT INTO memory_meta (key, value) VALUES (?, ?)').run(receiptKey, node.id);
+    return node;
   });
 }
 

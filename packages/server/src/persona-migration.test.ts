@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NeoConfigSchema, NeoError, silentLogger } from '@neo/protocol';
-import type { MemoryNode } from '@neo/protocol';
+import type { MemoryChangeEvent, MemoryNode } from '@neo/protocol';
 import { createMemoryService } from '@neo/memory';
 import { createSettingsStore, openNeoDatabase } from '@neo/storage';
 import type { NeoDatabase } from '@neo/storage';
@@ -138,7 +138,7 @@ describe('persona settings startup migration v1', () => {
 
   it('retains raw values after an interrupted migration and resumes without duplicate writes', async () => {
     const f = fixture({ name: 'Luna', instructions: 'Keep answers short. Reply in Chinese.' });
-    const remember = vi.spyOn(f.memory, 'remember');
+    const remember = vi.spyOn(f.memory, 'rememberOnce');
     const original = remember.getMockImplementation()!;
     remember.mockImplementationOnce(original).mockRejectedValueOnce(new NeoError('bad_request', 'Unrelated invalid memory'));
     await expect(f.run()).rejects.toThrow('Unrelated invalid memory');
@@ -198,4 +198,84 @@ describe('persona settings startup migration v1', () => {
     expect(upgraded.settings.get().persona).toEqual({ avatar: '🌟' });
     expect((await upgraded.memory.search({ kinds: ['preference'] })).items).toHaveLength(2);
   });
+  it('rechecks a final marker after a real sibling transaction wins an empty migration', async () => {
+    const f = fixture({ avatar: '🌙' });
+    const statement = f.db.prepare('SELECT 1 FROM memory_meta WHERE key = ?');
+    const get = statement.get.bind(statement);
+    vi.spyOn(statement, 'get').mockImplementationOnce((...args) => {
+      const absent = get(...args);
+      expect(absent).toBeUndefined();
+      f.db.transaction(() => {
+        f.settings.update({});
+        f.db.prepare('INSERT INTO memory_meta (key, value) VALUES (?, ?)').run(PERSONA_MEMORY_MIGRATION, 'sibling-original-value');
+      });
+      return absent;
+    });
+    await expect(f.run()).resolves.toBeUndefined();
+    expect(f.db.prepare('SELECT value FROM memory_meta WHERE key = ?').get(PERSONA_MEMORY_MIGRATION)).toEqual({ value: 'sibling-original-value' });
+    expect((await f.memory.stats()).total).toBe(0);
+  });
+
+  it.each([
+    { tone: 'playful', instructions: 'Be more serious.' },
+    { instructions: 'My password is fixture-secret-123. Keep answers short.' },
+  ])('concurrent file-backed starters preserve directive receipts, privacy and history: %j', async persona => {
+    const directory = mkdtempSync(join(tmpdir(), 'neo-persona-concurrent-'));
+    directories.push(directory);
+    const first = openNeoDatabase(join(directory, 'neo.db'));
+    databases.push(first);
+    first.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run('settings', JSON.stringify({ persona }), 1);
+    const a = createMemoryService({ db: first, clock });
+    const second = openNeoDatabase(join(directory, 'neo.db'));
+    databases.push(second);
+    const b = createMemoryService({ db: second, clock });
+    const legacy = storedPersona(first);
+    const changes: MemoryChangeEvent[] = [];
+    a.onChange(event => changes.push(event));
+    b.onChange(event => changes.push(event));
+    const logger = { ...silentLogger, warn: vi.fn() };
+    await Promise.all([
+      migratePersonaSettings(first, a, createSettingsStore(first), legacy, clock, logger),
+      migratePersonaSettings(second, b, createSettingsStore(second), legacy, clock, logger),
+    ]);
+    const snapshot = first.prepare('SELECT * FROM memory_nodes ORDER BY id').all();
+    const receipts = first.prepare('SELECT * FROM memory_meta WHERE key LIKE ? ORDER BY key').all(`${PERSONA_MEMORY_MIGRATION}%`);
+    expect(receipts).toHaveLength(3);
+    expect(JSON.stringify(snapshot)).not.toContain('fixture-secret-123');
+    if ('tone' in persona) {
+      expect((await a.search({ kinds: ['preference'], status: ['active'] })).items.map(node => node.content)).toEqual(['Be more serious.']);
+      expect(first.prepare("SELECT COUNT(*) AS n FROM memory_nodes WHERE kind = 'preference'").get()).toEqual({ n: 2 });
+      expect(changes.map(event => event.type)).toEqual(['created', 'created', 'updated']);
+      const oldTone = first.prepare("SELECT id FROM memory_nodes WHERE content = ?").get('The user wants me to use a playful tone') as { id: string };
+      expect(changes[2]?.nodeIds).toContain(oldTone.id);
+      expect(new Set(changes.filter(event => event.type === 'created').flatMap(event => event.nodeIds)).size).toBe(2);
+    } else {
+      expect((await a.search({ kinds: ['preference'] })).items.map(node => node.content)).toEqual(['Keep answers short.']);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(changes).toHaveLength(1);
+    }
+    await migratePersonaSettings(second, b, createSettingsStore(second), legacy, clock, logger);
+    expect(first.prepare('SELECT * FROM memory_nodes ORDER BY id').all()).toEqual(snapshot);
+    expect(first.prepare('SELECT * FROM memory_meta WHERE key LIKE ? ORDER BY key').all(`${PERSONA_MEMORY_MIGRATION}%`)).toEqual(receipts);
+  });
+
+  it('retries after the final directive committed without reversing its precedence or history', async () => {
+    const f = fixture({ tone: 'playful', instructions: 'Be more serious.' });
+    const original = f.memory.rememberOnce.bind(f.memory);
+    let calls = 0;
+    const remember = vi.spyOn(f.memory, 'rememberOnce').mockImplementation(async (...args) => {
+      await original(...args);
+      if (++calls === 2) throw new Error('caller lost after committed instruction');
+    });
+    await expect(f.run()).rejects.toThrow('caller lost after committed instruction');
+    expect(f.raw().persona).toMatchObject({ tone: 'playful', instructions: 'Be more serious.' });
+    expect(f.db.prepare('SELECT 1 FROM memory_meta WHERE key = ?').get(PERSONA_MEMORY_MIGRATION)).toBeUndefined();
+    const snapshot = f.db.prepare('SELECT * FROM memory_nodes ORDER BY id').all();
+    remember.mockRestore();
+    await f.run();
+    expect(f.db.prepare('SELECT * FROM memory_nodes ORDER BY id').all()).toEqual(snapshot);
+    expect((await f.memory.search({ kinds: ['preference'], status: ['active'] })).items.map(node => node.content)).toEqual(['Be more serious.']);
+    expect(f.raw().persona).toEqual({ avatar: null });
+  });
+
 });

@@ -16,7 +16,8 @@ import { HashingEmbedder as HashingEmbedderImpl, createProviderEmbedder as creat
 import { retention as retentionImpl, cosineSimilarity as cosineSimilarityImpl } from './utils.js';
 import { heuristicExtract as heuristicExtractImpl } from './heuristic.js';
 import { memoryMigrations as _memoryMigrations } from './schema.js';
-import { createMemoryServiceImpl } from './service.js';
+import { createMemoryServiceImpl, type MemoryReceiptWriter } from './service.js';
+export type { MemoryReceiptWriter } from './service.js';
 import type { MemoryServiceOptions } from './constants.js';
 
 // Export constants and shared types (also used by sub-modules via ./constants.js)
@@ -25,7 +26,7 @@ export { ASSISTANT_STYLE_TAG, assistantStyleAspect, assistantStyleTags } from '.
 export type { MemoryLLM, MemoryServiceOptions } from './constants.js';
 
 /** Create the service and run memory migrations on `db`. */
-export function createMemoryService(options: MemoryServiceOptions): MemoryService & { setEmbedder(embedder: Embedder): void } {
+export function createMemoryService(options: MemoryServiceOptions): MemoryService & MemoryReceiptWriter & { setEmbedder(embedder: Embedder): void } {
   return createMemoryServiceImpl(options);
 }
 
