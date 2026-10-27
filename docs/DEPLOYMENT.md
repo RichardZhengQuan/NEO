@@ -51,6 +51,32 @@ node packages/cli/dist/index.js serve      # or link it once: (cd packages/cli &
 # Open http://127.0.0.1:7777 in your browser.
 ```
 
+### Desktop icons
+
+The desktop app uses the unchanged girl portrait from
+`packages/ui/assets/avatar-art/girl.webp`, fitted inside a rounded tile with
+64/1024 transparent padding. Website and mobile icons are independent.
+
+Run `pnpm --filter @neo/desktop icon:generate` to regenerate the ICNS, ICO and
+seven Linux PNG files under `apps/desktop/build/`. The existing resvg/png2icons
+toolchain needs no Electron binary or platform-specific image converter.
+
+`apps/desktop/build/source-girl.png` is a lossless format bridge because the
+bundled resvg 2.6.2 does not decode WebP. If the canonical portrait changes,
+refresh that bridge once with an image decoder, preserving every decoded RGBA
+pixel and the original dimensions. The initial conversion used Python/Pillow:
+
+```python
+from PIL import Image
+source = Image.open("packages/ui/assets/avatar-art/girl.webp").convert("RGBA")
+source.save("apps/desktop/build/source-girl.png", format="PNG", optimize=False, compress_level=9)
+assert Image.open("apps/desktop/build/source-girl.png").convert("RGBA").tobytes() == source.tobytes()
+```
+
+Pillow is an asset-maintenance tool, not a project or CI dependency; normal icon
+regeneration reads the checked-in PNG. Do not crop, redraw or replace the
+canonical artwork while refreshing it.
+
 ### Updates
 
 The desktop app checks this repository's GitHub Releases for updates on launch

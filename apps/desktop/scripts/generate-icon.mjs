@@ -1,5 +1,5 @@
 /**
- * Generate desktop icons from the canonical site/favicon.svg.
+ * Generate desktop icons from the canonical girl portrait, via its lossless PNG bridge.
  * @resvg/resvg-js rasterizes SVG deterministically; png2icons assembles ICNS
  * and ICO files in pure JavaScript. resvg-js uses npm-packaged native Node
  * bindings, not WASM, without a separate native download or post-install build.
@@ -26,7 +26,13 @@ async function generateIcons() {
   // Load inside the caught operation so missing dependencies also fail clearly.
   const { Resvg } = await import('@resvg/resvg-js');
   const { default: png2icons } = await import('png2icons');
-  const svg = await readFile(path.join(repoRoot, 'site/favicon.svg'), 'utf8');
+  // resvg 2.6.2 decodes PNG, but not the canonical portrait's WebP format.
+  // Keep the checked-in bridge pixel-identical to packages/ui/assets/avatar-art/girl.webp.
+  const portrait = await readFile(path.join(buildDir, 'source-girl.png'));
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+    <defs><clipPath id="tile"><rect x="64" y="64" width="896" height="896" rx="196"/></clipPath></defs>
+    <image x="64" y="64" width="896" height="896" preserveAspectRatio="xMidYMid meet" clip-path="url(#tile)" href="data:image/png;base64,${portrait.toString('base64')}"/>
+  </svg>`;
   const pngs = new Map();
 
   for (const size of rasterSizes) {
