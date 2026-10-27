@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TUNNEL_BODY_CHUNK, TUNNEL_MAX_FRAME, TunnelFrameType } from '@neo/protocol';
 import type { TunnelReset } from '@neo/protocol';
-import { toBase64Url } from './bytes.js';
+import { toBase64Url, utf8 } from './bytes.js';
 import { acceptChannel } from './channel.js';
 import * as channels from './channel.js';
 import type { SecureChannel } from './channel.js';
@@ -32,6 +32,7 @@ afterEach(async () => {
 
 function environment(input: {
   accept: (link: MessageLink, identity: ServerIdentity) => { close(): void };
+  relayOnly?: boolean;
 }) {
   const identity = generateServerIdentity();
   const peers: { close(): void }[] = [];
@@ -74,7 +75,7 @@ function environment(input: {
   const transport = createTunnelTransport({
     route: {
       serverId: identity.serverId, publicKey: toBase64Url(identity.dh.publicKey),
-      lan: ['lan:7778'], relay: null,
+      lan: input.relayOnly ? [] : ['lan:7778'], relay: input.relayOnly ? 'wss://relay.example' : null,
     },
     WebSocket: FakeSocket,
   });
@@ -181,6 +182,99 @@ function stallUpload(client: SecureChannel, after: number) {
   });
   return { frames, stalled, release, drained, bufferedAmount };
 }
+
+async function keepaliveSession(via: 'lan' | 'relay' = 'lan') {
+  vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+  let channel!: SecureChannel;
+  const frames: Frame[] = [];
+  const { transport } = environment({ relayOnly: via === 'relay', accept(link, identity) {
+    void acceptChannel(link, { serverId: identity.serverId, staticKey: identity.dh }).then(value => {
+      channel = value;
+      channel.onFrame = frame => { frames.push(frame); };
+    }).catch(() => {});
+    return { close() { link.close(); } };
+  } });
+  await transport.connect();
+  return { transport, channel, frames };
+}
+
+describe('tunnel client keepalive', () => {
+  it.each(['lan', 'relay'] as const)('accepts a delayed Pong for the previous Ping and sends the third Ping over %s', async via => {
+    const { transport, channel, frames } = await keepaliveSession(via);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(frames.map(frame => frame.payload)).toEqual([utf8('1')]);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(frames.map(frame => frame.payload)).toEqual([utf8('1'), utf8('2')]);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    channel.send({ type: TunnelFrameType.Pong, stream: 0, payload: frames[0]!.payload });
+    await vi.advanceTimersByTimeAsync(23_000);
+
+    expect(channel.closed).toBe(false);
+    expect(transport.via).toBe(via);
+    expect(frames.map(frame => [frame.type, frame.payload])).toEqual([
+      [TunnelFrameType.Ping, utf8('1')],
+      [TunnelFrameType.Ping, utf8('2')],
+      [TunnelFrameType.Ping, utf8('3')],
+    ]);
+    // Matching Ping #1 must leave Ping #2 available for its own delayed answer.
+    channel.send({ type: TunnelFrameType.Pong, stream: 0, payload: frames[1]!.payload });
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(channel.closed).toBe(false);
+    expect(frames[3]?.payload).toEqual(utf8('4'));
+  });
+
+  it('closes after two unanswered Ping intervals', async () => {
+    const { transport, channel, frames } = await keepaliveSession();
+    await vi.advanceTimersByTimeAsync(75_000);
+    expect(channel.closed).toBe(true);
+    expect(transport.via).toBeNull();
+    expect(frames.map(frame => frame.payload)).toEqual([utf8('1'), utf8('2')]);
+  });
+
+  it.each(['', 'unknown', '3'])('ignores an unsolicited Pong with payload %j', async payload => {
+    const { channel, frames } = await keepaliveSession();
+    await vi.advanceTimersByTimeAsync(50_000);
+    channel.send({ type: TunnelFrameType.Pong, stream: 0, payload: utf8(payload) });
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(channel.closed).toBe(true);
+    expect(frames).toHaveLength(2);
+  });
+
+  it('does not let an answer to a newer Ping extend an older Ping deadline', async () => {
+    const { channel, frames } = await keepaliveSession();
+    await vi.advanceTimersByTimeAsync(50_000);
+    channel.send({ type: TunnelFrameType.Pong, stream: 0, payload: frames[1]!.payload });
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(channel.closed).toBe(true);
+    expect(frames).toHaveLength(2);
+  });
+
+  it('does not count a replayed Pong as another answer', async () => {
+    const { channel, frames } = await keepaliveSession();
+    await vi.advanceTimersByTimeAsync(25_000);
+    const pong = { type: TunnelFrameType.Pong, stream: 0, payload: frames[0]!.payload };
+    channel.send(pong);
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(channel.closed).toBe(false);
+    expect(frames).toHaveLength(3);
+    channel.send(pong);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(channel.closed).toBe(true);
+    expect(frames).toHaveLength(3);
+  });
+
+  it('echoes a peer Ping without counting it as an answer to a client Ping', async () => {
+    const { channel, frames } = await keepaliveSession();
+    await vi.advanceTimersByTimeAsync(50_000);
+    channel.send({ type: TunnelFrameType.Ping, stream: 0, payload: utf8('peer') });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(frames[2]).toEqual({ type: TunnelFrameType.Pong, stream: 0, payload: utf8('peer') });
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(channel.closed).toBe(true);
+    expect(frames).toHaveLength(3);
+  });
+});
 
 describe('tunnel client isolates oversized stream from channel-wide failure', () => {
   it('resets an oversized WebSocket while another WebSocket and an in-flight fetch complete', async () => {
