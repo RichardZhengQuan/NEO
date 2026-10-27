@@ -1210,7 +1210,7 @@ describe('lightbox focus trap', () => {
     thumb.focus();
     act(() => { fireEvent.click(thumb); });
 
-    const lightbox = container.querySelector<HTMLElement>('.neo-lightbox')!;
+    const lightbox = document.querySelector<HTMLElement>('.neo-lightbox')!;
     expect(lightbox).not.toBeNull();
     expect(lightbox.contains(document.activeElement)).toBe(true);
     const buttons = lightbox.querySelectorAll<HTMLButtonElement>('button');
@@ -1232,7 +1232,33 @@ describe('lightbox focus trap', () => {
     expect(document.activeElement).toBe(first);
 
     act(() => { fireEvent.click(first); });
-    expect(container.querySelector('.neo-lightbox')).toBeNull();
+    expect(document.querySelector('.neo-lightbox')).toBeNull();
     expect(document.activeElement).toBe(thumb);
+  });
+});
+
+
+describe('lightbox viewport layer', () => {
+  it.each(['image', 'gallery'] as const)('portals %s outside contained messages and preserves context and opener focus', (kind) => {
+    const image = { url: 'data:image/png;base64,iVBORw0KGgo=', alt: 'Portal image', caption: 'Visible caption' };
+    const block: UIBlock = kind === 'image' ? { type: 'image', ...image } : { type: 'gallery', images: [image] };
+    const { container } = wrap(
+      <section style={{ containerType: 'inline-size', contain: 'layout', transform: 'translateZ(0)' }}>
+        <BlockRenderer block={block} />
+      </section>,
+      'zh-CN',
+    );
+    const opener = screen.getByRole('button', { name: 'Portal image' });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = screen.getByRole('dialog', { name: 'Portal image' });
+    expect(dialog.parentElement).toBe(document.body);
+    expect(container.contains(dialog)).toBe(false);
+    const close = screen.getByRole('button', { name: '关闭' });
+    expect(document.activeElement).toBe(close);
+    expect(dialog.textContent).toContain('Visible caption');
+    fireEvent.keyDown(close, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(opener);
   });
 });

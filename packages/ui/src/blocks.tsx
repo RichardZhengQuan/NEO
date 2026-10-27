@@ -25,6 +25,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   describeRecurrence,
   formatTableCell,
@@ -697,8 +698,9 @@ function Lightbox({ images, index, onClose, onIndex }: { images: { url: string; 
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [index, images.length, onClose, onIndex]);
-  if (!img) return null;
-  return (
+  if (!img || typeof document === 'undefined') return null;
+  // Message containers establish containing blocks; the overlay must escape them.
+  return createPortal(
     <div ref={dialogRef} className="neo-lightbox" role="dialog" aria-modal="true" aria-label={img.alt} onClick={onClose}>
       <span className="neo-lightbox__close">
         <IconButton icon="x" label={t('common.close')} onClick={onClose} />
@@ -711,7 +713,8 @@ function Lightbox({ images, index, onClose, onIndex }: { images: { url: string; 
           {images.length > 1 && <IconButton icon="chevron-right" label={t('block.next')} onClick={() => onIndex((index + 1) % images.length)} />}
         </div>
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

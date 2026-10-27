@@ -149,6 +149,8 @@ Model tool-call approvals use a separate server-generated `ToolConfirmation.id` 
 - Streaming: blocks appear when their part arrives (tool results). Text streams token by token with a caret.
 - Never throw. An invalid block (it can't happen after server validation, but old data might) renders a small "Can't display this content" fallback with the text rendering inside `<details>`.
 
+Image and gallery lightboxes render in a portal attached to `document.body`, so message containment cannot clip the viewport backdrop. They retain React context and the root theme, focus Close when opened, trap keyboard focus, and restore the exact opener when dismissed.
+
 ### Unfinished chat input
 
 Within the current app session, leaving the timeline or switching generated tabs and accordion sections preserves composer text and image attachments, form edits, field selections, and the current generated view. A pending form submission remains pending after returning, so navigation does not enable a duplicate submission. Failed chat sends restore their draft unless newer input has replaced it.
