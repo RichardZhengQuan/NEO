@@ -90,7 +90,7 @@ export function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reminder.updatedAt]);
   const dueAt = fromLocalInputValue(due, timezone);
-  const weekday = dueAt ? wallTimeOf(dueAt, timezone).weekday : 1;
+  const weekday = dueAt !== null ? wallTimeOf(dueAt, timezone).weekday : 1;
   const generated = recurrenceFor(preset, { interval, weekdays, weekday });
   const recurrence: RecurrenceInput | null = presetChanged ? generated : preserveRecurrence(reminder.recurrence, generated);
 
@@ -146,7 +146,7 @@ export function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder
       >
         <TextField label={t('reminders.title')} value={title} onChange={setTitle} required maxLength={500} placeholder={t('reminders.title_placeholder')} autoFocus />
         <div className="neo-field">
-          <TextField label={t('reminders.when')} type="datetime-local" value={due} onChange={setDue} required help={dueAt && dueAt < now ? t('reminders.in_past') : dueAt ? formatRelative(dueAt, locale) : undefined} />
+          <TextField label={t('reminders.when')} type="datetime-local" value={due} onChange={setDue} required help={dueAt !== null && dueAt < now ? t('reminders.in_past') : dueAt !== null ? formatRelative(dueAt, locale) : undefined} />
           <div className="neo-tags" style={{ marginTop: '0.25rem' }}>
             <Chip size="sm" onClick={() => quick(now + 30 * 60_000)}>
               {t('reminders.quick_30m')}
