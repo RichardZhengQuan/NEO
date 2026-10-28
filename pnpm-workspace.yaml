@@ -4,5 +4,6 @@ packages:
 allowBuilds:
   esbuild: true
   electron: true
+  electron-winstaller: false
 minimumReleaseAgeExclude:
   - '@anthropic-ai/sdk@0.133.0'
