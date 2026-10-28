@@ -482,10 +482,12 @@ export function ProviderSetup(props: {
           <h3 className="group-title">{t('provider.already_set_up')}</h3>
           <ul className="ai-setup__connected">
             {connected.map((provider) => (
-              <li key={provider.id}>
+              <li key={provider.id} aria-labelledby={`${id}-${provider.id}-name ${id}-${provider.id}-location`} aria-describedby={!provider.isLocal && settings ? `${id}-${provider.id}-privacy` : undefined}>
                 <div>
-                  <span>{provider.label || (provider.kind === 'openai-compatible' ? t('provider.custom_label') : providerLabel(provider))}</span>
+                  <span id={`${id}-${provider.id}-name`}>{provider.label || (provider.kind === 'openai-compatible' ? t('provider.custom_label') : providerLabel(provider))}</span>
                   <p className="neo-help">{t(provider.needsReauthorization ? 'provider.chatgpt_disconnected' : !provider.enabled ? 'provider.disabled' : provider.kind === 'chatgpt' ? 'provider.saved_account' : provider.hasApiKey ? 'provider.saved_key' : 'provider.saved_endpoint')}</p>
+                  <p id={`${id}-${provider.id}-location`} className="neo-help" style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}><Icon name={provider.isLocal ? 'monitor' : 'cloud'} size={14} /> {t(provider.isLocal ? 'provider.local' : 'provider.cloud')}</p>
+                  {!provider.isLocal && settings && <p id={`${id}-${provider.id}-privacy`} className="neo-help">{t(settings.memory.sendSensitiveToCloud ? 'provider.sensitive_shared' : 'provider.sensitive_not_shared')}</p>}
                 </div>
                 <div className="ai-setup__connection-actions">
                   {provider.kind === 'chatgpt' && provider.needsReauthorization && <Button size="sm" disabled={busy || !local} onClick={() => void signIn('chatgpt', provider.id)} aria-label={t('provider.signin_again_name', { name: providerLabel(provider) })}>{t('provider.signin_again')}</Button>}
