@@ -82,7 +82,7 @@ NEO_DESKTOP_USER_DATA_DIR="$neo_smoke_profile" /absolute/path/NEO.app/Contents/M
 Use only a disposable test directory, with no concurrent external changes. The
 app records a private profile marker; a persisted test profile needs that marker
 for relaunch. Electron user data, session data, logs, crashes and embedded data
-stay under the validated profile. The opt-in rejects linked or permissive state,
+stay under the validated profile. The opt-in rejects linked state and non-private directories,
 ignores inherited NEO configuration/provider environment, and suppresses update
 checks and default-protocol registration. Ordinary launches retain their existing
 configuration behavior. This hook's source tests are separate from native
