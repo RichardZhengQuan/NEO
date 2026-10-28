@@ -23,7 +23,7 @@ function listFormat(items: string[], locale: string): string {
   }
 }
 
-export function describeRecurrence(r: RecurrenceInput | null | undefined, t: TranslateFn, locale: string): string {
+export function describeRecurrence(r: RecurrenceInput | null | undefined, t: TranslateFn, locale: string, timeZone?: string): string {
   if (!r) return t('recur.once');
   const n = r.interval ?? 1;
   let s: string;
@@ -67,7 +67,7 @@ export function describeRecurrence(r: RecurrenceInput | null | undefined, t: Tra
       break;
   }
   if (r.count) s += ` · ${t('recur.count', { n: r.count })}`;
-  if (r.until) s += ` · ${t('recur.until', { date: formatDate(r.until, locale) })}`;
+  if (r.until != null) s += ` · ${t('recur.until', { date: formatDate(r.until, locale, timeZone) })}`;
   return s;
 }
 

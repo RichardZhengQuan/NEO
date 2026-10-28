@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildMessages, createTranslator } from '@neo/ui';
 import { appDictionaries } from '../i18n.js';
 import { describeRecurrence } from './recurrence.js';
@@ -41,5 +41,23 @@ describe('describeRecurrence', () => {
   ] as const)('localizes daily weekdays in Chinese with interval %i', (interval, expected) => {
     const zh = createTranslator('zh-CN', buildMessages('zh-CN', appDictionaries));
     expect(describeRecurrence({ freq: 'daily', interval, byWeekday: [1, 5] }, zh, 'zh-CN')).toBe(expected);
+  });
+});
+
+describe('recurrence end date timezones', () => {
+  beforeEach(() => { vi.stubEnv('TZ', 'Asia/Singapore'); });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('formats until in the supplied timezone across the device date boundary', () => {
+    expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe('Asia/Singapore');
+    expect(describeRecurrence({ freq: 'daily', until: Date.parse('2026-10-28T00:25:00Z') }, t, 'en', 'America/New_York')).toBe('Every day · until Oct 27, 2026');
+  });
+
+  it('includes until at the Unix epoch in the supplied timezone', () => {
+    expect(describeRecurrence({ freq: 'daily', until: 0 }, t, 'en', 'America/New_York')).toBe('Every day · until Dec 31, 1969');
+  });
+
+  it('omits the end date only when until is absent', () => {
+    expect(describeRecurrence({ freq: 'daily' }, t, 'en', 'America/New_York')).toBe('Every day');
   });
 });

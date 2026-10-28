@@ -12,7 +12,7 @@ import { useLoader } from '../../hooks/useLoader.js';
 import { errorMessage, httpStatus } from '../../lib/errors.js';
 import { bumpMemoryVersion, useData } from '../../state/data.js';
 import { pushToast } from '../../state/notifications.js';
-import { requireClient } from '../../state/session.js';
+import { requireClient, useSession } from '../../state/session.js';
 import { MemoryEditor } from './MemoryEditor.js';
 
 function EdgeRow({ edge, nodeId, detail, onSelect, onUnlink }: { edge: MemoryEdge; nodeId: string; detail: MemoryNodeDetail; onSelect: (id: string) => void; onUnlink: (edge: MemoryEdge) => void }): ReactElement {
@@ -45,6 +45,7 @@ function EdgeRow({ edge, nodeId, detail, onSelect, onUnlink }: { edge: MemoryEdg
 export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: string; onClose: () => void; onSelect: (id: string) => void; onFocus?: (id: string) => void }): ReactElement {
   const t = useT();
   const locale = useLocale();
+  const timezone = useSession((s) => s.settings?.timezone);
   const confirm = useConfirm();
   const version = useData((s) => s.memoryVersion);
   const [editing, setEditing] = useState(false);
@@ -79,9 +80,9 @@ export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: s
   const client = requireClient();
   const self = node.id === SELF_MEMORY_ID;
   const facts: [string, string][] = [
-    [t('memoryDetail.created'), formatDateTime(node.createdAt, locale)],
-    [t('memoryDetail.updated'), formatDateTime(node.updatedAt, locale)],
-    [t('memoryDetail.last_recalled'), node.lastAccessedAt ? formatRelative(node.lastAccessedAt, locale) : t('memoryDetail.never')],
+    [t('memoryDetail.created'), formatDateTime(node.createdAt, locale, timezone)],
+    [t('memoryDetail.updated'), formatDateTime(node.updatedAt, locale, timezone)],
+    [t('memoryDetail.last_recalled'), node.lastAccessedAt != null ? formatRelative(node.lastAccessedAt, locale) : t('memoryDetail.never')],
     [t('memoryDetail.recalls'), String(node.accessCount)],
     [t('memoryDetail.importance'), `${Math.round(node.importance * 100)}%`],
     [t('memoryDetail.confidence'), `${Math.round(node.confidence * 100)}%`],
@@ -90,7 +91,7 @@ export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: s
   if (node.entityType) facts.push([t('memoryEdit.entity_type'), node.entityType]);
   if (node.aliases.length) facts.push([t('memoryEdit.aliases'), node.aliases.join(', ')]);
   if (node.tags.length) facts.push([t('memoryEdit.tags'), node.tags.join(', ')]);
-  if (node.validUntil) facts.push([t('memoryDetail.valid_until'), formatDateTime(node.validUntil, locale)]);
+  if (node.validUntil != null) facts.push([t('memoryDetail.valid_until'), formatDateTime(node.validUntil, locale, timezone)]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
@@ -192,7 +193,7 @@ export function MemoryDetail({ nodeId, onClose, onSelect, onFocus }: { nodeId: s
               <li key={h.id} className="neo-card" style={{ padding: '0.625rem 0.75rem', background: 'var(--neo-surface-2)' }}>
                 <div className="neo-help" style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
                   <Icon name="rotate-ccw" size={12} />
-                  {t('memoryDetail.used_to_be', { date: formatDateTime(h.updatedAt, locale) })}
+                  {t('memoryDetail.used_to_be', { date: formatDateTime(h.updatedAt, locale, timezone) })}
                 </div>
                 <div style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>{h.content || h.label}</div>
               </li>

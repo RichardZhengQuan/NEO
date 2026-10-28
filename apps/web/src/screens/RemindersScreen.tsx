@@ -170,7 +170,7 @@ export function ReminderEditor({ reminder, open, onClose }: { reminder: Reminder
             options={(['none', 'daily', 'weekdays', 'weekly', 'monthly', 'yearly'] as const).map((p) => ({ value: p, label: t(`reminders.repeat_${p}`) }))}
           />
           {preset !== 'none' && preset !== 'weekdays' && (
-            <TextField label={t('reminders.every')} type="number" inputMode="numeric" min={1} max={1000} value={String(interval)} onChange={(v) => setInterval(Math.max(1, Number(v) || 1))} help={describeRecurrence(recurrence, t, locale)} />
+            <TextField label={t('reminders.every')} type="number" inputMode="numeric" min={1} max={1000} value={String(interval)} onChange={(v) => setInterval(Math.max(1, Number(v) || 1))} help={describeRecurrence(recurrence, t, locale, timezone || useSession.getState().settings?.timezone)} />
           )}
         </div>
         {preset === 'weekly' && (
@@ -253,7 +253,7 @@ function ReminderRow({ reminder, highlight, onEdit }: { reminder: Reminder; high
           {reminder.recurrence && (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
               <Icon name="repeat" size={12} />
-              {describeRecurrence(reminder.recurrence, t, locale)}
+              {describeRecurrence(reminder.recurrence, t, locale, reminder.timezone || useSession.getState().settings?.timezone)}
             </span>
           )}
           {reminder.status === 'fired' && <span style={{ color: 'var(--neo-tone-warning-text)', fontWeight: 600 }}>{t('reminder.status.fired')}</span>}
