@@ -202,6 +202,82 @@ describe('AI connection setup', () => {
   });
 });
 
+describe.each([
+  { locale: 'en' as const, local: 'Local', cloud: 'Cloud', withheld: 'Sensitive memories aren’t sent to this connection.', shared: 'Sensitive memories are shared with this connection.' },
+  { locale: 'zh-CN' as const, local: '本地', cloud: '云端', withheld: '敏感记忆不会发送到此连接。', shared: '敏感记忆会发送到此连接。' },
+])('connected provider privacy in $locale', ({ locale, local, cloud, withheld, shared }) => {
+  it.each([
+    { baseUrl: 'http://localhost.:18441/v1', sendSensitiveToCloud: false },
+    { baseUrl: 'http://localhost.:18441/v1', sendSensitiveToCloud: true },
+    { baseUrl: 'http://[::ffff:127.0.0.1]:18441/v1', sendSensitiveToCloud: false },
+    { baseUrl: 'http://[::ffff:127.0.0.1]:18441/v1', sendSensitiveToCloud: true },
+    { baseUrl: 'https://models.example/v1', sendSensitiveToCloud: false },
+  ])('marks a local provider at $baseUrl with sharing $sendSensitiveToCloud and no cloud note', ({ baseUrl, sendSensitiveToCloud }) => {
+    const endpoint: ProviderView = { ...router, id: 'local', label: 'Local endpoint', baseUrl, hasApiKey: false, isLocal: true };
+    storedSettings = applySettingsPatch(storedSettings, { memory: { sendSensitiveToCloud } });
+    useSession.setState({ settings: storedSettings, providers: { items: [endpoint], defaultModel: null } });
+    setup(locale);
+    const row = screen.getByRole('listitem', { name: `Local endpoint ${local}` });
+    expect(within(row).getByText(local)).toBeTruthy();
+    expect(row.querySelector('[data-icon="monitor"][aria-hidden="true"]')).toBeTruthy();
+    expect(within(row).getByText(appDictionaries[locale]['provider.saved_endpoint']!)).toBeTruthy();
+    expect(within(row).queryByText(cloud)).toBeNull();
+    expect(within(row).queryByText(withheld)).toBeNull();
+    expect(within(row).queryByText(shared)).toBeNull();
+    expect(row.getAttribute('aria-describedby')).toBeNull();
+  });
+
+  const cloudProviders: ProviderView[] = [
+    provider,
+    { ...router, label: 'Remote endpoint', hasApiKey: false },
+    chatgpt,
+    { ...provider, label: 'Disabled cloud', enabled: false },
+    { ...chatgpt, label: 'Expired ChatGPT', needsReauthorization: true },
+    { ...router, label: 'Cloud override', baseUrl: 'http://localhost.:18441/v1' },
+  ];
+  it.each(cloudProviders.flatMap((connection) => [false, true].map((sendSensitiveToCloud) => ({ connection, sendSensitiveToCloud }))))(
+    'marks cloud provider $connection.label with sharing $sendSensitiveToCloud',
+    ({ connection, sendSensitiveToCloud }) => {
+      storedSettings = applySettingsPatch(storedSettings, { memory: { sendSensitiveToCloud } });
+      useSession.setState({ settings: storedSettings, providers: { items: [connection], defaultModel: null } });
+      setup(locale);
+      const row = screen.getByRole('listitem', { name: `${connection.label} ${cloud}` });
+      expect(within(row).getByText(cloud)).toBeTruthy();
+      expect(row.querySelector('[data-icon="cloud"][aria-hidden="true"]')).toBeTruthy();
+      const note = within(row).getByText(sendSensitiveToCloud ? shared : withheld);
+      expect(row.getAttribute('aria-describedby')).toBe(note.id);
+      expect(within(row).queryByText(sendSensitiveToCloud ? withheld : shared)).toBeNull();
+      expect(within(row).queryByText(local)).toBeNull();
+    },
+  );
+
+  it('updates only the cloud note when the session privacy setting changes', () => {
+    const endpoint: ProviderView = { ...router, id: 'local', label: 'Local endpoint', isLocal: true };
+    useSession.setState({ providers: { items: [endpoint, provider], defaultModel: null } });
+    setup(locale);
+    expect(within(screen.getByRole('listitem', { name: `${provider.label} ${cloud}` })).getByText(withheld)).toBeTruthy();
+    act(() => { useSession.setState({ settings: applySettingsPatch(storedSettings, { memory: { sendSensitiveToCloud: true } }) }); });
+    expect(within(screen.getByRole('listitem', { name: `${provider.label} ${cloud}` })).getByText(shared)).toBeTruthy();
+    expect(screen.queryByText(withheld)).toBeNull();
+    const localRow = screen.getByRole('listitem', { name: `Local endpoint ${local}` });
+    expect(within(localRow).getByText(local)).toBeTruthy();
+    expect(within(localRow).queryByText(shared)).toBeNull();
+    act(() => { useSession.setState({ settings: storedSettings }); });
+    expect(within(screen.getByRole('listitem', { name: `${provider.label} ${cloud}` })).getByText(withheld)).toBeTruthy();
+    expect(screen.queryByText(shared)).toBeNull();
+  });
+
+  it('shows the cloud indicator without a privacy claim while settings are unavailable', () => {
+    useSession.setState({ settings: null, providers: { items: [provider], defaultModel: null } });
+    setup(locale);
+    const row = screen.getByRole('listitem', { name: `${provider.label} ${cloud}` });
+    expect(within(row).getByText(cloud)).toBeTruthy();
+    expect(within(row).queryByText(withheld)).toBeNull();
+    expect(within(row).queryByText(shared)).toBeNull();
+    expect(row.getAttribute('aria-describedby')).toBeNull();
+  });
+});
+
 describe('OpenRouter sign-in waiting', () => {
   it('opens the host browser and resolves through polling without auto-continuing', async () => {
     vi.useFakeTimers();
