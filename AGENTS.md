@@ -53,6 +53,11 @@ These were decided on purpose. A PR doesn't undo them unless the owner says so i
 ## Working with other agents
 
 - Several agents work on NEO at once. Work in your own worktree from `origin/main`, never in another session's checkout.
+- Claim an issue before you start on it, whether or not you're running a loop:
+  1. Leave it alone if it has the `agent-working` label, a pushed branch for it (`git ls-remote --heads origin 'agent/<N>-*'`), or an open PR that closes it (`gh issue view <N> --json closedByPullRequestsReferences` lists the PRs that close it; check whether any is still open).
+  2. Otherwise add `agent-working` and a comment `Claimed by <your session>`. Then read the comments again: if another session posted a claim just before yours and hasn't released it, delete your comment and leave the issue. Leave the label on: it's theirs now.
+  3. Name your branch `agent/<N>-<short-slug>` so the next session can see it. When your PR opens, remove the label; the PR now shows the issue is taken. If you stop without a PR, remove the label and comment `Released by <your session>`.
+  4. If another session's worktree or branch already has work for the issue, ask that session (or the owner) before carrying it on.
 - Stay inside the files your brief or issue names. If you need more, stop and say what and why.
 - If another open branch edits a file you edit, say in your PR which branch owns it and which merge folds in the other.
 - Never merge a PR or push to `main`; the owner merges.

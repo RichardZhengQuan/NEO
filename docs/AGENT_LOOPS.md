@@ -16,7 +16,7 @@ Loops keep no state of their own. Everything they know is on GitHub (issues, lab
 ## Labels
 
 - `agent-ready`: scoped well enough that an agent may build it without asking. The issue says what done looks like and which files are in scope.
-- `agent-working`: a loop run has claimed it. Remove it when the PR opens or when you give up.
+- `agent-working`: an agent has claimed it, in a loop run or any other session ([how to claim](../AGENTS.md#working-with-other-agents)). Remove it when the PR opens or when you give up.
 - `needs-owner`: waiting for the owner: a product decision, a real account or device, a merge, or a security call. Loops don't take an issue with this label until the owner removes it.
 
 ## Rules for every run
@@ -34,7 +34,7 @@ Loops keep no state of their own. Everything they know is on GitHub (issues, lab
 Runs every few hours.
 
 1. If an open PR has an agent review saying **Changes needed**, fix that PR and stop.
-2. Otherwise take the oldest open `agent-ready` issue that has neither `agent-working` nor `needs-owner`, and add `agent-working`. No such issue: stop.
+2. Otherwise take the oldest open `agent-ready` issue that has neither `agent-working` nor `needs-owner`, no open PR and no pushed `agent/<N>-*` branch, and claim it as [AGENTS.md](../AGENTS.md#working-with-other-agents) describes. No such issue: stop.
 3. Write the implementer a brief: the issue, what done looks like, the files it may edit, the AGENTS.md route for that area, and the LESSONS.md entries that apply.
 4. Review the diff area by area against the brief. Run the area's checks from AGENTS.md. Do the red check: put the old code back, and a new test must fail, naming the broken behaviour.
 5. Open the PR with the template filled in honestly (`Closes #N`), then remove `agent-working`.
