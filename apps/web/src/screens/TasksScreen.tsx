@@ -83,7 +83,7 @@ function TaskDetails({ task, lists, onClose }: { task: Task; lists: TaskList[]; 
           size="sm"
           type="date"
           label={t('tasks.due')}
-          value={task.dueAt ? toDateInputValue(task.dueAt, tz) : ''}
+          value={task.dueAt != null ? toDateInputValue(task.dueAt, tz) : ''}
           onChange={(v) => save({ dueAt: v ? fromDateInputValue(v, tz, 9) : null })}
         />
         <Select size="sm" label={t('tasks.list')} value={task.listId} onChange={(v) => save({ listId: v })} options={lists.map((l) => ({ value: l.id, label: listName(l, t) }))} />
@@ -142,7 +142,7 @@ function TaskRow({ task, subtasks, lists, expanded, onToggleExpand, highlight }:
           <span className="row__title" style={task.done ? { color: 'var(--neo-text-muted)', textDecoration: 'line-through' } : undefined}>
             {task.title}
           </span>
-          {(task.dueAt || task.notes || task.priority > 0 || subtasks.length > 0) && (
+          {(task.dueAt != null || task.notes || task.priority > 0 || subtasks.length > 0) && (
             <span className="row__meta">
               {task.priority > 0 && (
                 <span className="neo-priority" data-level={task.priority} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
@@ -150,7 +150,7 @@ function TaskRow({ task, subtasks, lists, expanded, onToggleExpand, highlight }:
                   {t(`tasks.priority_${task.priority}`)}
                 </span>
               )}
-              {task.dueAt && (
+              {task.dueAt != null && (
                 <span style={overdue ? { color: 'var(--neo-tone-danger-text)', fontWeight: 600 } : undefined}>
                   <Icon name="calendar" size={12} /> {formatDate(task.dueAt, locale, tz, 'medium')}
                 </span>

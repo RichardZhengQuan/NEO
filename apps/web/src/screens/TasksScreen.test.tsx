@@ -61,6 +61,95 @@ describe('TasksScreen timezone', () => {
   });
 });
 
+describe('TasksScreen epoch due date', () => {
+  const otherList: TaskList = { ...inbox, id: 'list_other', name: 'Other' };
+
+  beforeEach(() => {
+    useSession.setState({ settings: { ...DEFAULT_SETTINGS, timezone: 'America/Los_Angeles' } });
+    useData.setState({ tasks: { [task.id]: { ...task, notes: null, dueAt: 0 } }, taskLists: [inbox, otherList] });
+    vi.mocked(requireClient().tasks.update).mockImplementation(async (id, patch) => ({ ...useData.getState().tasks[id]!, ...patch }));
+  });
+
+  it.each([
+    { timezone: 'UTC', date: 'Jan 1, 1970' },
+    { timezone: 'America/Los_Angeles', date: 'Dec 31, 1969' },
+  ])('shows an epoch-only row date in $timezone', ({ timezone, date }) => {
+    useSession.setState({ settings: { ...DEFAULT_SETTINGS, timezone } });
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+
+    const row = screen.getByRole('button', { name: /^Old\b/, expanded: false });
+    expect(row.querySelector('.row__meta')?.textContent).toBe(` ${date}`);
+  });
+
+  it('shows the epoch date alongside other row metadata', () => {
+    useData.setState({ tasks: { [task.id]: { ...task, dueAt: 0 } } });
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+
+    const row = screen.getByRole('button', { name: /^Old\b/, expanded: false });
+    expect(row.querySelector('.row__meta')).not.toBeNull();
+    expect(row.textContent).toContain('Dec 31, 1969');
+  });
+
+  it.each([
+    { timezone: 'UTC', date: '1970-01-01' },
+    { timezone: 'America/Los_Angeles', date: '1969-12-31' },
+  ])('shows the epoch date in the editor in $timezone', ({ timezone, date }) => {
+    useSession.setState({ settings: { ...DEFAULT_SETTINGS, timezone } });
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+
+    expect((screen.getByLabelText('Due date') as HTMLInputElement).value).toBe(date);
+  });
+
+  it.each([
+    { field: 'title', patch: { title: 'Updated title' } },
+    { field: 'notes', patch: { notes: 'Updated notes' } },
+    { field: 'priority', patch: { priority: 3 } },
+    { field: 'list', patch: { listId: otherList.id } },
+  ])('keeps the epoch due date when saving $field', async ({ field, patch }) => {
+    const view = render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const update = vi.mocked(requireClient().tasks.update);
+
+    await act(async () => {
+      if (field === 'title' || field === 'notes') {
+        const input = screen.getByRole('textbox', { name: field === 'title' ? 'Title' : 'Notes' });
+        fireEvent.change(input, { target: { value: field === 'title' ? 'Updated title' : 'Updated notes' } });
+        fireEvent.blur(input);
+      } else if (field === 'priority') {
+        fireEvent.click(screen.getByRole('radio', { name: 'High' }));
+      } else {
+        fireEvent.change(screen.getByRole('combobox', { name: 'List' }), { target: { value: otherList.id } });
+      }
+      expect(update).toHaveBeenCalledExactlyOnceWith(task.id, patch);
+      await update.mock.results[0]!.value;
+    });
+
+    expect(useData.getState().tasks[task.id]).toMatchObject({ ...patch, dueAt: 0 });
+    if (field === 'list') {
+      view.rerender(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen listId={otherList.id} /></ConfirmProvider></I18nProvider>);
+    }
+    expect((screen.getByLabelText('Due date') as HTMLInputElement).value).toBe('1969-12-31');
+  });
+
+  it('sends null when the epoch due date is cleared', async () => {
+    render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    const input = screen.getByLabelText('Due date') as HTMLInputElement;
+    const update = vi.mocked(requireClient().tasks.update);
+
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '' } });
+      expect(update).toHaveBeenCalledExactlyOnceWith(task.id, { dueAt: null });
+      await update.mock.results[0]!.value;
+    });
+
+    expect(useData.getState().tasks[task.id]!.dueAt).toBeNull();
+    expect(input.value).toBe('');
+    expect(screen.getByRole('button', { name: /^Old\b/, expanded: true }).querySelector('.row__meta')).toBeNull();
+  });
+});
+
 describe('TaskDetails store updates', () => {
   it('resyncs an untouched title before blur so it cannot overwrite a remote update', async () => {
     render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><TasksScreen /></ConfirmProvider></I18nProvider>);

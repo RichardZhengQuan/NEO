@@ -6,7 +6,7 @@ import { appDictionaries } from '../i18n.js';
 import * as platform from '../platform/index.js';
 import { useData } from '../state/data.js';
 import { requireClient, startSession, useSession } from '../state/session.js';
-import { RemindersScreen } from './RemindersScreen.js';
+import { ReminderEditor, RemindersScreen } from './RemindersScreen.js';
 
 vi.mock('@neo/client', async (importOriginal) => ({
   ...await importOriginal<typeof import('@neo/client')>(),
@@ -155,5 +155,55 @@ describe('reminder recurrence end date timezones', () => {
     if (surface === 'editor') openEditor();
     const view = surface === 'editor' ? within(screen.getByRole('dialog')) : screen;
     expect(view.getByText('Every day · until Oct 27, 2026')).toBeTruthy();
+  });
+});
+
+describe('ReminderEditor epoch due time', () => {
+  beforeEach(() => {
+    // Keep native Intl: this fake-timers version substitutes its clock for numeric 0.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(60_000);
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('shows past-time help when the edited time parses to the Unix epoch', () => {
+    render(<I18nProvider locale="en" messages={appDictionaries}><ReminderEditor reminder={{ ...reminder, dueAt: 60_000 }} open onClose={vi.fn()} /></I18nProvider>);
+    const input = screen.getByLabelText(/^When/) as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: '1970-01-01T00:00' } });
+
+    expect(input.value).toBe('1970-01-01T00:00');
+    expect(screen.getByText('That time has already passed.').id).toBe(input.getAttribute('aria-describedby'));
+  });
+
+  it.each([
+    { timezone: 'UTC', due: '1970-01-01T00:00', weekday: 4, day: 'Thu' },
+    { timezone: 'America/Los_Angeles', due: '1969-12-31T16:00', weekday: 3, day: 'Wed' },
+  ])('uses the epoch weekday in $timezone when defaulting a weekly recurrence', async ({ timezone, due, weekday, day }) => {
+    const onClose = vi.fn();
+    render(<I18nProvider locale="en" messages={appDictionaries}><ReminderEditor reminder={{ ...reminder, dueAt: 60_000, timezone }} open onClose={onClose} /></I18nProvider>);
+    fireEvent.change(screen.getByLabelText(/^When/), { target: { value: due } });
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Repeat' }), { target: { value: 'weekly' } });
+
+    expect(screen.getByText(`Every ${day}`)).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save' })); });
+    expect(requireClient().reminders.update).toHaveBeenCalledWith(reminder.id, expect.objectContaining({
+      dueAt: 0,
+      timezone,
+      recurrence: { freq: 'weekly', interval: 1, byWeekday: [weekday] },
+    }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('shows relative-time help when the edited epoch is still in the future', () => {
+    vi.setSystemTime(-60_000);
+    render(<I18nProvider locale="en" messages={appDictionaries}><ReminderEditor reminder={{ ...reminder, dueAt: 60_000 }} open onClose={vi.fn()} /></I18nProvider>);
+    const input = screen.getByLabelText(/^When/) as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: '1970-01-01T00:00' } });
+
+    expect(input.value).toBe('1970-01-01T00:00');
+    expect(screen.getByText('in 1 minute').id).toBe(input.getAttribute('aria-describedby'));
   });
 });
