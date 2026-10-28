@@ -3,9 +3,101 @@
  * Kept separate so they can be fully tested with vitest without mocking Electron.
  */
 import { deflateSync } from 'node:zlib';
+import { lstatSync, mkdirSync, readdirSync, realpathSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import type { Notification, ReminderFiring, TunnelRoute } from '@neo/protocol';
+
+// ───────────────────────────── disposable profile ─────────────────────────────
+
+/** Explicit opt-in for packaged smoke tests; ordinary startup does not touch paths. */
+export function configureDisposableProfile(
+  desktopApp: {
+    setPath(name: string, value: string): void;
+    setAppLogsPath(value: string): void;
+  },
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (!value.trim() || value.includes('\0') || !path.isAbsolute(value) || path.parse(value).root === path.resolve(value)) {
+    throw new Error('NEO_DESKTOP_USER_DATA_DIR must be an absolute private profile directory');
+  }
+  // macOS exposes its temporary directories through these system aliases.
+  // Canonicalize only those known aliases; caller-created links are refused.
+  let root = path.resolve(value);
+  if (process.platform === 'darwin') {
+    for (const alias of ['/tmp', '/var']) {
+      if ((root === alias || root.startsWith(alias + path.sep)) && realpathSync(alias) === '/private' + alias) {
+        root = '/private' + root;
+        break;
+      }
+    }
+  }
+  const verifyDirectory = (directory: string, privateMode: boolean) => {
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (privateMode && (stat.mode & 0o777) !== 0o700)) {
+      throw new Error('NEO_DESKTOP_USER_DATA_DIR requires real directories with mode 0700');
+    }
+  };
+  // Walk before mkdir: recursive mkdir alone would follow linked ancestors.
+  let cursor = path.parse(root).root;
+  for (const part of root.slice(cursor.length).split(path.sep)) {
+    cursor = path.join(cursor, part);
+    try { verifyDirectory(cursor, cursor === root); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      mkdirSync(cursor, { mode: 0o700 });
+      verifyDirectory(cursor, cursor === root);
+    }
+  }
+  const marker = path.join(root, '.neo-disposable-profile');
+  const markerContents = 'neo-disposable-profile-v1\n';
+  const names = readdirSync(root);
+  if (names.length) {
+    if (!names.includes('.neo-disposable-profile')) {
+      throw new Error('Disposable profile must be empty or already marked');
+    }
+    const stat = lstatSync(marker);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) {
+      throw new Error('Disposable profile marker must be a private unlinked regular file');
+    }
+    if (readFileSync(marker, 'utf8') !== markerContents) throw new Error('Invalid disposable profile marker');
+  }
+  const audit = (directory: string): void => {
+    verifyDirectory(directory, true);
+    for (const name of readdirSync(directory)) {
+      const child = path.join(directory, name);
+      const stat = lstatSync(child);
+      if (stat.isSymbolicLink() || (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))) {
+        throw new Error('NEO_DESKTOP_USER_DATA_DIR requires an unlinked regular profile tree');
+      }
+      if (stat.isDirectory()) audit(child);
+    }
+  };
+  audit(root);
+  // loadConfig must not discover either ambient config or a profile-supplied
+  // override. Reserve an absent explicit path and reject it on relaunch too.
+  if (readdirSync(root).includes('.smoke-config-disabled.json')) {
+    throw new Error('Disposable profile reserved config path must remain absent');
+  }
+  if (!names.length) writeFileSync(marker, markerContents, { mode: 0o600, flag: 'wx' });
+  const directories = {
+    userData: root,
+    sessionData: path.join(root, 'session'),
+    logs: path.join(root, 'logs'),
+    crashDumps: path.join(root, 'crashes'),
+    data: path.join(root, 'data'),
+  };
+  for (const directory of Object.values(directories)) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    verifyDirectory(directory, true);
+  }
+  desktopApp.setPath('userData', directories.userData);
+  desktopApp.setPath('sessionData', directories.sessionData);
+  desktopApp.setAppLogsPath(directories.logs);
+  desktopApp.setPath('crashDumps', directories.crashDumps);
+  return root;
+}
 
 // ───────────────────────────── web directory ─────────────────────────────
 

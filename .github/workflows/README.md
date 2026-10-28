@@ -14,7 +14,13 @@ uploaded as the `android-debug-apk` workflow artifact.
 
 ## release-desktop.yml
 
-To cut a macOS release:
+This is the owner-controlled publication path. As of 2026-10-29 there are no
+public desktop releases; local arm64 artifact receipts are tracked in
+[#557](https://github.com/RichardZhengQuan/NEO/issues/557). The bounded PR/manual
+packaging and runtime check remains work in
+[#692](https://github.com/RichardZhengQuan/NEO/issues/692).
+
+When the owner accepts the source, artifacts and remaining release checks:
 
 1. Bump `version` in `apps/desktop/package.json` to `X.Y.Z`.
 2. Merge that change to `main`.
@@ -23,6 +29,11 @@ To cut a macOS release:
 
 The tag must match the package version or the job fails at the version guard.
 
-electron-builder uploads the arm64 and x64 DMGs to a draft GitHub Release for that version. The owner publishes it. Mark the first release as a pre-release before publishing.
+The workflow is configured to build and upload the declared arm64 and x64 DMGs
+to a draft GitHub Release. That configuration is not evidence that either
+architecture's artifacts or runtime have passed acceptance. The owner reviews
+the exact assets and publishes the release. Mark the first release as a
+pre-release before publishing. Update-feed installation is tracked separately
+in [#88](https://github.com/RichardZhengQuan/NEO/issues/88).
 
 Builds are unsigned and un-notarized until signing lands (owner deferred this in #63). Gatekeeper will warn.

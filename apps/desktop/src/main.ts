@@ -27,6 +27,7 @@ import { NeoClient } from '@neo/client';
 import type { ConnectionStatus, EventEnvelope } from '@neo/client';
 import { createTunnelTransport, type TunnelTransport } from '@neo/tunnel';
 import {
+  configureDisposableProfile,
   createTrayIconPng,
   deepLinkToHash,
   formatReminderNotification,
@@ -49,6 +50,19 @@ import {
 import type { NeoServer } from '@neo/server';
 import type { ServerEvent, TunnelRoute } from '@neo/protocol';
 
+// Configure before updater construction, instance locking, sessions, or ready.
+let disposableProfile: string | undefined;
+try {
+  disposableProfile = configureDisposableProfile(app, process.env.NEO_DESKTOP_USER_DATA_DIR);
+} catch (error) {
+  console.error('[NEO desktop] Refusing invalid disposable profile:', error);
+  app.exit(1);
+  throw error;
+}
+
+// Keep new Chromium/profile descendants private on subsequent launches too.
+if (disposableProfile !== undefined) process.umask(0o077);
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'app',
@@ -63,6 +77,10 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 const { autoUpdater } = electronUpdater;
+if (disposableProfile !== undefined) {
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+}
 
 // ESM polyfill for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -403,12 +421,13 @@ function buildAppMenu(): Menu {
       submenu: [
         {
           label: 'Check for updates…',
-          click: createCheckForUpdatesHandler({
+          enabled: disposableProfile === undefined,
+          click: disposableProfile === undefined ? createCheckForUpdatesHandler({
             autoUpdater,
             // Narrow Electron's overloaded showMessageBox (the `(window, opts)`
             // overload would otherwise widen DialogLike away from a one-arg call).
             dialog: { showMessageBox: (opts) => dialog.showMessageBox(opts) },
-          }),
+          }) : undefined,
         },
       ],
     },
@@ -794,9 +813,9 @@ async function main(): Promise<void> {
 
   // Register neo:// so deep links work in dev builds. Packaged apps also
   // declare the scheme via electron-builder's protocols config in the Info.plist.
-  app.setAsDefaultProtocolClient('neo');
+  if (disposableProfile === undefined) app.setAsDefaultProtocolClient('neo');
 
-  const userData = app.getPath('userData');
+  const userData = disposableProfile ?? app.getPath('userData');
   const webDir = getWebDir();
 
   // The menu bar remains available in either mode and during the first choice.
@@ -839,7 +858,7 @@ async function main(): Promise<void> {
       registerNotificationCleanup();
     }
     attachUpdaterErrorHandler({ autoUpdater });
-    checkForUpdatesOnReady({ autoUpdater, isPackaged: app.isPackaged });
+    if (disposableProfile === undefined) checkForUpdatesOnReady({ autoUpdater, isPackaged: app.isPackaged });
     return;
   }
 
@@ -847,6 +866,10 @@ async function main(): Promise<void> {
   const dataDir = path.join(userData, 'data');
 
   const config = loadConfig({
+    ...(disposableProfile === undefined ? {} : {
+      env: {},
+      path: path.join(disposableProfile, '.smoke-config-disabled.json'),
+    }),
     overrides: {
       mode: 'local',
       dataDir,
@@ -886,7 +909,7 @@ async function main(): Promise<void> {
   // Open the main window.
   createWindow(serverUrl);
   attachUpdaterErrorHandler({ autoUpdater });
-  checkForUpdatesOnReady({ autoUpdater, isPackaged: app.isPackaged });
+  if (disposableProfile === undefined) checkForUpdatesOnReady({ autoUpdater, isPackaged: app.isPackaged });
 
   // Start listening for server events to show OS notifications.
   startNotificationListener(serverUrl, ownerToken, null);

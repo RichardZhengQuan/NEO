@@ -12,31 +12,53 @@ NEO supports three deployment topologies:
 
 ## 1. On-device (desktop app)
 
-The **NEO desktop app** embeds the server.  No separate installation is needed.
+The **NEO desktop app** can run its embedded server on this Mac or connect to
+another NEO. As of 2026-10-29, this repository has no public desktop release to
+download from [GitHub Releases](https://github.com/RichardZhengQuan/NEO/releases).
+Unsigned arm64 app and DMG artifacts have been built and tested locally with an
+isolated packaged payload; their exact source, checksums and acceptance evidence
+are recorded in [#557](https://github.com/RichardZhengQuan/NEO/issues/557).
+Those receipts apply to the recorded artifacts. Separate x64 evidence and public
+distribution remain pending.
 
-1. Go to this repository's [GitHub Releases](https://github.com/RichardZhengQuan/NEO/releases)
-   and download `NEO-<version>-arm64.dmg` (Apple Silicon) or
-   `NEO-<version>-x64.dmg` (Intel) for the latest Mac release.
-2. Open the dmg and drag `NEO.app` into **Applications**.
-3. On first launch, right-click `NEO.app` in **Applications** → **Open** →
-   **Open** in the Gatekeeper dialog. This is required because the app is not
-   yet signed; subsequent launches don't need it. Alternatively, run this in
-   Terminal before launching:
+Developers can build an unsigned arm64 app from a recorded checkout on macOS:
 
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/NEO.app
-   ```
+```bash
+pnpm install --frozen-lockfile
+pnpm build
+CSC_IDENTITY_AUTO_DISCOVERY=false pnpm --filter @neo/desktop run pack --mac --arm64 --publish never
+```
 
-4. The app starts an embedded server on a random localhost port and opens
-   the web UI in a native window. The onboarding wizard then guides you
-   through adding an AI provider and configuring memory settings.
+The unpacked app is `apps/desktop/release/mac-arm64/NEO.app`; TypeScript output
+remains in `dist/`. `run pack` selects the package script explicitly, since pnpm
+also has a built-in `pack` command. This command builds an app without publishing
+a release. A source build alone does not establish packaged startup acceptance.
+
+For a structural check without executing the app:
+
+```bash
+pnpm --filter @neo/desktop artifact:inspect /absolute/path/NEO.app /absolute/path/NEO /absolute/path/inspection.json arm64
+```
+
+The inspector checks contained bundle/archive links, required resources and
+declared runtime dependencies. Its result keeps `runtimeProven: false`;
+dynamic imports, native ABI and actual startup still require packaged tests.
+
+On first launch, choose **Run NEO on this Mac** or connect to another NEO. Local
+mode starts an embedded server on a random localhost port and opens the web UI
+in a native window. Onboarding proceeds through avatar → AI → notifications →
+done. **Skip for now** leaves a fresh install without an AI until one is connected.
 
 On macOS, **NEO** stays in the menu bar while running on this Mac or connecting
 to another NEO, including the first-launch choice. Use **Open NEO** to restore
 or reopen its window. Closing the window keeps NEO running; choose **Quit NEO**
 (or press **Command-Q**) to quit. The Dock icon remains available.
 
-Packaged Windows and Linux builds are planned but not shipped yet; macOS is the only platform on the Releases page today.
+Live tray close/reopen verification and the bounded macOS packaging/runtime CI
+workflow remain tracked in [#692](https://github.com/RichardZhengQuan/NEO/issues/692).
+Windows and Linux distribution is planned. Unsigned Mac builds remain
+un-notarized under [#63](https://github.com/RichardZhengQuan/NEO/issues/63), so
+received artifacts can require macOS's **Open** confirmation.
 
 Data is stored in the platform userData directory:
 
@@ -45,6 +67,28 @@ Data is stored in the platform userData directory:
 | macOS | `~/Library/Application Support/NEO/data/` |
 | Windows | `%APPDATA%\NEO\data\` |
 | Linux | `~/.config/NEO/data/` |
+
+### Disposable verification profiles
+
+Developer smoke checks can opt in with `NEO_DESKTOP_USER_DATA_DIR`, pointing to a
+fresh, empty directory with mode `0700` controlled by the test driver. For example,
+after building the app:
+
+```bash
+neo_smoke_profile="$(mktemp -d)"
+NEO_DESKTOP_USER_DATA_DIR="$neo_smoke_profile" /absolute/path/NEO.app/Contents/MacOS/NEO
+```
+
+Use only a disposable test directory, with no concurrent external changes. The
+app records a private profile marker; a persisted test profile needs that marker
+for relaunch. Electron user data, session data, logs, crashes and embedded data
+stay under the validated profile. The opt-in rejects linked state and non-private directories,
+ignores inherited NEO configuration/provider environment, and suppresses update
+checks and default-protocol registration. Ordinary launches retain their existing
+configuration behavior. This hook's source tests are separate from native
+Chromium fresh-launch/relaunch acceptance, which remains tracked in #692.
+
+### Run the server without the desktop shell
 
 You can also run the server on your laptop without the Electron shell:
 
@@ -83,6 +127,11 @@ regeneration reads the checked-in PNG. Do not crop, redraw or replace the
 canonical artwork while refreshing it.
 
 ### Updates
+
+The following describes the implemented updater behavior. Update-feed delivery
+and installation remain unverified in
+[#88](https://github.com/RichardZhengQuan/NEO/issues/88); they require compatible
+published release assets. A local app or DMG is not update-installation evidence.
 
 The desktop app checks this repository's GitHub Releases for updates on launch
 in packaged builds only. Development builds skip the automatic check.
