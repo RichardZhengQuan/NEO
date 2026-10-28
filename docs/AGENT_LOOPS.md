@@ -33,7 +33,7 @@ Loops keep no state of their own. Everything they know is on GitHub (issues, lab
 
 Runs every few hours.
 
-1. If an open PR has an agent review saying **Changes needed**, fix that PR and stop.
+1. If an open PR has an agent review saying **Changes needed**, fix that PR and stop. Comment `Fixing by <your session>` on it first, and skip it if another session's `Fixing by` comment is newer than the PR's last commit ([AGENTS.md](../AGENTS.md#working-with-other-agents)).
 2. Otherwise take the oldest open `agent-ready` issue that has neither `agent-working` nor `needs-owner`, no open PR and no pushed `agent/<N>-*` branch, and claim it as [AGENTS.md](../AGENTS.md#working-with-other-agents) describes. No such issue: stop.
 3. Write the implementer a brief: the issue, what done looks like, the files it may edit, the AGENTS.md route for that area, and the LESSONS.md entries that apply.
 4. Review the diff area by area against the brief. Run the area's checks from AGENTS.md. Do the red check: put the old code back, and a new test must fail, naming the broken behaviour.
