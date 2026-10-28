@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { useRef, useState, type ReactElement } from 'react';
 import { I18nProvider } from '../i18n.js';
@@ -101,6 +104,182 @@ beforeEach(() => {
     return { width, height, left, top, x: left, y: top, right: left + width, bottom: top + height, toJSON: () => ({}) };
   });
   vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+});
+
+describe('homepage orbit hit layers', () => {
+  let iframe: HTMLIFrameElement;
+
+  afterEach(() => {
+    iframe?.remove();
+    vi.clearAllTimers();
+    frames.clear();
+  });
+
+  function homepage(reduced = false) {
+    const source = (name: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../../site', name), 'utf8');
+    iframe = document.createElement('iframe');
+    document.body.append(iframe);
+    const child = iframe.contentWindow as Window & typeof globalThis;
+    const page = child.document;
+    // Keep the static page and its listeners in their own document. Assets are
+    // deliberately not fetched; tests deliver the load events they depend on.
+    page.open();
+    page.write(source('index.html')
+      .replace(/<link\b[^>]*>/g, '')
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, ''));
+    page.close();
+    const style = page.createElement('style');
+    style.textContent = source('styles.css');
+    page.head.append(style);
+    Object.defineProperties(child, { innerWidth: { value: 1024 }, innerHeight: { value: 768 } });
+    Object.defineProperty(page, 'hidden', { configurable: true, value: false });
+    child.matchMedia = vi.fn(() => ({ matches: reduced, addEventListener: vi.fn(), removeEventListener: vi.fn() }) as unknown as MediaQueryList);
+    vi.spyOn(child.HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.matches('.figure-frame, .figure-hit')) return rect(53, 40, 549, 704);
+      if (this.matches('.card')) return rect(660, 390, 308, 346);
+      return rect(0, 0, 1024, 768);
+    });
+    const script = source('main.js');
+    expect(page.querySelector('.figure-hit'), 'the homepage needs a separate figure hit layer').not.toBeNull();
+    new Function('window', 'document', 'Image', 'getComputedStyle', script)(child, page, child.Image, child.getComputedStyle.bind(child));
+    return { child, page, style, stage: page.querySelector<HTMLElement>('.stage')!, figure: page.querySelector<HTMLElement>('.figure')!, hit: page.querySelector<HTMLElement>('.figure-hit') };
+  }
+
+  function pointer(target: HTMLElement, type: string, pointerType = 'mouse'): void {
+    const event = new Event(type, { bubbles: type === 'pointerdown' });
+    Object.defineProperty(event, 'pointerType', { value: pointerType });
+    target.dispatchEvent(event);
+  }
+
+  function matchingRules(element: Element, rules: CSSRuleList): CSSStyleRule[] {
+    return styleRules(rules).filter((rule) => element.matches(rule.selectorText));
+  }
+
+  it('keeps the decorative frame above rear portraits without intercepting their pointer targets', () => {
+    const { child, page, style, stage, figure, hit } = homepage();
+    expect(hit, 'the homepage needs a separate figure hit layer').not.toBeNull();
+    const frame = page.querySelector<HTMLElement>('.figure-frame')!;
+    const orbit = page.querySelector<HTMLElement>('.orbit')!;
+    const pauseArea = page.querySelector<HTMLElement>('.orbit-area')!;
+    expect(hit!.parentElement).toBe(stage);
+    expect(hit!.children).toHaveLength(0);
+    expect(hit!.getAttribute('aria-hidden')).toBe('true');
+    expect(hit!.hasAttribute('tabindex')).toBe(false);
+    expect(child.getComputedStyle(hit!).pointerEvents).toBe('auto');
+    expect(child.getComputedStyle(hit!).zIndex).toBe('0');
+    expect(child.getComputedStyle(frame).pointerEvents).toBe('none');
+    expect(child.getComputedStyle(figure).pointerEvents).toBe('none');
+    expect(child.getComputedStyle(frame).zIndex).toBe('2');
+    expect(child.getComputedStyle(pauseArea).zIndex).toBe('-1');
+    expect(child.getComputedStyle(pauseArea).pointerEvents).toBe('auto');
+    expect(child.getComputedStyle(orbit).pointerEvents).toBe('none');
+    for (const property of ['z-index', 'transform', 'opacity', 'isolation']) {
+      expect(matchingRules(orbit, style.sheet!.cssRules).every((rule) => !rule.style.getPropertyValue(property))).toBe(true);
+    }
+    // Both responsive rules must size the hit layer exactly like the artwork.
+    const geometry = ['position', 'left', 'right', 'bottom', 'width', 'height', 'max-width', 'aspect-ratio', 'translate'];
+    const geometryRules = (element: Element) => matchingRules(element, style.sheet!.cssRules)
+      .map((rule) => geometry.map((property) => rule.style.getPropertyValue(property)))
+      .filter((values) => values.some(Boolean));
+    expect(geometryRules(hit!)).toEqual(geometryRules(frame));
+    expect(geometryRules(hit!)).toHaveLength(2);
+    expect(geometryRules(hit!).some((values) => values.includes('32 / 41'))).toBe(true);
+  });
+
+  it.each(['pointerenter', 'pointerdown'] as const)('triggers a loaded figure glitch from the separate %s hit layer', (eventType) => {
+    const { page, figure, hit } = homepage();
+    expect(hit).not.toBeNull();
+    fireEvent.load(page.querySelector('.figure-color')!);
+    fireEvent.load(page.querySelector('.figure-ink')!);
+    expect(figure.hasAttribute('data-glitch')).toBe(false);
+    pointer(hit!, eventType);
+    expect(figure.dataset.glitch).toBe('true');
+    vi.advanceTimersByTime(480);
+    expect(figure.hasAttribute('data-glitch')).toBe(false);
+  });
+
+  it('lifts, drops and selects a rear portrait whose center overlaps the frame', () => {
+    const { child, page, stage, figure } = homepage();
+    fireEvent.load(page.querySelector('.figure-color')!);
+    fireEvent.load(page.querySelector('.figure-ink')!);
+    const frame = page.querySelector<HTMLElement>('.figure-frame')!.getBoundingClientRect();
+    const target = Array.from(page.querySelectorAll<HTMLButtonElement>('.orbit-node')).find((node) => {
+      if (node.style.zIndex !== '1') return false;
+      const position = node.style.transform.match(/^translate3d\(([-\d.]+)px, ([-\d.]+)px/)!;
+      return Number(position[1]) > frame.left && Number(position[1]) < frame.right
+        && Number(position[2]) > frame.top && Number(position[2]) < frame.bottom;
+    })!;
+    expect(target, 'the test must exercise an overlapping rear portrait').toBeTruthy();
+    expect(child.getComputedStyle(target).pointerEvents).toBe('auto');
+    expect(target.style.opacity).toBe('0.6');
+    advanceFrame(0);
+    pointer(stage, 'pointerenter');
+    const before = target.style.transform;
+    advanceFrame(1000);
+    expect(target.style.transform).toBe(before);
+    // jsdom has no pixel hit testing: the CSS contract above establishes which
+    // layer wins, and these events exercise the actual native orbit handlers.
+    pointer(target, 'pointerenter');
+    expect(target.style.zIndex).toBe('4');
+    expect(target.style.opacity).toBe('1');
+    expect(target.style.transform).toContain('scale(0.9)');
+    pointer(target, 'pointerleave');
+    expect(target.style.zIndex).toBe('1');
+    expect(target.style.transform).toContain('scale(0.8)');
+    pointer(stage, 'pointerleave');
+    advanceFrame(1000);
+    advanceFrame(1000);
+    expect(target.style.transform).not.toBe(before);
+    pointer(stage, 'pointerenter');
+    pointer(target, 'pointerdown');
+    target.click();
+    expect(target.getAttribute('aria-checked')).toBe('true');
+    expect(page.querySelector('[data-kind="girl"].orbit-node')!.getAttribute('aria-checked')).toBe('false');
+    expect(figure.hasAttribute('data-glitch')).toBe(false);
+  });
+
+  it('glitches on a figure touch and pauses the moving orbit for four seconds before resuming', () => {
+    const { page, figure, hit } = homepage();
+    fireEvent.load(page.querySelector('.figure-color')!);
+    fireEvent.load(page.querySelector('.figure-ink')!);
+    const nodes = Array.from(page.querySelectorAll<HTMLButtonElement>('.orbit-node'));
+    advanceFrame(0);
+    const before = nodes.map((node) => node.style.transform);
+    pointer(hit!, 'pointerdown', 'touch');
+    expect(figure.dataset.glitch).toBe('true');
+    advanceFrame(3999);
+    expect(figure.hasAttribute('data-glitch')).toBe(false);
+    expect(nodes.map((node) => node.style.transform)).toEqual(before);
+    advanceFrame(1);
+    advanceFrame(1000);
+    expect(nodes.map((node) => node.style.transform)).not.toEqual(before);
+  });
+
+  it('keeps touch selection, keyboard selection and reduced motion on the same controls', () => {
+    const { page, stage, figure, hit } = homepage(true);
+    const nodes = Array.from(page.querySelectorAll<HTMLButtonElement>('.orbit-node'));
+    expect(page.querySelector('.orbit')!.getAttribute('data-orbit-motion')).toBe('reduced');
+    nodes.forEach((node) => expect(node.style.zIndex).toBe('3'));
+    fireEvent.load(page.querySelector('.figure-color')!);
+    fireEvent.load(page.querySelector('.figure-ink')!);
+    pointer(hit!, 'pointerdown', 'touch');
+    expect(figure.hasAttribute('data-glitch')).toBe(false);
+    pointer(stage, 'pointerenter', 'touch');
+    pointer(nodes[1]!, 'pointerenter', 'touch');
+    pointer(nodes[1]!, 'pointerdown', 'touch');
+    nodes[1]!.click();
+    expect(nodes[1]!.getAttribute('aria-checked')).toBe('true');
+    const before = nodes.map((node) => node.style.transform);
+    advanceFrame(4000);
+    expect(nodes.map((node) => node.style.transform)).toEqual(before);
+    fireEvent.keyDown(nodes[1]!, { key: 'ArrowRight' });
+    expect(nodes[2]!.getAttribute('aria-checked')).toBe('true');
+    expect(page.activeElement).toBe(nodes[2]);
+    fireEvent.keyDown(nodes[2]!, { key: 'Home' });
+    expect(nodes[0]!.getAttribute('aria-checked')).toBe('true');
+    fireEvent.keyDown(nodes[0]!, { key: 'End' });
+    expect(nodes[4]!.getAttribute('aria-checked')).toBe('true');
+  });
 });
 
 afterEach(() => {
