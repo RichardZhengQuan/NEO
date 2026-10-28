@@ -9,7 +9,7 @@ import { downloadJson, readFileText } from '../../lib/download.js';
 import { errorMessage } from '../../lib/errors.js';
 import { bumpMemoryVersion } from '../../state/data.js';
 import { pushToast } from '../../state/notifications.js';
-import { requireClient } from '../../state/session.js';
+import { requireClient, useSession } from '../../state/session.js';
 
 function ExportCard(): ReactElement {
   const t = useT();
@@ -48,6 +48,7 @@ function ExportCard(): ReactElement {
 function ImportCard(): ReactElement {
   const t = useT();
   const locale = useLocale();
+  const timezone = useSession((s) => s.settings?.timezone);
   const confirm = useConfirm();
   const input = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<{ name: string; data: MemoryExport } | null>(null);
@@ -115,7 +116,7 @@ function ImportCard(): ReactElement {
             </span>
             <div style={{ fontSize: '0.875rem' }}>
               <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{file.name}</div>
-              <div className="neo-help">{t('memoryData.file_summary', { nodes: file.data.nodes.length, edges: file.data.edges.length, date: formatDateTime(file.data.exportedAt, locale) })}</div>
+              <div className="neo-help">{t('memoryData.file_summary', { nodes: file.data.nodes.length, edges: file.data.edges.length, date: formatDateTime(file.data.exportedAt, locale, timezone) })}</div>
             </div>
           </div>
           <SegmentedControl

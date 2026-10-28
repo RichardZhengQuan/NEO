@@ -7,7 +7,7 @@ import { MEMORY_KINDS, type MemoryStatus } from '@neo/protocol';
 import { ChartRenderer, EmptyState, Icon, Skeleton, formatDateTime, formatNumber, formatRelative, useLocale, useT } from '@neo/ui';
 import { useLoader } from '../../hooks/useLoader.js';
 import { useData } from '../../state/data.js';
-import { requireClient } from '../../state/session.js';
+import { requireClient, useSession } from '../../state/session.js';
 
 const STATUSES: MemoryStatus[] = ['active', 'archived', 'superseded'];
 
@@ -29,6 +29,7 @@ function Tile({ icon, label, value, caption }: { icon: string; label: string; va
 export function StatsTab(): ReactElement {
   const t = useT();
   const locale = useLocale();
+  const timezone = useSession((s) => s.settings?.timezone);
   const version = useData((s) => s.memoryVersion);
   const loader = useLoader(() => requireClient().memory.stats(), [version]);
   const stats = loader.data;
@@ -52,8 +53,8 @@ export function StatsTab(): ReactElement {
         <Tile
           icon="moon-star"
           label={t('stats.last_consolidation')}
-          value={stats.lastConsolidationAt ? formatRelative(stats.lastConsolidationAt, locale) : t('stats.never')}
-          caption={stats.lastConsolidationAt ? formatDateTime(stats.lastConsolidationAt, locale) : undefined}
+          value={stats.lastConsolidationAt != null ? formatRelative(stats.lastConsolidationAt, locale) : t('stats.never')}
+          caption={stats.lastConsolidationAt != null ? formatDateTime(stats.lastConsolidationAt, locale, timezone) : undefined}
         />
       </div>
       <section className="neo-card">

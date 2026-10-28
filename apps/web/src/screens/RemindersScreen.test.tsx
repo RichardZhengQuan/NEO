@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { DEFAULT_SETTINGS, type Reminder } from '@neo/protocol';
 import { ConfirmProvider, I18nProvider } from '@neo/ui';
 import { appDictionaries } from '../i18n.js';
+import * as platform from '../platform/index.js';
 import { useData } from '../state/data.js';
 import { requireClient, startSession, useSession } from '../state/session.js';
 import { ReminderEditor, RemindersScreen } from './RemindersScreen.js';
@@ -102,6 +103,58 @@ describe('ReminderEditor store updates', () => {
 
     // Local draft must survive
     expect(input.value).toBe('User draft notes');
+  });
+});
+
+describe('reminder recurrence end date timezones', () => {
+  let restorePlatform: () => void;
+  beforeEach(() => {
+    vi.stubEnv('TZ', 'Asia/Singapore');
+    const stablePlatform = platform.getPlatform();
+    const spy = vi.spyOn(platform, 'getPlatform').mockReturnValue(stablePlatform);
+    restorePlatform = () => { spy.mockRestore(); };
+  });
+  afterEach(() => {
+    restorePlatform();
+    vi.unstubAllEnvs();
+  });
+
+  it.each(['list', 'editor'] as const)('shows the reminder timezone in the %s and follows editor timezone changes', async (surface) => {
+    const recurring: Reminder = {
+      ...reminder,
+      timezone: 'America/Los_Angeles',
+      recurrence: { freq: 'daily', interval: 1, until: Date.parse('2026-10-28T06:25:00Z') },
+    };
+    useSession.setState({ settings: { ...DEFAULT_SETTINGS, timezone: 'America/New_York' } });
+    useData.setState({ reminders: { [recurring.id]: recurring } });
+    expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe('Asia/Singapore');
+    await act(async () => {
+      render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><RemindersScreen /></ConfirmProvider></I18nProvider>);
+    });
+    if (surface === 'editor') openEditor();
+    const view = surface === 'editor' ? within(screen.getByRole('dialog')) : screen;
+    expect(view.getByText('Every day · until Oct 27, 2026')).toBeTruthy();
+    if (surface === 'editor') {
+      fireEvent.change(view.getByRole('combobox', { name: 'Timezone' }), { target: { value: 'Asia/Tokyo' } });
+      expect(view.getByText('Every day · until Oct 28, 2026')).toBeTruthy();
+      expect(screen.getAllByText('Every day · until Oct 27, 2026')).toHaveLength(1);
+    }
+  });
+
+  it.each(['list', 'editor'] as const)('falls back to the session timezone in the %s when the reminder timezone is empty', async (surface) => {
+    const recurring: Reminder = {
+      ...reminder,
+      timezone: '',
+      recurrence: { freq: 'daily', interval: 1, until: Date.parse('2026-10-28T00:25:00Z') },
+    };
+    useSession.setState({ settings: { ...DEFAULT_SETTINGS, timezone: 'America/New_York' } });
+    useData.setState({ reminders: { [recurring.id]: recurring } });
+    await act(async () => {
+      render(<I18nProvider locale="en" messages={appDictionaries}><ConfirmProvider><RemindersScreen /></ConfirmProvider></I18nProvider>);
+    });
+    if (surface === 'editor') openEditor();
+    const view = surface === 'editor' ? within(screen.getByRole('dialog')) : screen;
+    expect(view.getByText('Every day · until Oct 27, 2026')).toBeTruthy();
   });
 });
 

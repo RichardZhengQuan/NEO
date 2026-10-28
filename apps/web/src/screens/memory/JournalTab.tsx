@@ -9,7 +9,7 @@ import { useLoader } from '../../hooks/useLoader.js';
 import { errorMessage } from '../../lib/errors.js';
 import { bumpMemoryVersion, useData } from '../../state/data.js';
 import { pushToast } from '../../state/notifications.js';
-import { requireClient } from '../../state/session.js';
+import { requireClient, useSession } from '../../state/session.js';
 
 const COUNTS: { key: keyof ConsolidationReport; icon: string }[] = [
   { key: 'factsCreated', icon: 'lightbulb' },
@@ -23,6 +23,7 @@ const COUNTS: { key: keyof ConsolidationReport; icon: string }[] = [
 export function JournalEntry({ report }: { report: ConsolidationReport }): ReactElement {
   const t = useT();
   const locale = useLocale();
+  const timezone = useSession((s) => s.settings?.timezone);
   const seconds = Math.max(0, (report.finishedAt - report.startedAt) / 1000);
   const counts = COUNTS.filter((c) => Number(report[c.key]) > 0);
   return (
@@ -31,7 +32,7 @@ export function JournalEntry({ report }: { report: ConsolidationReport }): React
         <Icon name="moon-star" size={10} />
       </span>
       <header style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '0.25rem 0.625rem' }}>
-        <h3 style={{ margin: 0, fontSize: '0.9688rem', fontWeight: 650 }}>{formatDateTime(report.finishedAt, locale)}</h3>
+        <h3 style={{ margin: 0, fontSize: '0.9688rem', fontWeight: 650 }}>{formatDateTime(report.finishedAt, locale, timezone)}</h3>
         <span className="neo-help">
           {formatRelative(report.finishedAt, locale)} · {t('journal.took', { s: seconds < 10 ? seconds.toFixed(1) : Math.round(seconds) })}
         </span>
