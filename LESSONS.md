@@ -95,5 +95,5 @@ The nightly lessons loop ([docs/AGENT_LOOPS.md](docs/AGENT_LOOPS.md)) adds entri
 ## Claim an issue before you start on it, even outside the build loop
 
 - On 2026-10-28 two agent sessions took the same two bugs, #719 and #722, a few hours apart. Both issues were labelled only `bug`, so the build loop's claim step didn't apply, and neither session added `agent-working`. The first left Codex's fixes uncommitted in its worktrees; the second pushed `agent/719-orbit-rear-hit-layer` (53e596f5, PR #733) and `agent/722-session-tz-dates`, and its #719 commit matches the first session's uncommitted changes file for file. Both sessions spent their runs on the same issues, and the owner had to tell one of them to stand down.
-- Fixed in this file's PR: AGENTS.md now has every session check for `agent-working`, an open PR or a pushed `agent/<N>-*` branch, and claim the issue, before working on it.
+- Fixed in #738: AGENTS.md now has every session check for `agent-working`, an open PR or a pushed `agent/<N>-*` branch, and claim the issue, before working on it.
 - Seen 1× (2026-10-28).
