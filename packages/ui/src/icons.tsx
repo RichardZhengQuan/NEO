@@ -2,7 +2,7 @@
  * Icon — a small line-icon set drawn on a 24×24 grid with 2px strokes
  * (lucide-style shapes, original path data, MIT-compatible).
  *
- * `name` is a kebab-case icon name or a single emoji (models may use either in
+ * `name` is a kebab-case icon name or a single glyph (models may use emoji in
  * generative UI). Unknown names render a neutral dot instead of a misleading
  * glyph.
  */
@@ -262,9 +262,14 @@ const ALIASES: Record<string, string> = {
   magic: 'wand',
 };
 
-/** True for names that look like icon identifiers (kebab-case ASCII). */
-function isIconName(name: string): boolean {
-  return /^[a-z][a-z0-9-]*$/.test(name);
+/** Keep one non-ASCII grapheme, including emoji, symbols and CJK glyphs. */
+function iconGlyph(name: string): string | undefined {
+  const glyph = typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+      .segment(name)[Symbol.iterator]().next().value?.segment
+    // Older browsers: keep emoji sequences, otherwise one non-control code point with extenders.
+    : name.match(/^(?:\p{Regional_Indicator}{2}|[0-9#*][\uFE0E\uFE0F]?\u20E3|\p{Extended_Pictographic}(?:[\p{Grapheme_Extend}\p{Emoji_Modifier}]|\u200D\p{Extended_Pictographic})*|[^\p{C}\p{Zl}\p{Zp}]\p{Grapheme_Extend}*)/u)?.[0];
+  return glyph && /[^\u0000-\u007f]/u.test(glyph) ? glyph : undefined;
 }
 
 /** All known icon names (for docs, pickers and tests). */
@@ -292,18 +297,19 @@ export function Icon(props: {
 }): ReactElement {
   const { name, size = 16, className, label, strokeWidth = 2, style } = props;
   const trimmed = name.trim();
+  const glyph = iconGlyph(trimmed);
 
-  if (!isIconName(trimmed)) {
-    // A single emoji (or short text): render it as text, sized like an icon.
+  if (glyph) {
+    // Text stays inside the slot even when a font draws an unusually wide glyph.
     return (
       <span
         className={className}
         role={label ? 'img' : undefined}
         aria-label={label}
         aria-hidden={label ? undefined : true}
-        style={{ fontSize: size * 0.95, lineHeight: 1, display: 'inline-flex', width: size, height: size, alignItems: 'center', justifyContent: 'center', ...style }}
+        style={{ fontSize: size * 0.95, lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', ...style, width: size, height: size, flexShrink: 0, overflow: 'hidden', whiteSpace: 'nowrap' }}
       >
-        {trimmed.slice(0, 8)}
+        {glyph}
       </span>
     );
   }
