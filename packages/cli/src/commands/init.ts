@@ -16,10 +16,20 @@ export async function runInit(opts: InitOptions): Promise<void> {
   process.stdout.write(`\n  ${bold(cyan('NEO setup wizard'))}\n`);
   process.stdout.write(`  ${dim(`Data directory: ${dataDir}`)}\n\n`);
 
-  const rl = readline.createInterface({ input, output, terminal: true });
+  // Input controls terminal behavior, even when stdout is redirected.
+  const terminal = Boolean(input.isTTY && typeof input.setRawMode === 'function');
+  const rl = readline.createInterface({ input, output, terminal });
+  // Subscribe before any input arrives: question() loses lines between prompts.
+  const lines = terminal ? undefined : rl[Symbol.asyncIterator]();
 
   // Build a prompt function that uses readline
   const prompt: PromptFn = async (question, options) => {
+    if (lines) {
+      process.stdout.write(`  ${question}: `);
+      const answer = await lines.next();
+      if (answer.done) throw new Error('Input ended before setup was complete.');
+      return answer.value;
+    }
     if (options?.secret) {
       // For secret input: use readline but hide the input
       return readSecret(rl, question);
@@ -55,7 +65,7 @@ function getWebAppHint(mode: string): string {
 
 /**
  * Read a secret/password without echoing it.
- * Falls back to a regular prompt if the terminal does not support it.
+ * Only used for TTY input with raw-mode support; other streams use queued lines.
  */
 async function readSecret(rl: readline.Interface, question: string): Promise<string> {
   // Write the question manually so we control the newline
