@@ -9,13 +9,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "node --test scripts/inspect-packaged.test.mjs && vitest run",
     "icon:generate": "node scripts/generate-icon.mjs",
     "start": "electron .",
     "dev": "pnpm --filter @neo/web build && pnpm -r --filter @neo/desktop... build && electron .",
     "pack": "electron-builder --dir",
     "release:mac": "electron-builder --mac --publish always",
-    "release:all": "electron-builder -mwl --publish always"
+    "release:all": "electron-builder -mwl --publish always",
+    "artifact:inspect": "node scripts/inspect-packaged.mjs"
   },
   "dependencies": {
     "@neo/protocol": "workspace:*",
