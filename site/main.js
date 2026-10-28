@@ -67,6 +67,7 @@
   const stage = home.querySelector('.stage');
   const card = home.querySelector('.card');
   const frame = home.querySelector('.figure-frame');
+  const figureHit = home.querySelector('.figure-hit');
   const figure = home.querySelector('.figure');
   const colorImage = figure.querySelector('.figure-color');
   const inkImage = figure.querySelector('.figure-ink');
@@ -165,8 +166,8 @@
   }
   if (colorImage.complete) loadInk(kind);
   else colorImage.addEventListener('load', () => loadInk(kind), { once: true });
-  frame.addEventListener('pointerenter', (event) => { if (event.pointerType !== 'touch') startGlitch(); });
-  frame.addEventListener('pointerdown', startGlitch);
+  figureHit.addEventListener('pointerenter', (event) => { if (event.pointerType !== 'touch') startGlitch(); });
+  figureHit.addEventListener('pointerdown', startGlitch);
 
   function preload(name) {
     const image = new Image();
