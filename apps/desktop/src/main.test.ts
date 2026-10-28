@@ -1,6 +1,9 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
 import { ipcMain, shell } from 'electron';
-import { startServer } from '@neo/server';
+import { startServer, loadConfig } from '@neo/server';
 import { NeoClient } from '@neo/client';
 
 // Mock node:fs/promises so catch-up state persistence doesn't touch disk.
@@ -88,6 +91,9 @@ const electron = await vi.hoisted(async () => {
       quit: vi.fn(),
       requestSingleInstanceLock: vi.fn(() => true),
       setAsDefaultProtocolClient: vi.fn(() => true),
+      exit: vi.fn(),
+      setPath: vi.fn(),
+      setAppLogsPath: vi.fn(),
       getPath: vi.fn(() => '/neo-test'),
       getAppPath: vi.fn(() => '/neo-test/apps/desktop'),
       getLocale: vi.fn(() => 'en-US'),
@@ -144,11 +150,20 @@ vi.mock('electron', () => {
   };
 });
 
+const updaterMock = vi.hoisted(() => ({
+  get: vi.fn(),
+  autoUpdater: {
+    on: vi.fn(),
+    checkForUpdatesAndNotify: vi.fn(),
+    autoDownload: true,
+    autoInstallOnAppQuit: true,
+  },
+}));
 vi.mock('electron-updater', () => ({
   default: {
-    autoUpdater: {
-      on: vi.fn(),
-      checkForUpdatesAndNotify: vi.fn(),
+    get autoUpdater() {
+      updaterMock.get();
+      return updaterMock.autoUpdater;
     },
   },
 }));
@@ -175,7 +190,15 @@ vi.mock('@neo/client', () => ({
   }),
 }));
 
+const disposableTestProfiles: string[] = [];
+const originalUmask = process.umask();
+
 afterEach(() => {
+  vi.unstubAllEnvs();
+  process.umask(originalUmask);
+  updaterMock.autoUpdater.autoDownload = true;
+  updaterMock.autoUpdater.autoInstallOnAppQuit = true;
+  for (const profile of disposableTestProfiles.splice(0)) rmSync(profile, { recursive: true, force: true });
   vi.restoreAllMocks();
   vi.clearAllMocks();
   vi.resetModules();
@@ -1487,5 +1510,59 @@ describe('desktop connect mode', () => {
     );
     const win = electron.BrowserWindow.mock.results[0]?.value;
     expect(win?.loadURL).toHaveBeenCalledWith('http://127.0.0.1:7790');
+  });
+});
+
+
+describe('disposable packaged profile startup', () => {
+  it.each(['local', 'remote'] as const)('isolates paths before updater/lock/ready and suppresses OS/update effects in %s mode', async (mode) => {
+    const profile = realpathSync(mkdtempSync(path.join(tmpdir(), 'neo-desktop-profile-')));
+    disposableTestProfiles.push(profile);
+    vi.stubEnv('NEO_DESKTOP_USER_DATA_DIR', profile);
+    electron.app.isPackaged = true;
+    fsMock.readFile.mockImplementation((p: string) => {
+      if (p.endsWith('startup-mode.json')) return Promise.resolve(JSON.stringify(mode === 'local' ? 'local' : { kind: 'remote' }));
+      return Promise.reject(ENOENT);
+    });
+    server.startServer.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:7777', ownerToken: 'synthetic-profile-token', stop: server.stopServer,
+    });
+    const ready = new Promise<void>((resolve) => {
+      electron.app.on('newListener', (event: string) => {
+        if (event === 'before-quit' && electron.app.listenerCount(event) === (mode === 'local' ? 2 : 1)) resolve();
+      });
+    });
+    await import('./main.js');
+    await ready;
+    expect(electron.BrowserWindow).toHaveBeenCalledTimes(1);
+
+    expect(electron.app.setPath.mock.calls).toEqual([
+      ['userData', profile], ['sessionData', path.join(profile, 'session')], ['crashDumps', path.join(profile, 'crashes')],
+    ]);
+    expect(electron.app.setAppLogsPath).toHaveBeenCalledWith(path.join(profile, 'logs'));
+    const lastPathOrder = Math.max(...electron.app.setPath.mock.invocationCallOrder, ...electron.app.setAppLogsPath.mock.invocationCallOrder);
+    expect(lastPathOrder).toBeLessThan(updaterMock.get.mock.invocationCallOrder[0]!);
+    expect(lastPathOrder).toBeLessThan(electron.app.requestSingleInstanceLock.mock.invocationCallOrder[0]!);
+    expect(lastPathOrder).toBeLessThan(electron.app.whenReady.mock.invocationCallOrder[0]!);
+    expect(electron.app.setAsDefaultProtocolClient).not.toHaveBeenCalled();
+    expect(updaterMock.autoUpdater.checkForUpdatesAndNotify).not.toHaveBeenCalled();
+    expect(updaterMock.autoUpdater.autoDownload).toBe(false);
+    expect(updaterMock.autoUpdater.autoInstallOnAppQuit).toBe(false);
+    const menus = vi.mocked((await import('electron')).Menu.buildFromTemplate).mock.calls.flatMap(([items]) => items);
+    const help = menus.find((item) => item.role === 'help');
+    expect(help?.submenu).toEqual(expect.arrayContaining([expect.objectContaining({ label: 'Check for updates…', enabled: false, click: undefined })]));
+    expect(server.startServer).toHaveBeenCalledTimes(mode === 'local' ? 1 : 0);
+    if (mode === 'local') expect(loadConfig).toHaveBeenCalledWith(expect.objectContaining({ env: {}, path: path.join(profile, '.smoke-config-disabled.json') }));
+  });
+
+  it('fails closed before updater, lock, and ready for an explicit invalid profile', async () => {
+    vi.stubEnv('NEO_DESKTOP_USER_DATA_DIR', 'relative-profile');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(import('./main.js')).rejects.toThrow('absolute private profile');
+    expect(electron.app.exit).toHaveBeenCalledExactlyOnceWith(1);
+    expect(updaterMock.get).not.toHaveBeenCalled();
+    expect(electron.app.requestSingleInstanceLock).not.toHaveBeenCalled();
+    expect(electron.app.whenReady).not.toHaveBeenCalled();
+    expect(electron.app.setAsDefaultProtocolClient).not.toHaveBeenCalled();
   });
 });
