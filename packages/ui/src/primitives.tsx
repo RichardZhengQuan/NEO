@@ -713,7 +713,12 @@ export function Modal(props: {
     <div
       className="neo-modal-backdrop"
       onMouseDown={(e) => {
-        if (dismissable && e.target === e.currentTarget) onClose();
+        if (dismissable && e.target === e.currentTarget) {
+          // Closing restores focus synchronously; don't let the browser's
+          // subsequent mousedown default blur the restored element.
+          e.preventDefault();
+          onClose();
+        }
       }}
     >
       <div
