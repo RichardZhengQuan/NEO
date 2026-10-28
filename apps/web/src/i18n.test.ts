@@ -2,9 +2,10 @@
  * Every string the app asks for exists in English and Simplified Chinese.
  */
 import { describe, expect, it } from 'vitest';
-import { buildMessages, dictionaries } from '@neo/ui';
+import { buildMessages, createTranslator, dictionaries } from '@neo/ui';
 import { AI_CAPABILITIES } from '@neo/protocol';
 import { appDictionaries } from './i18n.js';
+import { describeRecurrence } from './lib/recurrence.js';
 
 const sources = import.meta.glob(['./**/*.ts', './**/*.tsx', '!./**/*.test.ts', '!./**/*.test.tsx'], { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 
@@ -63,6 +64,55 @@ describe('app dictionaries', () => {
     const zh = appDictionaries['zh-CN'];
     const missing = Object.keys(appDictionaries.en).filter((k) => !(k in zh) && !/_(one|other)$/.test(k));
     expect(missing).toEqual([]);
+  });
+
+  it('Chinese covers every English plural base for its plural categories', () => {
+    const en = appDictionaries.en;
+    const zh = appDictionaries['zh-CN'];
+    const bases = [...new Set(Object.keys(en)
+      .filter((key) => /_(one|other)$/.test(key))
+      .map((key) => key.replace(/_(one|other)$/, '')))];
+    const categories = new Intl.PluralRules('zh-CN').resolvedOptions().pluralCategories;
+    const missing = bases.flatMap((base) => categories
+      .filter((category) => zh[`${base}_${category}`] === undefined && zh[`${base}_other`] === undefined)
+      .map((category) => `${base}_${category}`));
+    // Check the raw Chinese dictionary: buildMessages would hide gaps with English.
+    expect(missing).toEqual([]);
+  });
+
+  it.each([
+    ['toast.snoozed', '已推迟 {n} 分钟'],
+    ['memoryList.count', '共 {n} 条记忆'],
+    ['memoryDetail.days', '{n} 天'],
+    ['memoryDetail.links', '{n} 条关联'],
+    ['memoryDetail.coactivations', '一起被想起 {n} 次'],
+    ['journal.count_factsCreated', '新领悟 {n} 条'],
+    ['journal.count_episodesConsolidated', '消化经历 {n} 段'],
+    ['journal.count_linksCreated', '新关联 {n} 条'],
+    ['journal.count_entitiesMerged', '合并 {n} 处'],
+    ['journal.count_archived', '淡去 {n} 条'],
+    ['journal.count_edgesPruned', '清理弱关联 {n} 条'],
+    ['memoryData.exported', '已导出 {n} 条记忆'],
+    ['memoryData.forget_selected', '忘掉 {n} 条记忆'],
+    ['memoryData.forget_confirm', '{n} 条记忆将被永久删除。'],
+    ['memoryData.forgotten', '已忘掉 {n} 条记忆'],
+    ['recur.count', '共 {n} 次'],
+    ['ai.minutes', '{n} 分钟'],
+    ['memorySettings.hours', '每 {n} 小时'],
+  ])('localizes %s for Chinese counts of 1 and 5', (key, expected) => {
+    const t = createTranslator('zh-CN', buildMessages('zh-CN', appDictionaries));
+    for (const n of [1, 5]) expect(t(key, { n })).toBe(expected.replace('{n}', String(n)));
+  });
+
+  it.each([
+    ['hourly', '每 2 小时'],
+    ['daily', '每 2 天'],
+    ['weekly', '每 2 周'],
+    ['monthly', '每 2 个月'],
+    ['yearly', '每 2 年'],
+  ] as const)('localizes the repeat count in a Chinese %s recurrence summary', (freq, expected) => {
+    const t = createTranslator('zh-CN', buildMessages('zh-CN', appDictionaries));
+    expect(describeRecurrence({ freq, interval: 2, count: 5 }, t, 'zh-CN')).toBe(`${expected} · 共 5 次`);
   });
 
   it('has no removed persona or trait settings keys', () => {
