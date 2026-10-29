@@ -6,6 +6,62 @@ import { I18nProvider } from './i18n.js';
 
 afterEach(cleanup);
 
+describe('category label containment', () => {
+  const fixtures = [
+    { name: 'singleton', labels: ['👩🏽‍💻'.repeat(12)] },
+    { name: 'long Unicode and text-only labels', labels: ['👩🏽‍💻'.repeat(10), 'e\u0301'.repeat(25), 'الفئة الطويلة'.repeat(4), '<img src=x onerror=alert(1)>'] },
+    { name: 'many categories', labels: Array.from({ length: 80 }, (_, i) => `Category ${i} ${'类别'.repeat(12)}`) },
+  ];
+  const cases = (['line', 'area', 'bar'] as const).flatMap((kind) => [1280, 390, 360].flatMap((width) => fixtures.map((fixture) => ({ kind, width, ...fixture }))));
+  it.each(cases)('bounds $kind labels at $width px for $name', ({ kind, width, labels }) => {
+    const measured = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(width);
+    try {
+      const block: ChartBlock = { type: 'chart', kind, series: [{ name: 'Values', data: labels.map((x, i) => ({ x, y: i % 2 ? 10 : -10 })) }] };
+      const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block} /></I18nProvider>);
+      const cells = [...container.querySelectorAll('foreignObject[data-chart-category]')];
+      expect(cells.length).toBeGreaterThan(0);
+      expect(Number(cells[0]!.getAttribute('data-chart-category'))).toBe(0);
+      expect(Number(cells[cells.length - 1]!.getAttribute('data-chart-category'))).toBe(labels.length - 1);
+      let previousRight = 0;
+      for (const cell of cells) {
+        const left = Number(cell.getAttribute('x'));
+        const right = left + Number(cell.getAttribute('width'));
+        expect(left).toBeGreaterThanOrEqual(0);
+        expect(right).toBeLessThanOrEqual(width);
+        expect(right).toBeGreaterThan(left);
+        expect(left).toBeGreaterThanOrEqual(previousRight);
+        previousRight = right;
+        const full = labels[Number(cell.getAttribute('data-chart-category'))]!;
+        const text = cell.querySelector('div')!;
+        // CSS performs glyph-aware ellipsis in a real browser; the DOM retains
+        // complete Unicode text, title and accessible category identity.
+        expect(text.textContent).toBe(full);
+        expect(text.getAttribute('title')).toBe(full);
+        expect(text.getAttribute('aria-label')).toBe(full);
+        expect(text.getAttribute('dir')).toBe('auto');
+        expect(text.style.whiteSpace).toBe('nowrap');
+        expect(text.style.overflow).toBe('hidden');
+        expect(text.style.textOverflow).toBe('ellipsis');
+        expect(text.style.fontSize).toBe('11px');
+      }
+      expect([...container.querySelectorAll('tbody th')].map((cell) => cell.textContent)).toEqual(labels);
+      expect(container.querySelector('img')).toBeNull();
+    } finally { measured.mockRestore(); }
+  });
+
+  it.each([1280, 390, 360])('preserves line plot endpoints at %i px while aligning category text inside', (width) => {
+    const measured = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(width);
+    try {
+      const block: ChartBlock = { type: 'chart', kind: 'line', series: [{ name: 'Values', data: [{ x: 'Category 0', y: -10 }, { x: 'Category 1', y: 10 }] }] };
+      const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block} /></I18nProvider>);
+      expect([...container.querySelectorAll('circle')].map((point) => Number(point.getAttribute('cx')))).toEqual([33.8, width - 12]);
+      const labels = [...container.querySelectorAll('foreignObject[data-chart-category] div')];
+      expect((labels[0] as HTMLElement).style.textAlign).toBe('left');
+      expect((labels[1] as HTMLElement).style.textAlign).toBe('right');
+    } finally { measured.mockRestore(); }
+  });
+});
+
 describe('niceTicks', () => {
   it.each([
     { domain: 'positive maximum', min: 0, max: Number.MAX_VALUE },

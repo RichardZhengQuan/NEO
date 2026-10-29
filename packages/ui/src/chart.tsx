@@ -234,6 +234,25 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
   const band = plotW / Math.max(n, 1);
   const xCenter = (i: number) => (kind === 'bar' ? pad.left + band * i + band / 2 : pad.left + (n <= 1 ? plotW / 2 : (plotW * i) / (n - 1)));
   const labelEvery = Math.max(1, Math.ceil(n / Math.max(1, Math.floor(plotW / 58))));
+  const labelIndexes = categories.flatMap((_, i) => i % labelEvery === 0 ? [i] : []);
+  if (n > 1 && labelIndexes[labelIndexes.length - 1] !== n - 1) {
+    if (labelIndexes.length > 1 && n - 1 - labelIndexes[labelIndexes.length - 1]! <= labelEvery / 2) labelIndexes.pop();
+    labelIndexes.push(n - 1);
+  }
+  const categoryLabels = labelIndexes.map((index, li) => {
+    const x = xCenter(index);
+    let left = li === 0 ? 4 : (xCenter(labelIndexes[li - 1]!) + x) / 2 + 4;
+    let right = li === labelIndexes.length - 1 ? width - 4 : (x + xCenter(labelIndexes[li + 1]!)) / 2 - 4;
+    let align: 'left' | 'right' | 'center' = 'center';
+    if (kind !== 'bar' && labelIndexes.length > 1 && li === 0) { left = x; align = 'left'; }
+    else if (kind !== 'bar' && labelIndexes.length > 1 && li === labelIndexes.length - 1) { right = x; align = 'right'; }
+    else {
+      const half = Math.max(0, Math.min(x - left, right - x));
+      left = x - half;
+      right = x + half;
+    }
+    return { index, left, width: Math.max(0, right - left), align };
+  });
 
   const tipFor = (ci: number): TooltipData => {
     const rows = block.series.map((s, si) => ({ name: s.name, value: rawValues[si]![ci] === null ? '—' : fmt(rawValues[si]![ci]!), color: color(si) }));
@@ -386,13 +405,18 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
         )}
         {bars}
         {lines}
-        {categories.map((c, i) =>
-          i % labelEvery === 0 ? (
-            <text key={i} className="neo-chart__axis" x={xCenter(i)} y={pad.top + plotH + 17} textAnchor="middle">
-              {String(c).length > 12 ? `${String(c).slice(0, 11)}…` : String(c)}
-            </text>
-          ) : null,
-        )}
+        {categoryLabels.map(({ index, left, width: labelWidth, align }) => (
+          <foreignObject key={index} data-chart-category={index} x={left} y={pad.top + plotH + 5} width={labelWidth} height={18} overflow="hidden">
+            <div
+              dir="auto"
+              title={String(categories[index])}
+              aria-label={String(categories[index])}
+              style={{ color: 'var(--neo-text-muted)', fontFamily: 'inherit', fontSize: 11, lineHeight: '17px', textAlign: align, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', unicodeBidi: 'plaintext' }}
+            >
+              {String(categories[index])}
+            </div>
+          </foreignObject>
+        ))}
         {block.xLabel && (
           <text className="neo-chart__axis" x={pad.left + plotW / 2} y={height - 6} textAnchor="middle">
             {block.xLabel}
