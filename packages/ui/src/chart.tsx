@@ -192,15 +192,26 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
   if (kind !== 'line' || lo > 0) lo = Math.min(lo, 0);
   if (kind !== 'line' || hi < 0) hi = Math.max(hi, 0);
   const ticks = niceTicks(lo, hi);
-  const yMin = ticks[0]!;
-  const yMax = ticks[ticks.length - 1]!;
+  // Extreme finite domains may have no usable ticks, or a bounded tick loop
+  // may stop before the last data point. Keep the plotting domain complete.
+  const yMin = Math.min(lo, ticks[0] ?? lo);
+  const yMax = Math.max(hi, ticks[ticks.length - 1] ?? hi);
+  const span = yMax - yMin;
+  const scale = Math.max(Math.abs(yMin), Math.abs(yMax));
 
   const height = width < 420 ? 200 : 240;
-  const labelChars = Math.max(...ticks.map((v) => axisFmt(v).length));
+  const labelChars = Math.max(0, ...ticks.map((v) => axisFmt(v).length));
   const pad = { top: 12, right: 12, bottom: block.xLabel ? 44 : 28, left: Math.min(72, 14 + labelChars * 6.6) + (block.yLabel ? 14 : 0) };
   const plotW = Math.max(40, width - pad.left - pad.right);
   const plotH = height - pad.top - pad.bottom;
-  const y = (v: number) => pad.top + plotH - ((v - yMin) / (yMax - yMin || 1)) * plotH;
+  const y = (v: number) => {
+    // Divide before subtracting when opposite finite extrema overflow their
+    // difference. Ordinary domains retain their existing arithmetic/geometry.
+    const fraction = Number.isFinite(span)
+      ? (v - yMin) / (span || 1)
+      : (v / scale - yMin / scale) / (yMax / scale - yMin / scale);
+    return pad.top + plotH - fraction * plotH;
+  };
   const band = plotW / Math.max(n, 1);
   const xCenter = (i: number) => (kind === 'bar' ? pad.left + band * i + band / 2 : pad.left + (n <= 1 ? plotW / 2 : (plotW * i) / (n - 1)));
   const labelEvery = Math.max(1, Math.ceil(n / Math.max(1, Math.floor(plotW / 58))));
@@ -480,10 +491,13 @@ export function ChartRenderer({ block }: { block: ChartBlock }): ReactElement {
     }
   };
   const axisFmt = (v: number) => {
+    const extreme = Math.abs(v) >= 1e21;
     try {
-      return new Intl.NumberFormat(locale, { notation: Math.abs(v) >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 2 }).format(v);
+      // Compact suffixes stop scaling at a locale's largest named magnitude;
+      // scientific notation keeps extreme axes inside their bounded gutter.
+      return new Intl.NumberFormat(locale, { notation: extreme ? 'scientific' : Math.abs(v) >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 2 }).format(v);
     } catch {
-      return String(v);
+      return extreme ? v.toExponential(2) : String(v);
     }
   };
   const isPie = block.kind === 'pie' || block.kind === 'donut';
