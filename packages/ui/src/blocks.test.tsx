@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ChangesBlock, Reminder, ReminderBlock, UIBlock } from '@neo/protocol';
 import { BlockRenderer, formatCell, type LiveData, type OnUIAction } from './blocks.js';
@@ -249,5 +249,59 @@ describe('formatted blocks', () => {
     const { container } = render(widget({ type: 'table', columns: [{ key: 'old', label: 'Old', format: 'currency' }, { key: 'eur', label: 'Euro', format: 'currency', currency: 'EUR' }, { key: 'jpy', label: 'Yen', format: 'currency', currency: 'JPY' }], rows: [{ old: 1234.5, eur: 1234.5, jpy: 1234.5 }] }, undefined, undefined, locale));
     expect(Array.from(container.querySelectorAll('td'), (cell) => cell.textContent)).toEqual(['USD', 'EUR', 'JPY'].map((currency) => new Intl.NumberFormat(locale, { style: 'currency', currency }).format(1234.5)));
     expect(formatCell(1234.5, 'currency', locale, 'EUR')).toBe(new Intl.NumberFormat(locale, { style: 'currency', currency: 'EUR' }).format(1234.5));
+  });
+});
+
+
+describe('timeline timezone context', () => {
+  const instant = Date.parse('2026-10-29T01:30:00Z');
+  const timeline: UIBlock = { type: 'timeline', items: [{ time: instant, title: 'Boundary' }, { time: 0, title: 'Epoch' }, { time: 'Tomorrow morning', title: 'Literal' }] };
+  const NativeDateTimeFormat = Intl.DateTimeFormat;
+  beforeEach(() => {
+    vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (locale, options) {
+      return new NativeDateTimeFormat(locale, { ...options, timeZone: options?.timeZone ?? 'Asia/Singapore' });
+    });
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+  const showTimeline = (block: UIBlock, timezone?: string) => render(<I18nProvider locale="en"><BlockRenderer block={block} timezone={timezone} /></I18nProvider>);
+  const displayedTimes = (container: HTMLElement) => Array.from(container.querySelectorAll('.neo-timeline__time'), (time) => time.textContent);
+
+  it('uses the session zone across the device date boundary, including epoch zero and literal strings', () => {
+    expect(new Intl.DateTimeFormat().resolvedOptions().timeZone).toBe('Asia/Singapore');
+    const view = showTimeline(timeline, 'America/New_York');
+    expect(displayedTimes(view.container)).toEqual(['Oct 28, 2026, 9:30 PM', 'Dec 31, 1969, 7:00 PM', 'Tomorrow morning']);
+    expect(view.container.querySelector('time')?.getAttribute('datetime')).toBe('2026-10-29T01:30:00.000Z');
+    expect(view.container.querySelectorAll('time')[1]?.getAttribute('datetime')).toBe('1970-01-01T00:00:00.000Z');
+    expect(view.container.querySelectorAll('time')[2]?.hasAttribute('datetime')).toBe(false);
+  });
+
+  it('lets the explicit block zone override session context and retains device fallback without either', () => {
+    const explicit = showTimeline({ ...timeline, timezone: 'Asia/Tokyo' }, 'America/New_York');
+    expect(displayedTimes(explicit.container)[0]).toBe('Oct 29, 2026, 10:30 AM');
+    explicit.unmount();
+    const legacy = showTimeline(timeline);
+    expect(displayedTimes(legacy.container)[0]).toBe('Oct 29, 2026, 9:30 AM');
+  });
+
+  it.each(['', 'Not/A_Zone'])('ignores an unusable explicit zone %j in favor of the valid session zone', (timezone) => {
+    const view = showTimeline({ ...timeline, timezone }, 'America/New_York');
+    expect(displayedTimes(view.container)).toEqual(['Oct 28, 2026, 9:30 PM', 'Dec 31, 1969, 7:00 PM', 'Tomorrow morning']);
+  });
+
+  it('falls back safely to the device when neither zone is usable', () => {
+    const view = showTimeline({ ...timeline, timezone: 'Not/A_Zone' }, 'Also/Invalid');
+    expect(displayedTimes(view.container)[0]).toBe('Oct 29, 2026, 9:30 AM');
+  });
+
+  const containers: [string, (child: UIBlock) => UIBlock][] = [
+    ['card', (child) => ({ type: 'card', children: [child] })],
+    ['grid', (child) => ({ type: 'grid', columns: 1, children: [child] })],
+    ['stack', (child) => ({ type: 'stack', children: [child] })],
+    ['tabs', (child) => ({ type: 'tabs', tabs: [{ id: 'one', label: 'One', children: [child] }] })],
+    ['accordion', (child) => ({ type: 'accordion', items: [{ id: 'one', title: 'One', open: true, children: [child] }] })],
+  ];
+  it.each(containers)('preserves session timezone through %s children', (_name, nest) => {
+    const view = showTimeline(nest(timeline), 'America/New_York');
+    expect(displayedTimes(view.container)[0]).toBe('Oct 28, 2026, 9:30 PM');
   });
 });

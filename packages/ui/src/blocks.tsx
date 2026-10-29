@@ -33,6 +33,7 @@ import {
   UIBlockSchema,
   isSafeImageUrl,
   isSafeLinkUrl,
+  isValidTimeZone,
   uiBlockToText,
   widgetActionId,
   type AccordionBlock,
@@ -104,6 +105,8 @@ export interface LiveData {
 
 export interface BlockRendererProps {
   block: UIBlock;
+  /** Viewer/session zone for numeric timeline times without an explicit block zone. */
+  timezone?: string;
   uiId?: string;
   onAction?: OnUIAction;
   live?: LiveData;
@@ -235,7 +238,7 @@ function HeadingRenderer({ block }: { block: HeadingBlock }): ReactElement {
   return <h2 className="neo-block-heading">{block.text}</h2>;
 }
 
-function CardRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: CardBlock }): ReactElement {
+function CardRenderer({ block, uiId, onAction, live, depth, timezone, blockPath = [] }: BlockRendererProps & { block: CardBlock }): ReactElement {
   const runner = useActionRunner(onAction, uiId);
   const hasImage = Boolean(block.imageUrl && isSafeImageUrl(block.imageUrl));
   const body = (
@@ -255,7 +258,7 @@ function CardRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: Bl
       )}
       {block.children && block.children.length > 0 && (
         <div style={{ marginTop: block.title || block.icon || block.subtitle ? '0.75rem' : 0 }}>
-          <BlockList blocks={block.children} parentPath={blockPath} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+          <BlockList blocks={block.children} parentPath={blockPath} uiId={uiId} onAction={onAction} live={live} timezone={timezone} depth={(depth ?? 0) + 1} />
         </div>
       )}
       {block.actions && block.actions.length > 0 && (
@@ -809,28 +812,28 @@ function DividerRenderer({ block }: { block: DividerBlock }): ReactElement {
 
 // ── containers ───────────────────────────────────────────────────────────
 
-function GridRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: GridBlock }): ReactElement {
+function GridRenderer({ block, uiId, onAction, live, depth, timezone, blockPath = [] }: BlockRendererProps & { block: GridBlock }): ReactElement {
   const cols = Math.min(4, Math.max(1, Math.round(block.columns)));
   return (
     <div className="neo-grid" data-cols={cols} style={{ ['--neo-cols' as string]: cols }}>
       {block.children.map((child, i) => (
-        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} blockPath={[...blockPath, i]} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} blockPath={[...blockPath, i]} block={child} uiId={uiId} onAction={onAction} live={live} timezone={timezone} depth={(depth ?? 0) + 1} />
       ))}
     </div>
   );
 }
 
-function StackRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: StackBlock }): ReactElement {
+function StackRenderer({ block, uiId, onAction, live, depth, timezone, blockPath = [] }: BlockRendererProps & { block: StackBlock }): ReactElement {
   return (
     <div className="neo-stack" data-direction={block.direction ?? 'vertical'} data-gap={block.gap ?? 'md'}>
       {block.children.map((child, i) => (
-        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} blockPath={[...blockPath, i]} block={child} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+        <BlockRenderer key={child.id ?? i} stateKey={blockStateKey(child, i)} blockPath={[...blockPath, i]} block={child} uiId={uiId} onAction={onAction} live={live} timezone={timezone} depth={(depth ?? 0) + 1} />
       ))}
     </div>
   );
 }
 
-function TabsRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: TabsBlock }): ReactElement {
+function TabsRenderer({ block, uiId, onAction, live, depth, timezone, blockPath = [] }: BlockRendererProps & { block: TabsBlock }): ReactElement {
   const prefix = useId();
   const [active, setActive] = useRetainedState('tabs:active', block.tabs[0]?.id ?? '');
   const currentIndex = Math.max(0, block.tabs.findIndex((tab) => tab.id === active));
@@ -848,7 +851,7 @@ function TabsRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: Bl
       {current && (
         <div className="neo-tabpanel" role="tabpanel" id={`${prefix}-panel-${current.id}`} aria-labelledby={`${prefix}-tab-${current.id}`}>
           <RetainedStateScope key={current.id} scope={`tab:${current.id}`}>
-            <BlockList blocks={current.children} parentPath={blockPath} childOffset={childOffset} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+            <BlockList blocks={current.children} parentPath={blockPath} childOffset={childOffset} uiId={uiId} onAction={onAction} live={live} timezone={timezone} depth={(depth ?? 0) + 1} />
           </RetainedStateScope>
         </div>
       )}
@@ -856,7 +859,7 @@ function TabsRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: Bl
   );
 }
 
-function AccordionRenderer({ block, uiId, onAction, live, depth, blockPath = [] }: BlockRendererProps & { block: AccordionBlock }): ReactElement {
+function AccordionRenderer({ block, uiId, onAction, live, depth, timezone, blockPath = [] }: BlockRendererProps & { block: AccordionBlock }): ReactElement {
   const prefix = useId();
   const [open, setOpen] = useRetainedState<Record<string, boolean>>('accordion:open', () => Object.fromEntries(block.items.map((item) => [item.id, item.open ?? false])));
   return (
@@ -882,7 +885,7 @@ function AccordionRenderer({ block, uiId, onAction, live, depth, blockPath = [] 
             {isOpen && (
               <div id={panelId} className="neo-accordion__panel">
                 <RetainedStateScope scope={`item:${item.id}`}>
-                  <BlockList blocks={item.children} parentPath={blockPath} childOffset={childOffset} uiId={uiId} onAction={onAction} live={live} depth={(depth ?? 0) + 1} />
+                  <BlockList blocks={item.children} parentPath={blockPath} childOffset={childOffset} uiId={uiId} onAction={onAction} live={live} timezone={timezone} depth={(depth ?? 0) + 1} />
                 </RetainedStateScope>
               </div>
             )}
@@ -926,8 +929,9 @@ function LinkRenderer({ block }: { block: LinkBlock }): ReactElement {
   );
 }
 
-function TimelineRenderer({ block }: { block: TimelineBlock }): ReactElement {
+function TimelineRenderer({ block, timezone }: { block: TimelineBlock; timezone?: string }): ReactElement {
   const locale = useLocale();
+  const zone = isValidTimeZone(block.timezone) ? block.timezone : timezone;
   return (
     <div>
       {block.title && <p className="neo-block-title">{block.title}</p>}
@@ -939,7 +943,7 @@ function TimelineRenderer({ block }: { block: TimelineBlock }): ReactElement {
             </span>
             <div style={{ minWidth: 0, paddingTop: '0.125rem' }}>
               <time className="neo-timeline__time" dateTime={typeof item.time === 'number' ? new Date(item.time).toISOString() : undefined}>
-                {typeof item.time === 'number' ? formatDateTime(item.time, locale) : item.time}
+                {typeof item.time === 'number' ? formatDateTime(item.time, locale, zone) : item.time}
               </time>
               <p className="neo-timeline__title">{item.title}</p>
               {item.description && <p className="neo-timeline__desc">{item.description}</p>}
@@ -1399,7 +1403,7 @@ function renderBlock(props: BlockRendererProps): ReactElement {
     case 'link':
       return <LinkRenderer block={block} />;
     case 'timeline':
-      return <TimelineRenderer block={block} />;
+      return <TimelineRenderer block={block} timezone={props.timezone} />;
     case 'keyvalue':
       return <KeyValueRenderer block={block} />;
     case 'tags':
@@ -1442,6 +1446,7 @@ export function BlockRenderer(props: BlockRendererProps): ReactElement | null {
 
 export function BlockList({
   blocks,
+  timezone,
   uiId,
   onAction,
   live,
@@ -1450,6 +1455,7 @@ export function BlockList({
   childOffset = 0,
 }: {
   blocks: UIBlock[];
+  timezone?: string;
   uiId?: string;
   onAction?: OnUIAction;
   live?: LiveData;
@@ -1460,7 +1466,7 @@ export function BlockList({
   return (
     <div className={`neo-blocks${depth === 0 ? ' neo-blocks--root' : ''}`}>
       {blocks.map((block, i) => (
-        <BlockRenderer key={block?.id ?? i} stateKey={blockStateKey(block, i)} blockPath={parentPath ? [...parentPath, childOffset + i] : []} block={block} uiId={uiId} onAction={onAction} live={live} depth={depth} />
+        <BlockRenderer key={block?.id ?? i} stateKey={blockStateKey(block, i)} blockPath={parentPath ? [...parentPath, childOffset + i] : []} block={block} uiId={uiId} onAction={onAction} live={live} timezone={timezone} depth={depth} />
       ))}
     </div>
   );

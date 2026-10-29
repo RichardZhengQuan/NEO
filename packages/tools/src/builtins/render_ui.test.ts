@@ -27,8 +27,18 @@ it('exposes supported presentation props in the compact catalogue', () => {
   expect(description).toMatch(/- form:.*placeholder\?.*help\?.*min\?.*max\?.*step\?/);
   expect(description).toMatch(/- reminder:.*notes\?.*timezone\?.*recurrenceText\?/);
   expect(description).toMatch(/- countdown:.*timezone\?/);
+  expect(description).toMatch(/- timeline:.*timezone\?/);
   expect(description).toMatch(/- table:.*currency\?.*USD default/);
   expect(description).toMatch(/- memory:.*content\?.*recall with show:true/);
   expect(description).toContain('images: http(s)');
   expect(description.length).toBeLessThan(4000);
+});
+
+
+it('preserves an explicit timeline timezone and keeps old blocks unstamped', async () => {
+  const legacy = { type: 'timeline', items: [{ time: 0, title: 'Epoch' }] };
+  const explicit = { ...legacy, timezone: 'America/New_York' };
+  const result = await renderUiTool.execute({ blocks: [legacy, explicit] }, context);
+  expect(result.ui).toEqual([legacy, explicit]);
+  expect(result.output).toMatchObject({ shown: true, text: expect.stringContaining('Dec 31, 1969, 7:00 PM') });
 });

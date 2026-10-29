@@ -282,6 +282,8 @@ function RecalledChip({ recalled, onOpenMemory }: { recalled: RecalledMemorySumm
 
 export interface MessageViewProps {
   message: Message;
+  /** Viewer/session zone for timeline UI blocks that do not specify their own. */
+  timezone?: string;
   /** This message is the assistant message of the running turn. */
   streaming?: boolean;
   confirmations?: ToolConfirmation[];
@@ -341,6 +343,7 @@ function SourcesView({ sources }: { sources: Source[] }): ReactElement | null {
 export function MessageView(props: MessageViewProps): ReactElement {
   const {
     message,
+    timezone,
     streaming = false,
     confirmations = [],
     onConfirm,
@@ -461,7 +464,7 @@ export function MessageView(props: MessageViewProps): ReactElement {
             <RetainedStateScope scope={message.id}>
               <RetainedStateScope scope="ui">
                 <RetainedStateScope scope={part.id}>
-                  <BlockList blocks={[part.block]} uiId={part.id} onAction={onAction} live={live} />
+                  <BlockList blocks={[part.block]} timezone={timezone} uiId={part.id} onAction={onAction} live={live} />
                 </RetainedStateScope>
               </RetainedStateScope>
             </RetainedStateScope>

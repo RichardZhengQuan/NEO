@@ -264,3 +264,29 @@ it('keeps the toggle off when the server rejects entering privacy', async () => 
   expect(screen.getByRole('button', { name: 'Off the record' }).getAttribute('aria-pressed')).toBe('false');
   expect(screen.queryByText('Off the record — not remembered, and erased when you turn this off.')).toBeNull();
 });
+
+
+it('renders stored timeline UI in the current session timezone across the device date boundary', async () => {
+  const NativeDateTimeFormat = Intl.DateTimeFormat;
+  const device = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (locale, options) {
+      return new NativeDateTimeFormat(locale, { ...options, timeZone: options?.timeZone ?? 'Asia/Singapore' });
+    });
+  try {
+    expect(new Intl.DateTimeFormat().resolvedOptions().timeZone).toBe('Asia/Singapore');
+    const instant = Date.parse('2026-10-29T01:30:00Z');
+    const stored: Message = { ...message('zoned', instant), role: 'assistant', parts: [
+      { type: 'ui', id: 'ui_legacy', block: { type: 'card', children: [{ type: 'timeline', items: [{ time: instant, title: 'Session time' }, { time: 0, title: 'Epoch' }, { time: 'Tomorrow morning', title: 'Literal' }] }] } },
+      { type: 'ui', id: 'ui_explicit', block: { type: 'timeline', timezone: 'Asia/Tokyo', items: [{ time: instant, title: 'Explicit time' }] } },
+    ] };
+    useSession.setState({ settings: { ...DEFAULT_SETTINGS, timezone: 'America/New_York' } });
+    useTimeline.setState({ messages: [stored] });
+    const view = show();
+    const times = () => Array.from(view.container.querySelectorAll('.neo-timeline__time'), (node) => node.textContent);
+    expect(times()).toEqual(['Oct 28, 2026, 9:30 PM', 'Dec 31, 1969, 7:00 PM', 'Tomorrow morning', 'Oct 29, 2026, 10:30 AM']);
+    await act(async () => { useSession.setState({ settings: { ...DEFAULT_SETTINGS, timezone: 'UTC' } }); });
+    expect(times()).toEqual(['Oct 29, 2026, 1:30 AM', 'Jan 1, 1970, 12:00 AM', 'Tomorrow morning', 'Oct 29, 2026, 10:30 AM']);
+    expect(useTimeline.getState().messages[0]).toBe(stored);
+  } finally {
+    device.mockRestore();
+  }
+});

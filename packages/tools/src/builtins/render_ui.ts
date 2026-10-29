@@ -30,7 +30,7 @@ const BLOCK_PROPS: Record<UIBlockType, string> = {
   tabs: 'tabs[{id, label, icon?, children[]}]',
   accordion: 'items[{id, title, open?, children[]}]',
   link: 'url, title, description?, imageUrl?, siteName?',
-  timeline: 'items[{time (epoch ms or text), title, description?, icon?, tone?}], title?',
+  timeline: 'items[{time (epoch ms or text), title, description?, icon?, tone?}], title?, timezone?',
   keyvalue: 'items[{key, value}], title?',
   tags: 'items[{label, tone?, icon?}]',
   countdown: 'label, until (epoch ms), timezone?, doneText?',
