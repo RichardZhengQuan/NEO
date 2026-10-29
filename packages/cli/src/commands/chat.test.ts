@@ -11,6 +11,8 @@ const repl = vi.hoisted(() => ({
   setPrompt: vi.fn(),
   closeConnection: vi.fn(),
 }));
+// These mocked REPL fixtures exercise the interactive terminal path.
+vi.mock('node:process', () => ({ stdin: { isTTY: true }, stdout: process.stdout }));
 vi.mock('@neo/client', () => ({ NeoClient: vi.fn(function () { return repl.client; }) }));
 vi.mock('node:readline/promises', () => ({
   createInterface: () => ({

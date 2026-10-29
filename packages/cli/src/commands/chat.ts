@@ -53,7 +53,31 @@ export async function runChat(opts: ChatOptions): Promise<void> {
   const recent = await client.timeline.list({ limit: 6 });
 
   // Set up readline interface
-  const rl = readline.createInterface({ input, output, terminal: true });
+  const terminal = Boolean(input.isTTY);
+  const rl = readline.createInterface({ input, output, terminal });
+  // Subscribe before input arrives: question() drops lines between prompts.
+  // One iterator serves messages and both confirmation paths in pipe order.
+  const pipedLines = terminal ? undefined : rl[Symbol.asyncIterator]();
+  let pipedStopped = false;
+  const questions: Pick<readline.Interface, 'question'> = {
+    question: async (query: string, options?: { signal?: AbortSignal }) => {
+      if (!pipedLines) return rl.question(query, options ?? {});
+      process.stdout.write(query);
+      options?.signal?.throwIfAborted();
+      if (pipedStopped) throw new DOMException('Aborted', 'AbortError');
+      const onAbort = () => { pipedStopped = true; rl.close(); };
+      options?.signal?.addEventListener('abort', onAbort, { once: true });
+      try {
+        const answer = await pipedLines.next();
+        options?.signal?.throwIfAborted();
+        if (pipedStopped) throw new DOMException('Aborted', 'AbortError');
+        if (answer.done) throw new InputEndedError();
+        return answer.value;
+      } finally {
+        options?.signal?.removeEventListener('abort', onAbort);
+      }
+    },
+  };
 
   process.stdout.write(
     `\n  ${bold(cyan('NEO chat'))}  ${dim('timeline')}\n` +
@@ -73,7 +97,10 @@ export async function runChat(opts: ChatOptions): Promise<void> {
   let interrupted = false;
 
   // Handle Ctrl+C
-  rl.on('SIGINT', () => {
+  const onInterrupt = () => {
+    // A pipe has no interactive second-Ctrl+C gesture. Close its queued reader
+    // even during /forget (which has no streaming turn controller).
+    if (pipedLines) { pipedStopped = true; rl.close(); }
     if (abortController) {
       abortController.abort();
       pendingConfirmationId = null;
@@ -83,7 +110,7 @@ export async function runChat(opts: ChatOptions): Promise<void> {
       interrupted = false;
       rl.setPrompt(prompt());
       rl.prompt();
-    } else {
+    } else if (!pipedLines) {
       if (interrupted) {
         process.stdout.write('\n  Goodbye!\n');
         void cleanup(embeddedServer, client, ctx.offRecord, ctx.connection).then(() => process.exit(0));
@@ -94,13 +121,14 @@ export async function runChat(opts: ChatOptions): Promise<void> {
         setTimeout(() => { interrupted = false; }, 2000);
       }
     }
-  });
+  };
+  rl.on('SIGINT', onInterrupt);
 
   const prompt = () => `${bold(cyan('you'))}${ctx.offRecord ? magenta(' [off the record]') : ''}> `;
   rl.setPrompt(prompt());
   rl.prompt();
 
-  rl.on('line', async (line: string) => {
+  const onLine = async (line: string) => {
     const text = line.trim();
     if (!text) {
       rl.prompt();
@@ -109,7 +137,7 @@ export async function runChat(opts: ChatOptions): Promise<void> {
 
     // Slash commands
     if (text.startsWith('/')) {
-      await handleSlash(text, rl, client, ctx);
+      await handleSlash(text, questions, client, ctx);
       rl.setPrompt(prompt());
       rl.prompt();
       return;
@@ -155,7 +183,8 @@ export async function runChat(opts: ChatOptions): Promise<void> {
           for (const l of lines) process.stdout.write(`${l.text}\n`);
           // Inline prompt for y/n/a
           rl.resume();
-          const answer = await rl.question('  → ', { signal: turnController.signal });
+          const answer = await questions.question('  → ', { signal: turnController.signal });
+          turnController.signal.throwIfAborted();
           rl.pause();
           const approve = answer.trim() === 'y' || answer.trim() === 'a';
           const always = answer.trim() === 'a';
@@ -175,7 +204,11 @@ export async function runChat(opts: ChatOptions): Promise<void> {
       }
       if (onSameLine) process.stdout.write('\n');
     } catch (err: unknown) {
-      if ((err as { name?: string }).name === 'AbortError') {
+      if (err instanceof InputEndedError) {
+        turnController.abort();
+        await client.timeline.cancel().catch(() => undefined);
+        process.stdout.write(red('  Input ended before a confirmation answer.\n'));
+      } else if ((err as { name?: string }).name === 'AbortError') {
         // cancelled, already printed
       } else if (err instanceof NeoError && err.code === 'no_provider') {
         process.stdout.write(`\n${yellow('  Connect an AI to start chatting. Open Settings → AI or run `neo init`.')}\n`);
@@ -189,9 +222,11 @@ export async function runChat(opts: ChatOptions): Promise<void> {
     rl.resume();
     rl.setPrompt(prompt());
     rl.prompt();
-  });
+  };
+  if (!pipedLines) rl.on('line', onLine);
 
-  rl.on('close', () => {
+  // A pipe may close while its buffered confirmation answers are still queued.
+  if (!pipedLines) rl.on('close', () => {
     abortController?.abort();
     if (abortController) void client.timeline.cancel().catch(() => undefined);
     void cleanup(embeddedServer, client, ctx.offRecord, ctx.connection).then(() => process.exit(0));
@@ -216,6 +251,24 @@ export async function runChat(opts: ChatOptions): Promise<void> {
       }).catch(() => undefined);
     },
   });
+
+  if (pipedLines) {
+    process.on('SIGINT', onInterrupt);
+    try {
+      for await (const line of pipedLines) {
+        if (pipedStopped) break;
+        await onLine(line);
+      }
+    } finally {
+      process.removeListener('SIGINT', onInterrupt);
+      rl.close();
+      await cleanup(embeddedServer, client, ctx.offRecord, ctx.connection);
+    }
+  }
+}
+
+class InputEndedError extends Error {
+  constructor() { super('Input ended before a confirmation answer.'); }
 }
 
 async function isReachable(url: string, token: string): Promise<boolean> {
@@ -248,7 +301,7 @@ export interface SlashContext {
 
 export async function handleSlash(
   text: string,
-  rl: readline.Interface,
+  rl: Pick<readline.Interface, 'question'>,
   client: NeoClient,
   ctx: SlashContext,
 ): Promise<void> {
