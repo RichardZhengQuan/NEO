@@ -412,11 +412,43 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
 
 // ── Pie / donut ───────────────────────────────────────────────────────────
 
+/** Accumulate an overflowed signed group without losing cancellation remainders. */
+function overflowedGroup(values: number[]): { value: number; scale: number } {
+  const bits = new DataView(new ArrayBuffer(8));
+  const fractionMask = (1n << 52n) - 1n;
+  let units = 0n;
+  for (const value of values) {
+    if (!Number.isFinite(value) || value === 0) continue;
+    bits.setFloat64(0, value);
+    const word = bits.getBigUint64(0);
+    const exponent = Number((word >> 52n) & 0x7ffn);
+    const significand = (word & fractionMask) | (exponent === 0 ? 0n : 1n << 52n);
+    // Every finite double is an integer multiple of 2^-1074. Exact integer
+    // addition preserves tiny terms even when huge terms later cancel out.
+    const term = significand << BigInt(Math.max(0, exponent - 1));
+    units += value < 0 ? -term : term;
+  }
+  if (units <= 0n) return { value: 0, scale: 1 };
+  const shift = Math.max(0, units.toString(2).length - 53);
+  let top = units >> BigInt(shift);
+  if (shift > 0) {
+    const remainder = units - (top << BigInt(shift));
+    const halfway = 1n << BigInt(shift - 1);
+    if (remainder > halfway || (remainder === halfway && (top & 1n) === 1n)) top++;
+  }
+  const coefficient = Number(top);
+  const finite = coefficient * 2 ** (shift - 1074);
+  if (Number.isFinite(finite)) return { value: finite, scale: 1 };
+  // Keep unrepresentable positive totals as two finite factors for geometry
+  // and scientific labels; never turn the total back into Infinity.
+  return { value: coefficient * 2 ** (shift - 2097), scale: 2 ** 1023 };
+}
+
 function Pie({ block, prepared, fmt, aggregateFmt, donut }: { block: ChartBlock; prepared: Prepared; fmt: (n: number) => string; aggregateFmt: (n: number, scale: number) => string; donut: boolean }): ReactElement {
   const t = useT();
   const [active, setActive] = useState<number | null>(null);
   // One series: its points are the slices. Several series: one slice per series total.
-  const { slices, valueScale } = useMemo(() => {
+  const { slices, valueScale, rawLabels } = useMemo(() => {
     let overflow = false;
     const makeSlices = (scale: number) => {
       if (block.series.length === 1) {
@@ -433,11 +465,34 @@ function Pie({ block, prepared, fmt, aggregateFmt, donut }: { block: ChartBlock;
     };
     const raw = makeSlices(1);
     overflow ||= !Number.isFinite(raw.reduce((sum, s) => sum + s.value, 0));
-    if (!overflow) return { slices: raw, valueScale: 1 };
+    if (!overflow) return { slices: raw, valueScale: 1, rawLabels: null };
     // Scale before either per-series or overall sums overflow. A common scale
     // preserves proportions, including signed cancellation within a series.
-    const scale = Math.max(...block.series.flatMap((s) => s.data.map((d) => Number.isFinite(d.y) ? Math.abs(d.y) : 0)));
-    return { slices: makeSlices(scale), valueScale: scale };
+    if (block.series.length === 1) {
+      const scale = Math.max(...raw.map((s) => s.value));
+      return { slices: makeSlices(scale), valueScale: scale, rawLabels: raw.map((s) => ({ value: s.value, scale: 1 })) };
+    }
+    const groups = block.series.map((s) => {
+      let value = 0;
+      let groupOverflow = false;
+      for (const d of s.data) {
+        value += Number.isFinite(d.y) ? d.y : 0;
+        groupOverflow ||= !Number.isFinite(value);
+      }
+      // Keep finite aggregates intact: scaling their large cancelling terms
+      // first could underflow an otherwise representable tiny remainder.
+      if (!groupOverflow) return { value: Math.max(0, value), scale: 1 };
+      return overflowedGroup(s.data.map((d) => d.y));
+    });
+    // A discarded negative group must not set the scale: doing so could erase
+    // an unrelated tiny positive slice. Determine signs at each group's scale.
+    const scale = Math.max(0, ...groups.map((group) => group.value > 0 ? (group.scale === 1 ? group.value : group.scale) : 0));
+    if (scale === 0) return { slices: raw.map((s) => ({ ...s, value: 0 })), valueScale: 1, rawLabels: null };
+    const slices = block.series.map((s, i) => ({
+      name: s.name,
+      value: groups[i]!.scale === 1 ? groups[i]!.value / scale : groups[i]!.value * (groups[i]!.scale / scale),
+    }));
+    return { slices, valueScale: scale, rawLabels: groups };
   }, [block.series, prepared]);
   const total = slices.reduce((a, s) => a + s.value, 0);
   const displayValue = (v: number) => valueScale === 1 && Math.abs(v) < 1e21 ? fmt(v) : aggregateFmt(v, valueScale);
@@ -509,7 +564,7 @@ function Pie({ block, prepared, fmt, aggregateFmt, donut }: { block: ChartBlock;
           </>
         )}
       </svg>
-      <Legend items={slices.map((s, i) => ({ name: s.name, color: color(i), value: `${displayValue(s.value)} · ${pct(s.value)}` }))} />
+      <Legend items={slices.map((s, i) => ({ name: s.name, color: color(i), value: `${rawLabels ? aggregateFmt(rawLabels[i]!.value, rawLabels[i]!.scale) : displayValue(s.value)} · ${pct(s.value)}` }))} />
     </div>
   );
 }
@@ -530,7 +585,7 @@ export function ChartRenderer({ block }: { block: ChartBlock }): ReactElement {
   const scaledFmt = (v: number, scale: number) => {
     if (v === 0) return '0';
     // Compose the exponent as text: multiplying back by scale could overflow.
-    const [scaleMantissa, scaleExponent] = scale.toExponential().split('e');
+    const [scaleMantissa, scaleExponent] = scale.toExponential(16).split('e');
     const [mantissa, exponent] = (v * Number(scaleMantissa)).toExponential(2).split('e');
     let coefficient = String(Number(mantissa));
     try { coefficient = new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(Number(mantissa)); } catch { /* numeric fallback */ }

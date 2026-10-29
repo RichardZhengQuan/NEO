@@ -130,6 +130,68 @@ describe('overflowing chart aggregates', () => {
     finiteSvg(container);
     expect([...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent)).toEqual(['0 kg · 0%', '0 kg · 0%']);
   });
+
+  it.each(['pie', 'donut'] as const)('keeps a tiny positive %s slice after discarding an overflowing negative group', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[-max, -max], [1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['0%', '100%']);
+    expect(container.querySelectorAll('svg path')[1]!.getAttribute('d')).toContain('a90 90');
+  });
+
+  it.each(['pie', 'donut'] as const)('clamps single-series %s points individually before overflow normalization', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[max, max, -max, -max, -max]])} /></I18nProvider>);
+    const svg = finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['50%', '50%', '0%', '0%', '0%']);
+    const paths = [...svg.querySelectorAll('path')].map((path) => path.getAttribute('d'));
+    expect(paths[0]).not.toBe(paths[1]);
+  });
+
+  it.each(['pie', 'donut'] as const)('keeps a single-series tiny positive %s point beside negative points', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[-max, -max, 1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    expect([...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!.match(/\d+%/)?.[0])).toEqual(['0%', '0%', '100%']);
+  });
+
+  it.each(['pie', 'donut'] as const)('ignores discarded negative and zero %s groups when preserving tiny proportions', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[-max, -max], [0], [1e-20], [3e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    expect([...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!.match(/\d+%/)?.[0])).toEqual(['0%', '0%', '25%', '75%']);
+  });
+
+  it.each(['pie', 'donut'] as const)('keeps a finite cancelled %s aggregate when another group overflows negatively', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[-max, -max], [max, -max, 1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['0%', '100%']);
+    expect(labels[1]).toContain('1E-20 kg');
+  });
+
+  it.each(['pie', 'donut'] as const)('retains a tiny raw %s label even when its normalized geometry rounds to zero', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[max, max], [1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels[1]).toContain('1E-20 kg');
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['100%', '0%']);
+  });
+
+  it.each((['pie', 'donut'] as const).flatMap((kind) => [false, true].map((tinyFirst) => ({ kind, tinyFirst }))))('retains a tiny remainder after overflowing $kind cancellation (tiny first: $tinyFirst)', ({ kind, tinyFirst }) => {
+    const cancelling = tinyFirst ? [1e-20, max, max, -max, -max] : [max, max, -max, -max, 1e-20];
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [cancelling, [1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['50%', '50%']);
+    expect(labels.every((label) => label.startsWith('1E-20 kg'))).toBe(true);
+  });
+
+  it.each(['pie', 'donut'] as const)('retains subnormal %s remainders after overflow cancellation', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[max, max, -max, -max, Number.MIN_VALUE], [Number.MIN_VALUE]])} /></I18nProvider>);
+    const svg = finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels).toEqual(['4.94E-324 kg · 50%', '4.94E-324 kg · 50%']);
+    if (kind === 'donut') expect(svg.textContent).toContain('9.88E-324 kg');
+  });
 });
 
 describe('stacked area charts', () => {
