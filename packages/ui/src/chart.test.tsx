@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import type { ChartBlock } from '@neo/protocol';
 import { ChartRenderer, niceTicks } from './chart.js';
 import { I18nProvider } from './i18n.js';
@@ -31,6 +31,166 @@ describe('niceTicks', () => {
     } finally {
       precision.mockRestore();
     }
+  });
+});
+
+describe('overflowing chart aggregates', () => {
+  const max = Number.MAX_VALUE;
+  function block(kind: ChartBlock['kind'], rows: number[][]): ChartBlock {
+    return { type: 'chart', kind, stacked: true, unit: 'kg', series: rows.map((row, i) => ({ name: `Series ${i}`, data: row.map((y, ci) => ({ x: String(ci), y })) })) };
+  }
+  function finiteSvg(container: HTMLElement): SVGSVGElement {
+    const svg = container.querySelector('svg')!;
+    expect(svg).not.toBeNull();
+    for (const element of [svg, ...svg.querySelectorAll('*')]) for (const attribute of element.attributes) expect(attribute.value).not.toMatch(/NaN|Infinity/);
+    expect(svg.textContent).not.toMatch(/NaN|Infinity|∞/);
+    return svg;
+  }
+
+  it.each((['bar', 'area'] as const).flatMap((kind) => [1, -1].map((sign) => ({ kind, sign }))))('preserves equal $kind stack bands for overflowing sign $sign', ({ kind, sign }) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[sign * max, sign * max], [sign * max, sign * max]])} /></I18nProvider>);
+    const svg = finiteSvg(container);
+    const labels = [...svg.querySelectorAll('text[text-anchor="end"]')].map((label) => label.textContent!);
+    expect(labels.some((label) => label.includes('3.6E308'))).toBe(true);
+    for (const label of labels) expect(label.length).toBeLessThanOrEqual(12);
+    if (kind === 'bar') {
+      const heights = [...svg.querySelectorAll('rect')].map((bar) => Number(bar.getAttribute('height')));
+      expect(heights).toHaveLength(4);
+      for (const height of heights) expect(height).toBeCloseTo(100, 6);
+    } else {
+      const areas = [...svg.querySelectorAll('path')].filter((path) => path.getAttribute('d')!.endsWith('Z'));
+      expect(areas).toHaveLength(2);
+      expect(areas[0]!.getAttribute('d')).not.toBe(areas[1]!.getAttribute('d'));
+    }
+    expect(container.querySelector('td')!.textContent).toBe(`${new Intl.NumberFormat('en', { maximumFractionDigits: 2 }).format(sign * max)} kg`);
+  });
+
+  it.each(['bar', 'area'] as const)('preserves both signs in overflowing %s stacks', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[max], [max], [-max], [-max]])} /></I18nProvider>);
+    const svg = finiteSvg(container);
+    const zero = Number(svg.querySelector('line.neo-chart__grid:not([stroke-dasharray])')!.getAttribute('y1'));
+    expect(zero).toBe(112);
+    if (kind === 'bar') {
+      const bars = [...svg.querySelectorAll('rect')];
+      expect(bars.slice(0, 2).every((bar) => Number(bar.getAttribute('y')) < zero)).toBe(true);
+      expect(bars.slice(2).every((bar) => Number(bar.getAttribute('y')) >= zero)).toBe(true);
+    }
+  });
+
+  it.each(['bar', 'area'] as const)('preserves unequal overflowing %s stack proportions', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[max], [max / 2]])} /></I18nProvider>);
+    const svg = finiteSvg(container);
+    if (kind === 'bar') {
+      const bars = [...svg.querySelectorAll('rect')];
+      expect(Number(bars[0]!.getAttribute('height')) / Number(bars[1]!.getAttribute('height'))).toBeCloseTo(2, 6);
+    } else {
+      const areas = [...svg.querySelectorAll('path')].filter((path) => path.getAttribute('d')!.endsWith('Z'));
+      const heights = areas.map((area) => {
+        const ys = [...area.getAttribute('d')!.matchAll(/[ML]-?\d+(?:\.\d+)? (-?\d+(?:\.\d+)?)/g)].map((point) => Number(point[1]));
+        return Math.max(...ys) - Math.min(...ys);
+      });
+      expect(heights[0]! / heights[1]!).toBeCloseTo(2, 2);
+    }
+  });
+
+  it.each(['en', 'zh-CN'] as const)('shows bounded raw tooltip values after overflow normalization in %s', (locale) => {
+    const { container } = render(<I18nProvider locale={locale}><ChartRenderer block={block('bar', [[max], [max]])} /></I18nProvider>);
+    fireEvent.keyDown(container.querySelector('svg')!, { key: 'ArrowRight' });
+    const values = [...container.querySelectorAll('.neo-chart__tooltip strong')].map((value) => value.textContent!);
+    expect(values).toHaveLength(2);
+    for (const value of values) { expect(value).toMatch(/E308 kg$/); expect(value.length).toBeLessThanOrEqual(16); }
+  });
+
+  const radialCases = [
+    { name: 'single-series total', rows: [[max, max]], percentages: ['50%', '50%'] },
+    { name: 'multiple finite slices', rows: [[max], [max]], percentages: ['50%', '50%'] },
+    { name: 'overflowing series', rows: [[max, max], [max, max]], percentages: ['50%', '50%'] },
+    { name: 'positive prefix cancellation', rows: [[max, max, -max], [max]], percentages: ['50%', '50%'] },
+    { name: 'negative prefix cancellation', rows: [[-max, -max, max, max, max], [max]], percentages: ['50%', '50%'] },
+    { name: 'unequal slices', rows: [[max], [max / 2]], percentages: ['67%', '33%'] },
+    { name: 'ordinary', rows: [[10, 10]], percentages: ['50%', '50%'] },
+  ];
+  it.each((['pie', 'donut'] as const).flatMap((kind) => radialCases.map((entry) => ({ kind, ...entry }))))('preserves $kind proportions for $name', ({ kind, rows, percentages, name }) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, rows)} /></I18nProvider>);
+    const svg = finiteSvg(container);
+    const paths = [...svg.querySelectorAll('path')].map((path) => path.getAttribute('d'));
+    expect(paths).toHaveLength(2);
+    expect(new Set(paths).size).toBe(2);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(percentages);
+    for (const label of labels) expect(label).not.toMatch(/NaN|Infinity|∞/);
+    if (name !== 'ordinary') {
+      for (const label of labels) { expect(label).toContain('E'); expect(label.length).toBeLessThanOrEqual(24); }
+      if (kind === 'donut') expect(svg.textContent).toContain('E308 kg');
+    } else expect(labels).toEqual(['10 kg · 50%', '10 kg · 50%']);
+  });
+
+  it.each(['pie', 'donut'] as const)('preserves zero/negative %s values', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[-max], [0]])} /></I18nProvider>);
+    finiteSvg(container);
+    expect([...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent)).toEqual(['0 kg · 0%', '0 kg · 0%']);
+  });
+
+  it.each(['pie', 'donut'] as const)('keeps a tiny positive %s slice after discarding an overflowing negative group', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[-max, -max], [1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['0%', '100%']);
+    expect(container.querySelectorAll('svg path')[1]!.getAttribute('d')).toContain('a90 90');
+  });
+
+  it.each(['pie', 'donut'] as const)('clamps single-series %s points individually before overflow normalization', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[max, max, -max, -max, -max]])} /></I18nProvider>);
+    const svg = finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['50%', '50%', '0%', '0%', '0%']);
+    const paths = [...svg.querySelectorAll('path')].map((path) => path.getAttribute('d'));
+    expect(paths[0]).not.toBe(paths[1]);
+  });
+
+  it.each(['pie', 'donut'] as const)('keeps a single-series tiny positive %s point beside negative points', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[-max, -max, 1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    expect([...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!.match(/\d+%/)?.[0])).toEqual(['0%', '0%', '100%']);
+  });
+
+  it.each(['pie', 'donut'] as const)('ignores discarded negative and zero %s groups when preserving tiny proportions', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[-max, -max], [0], [1e-20], [3e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    expect([...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!.match(/\d+%/)?.[0])).toEqual(['0%', '0%', '25%', '75%']);
+  });
+
+  it.each(['pie', 'donut'] as const)('keeps a finite cancelled %s aggregate when another group overflows negatively', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[-max, -max], [max, -max, 1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['0%', '100%']);
+    expect(labels[1]).toContain('1E-20 kg');
+  });
+
+  it.each(['pie', 'donut'] as const)('retains a tiny raw %s label even when its normalized geometry rounds to zero', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[max, max], [1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels[1]).toContain('1E-20 kg');
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['100%', '0%']);
+  });
+
+  it.each((['pie', 'donut'] as const).flatMap((kind) => [false, true].map((tinyFirst) => ({ kind, tinyFirst }))))('retains a tiny remainder after overflowing $kind cancellation (tiny first: $tinyFirst)', ({ kind, tinyFirst }) => {
+    const cancelling = tinyFirst ? [1e-20, max, max, -max, -max] : [max, max, -max, -max, 1e-20];
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [cancelling, [1e-20]])} /></I18nProvider>);
+    finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels.map((label) => label.match(/\d+%/)?.[0])).toEqual(['50%', '50%']);
+    expect(labels.every((label) => label.startsWith('1E-20 kg'))).toBe(true);
+  });
+
+  it.each(['pie', 'donut'] as const)('retains subnormal %s remainders after overflow cancellation', (kind) => {
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block(kind, [[max, max, -max, -max, Number.MIN_VALUE], [Number.MIN_VALUE]])} /></I18nProvider>);
+    const svg = finiteSvg(container);
+    const labels = [...container.querySelectorAll('.neo-chart-pie__value')].map((label) => label.textContent!);
+    expect(labels).toEqual(['4.94E-324 kg · 50%', '4.94E-324 kg · 50%']);
+    if (kind === 'donut') expect(svg.textContent).toContain('9.88E-324 kg');
   });
 });
 

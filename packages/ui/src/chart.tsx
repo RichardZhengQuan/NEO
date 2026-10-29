@@ -154,15 +154,34 @@ function DataTable({ block, prepared, fmt }: { block: ChartBlock; prepared: Prep
 
 // ── Cartesian (bar / line / area) ─────────────────────────────────────────
 
-function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepared: Prepared; fmt: (n: number) => string; axisFmt: (n: number) => string }): ReactElement {
+function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepared: Prepared; fmt: (n: number) => string; axisFmt: (n: number, scale?: number) => string }): ReactElement {
   const t = useT();
   const uid = useId().replace(/:/g, '');
   const [ref, width] = useWidth();
   const [active, setActive] = useState<number | null>(null);
-  const { categories, values } = prepared;
+  const { categories, values: rawValues } = prepared;
+  let values = rawValues;
+  let valueScale = 1;
   const n = categories.length;
   const kind = block.kind;
   const stacked = Boolean(block.stacked) && (kind === 'bar' || kind === 'area') && values.length > 1;
+  if (stacked) {
+    let overflow = false;
+    for (let c = 0; c < n; c++) {
+      let pos = 0;
+      let neg = 0;
+      for (const row of rawValues) {
+        const v = row[c] ?? 0;
+        if (v >= 0) pos += v;
+        else neg += v;
+      }
+      overflow ||= !Number.isFinite(pos) || !Number.isFinite(neg);
+    }
+    if (overflow) {
+      valueScale = Math.max(...rawValues.flatMap((row) => row.map((v) => Math.abs(v ?? 0))));
+      values = rawValues.map((row) => row.map((v) => v === null ? null : v / valueScale));
+    }
+  }
 
   // Domain
   let lo = Infinity;
@@ -200,7 +219,7 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
   const scale = Math.max(Math.abs(yMin), Math.abs(yMax));
 
   const height = width < 420 ? 200 : 240;
-  const labelChars = Math.max(0, ...ticks.map((v) => axisFmt(v).length));
+  const labelChars = Math.max(0, ...ticks.map((v) => axisFmt(v, valueScale).length));
   const pad = { top: 12, right: 12, bottom: block.xLabel ? 44 : 28, left: Math.min(72, 14 + labelChars * 6.6) + (block.yLabel ? 14 : 0) };
   const plotW = Math.max(40, width - pad.left - pad.right);
   const plotH = height - pad.top - pad.bottom;
@@ -217,7 +236,7 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
   const labelEvery = Math.max(1, Math.ceil(n / Math.max(1, Math.floor(plotW / 58))));
 
   const tipFor = (ci: number): TooltipData => {
-    const rows = block.series.map((s, si) => ({ name: s.name, value: values[si]![ci] === null ? '—' : fmt(values[si]![ci]!), color: color(si) }));
+    const rows = block.series.map((s, si) => ({ name: s.name, value: rawValues[si]![ci] === null ? '—' : fmt(rawValues[si]![ci]!), color: color(si) }));
     const top = Math.min(...values.map((row) => y(Math.max(0, row[ci] ?? 0))));
     return { x: Math.min(Math.max(xCenter(ci), 60), width - 60), y: Math.max(top, 40), title: String(categories[ci]), rows };
   };
@@ -355,7 +374,7 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
           <g key={v}>
             <line className="neo-chart__grid" x1={pad.left} x2={pad.left + plotW} y1={y(v)} y2={y(v)} strokeDasharray={v === 0 ? undefined : '3 4'} />
             <text className="neo-chart__axis" x={pad.left - 8} y={y(v) + 4} textAnchor="end">
-              {axisFmt(v)}
+              {axisFmt(v, valueScale)}
             </text>
           </g>
         ))}
@@ -393,17 +412,90 @@ function Cartesian({ block, prepared, fmt, axisFmt }: { block: ChartBlock; prepa
 
 // ── Pie / donut ───────────────────────────────────────────────────────────
 
-function Pie({ block, prepared, fmt, donut }: { block: ChartBlock; prepared: Prepared; fmt: (n: number) => string; donut: boolean }): ReactElement {
+/** Accumulate an overflowed signed group without losing cancellation remainders. */
+function overflowedGroup(values: number[]): { value: number; scale: number } {
+  const bits = new DataView(new ArrayBuffer(8));
+  const fractionMask = (1n << 52n) - 1n;
+  let units = 0n;
+  for (const value of values) {
+    if (!Number.isFinite(value) || value === 0) continue;
+    bits.setFloat64(0, value);
+    const word = bits.getBigUint64(0);
+    const exponent = Number((word >> 52n) & 0x7ffn);
+    const significand = (word & fractionMask) | (exponent === 0 ? 0n : 1n << 52n);
+    // Every finite double is an integer multiple of 2^-1074. Exact integer
+    // addition preserves tiny terms even when huge terms later cancel out.
+    const term = significand << BigInt(Math.max(0, exponent - 1));
+    units += value < 0 ? -term : term;
+  }
+  if (units <= 0n) return { value: 0, scale: 1 };
+  const shift = Math.max(0, units.toString(2).length - 53);
+  let top = units >> BigInt(shift);
+  if (shift > 0) {
+    const remainder = units - (top << BigInt(shift));
+    const halfway = 1n << BigInt(shift - 1);
+    if (remainder > halfway || (remainder === halfway && (top & 1n) === 1n)) top++;
+  }
+  const coefficient = Number(top);
+  const finite = coefficient * 2 ** (shift - 1074);
+  if (Number.isFinite(finite)) return { value: finite, scale: 1 };
+  // Keep unrepresentable positive totals as two finite factors for geometry
+  // and scientific labels; never turn the total back into Infinity.
+  return { value: coefficient * 2 ** (shift - 2097), scale: 2 ** 1023 };
+}
+
+function Pie({ block, prepared, fmt, aggregateFmt, donut }: { block: ChartBlock; prepared: Prepared; fmt: (n: number) => string; aggregateFmt: (n: number, scale: number) => string; donut: boolean }): ReactElement {
   const t = useT();
   const [active, setActive] = useState<number | null>(null);
   // One series: its points are the slices. Several series: one slice per series total.
-  const slices = useMemo(() => {
+  const { slices, valueScale, rawLabels } = useMemo(() => {
+    let overflow = false;
+    const makeSlices = (scale: number) => {
+      if (block.series.length === 1) {
+        return prepared.categories.map((c, i) => ({ name: String(c), value: Math.max(0, (prepared.values[0]![i] ?? 0) / scale) }));
+      }
+      return block.series.map((s) => {
+        let value = 0;
+        for (const d of s.data) {
+          value += Number.isFinite(d.y) ? d.y / scale : 0;
+          overflow ||= !Number.isFinite(value);
+        }
+        return { name: s.name, value: Math.max(0, value) };
+      });
+    };
+    const raw = makeSlices(1);
+    overflow ||= !Number.isFinite(raw.reduce((sum, s) => sum + s.value, 0));
+    if (!overflow) return { slices: raw, valueScale: 1, rawLabels: null };
+    // Scale before either per-series or overall sums overflow. A common scale
+    // preserves proportions, including signed cancellation within a series.
     if (block.series.length === 1) {
-      return prepared.categories.map((c, i) => ({ name: String(c), value: Math.max(0, prepared.values[0]![i] ?? 0) }));
+      const scale = Math.max(...raw.map((s) => s.value));
+      return { slices: makeSlices(scale), valueScale: scale, rawLabels: raw.map((s) => ({ value: s.value, scale: 1 })) };
     }
-    return block.series.map((s) => ({ name: s.name, value: Math.max(0, s.data.reduce((a, d) => a + (Number.isFinite(d.y) ? d.y : 0), 0)) }));
+    const groups = block.series.map((s) => {
+      let value = 0;
+      let groupOverflow = false;
+      for (const d of s.data) {
+        value += Number.isFinite(d.y) ? d.y : 0;
+        groupOverflow ||= !Number.isFinite(value);
+      }
+      // Keep finite aggregates intact: scaling their large cancelling terms
+      // first could underflow an otherwise representable tiny remainder.
+      if (!groupOverflow) return { value: Math.max(0, value), scale: 1 };
+      return overflowedGroup(s.data.map((d) => d.y));
+    });
+    // A discarded negative group must not set the scale: doing so could erase
+    // an unrelated tiny positive slice. Determine signs at each group's scale.
+    const scale = Math.max(0, ...groups.map((group) => group.value > 0 ? (group.scale === 1 ? group.value : group.scale) : 0));
+    if (scale === 0) return { slices: raw.map((s) => ({ ...s, value: 0 })), valueScale: 1, rawLabels: null };
+    const slices = block.series.map((s, i) => ({
+      name: s.name,
+      value: groups[i]!.scale === 1 ? groups[i]!.value / scale : groups[i]!.value * (groups[i]!.scale / scale),
+    }));
+    return { slices, valueScale: scale, rawLabels: groups };
   }, [block.series, prepared]);
   const total = slices.reduce((a, s) => a + s.value, 0);
+  const displayValue = (v: number) => valueScale === 1 && Math.abs(v) < 1e21 ? fmt(v) : aggregateFmt(v, valueScale);
   const R = 90;
   const RI = donut ? 56 : 0;
   const C = 100;
@@ -464,7 +556,7 @@ function Pie({ block, prepared, fmt, donut }: { block: ChartBlock; prepared: Pre
         {donut && (
           <>
             <text x={C} y={C - 2} textAnchor="middle" fontSize={shown ? 13 : 18} fontWeight={700} fill="var(--neo-text)">
-              {shown ? pct(shown.value) : fmt(total)}
+              {shown ? pct(shown.value) : displayValue(total)}
             </text>
             <text x={C} y={C + 16} textAnchor="middle" fontSize={10} fill="var(--neo-text-muted)">
               {shown ? (shown.name.length > 16 ? `${shown.name.slice(0, 15)}…` : shown.name) : t('chart.total')}
@@ -472,7 +564,7 @@ function Pie({ block, prepared, fmt, donut }: { block: ChartBlock; prepared: Pre
           </>
         )}
       </svg>
-      <Legend items={slices.map((s, i) => ({ name: s.name, color: color(i), value: `${fmt(s.value)} · ${pct(s.value)}` }))} />
+      <Legend items={slices.map((s, i) => ({ name: s.name, color: color(i), value: `${rawLabels ? aggregateFmt(rawLabels[i]!.value, rawLabels[i]!.scale) : displayValue(s.value)} · ${pct(s.value)}` }))} />
     </div>
   );
 }
@@ -490,7 +582,17 @@ export function ChartRenderer({ block }: { block: ChartBlock }): ReactElement {
       return `${v}${unit}`;
     }
   };
-  const axisFmt = (v: number) => {
+  const scaledFmt = (v: number, scale: number) => {
+    if (v === 0) return '0';
+    // Compose the exponent as text: multiplying back by scale could overflow.
+    const [scaleMantissa, scaleExponent] = scale.toExponential(16).split('e');
+    const [mantissa, exponent] = (v * Number(scaleMantissa)).toExponential(2).split('e');
+    let coefficient = String(Number(mantissa));
+    try { coefficient = new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(Number(mantissa)); } catch { /* numeric fallback */ }
+    return `${coefficient}E${Number(exponent) + Number(scaleExponent)}`;
+  };
+  const axisFmt = (v: number, scale = 1) => {
+    if (scale !== 1) return scaledFmt(v, scale);
     const extreme = Math.abs(v) >= 1e21;
     try {
       // Compact suffixes stop scaling at a locale's largest named magnitude;
@@ -510,9 +612,9 @@ export function ChartRenderer({ block }: { block: ChartBlock }): ReactElement {
         </figcaption>
       )}
       {isPie ? (
-        <Pie block={block} prepared={prepared} fmt={fmt} donut={block.kind === 'donut'} />
+        <Pie block={block} prepared={prepared} fmt={fmt} aggregateFmt={(v, scale) => `${scaledFmt(v, scale)}${unit}`} donut={block.kind === 'donut'} />
       ) : (
-        <Cartesian block={block} prepared={prepared} fmt={fmt} axisFmt={axisFmt} />
+        <Cartesian block={block} prepared={prepared} fmt={(v) => Math.abs(v) >= 1e21 ? `${axisFmt(v)}${unit}` : fmt(v)} axisFmt={axisFmt} />
       )}
       <DataTable block={block} prepared={prepared} fmt={fmt} />
     </figure>
