@@ -1,0 +1,357 @@
+# Partial #692 acceptance: builds and static checks only; never launches NEO.
+name: Desktop artifacts (build and static)
+
+'on':
+  pull_request:
+    paths:
+      - 'apps/desktop/**'
+      - 'apps/web/**'
+      - 'packages/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig*.json'
+      - '.github/workflows/desktop-package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-package-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  package-arm64:
+    name: Build/static arm64
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      NEO_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Prepare private build directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_root="$RUNNER_TEMP/neo-desktop-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$NEO_ARCH"
+          mkdir -m 700 "$package_root"
+          mkdir -m 700 "$package_root/logs" "$package_root/artifacts" "$package_root/tmp"
+          echo "NEO_PACKAGE_ROOT=$package_root" >> "$GITHUB_ENV"
+          expected=arm64
+          if [[ "$NEO_ARCH" == x64 ]]; then expected=x86_64; fi
+          test "$(uname -m)" = "$expected"
+          node --version | tee "$package_root/logs/node-version.log"
+          pnpm --version | tee "$package_root/logs/pnpm-version.log"
+          git rev-parse HEAD > "$package_root/logs/source-sha.log"
+          git rev-parse 'HEAD^{tree}' > "$package_root/logs/source-tree.log"
+      - name: Install, build and package without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build subprocesses receive no repository, release, signing or account tokens.
+          clean_env=(env -i "PATH=$PATH" "LANG=en_US.UTF-8" "CI=true"
+            "TMPDIR=$NEO_PACKAGE_ROOT/tmp"
+            "PNPM_CONFIG_STORE_DIR=$NEO_PACKAGE_ROOT/store"
+            "PNPM_CONFIG_CACHE_DIR=$NEO_PACKAGE_ROOT/pnpm-cache"
+            "PNPM_CONFIG_STATE_DIR=$NEO_PACKAGE_ROOT/pnpm-state"
+            "ELECTRON_CACHE=$NEO_PACKAGE_ROOT/electron-cache"
+            "ELECTRON_BUILDER_CACHE=$NEO_PACKAGE_ROOT/builder-cache"
+            "CSC_IDENTITY_AUTO_DISCOVERY=false" "ELECTRON_SKIP_BINARY_DOWNLOAD=1")
+          "${clean_env[@]}" pnpm install --frozen-lockfile 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/install.log"
+          "${clean_env[@]}" pnpm --filter @neo/web build 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/build-web.log"
+          "${clean_env[@]}" pnpm -r --workspace-concurrency=1 --filter @neo/desktop... build 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/build-desktop.log"
+          "${clean_env[@]}" pnpm --filter @neo/desktop exec electron-builder --mac dmg "--$NEO_ARCH" --publish never \
+            "--config.directories.output=$NEO_PACKAGE_ROOT/build" 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/package.log"
+          app_path=$(python3 -c 'import glob,os; p=glob.glob(os.environ["NEO_PACKAGE_ROOT"]+"/build/mac*/NEO.app"); assert len(p)==1,p; print(p[0])')
+          "${clean_env[@]}" pnpm --filter @neo/desktop artifact:inspect "$app_path" "$GITHUB_WORKSPACE" \
+            "$NEO_PACKAGE_ROOT/logs/inspection.json" "$NEO_ARCH" 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/inspect.log"
+      - name: Verify architecture, DMG payload and archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mounted=false
+          cleanup() {
+            if [[ "$mounted" == true ]]; then hdiutil detach "$NEO_PACKAGE_ROOT/mount"; fi
+          }
+          trap cleanup EXIT
+          python3 - <<'PYVERIFY'
+          import hashlib, json, os, pathlib, re, shutil, stat, subprocess
+          root = pathlib.Path(os.environ['NEO_PACKAGE_ROOT'])
+          arch = os.environ['NEO_ARCH']
+          expected = 'arm64' if arch == 'arm64' else 'x86_64'
+          apps = list((root / 'build').glob('mac*/NEO.app'))
+          dmgs = list((root / 'build').glob('*.dmg'))
+          assert len(apps) == len(dmgs) == 1, (apps, dmgs)
+          app = apps[0]
+          report = json.loads((root / 'logs/inspection.json').read_text())
+          assert report['status'] == 'STRUCTURAL_CHECKS_PASS_RUNTIME_NOT_RUN'
+          assert report['runtimeProven'] is False
+          shutil.copyfile(root / 'logs/inspection.json', root / 'artifacts/inspection.json')
+          macho = []
+          magic = {bytes.fromhex(s) for s in ['feedface','cefaedfe','feedfacf','cffaedfe','cafebabe','bebafeca','cafebabf','bfbafeca']}
+          for here, dirs, files in os.walk(app, followlinks=False):
+              for name in files:
+                  file = pathlib.Path(here) / name
+                  if file.is_symlink(): continue
+                  with file.open('rb') as stream: prefix = stream.read(4)
+                  if prefix not in magic: continue
+                  actual = subprocess.check_output(['lipo', '-archs', str(file)], text=True).split()
+                  assert actual == [expected], (str(file), actual, expected)
+                  macho.append({'path': str(file.relative_to(app)), 'architectures': actual})
+          assert macho, 'No physical Mach-O binaries were found'
+          (root / 'artifacts/macho.json').write_text(json.dumps(macho, indent=2) + '\n')
+          version = json.loads(pathlib.Path('apps/desktop/package.json').read_text())['version']
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?', version), version
+          name = 'NEO-' + version + '-' + arch
+          shutil.copyfile(dmgs[0], root / 'artifacts' / (name + '.dmg'))
+          metadata = {
+              'sourceSha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'sourceTree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+              'architecture': arch, 'runnerArchitecture': expected,
+              'node': subprocess.check_output(['node', '--version'], text=True).strip(),
+              'pnpm': subprocess.check_output(['pnpm', '--version'], text=True).strip(),
+              'status': 'BUILD_AND_STATIC_CHECKS_ONLY', 'runtimeProven': False,
+              'signatureAcceptance': 'NOT_VERIFIED', 'notarization': 'NOT_RUN',
+              'nativeStartup': 'NOT_RUN', 'publicRelease': False,
+          }
+          (root / 'artifacts/source.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          (root / 'app-path').write_text(str(app))
+          (root / 'artifact-name').write_text(name)
+          PYVERIFY
+          artifact_name=$(cat "$NEO_PACKAGE_ROOT/artifact-name")
+          app_path=$(cat "$NEO_PACKAGE_ROOT/app-path")
+          dmg_path="$NEO_PACKAGE_ROOT/artifacts/$artifact_name.dmg"
+          hdiutil verify "$dmg_path" 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/dmg-verify.log"
+          mkdir -m 700 "$NEO_PACKAGE_ROOT/mount"
+          # The trap also attempts detach if attach fails after creating a mount.
+          mounted=true
+          hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$NEO_PACKAGE_ROOT/mount" "$dmg_path" \
+            2>&1 | tee "$NEO_PACKAGE_ROOT/logs/dmg-attach.log"
+          python3 - <<'PYCOMPARE'
+          import hashlib, json, os, pathlib, stat
+          root = pathlib.Path(os.environ['NEO_PACKAGE_ROOT'])
+          def inventory(app):
+              result = []
+              def walk(item):
+                  info = item.lstat()
+                  entry = {'path': str(item.relative_to(app)), 'mode': stat.S_IMODE(info.st_mode)}
+                  if stat.S_ISLNK(info.st_mode): entry.update(kind='link', target=os.readlink(item))
+                  elif stat.S_ISDIR(info.st_mode):
+                      entry['kind'] = 'directory'
+                  elif stat.S_ISREG(info.st_mode):
+                      entry.update(kind='file', bytes=info.st_size, sha256=hashlib.sha256(item.read_bytes()).hexdigest())
+                  else: raise AssertionError('Unsupported file type: ' + str(item))
+                  result.append(entry)
+                  if entry['kind'] == 'directory':
+                      for child in sorted(item.iterdir()): walk(child)
+              walk(app)
+              return result
+          original = inventory(pathlib.Path((root / 'app-path').read_text()))
+          mounted = inventory(root / 'mount/NEO.app')
+          assert original == mounted, 'Mounted DMG app differs from packaged app'
+          (root / 'artifacts/app-inventory.json').write_text(json.dumps(original, indent=2) + '\n')
+          PYCOMPARE
+          hdiutil detach "$NEO_PACKAGE_ROOT/mount" 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/dmg-detach.log"
+          mounted=false
+          rmdir "$NEO_PACKAGE_ROOT/mount"
+          # Keep app symlinks and modes inside a tar; artifact ZIPs alone do not preserve them.
+          COPYFILE_DISABLE=1 tar -czf "$NEO_PACKAGE_ROOT/artifacts/$artifact_name.app.tar.gz" -C "$(dirname "$app_path")" NEO.app
+          cp -R "$NEO_PACKAGE_ROOT/logs" "$NEO_PACKAGE_ROOT/artifacts/logs"
+          printf '%s\n' 'Build/static evidence only. runtimeProven: false.' \
+            'No app launch, onboarding, remote/tray, x64 runtime, signature or update-feed acceptance.' \
+            'Remaining acceptance is tracked in #692 and #557. This is not a public release.' \
+            > "$NEO_PACKAGE_ROOT/artifacts/ACCEPTANCE.txt"
+          (cd "$NEO_PACKAGE_ROOT/artifacts" && shasum -a 256 *.dmg *.tar.gz *.json ACCEPTANCE.txt logs/* > SHA256SUMS)
+      - name: Upload checked build/static artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo-macos-${{ env.NEO_ARCH }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ env.NEO_PACKAGE_ROOT }}/artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload failure diagnostics separately
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo-macos-${{ env.NEO_ARCH }}-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/neo-desktop-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.NEO_ARCH }}/logs/
+          if-no-files-found: warn
+          retention-days: 7
+  package-x64:
+    name: Build/static x64
+    needs: package-arm64
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    env:
+      NEO_ARCH: x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Prepare private build directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_root="$RUNNER_TEMP/neo-desktop-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$NEO_ARCH"
+          mkdir -m 700 "$package_root"
+          mkdir -m 700 "$package_root/logs" "$package_root/artifacts" "$package_root/tmp"
+          echo "NEO_PACKAGE_ROOT=$package_root" >> "$GITHUB_ENV"
+          expected=arm64
+          if [[ "$NEO_ARCH" == x64 ]]; then expected=x86_64; fi
+          test "$(uname -m)" = "$expected"
+          node --version | tee "$package_root/logs/node-version.log"
+          pnpm --version | tee "$package_root/logs/pnpm-version.log"
+          git rev-parse HEAD > "$package_root/logs/source-sha.log"
+          git rev-parse 'HEAD^{tree}' > "$package_root/logs/source-tree.log"
+      - name: Install, build and package without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build subprocesses receive no repository, release, signing or account tokens.
+          clean_env=(env -i "PATH=$PATH" "LANG=en_US.UTF-8" "CI=true"
+            "TMPDIR=$NEO_PACKAGE_ROOT/tmp"
+            "PNPM_CONFIG_STORE_DIR=$NEO_PACKAGE_ROOT/store"
+            "PNPM_CONFIG_CACHE_DIR=$NEO_PACKAGE_ROOT/pnpm-cache"
+            "PNPM_CONFIG_STATE_DIR=$NEO_PACKAGE_ROOT/pnpm-state"
+            "ELECTRON_CACHE=$NEO_PACKAGE_ROOT/electron-cache"
+            "ELECTRON_BUILDER_CACHE=$NEO_PACKAGE_ROOT/builder-cache"
+            "CSC_IDENTITY_AUTO_DISCOVERY=false" "ELECTRON_SKIP_BINARY_DOWNLOAD=1")
+          "${clean_env[@]}" pnpm install --frozen-lockfile 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/install.log"
+          "${clean_env[@]}" pnpm --filter @neo/web build 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/build-web.log"
+          "${clean_env[@]}" pnpm -r --workspace-concurrency=1 --filter @neo/desktop... build 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/build-desktop.log"
+          "${clean_env[@]}" pnpm --filter @neo/desktop exec electron-builder --mac dmg "--$NEO_ARCH" --publish never \
+            "--config.directories.output=$NEO_PACKAGE_ROOT/build" 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/package.log"
+          app_path=$(python3 -c 'import glob,os; p=glob.glob(os.environ["NEO_PACKAGE_ROOT"]+"/build/mac*/NEO.app"); assert len(p)==1,p; print(p[0])')
+          "${clean_env[@]}" pnpm --filter @neo/desktop artifact:inspect "$app_path" "$GITHUB_WORKSPACE" \
+            "$NEO_PACKAGE_ROOT/logs/inspection.json" "$NEO_ARCH" 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/inspect.log"
+      - name: Verify architecture, DMG payload and archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mounted=false
+          cleanup() {
+            if [[ "$mounted" == true ]]; then hdiutil detach "$NEO_PACKAGE_ROOT/mount"; fi
+          }
+          trap cleanup EXIT
+          python3 - <<'PYVERIFY'
+          import hashlib, json, os, pathlib, re, shutil, stat, subprocess
+          root = pathlib.Path(os.environ['NEO_PACKAGE_ROOT'])
+          arch = os.environ['NEO_ARCH']
+          expected = 'arm64' if arch == 'arm64' else 'x86_64'
+          apps = list((root / 'build').glob('mac*/NEO.app'))
+          dmgs = list((root / 'build').glob('*.dmg'))
+          assert len(apps) == len(dmgs) == 1, (apps, dmgs)
+          app = apps[0]
+          report = json.loads((root / 'logs/inspection.json').read_text())
+          assert report['status'] == 'STRUCTURAL_CHECKS_PASS_RUNTIME_NOT_RUN'
+          assert report['runtimeProven'] is False
+          shutil.copyfile(root / 'logs/inspection.json', root / 'artifacts/inspection.json')
+          macho = []
+          magic = {bytes.fromhex(s) for s in ['feedface','cefaedfe','feedfacf','cffaedfe','cafebabe','bebafeca','cafebabf','bfbafeca']}
+          for here, dirs, files in os.walk(app, followlinks=False):
+              for name in files:
+                  file = pathlib.Path(here) / name
+                  if file.is_symlink(): continue
+                  with file.open('rb') as stream: prefix = stream.read(4)
+                  if prefix not in magic: continue
+                  actual = subprocess.check_output(['lipo', '-archs', str(file)], text=True).split()
+                  assert actual == [expected], (str(file), actual, expected)
+                  macho.append({'path': str(file.relative_to(app)), 'architectures': actual})
+          assert macho, 'No physical Mach-O binaries were found'
+          (root / 'artifacts/macho.json').write_text(json.dumps(macho, indent=2) + '\n')
+          version = json.loads(pathlib.Path('apps/desktop/package.json').read_text())['version']
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?', version), version
+          name = 'NEO-' + version + '-' + arch
+          shutil.copyfile(dmgs[0], root / 'artifacts' / (name + '.dmg'))
+          metadata = {
+              'sourceSha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'sourceTree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+              'architecture': arch, 'runnerArchitecture': expected,
+              'node': subprocess.check_output(['node', '--version'], text=True).strip(),
+              'pnpm': subprocess.check_output(['pnpm', '--version'], text=True).strip(),
+              'status': 'BUILD_AND_STATIC_CHECKS_ONLY', 'runtimeProven': False,
+              'signatureAcceptance': 'NOT_VERIFIED', 'notarization': 'NOT_RUN',
+              'nativeStartup': 'NOT_RUN', 'publicRelease': False,
+          }
+          (root / 'artifacts/source.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          (root / 'app-path').write_text(str(app))
+          (root / 'artifact-name').write_text(name)
+          PYVERIFY
+          artifact_name=$(cat "$NEO_PACKAGE_ROOT/artifact-name")
+          app_path=$(cat "$NEO_PACKAGE_ROOT/app-path")
+          dmg_path="$NEO_PACKAGE_ROOT/artifacts/$artifact_name.dmg"
+          hdiutil verify "$dmg_path" 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/dmg-verify.log"
+          mkdir -m 700 "$NEO_PACKAGE_ROOT/mount"
+          # The trap also attempts detach if attach fails after creating a mount.
+          mounted=true
+          hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$NEO_PACKAGE_ROOT/mount" "$dmg_path" \
+            2>&1 | tee "$NEO_PACKAGE_ROOT/logs/dmg-attach.log"
+          python3 - <<'PYCOMPARE'
+          import hashlib, json, os, pathlib, stat
+          root = pathlib.Path(os.environ['NEO_PACKAGE_ROOT'])
+          def inventory(app):
+              result = []
+              def walk(item):
+                  info = item.lstat()
+                  entry = {'path': str(item.relative_to(app)), 'mode': stat.S_IMODE(info.st_mode)}
+                  if stat.S_ISLNK(info.st_mode): entry.update(kind='link', target=os.readlink(item))
+                  elif stat.S_ISDIR(info.st_mode):
+                      entry['kind'] = 'directory'
+                  elif stat.S_ISREG(info.st_mode):
+                      entry.update(kind='file', bytes=info.st_size, sha256=hashlib.sha256(item.read_bytes()).hexdigest())
+                  else: raise AssertionError('Unsupported file type: ' + str(item))
+                  result.append(entry)
+                  if entry['kind'] == 'directory':
+                      for child in sorted(item.iterdir()): walk(child)
+              walk(app)
+              return result
+          original = inventory(pathlib.Path((root / 'app-path').read_text()))
+          mounted = inventory(root / 'mount/NEO.app')
+          assert original == mounted, 'Mounted DMG app differs from packaged app'
+          (root / 'artifacts/app-inventory.json').write_text(json.dumps(original, indent=2) + '\n')
+          PYCOMPARE
+          hdiutil detach "$NEO_PACKAGE_ROOT/mount" 2>&1 | tee "$NEO_PACKAGE_ROOT/logs/dmg-detach.log"
+          mounted=false
+          rmdir "$NEO_PACKAGE_ROOT/mount"
+          # Keep app symlinks and modes inside a tar; artifact ZIPs alone do not preserve them.
+          COPYFILE_DISABLE=1 tar -czf "$NEO_PACKAGE_ROOT/artifacts/$artifact_name.app.tar.gz" -C "$(dirname "$app_path")" NEO.app
+          cp -R "$NEO_PACKAGE_ROOT/logs" "$NEO_PACKAGE_ROOT/artifacts/logs"
+          printf '%s\n' 'Build/static evidence only. runtimeProven: false.' \
+            'No app launch, onboarding, remote/tray, x64 runtime, signature or update-feed acceptance.' \
+            'Remaining acceptance is tracked in #692 and #557. This is not a public release.' \
+            > "$NEO_PACKAGE_ROOT/artifacts/ACCEPTANCE.txt"
+          (cd "$NEO_PACKAGE_ROOT/artifacts" && shasum -a 256 *.dmg *.tar.gz *.json ACCEPTANCE.txt logs/* > SHA256SUMS)
+      - name: Upload checked build/static artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo-macos-${{ env.NEO_ARCH }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ env.NEO_PACKAGE_ROOT }}/artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload failure diagnostics separately
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo-macos-${{ env.NEO_ARCH }}-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/neo-desktop-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.NEO_ARCH }}/logs/
+          if-no-files-found: warn
+          retention-days: 7
