@@ -209,6 +209,6 @@ export function describeRecurrence(r: RecurrenceInput | null | undefined): strin
   if (r.freq === 'monthly' && r.byMonthDay?.length)
     s += ` on ${r.byMonthDay.map((d) => (d === -1 ? 'the last day' : `day ${d}`)).join(', ')}`;
   if (r.count) s += `, ${r.count} times`;
-  if (r.until) s += `, until ${new Date(r.until).toISOString().slice(0, 10)}`;
+  if (r.until != null) s += `, until ${new Date(r.until).toISOString().slice(0, 10)}`;
   return s;
 }
