@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import type { Message } from '@neo/protocol';
+import { NeoError, type Message } from '@neo/protocol';
 import { createConversationStore, createSettingsStore, migrate, openDatabase, openNeoDatabase, storageMigrations, type NeoDatabase } from './index.js';
 
 let db: NeoDatabase;
@@ -241,6 +241,91 @@ describe('timeline storage', () => {
     expect(store.purgeOffRecord(3)).toBe(1);
     expect(store.currentEpisode()).toBeNull();
     expect(store.searchMessages('private')).toHaveLength(1);
+  });
+
+  it.each(['purged private', 'deleted normal'] as const)(
+    'rejects a pending assistant continuation after its destination is %s without orphaning parts or FTS rows',
+    (removal) => {
+      db = openNeoDatabase(':memory:');
+      let now = 1000;
+      const store = createConversationStore(db, { clock: () => now });
+      const normal = store.createEpisode();
+      const survivor = store.appendMessage(message('surviving-message', normal.id, now, 'survivortoken'));
+      const destination = store.createEpisode({ offRecord: removal === 'purged private' });
+      store.appendMessage({ ...message('destination-seed', destination.id, now, 'destinationseedtoken'), role: 'assistant' });
+      // The continuation already names its destination before cleanup removes it.
+      // This models the storage boundary, not the runtime's migration scheduling.
+      const pending: Message = {
+        ...message('pending-continuation', destination.id, now + 1),
+        role: 'assistant',
+        status: 'streaming',
+        parts: [
+          { type: 'text', text: 'continuationtoken' },
+          { type: 'context', text: 'hiddencontexttoken' },
+        ],
+      };
+      const pendingParts = JSON.stringify(pending.parts);
+      now = 2000;
+      if (removal === 'purged private') {
+        expect(store.get(destination.id)).toMatchObject({ offRecord: true, ephemeral: true });
+        expect(store.purgeOffRecord(now)).toBe(1);
+      } else {
+        expect(store.get(destination.id)).toMatchObject({ offRecord: false, ephemeral: false });
+        expect(store.delete(destination.id)).toBe(true);
+      }
+      expect(store.get(destination.id)).toBeNull();
+      expect(store.getMessage('destination-seed')).toBeNull();
+      expect(store.searchMessages('destinationseedtoken')).toEqual([]);
+      const rows = () => ({
+        episodes: db.prepare('SELECT * FROM conversations ORDER BY id').all(),
+        messages: db.prepare('SELECT * FROM messages ORDER BY id').all(),
+        fts: db.prepare('SELECT rowid, message_id, text FROM message_fts ORDER BY rowid').all(),
+      });
+      const before = rows();
+      expect(before.episodes).toHaveLength(1);
+      expect(before.messages).toHaveLength(1);
+      expect(before.fts).toHaveLength(1);
+
+      let failure: unknown;
+      try { store.appendMessage(pending); } catch (error) { failure = error; }
+
+      expect(failure).toBeInstanceOf(NeoError);
+      expect(failure).toMatchObject({ code: 'not_found', message: `Conversation ${destination.id} not found.` });
+      expect(rows()).toEqual(before);
+      expect(store.getMessage(pending.id)).toBeNull();
+      expect(store.messages(destination.id)).toEqual([]);
+      expect(store.searchMessages('continuationtoken')).toEqual([]);
+      expect(store.searchMessages('hiddencontexttoken')).toEqual([]);
+      expect(store.timeline().items.map((item) => item.id)).toEqual([survivor.id]);
+      expect(JSON.stringify(pending.parts)).toBe(pendingParts);
+      expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    },
+  );
+
+  it('appends and indexes a pending assistant continuation while its private destination still exists', () => {
+    db = openNeoDatabase(':memory:');
+    const store = createConversationStore(db, { clock: () => 1000 });
+    const destination = store.createEpisode({ offRecord: true });
+    const pending: Message = {
+      ...message('live-continuation', destination.id, 1001),
+      role: 'assistant',
+      status: 'streaming',
+      parts: [
+        { type: 'text', text: 'continuationtoken' },
+        { type: 'context', text: 'hiddencontexttoken' },
+      ],
+    };
+
+    expect(store.appendMessage(pending)).toEqual({ ...pending, episodeId: destination.id });
+    expect(store.getMessage(pending.id)).toMatchObject({ ...pending, episodeId: destination.id });
+    expect(store.get(destination.id)).toMatchObject({ offRecord: true, ephemeral: true, lastMessageAt: 1001 });
+    expect(store.timeline().items.map((item) => item.id)).toEqual([pending.id]);
+    expect(store.searchMessages('continuationtoken').map((item) => item.messageId)).toEqual([pending.id]);
+    expect(store.searchMessages('hiddencontexttoken')).toEqual([]);
+    expect(db.prepare('SELECT message_id, text FROM message_fts').all()).toEqual([
+      { message_id: pending.id, text: 'continuationtoken' },
+    ]);
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
   });
 
   it('cascades FTS deletion when an entire episode is hard-deleted', () => {
