@@ -150,7 +150,14 @@ export async function loadNotifications(client: NeoClient): Promise<void> {
 }
 
 export function addNotification(n: Notification): void {
-  useData.setState((s) => ({ notifications: [n, ...s.notifications.filter((x) => x.id !== n.id)].slice(0, 100), unreadNotifications: s.unreadNotifications + (n.readAt != null ? 0 : 1) }));
+  useData.setState((s) => {
+    const previous = s.notifications.find((item) => item.id === n.id);
+    const previousUnread = previous && previous.readAt == null ? 1 : 0;
+    return {
+      notifications: [n, ...s.notifications.filter((item) => item.id !== n.id)].slice(0, 100),
+      unreadNotifications: s.unreadNotifications - previousUnread + (n.readAt == null ? 1 : 0),
+    };
+  });
 }
 
 /** Everything loaded is refetched (reconnect / seq gap). */
