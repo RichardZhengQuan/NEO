@@ -71,3 +71,64 @@ describe('stacked area charts', () => {
     });
   });
 });
+
+describe('finite Cartesian domains', () => {
+  const domains = [
+    { name: 'mixed extrema', values: [-Number.MAX_VALUE, Number.MAX_VALUE] },
+    { name: 'overflowing mixed span', values: [-1e308, 1e308] },
+    { name: 'positive extrema beyond bounded ticks', values: [Number.MAX_VALUE / 2, Number.MAX_VALUE] },
+    { name: 'negative extrema', values: [-Number.MAX_VALUE, -Number.MAX_VALUE / 2] },
+  ];
+  const cases = (['line', 'area', 'bar'] as const).flatMap((kind) => domains.map((domain) => ({ kind, ...domain })));
+
+  function expectFinitePlot(container: HTMLElement): void {
+    const svg = container.querySelector('svg')!;
+    expect(svg).not.toBeNull();
+    for (const element of [svg, ...svg.querySelectorAll('*')]) {
+      for (const attribute of element.attributes) expect(attribute.value).not.toMatch(/NaN|Infinity/);
+    }
+    const points = [...svg.querySelectorAll('circle')].map((circle) => Number(circle.getAttribute('cy')));
+    const bars = [...svg.querySelectorAll('rect')];
+    const plottedYs = points.length ? points : bars.flatMap((bar) => {
+      const top = Number(bar.getAttribute('y'));
+      return [top, top + Number(bar.getAttribute('height'))];
+    });
+    expect(plottedYs.length).toBeGreaterThan(0);
+    for (const y of plottedYs) {
+      expect(Number.isFinite(y)).toBe(true);
+      expect(y).toBeGreaterThanOrEqual(12 - 1e-6);
+      expect(y).toBeLessThanOrEqual(212 + 1e-6);
+    }
+    expect(Math.max(...plottedYs) - Math.min(...plottedYs)).toBeGreaterThan(1);
+  }
+
+  it.each(cases)('renders finite, in-bounds $kind geometry for $name', ({ kind, values }) => {
+    const block: ChartBlock = {
+      type: 'chart', kind,
+      series: [{ name: 'Finite values', data: values.map((y, i) => ({ x: String(i), y })) }],
+    };
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block} /></I18nProvider>);
+    expectFinitePlot(container);
+  });
+
+  it.each(['area', 'bar'] as const)('renders finite mixed-sign %s stacks whose totals remain finite', (kind) => {
+    const block: ChartBlock = {
+      type: 'chart', kind, stacked: true,
+      series: [[6e307, -6e307], [3e307, -3e307]].map((values, i) => ({
+        name: `Stack ${i}`, data: values.map((y, ci) => ({ x: String(ci), y })),
+      })),
+    };
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block} /></I18nProvider>);
+    expectFinitePlot(container);
+  });
+
+  it('preserves ordinary line geometry', () => {
+    const block: ChartBlock = {
+      type: 'chart', kind: 'line',
+      series: [{ name: 'Ordinary', data: [{ x: 'A', y: -10 }, { x: 'B', y: 10 }] }],
+    };
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block} /></I18nProvider>);
+    expect([...container.querySelectorAll('circle')].map((circle) => Number(circle.getAttribute('cy')))).toEqual([212, 12]);
+    expect(Number(container.querySelector('line.neo-chart__grid:not([stroke-dasharray])')!.getAttribute('y1'))).toBe(112);
+  });
+});
