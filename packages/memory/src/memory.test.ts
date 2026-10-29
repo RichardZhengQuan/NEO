@@ -512,40 +512,59 @@ describe('recall', () => {
   });
 
   it('sub-threshold best.from that becomes sensitive poisons its reachable destination', async () => {
-    // Topology (all edges 'related', no direct S→B edge):
-    //   S  = seed (content = query text, A[S] = 1.0)
-    //   fan_S = sqrt(5) = 2.236  (S has 5 neighbours: I, X1, X2, X3, X4)
-    //
-    //   S→I  w=0.50  → A[I]  = 0.50×0.5/2.236 = 0.112  < minScore 0.15  (sub-threshold)
-    //   S→X1 w=0.70  → A[X1] = 0.70×0.5/2.236 = 0.156  ≥ 0.15
-    //   S→X2 w=0.70  → A[X2] = 0.156  (same)
-    //   S→X3 w=0.70  → A[X3] = 0.156  (same)
-    //   S→X4 w=0.70  → A[X4] = 0.156  (same)
-    //
-    //   At hop 1 each of X1–X4 and I spread to B (fan = sqrt(2) = 1.414):
-    //     c(Xi→B) = 0.156 × 0.7 × 0.5 / 1.414 = 0.0387
-    //     c(I →B) = 0.112 × 1.0 × 0.5 / 1.414 = 0.0396   ← strictly largest
-    //   → best[B].from = I  (the sub-threshold node)
-    //   → A[B] = 4×0.0387 + 0.0396 = 0.194 ≥ 0.15
-    //   → score_B = A[B] × strength ≥ 0.15 (importance=1.0 ensures strength ≥ 0.9)
-    //
-    // A wrapper embedder sets I's sensitivity to 'sensitive' on its first embed()
-    // call, simulating the race between the async embedding await and a DB write.
-    // Bug (no fix): I is never in nonStyleIds → never queried → never tainted →
-    //   B passes the cascade and is returned (with via chain leaking I's label).
-    // Fix:          I is added to checkIds → fails eligibility → B is tainted →
-    //   B is deleted from nodes and absent from results.
-    const { svc, db } = makeTestService();
+    // Only S is a seed: cos(query, S) = 0.88 gives activation 0.85;
+    // all other node vectors are orthogonal to the query and to each other.
+    // This fixes the graph geometry independently of feature-hash collisions.
+    // With S's five neighbors, I gets 0.85*0.5*0.5/sqrt(5) ≈ 0.0950
+    // and each Xi gets 0.85*0.7*0.5/sqrt(5) ≈ 0.1330 (all sub-threshold).
+    // At hop two I→B contributes ≈0.03360, strictly more than each Xi→B
+    // contribution ≈0.03293. B's activation ≈0.16531 passes minScore.
+    // After I becomes sensitive, eligibility is re-read before activation:
+    // S has four eligible neighbors, so clean B activation is
+    // 4*(0.85*0.7*0.5/sqrt(4))*0.7*0.5/sqrt(2) ≈0.14725 <0.15.
+    // Thus B must disappear even after fan normalization is recomputed.
+    const queryText = 'qxfixturequery';
+    const DIMS = 8;
+    const qVec = new Float32Array(DIMS); qVec[0] = 1;
+    const sVec = new Float32Array(DIMS); sVec[0] = 0.88; sVec[7] = Math.sqrt(1 - 0.88 ** 2);
+    const otherContents = [
+      'sub-threshold-intermediate-zqxwvu', 'bridge-node-x1-tsrqpo',
+      'bridge-node-x2-nmlkji', 'bridge-node-x3-hgfedcb',
+      'bridge-node-x4-zyxwvut', 'destination-node-b-srqpon',
+    ];
+    const otherVecs = otherContents.map((_, i) => {
+      const v = new Float32Array(DIMS); v[i + 1] = 1; return v;
+    });
+    const inner = {
+      id: 'controlled-subthreshold-8', dimensions: DIMS, isLocal: true as const,
+      embed(texts: string[]): Promise<Float32Array[]> {
+        return Promise.resolve(texts.map(text => {
+          if (text === queryText) return qVec;
+          if (text.includes(queryText)) return sVec;
+          const index = otherContents.findIndex(content => text.includes(content));
+          return index < 0 ? new Float32Array(DIMS) : otherVecs[index]!;
+        }));
+      },
+    };
+    expect(cosineSimilarity(qVec, sVec)).toBeCloseTo(0.88, 6);
+    for (const vector of otherVecs) expect(cosineSimilarity(qVec, vector)).toBe(0);
+    const seedActivation = (cosineSimilarity(qVec, sVec) - MEMORY_CONSTANTS.seedSimilarityFloor) / (1 - MEMORY_CONSTANTS.seedSimilarityFloor);
+    const cleanActivation = 4 * (seedActivation * 0.7 * MEMORY_CONSTANTS.spreadDecay / Math.sqrt(4)) * 0.7 * MEMORY_CONSTANTS.spreadDecay / Math.sqrt(2);
+    expect(cleanActivation).toBeLessThan(DEFAULT_MEMORY_POLICY.minScore);
+    const { clock } = makeClock();
+    const db = openNeoDatabase(':memory:');
+    const svc = createMemoryService({ db, embedder: inner, clock, logger: silentLogger });
 
-    const queryText = 'recall-subthreshold-poison-seed-' + Math.random().toString(36).slice(2);
     const nodeS  = await svc.remember({ kind: 'fact', label: 'Seed S',         content: queryText,                           importance: 0.5 });
     const nodeI  = await svc.remember({ kind: 'fact', label: 'Intermediate I', content: 'sub-threshold-intermediate-zqxwvu', importance: 0.5 });
     const nodeX1 = await svc.remember({ kind: 'fact', label: 'Bridge X1',      content: 'bridge-node-x1-tsrqpo',             importance: 0.5 });
     const nodeX2 = await svc.remember({ kind: 'fact', label: 'Bridge X2',      content: 'bridge-node-x2-nmlkji',             importance: 0.5 });
     const nodeX3 = await svc.remember({ kind: 'fact', label: 'Bridge X3',      content: 'bridge-node-x3-hgfedcb',            importance: 0.5 });
     const nodeX4 = await svc.remember({ kind: 'fact', label: 'Bridge X4',      content: 'bridge-node-x4-zyxwvut',            importance: 0.5 });
-    // importance=1.0 ensures score = A[B] × strength ≥ 0.194 × 0.90 = 0.175 ≥ 0.15
+    // importance=1.0 keeps B's baseline score above minScore.
     const nodeB  = await svc.remember({ kind: 'fact', label: 'Destination B',  content: 'destination-node-b-srqpon',         importance: 1.0 });
+
+    expect(new Set([nodeS, nodeI, nodeX1, nodeX2, nodeX3, nodeX4, nodeB].map(node => node.id)).size).toBe(7);
 
     await svc.link(nodeS.id,  nodeI.id,  'related', 0.5);
     await svc.link(nodeS.id,  nodeX1.id, 'related', 0.7);
@@ -561,16 +580,20 @@ describe('recall', () => {
     // First confirm B IS reachable before the race: verify the topology is correct.
     {
       const baseline = await svc.recall({ text: queryText, limit: 20, reinforce: false, allowSensitive: false });
-      expect(baseline.items.some(r => r.node.id === nodeB.id)).toBe(true);
+      const destination = baseline.items.find(r => r.node.id === nodeB.id);
+      expect(destination).toBeDefined();
+      expect(destination!.score).toBeGreaterThanOrEqual(DEFAULT_MEMORY_POLICY.minScore);
+      expect(destination!.via.map(v => v.nodeId)).toEqual([nodeS.id, nodeI.id]);
+      expect(baseline.items.some(r => r.node.id === nodeI.id)).toBe(false);
     }
 
     // Wrapper embedder: flip I to sensitive on the first embed() call,
     // simulating a concurrent write that races with the async embedding gap.
-    const inner = new HashingEmbedder(256);
     let raceTriggered = false;
     const racingEmbedder = {
       id: inner.id,
       dimensions: inner.dimensions,
+      isLocal: true as const,
       async embed(texts: string[], _signal?: AbortSignal) {
         if (!raceTriggered) {
           raceTriggered = true;
@@ -583,14 +606,15 @@ describe('recall', () => {
 
     const result = await svc.recall({ text: queryText, limit: 20, reinforce: false, allowSensitive: false });
 
-    // The race condition fired: I is now sensitive.  best[B].from = I, so the fix
-    // must taint B and exclude it from results; the bug would return B.
+    // The race fired: I is sensitive, and the remaining clean paths cannot
+    // recall B. Neither I's id nor label may survive in any explanation.
     expect(raceTriggered).toBe(true);
     expect(result.items.every(r => r.node.id !== nodeB.id)).toBe(true);
     // Issue #539 spec: no via entry in any result pointing at I, and I's label
     // never leaks through a result's reason string.
     expect(result.items.every(r => r.via.every(v => v.nodeId !== nodeI.id))).toBe(true);
     expect(result.items.every(r => !r.reason.includes('Intermediate I'))).toBe(true);
+    db.close();
   });
 
   it('sub-threshold seed (best.from) that becomes sensitive poisons its destination (Bug 1 #596)', async () => {
