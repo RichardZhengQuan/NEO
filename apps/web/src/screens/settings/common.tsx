@@ -4,12 +4,12 @@ import type { ReactElement, ReactNode } from 'react';
 export function Section({ title, description, children, actions }: { title: string; description?: ReactNode; children: ReactNode; actions?: ReactNode }): ReactElement {
   return (
     <section className="settings-group" aria-label={title} style={{ marginBottom: '2rem' }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="settings-group__header">
+        <div className="settings-group__copy">
           <h2 className="h-section">{title}</h2>
           {description && <p className="h-sub">{description}</p>}
         </div>
-        {actions}
+        {actions != null && typeof actions !== 'boolean' && <div className="settings-group__actions">{actions}</div>}
       </div>
       {children}
     </section>
