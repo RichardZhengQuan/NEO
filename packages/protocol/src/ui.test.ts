@@ -539,3 +539,23 @@ describe('uiBlockKey and walkUIBlocks: unpaired surrogate safety', () => {
     expect(key).toBe('id:%F0%9F%98%80');
   });
 });
+
+
+describe('timeline timezone compatibility', () => {
+  const legacy = { type: 'timeline' as const, items: [{ time: 0, title: 'Epoch' }, { time: 'Tomorrow morning', title: 'Literal' }] };
+
+  it('accepts old blocks and preserves an optional explicit timezone through validation', () => {
+    expect(TimelineBlockSchema.parse(legacy)).toEqual(legacy);
+    const zoned = { ...legacy, timezone: 'America/New_York' };
+    expect(TimelineBlockSchema.parse(zoned)).toEqual(zoned);
+    expect(validateUIBlocks([zoned])).toEqual({ ok: true, blocks: [zoned] });
+    expect(TimelineBlockSchema.safeParse({ ...legacy, timezone: 'x'.repeat(65) }).success).toBe(false);
+  });
+
+  it('honors explicit zones in text fallback while keeping absent-zone and literal times compatible', () => {
+    expect(uiBlockToText({ ...legacy, timezone: 'America/New_York' })).toBe('  Dec 31, 1969, 7:00 PM — Epoch\n  Tomorrow morning — Literal');
+    const hostTime = new Date(0).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+    expect(uiBlockToText(legacy)).toBe(`  ${hostTime} — Epoch\n  Tomorrow morning — Literal`);
+    expect(uiBlockToText({ ...legacy, timezone: 'Not/A_Zone' })).toContain('1970-01-01T00:00:00.000Z');
+  });
+});

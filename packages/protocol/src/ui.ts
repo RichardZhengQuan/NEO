@@ -285,11 +285,13 @@ export const TimelineBlockSchema = z.object({
   ...blockId,
   type: z.literal('timeline'),
   title: z.string().max(200).optional(),
+  /** Numeric times use this zone before the viewer's session timezone. */
+  timezone: z.string().max(64).optional(),
   items: z
     .array(
       z.object({
         id: z.string().max(64).optional(),
-        /** Epoch ms (rendered in the viewer's timezone) or a display string. */
+        /** Epoch ms (rendered in the block or viewer's timezone) or a display string. */
         time: z.union([
           z.number().refine((n) => Number.isFinite(n) && Math.abs(n) <= 8.64e15, { message: 'epoch-ms value out of ECMAScript Date range' }),
           z.string().max(60),
@@ -1016,7 +1018,7 @@ export function uiBlockToText(block: UIBlock, indent = 0): string {
     case 'timeline':
       if (block.title) push(block.title);
       for (const item of block.items) {
-        const t = typeof item.time === 'number' ? fmtTime(item.time) : item.time;
+        const t = typeof item.time === 'number' ? fmtTime(item.time, block.timezone) : item.time;
         push(`  ${t} — ${item.title}${item.description ? `: ${item.description}` : ''}`);
       }
       break;

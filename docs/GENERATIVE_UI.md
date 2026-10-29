@@ -39,7 +39,7 @@ Every rendered block becomes a `ui` part `{ type: 'ui', id: 'ui_…', block, too
 | `tabs` | `tabs[{id,label,icon,children}]` | |
 | `accordion` | `items[{id,title,open,children}]` | |
 | `link` | `url`, `title`, `description`, `imageUrl`, `siteName` | link preview card |
-| `timeline` | `items[{time,title,description,icon,tone}]` | |
+| `timeline` | `items[{time,title,description,icon,tone}]`, `timezone` | numeric epoch-ms times use the optional valid block timezone (max 64), then the viewer’s session timezone, then the device timezone; text times remain literal |
 | `keyvalue` | `title`, `items[{key,value}]` | |
 | `tags` | `items[{label,tone,icon}]` | |
 | `countdown` | `label`, `until` (epoch ms), `timezone`, `doneText` | live ticking; optional timezone (max 64), defaults to the viewer's timezone |
@@ -47,6 +47,8 @@ Every rendered block becomes a `ui` part `{ type: 'ui', id: 'ui_…', block, too
 | `tasks` | `title`, `listId`, `timezone`, `tasks[{id,title,done,dueAt,priority}]` | **live widget**: checkboxes; optional timezone (max 64), defaults to the viewer's timezone |
 | `changes` | `title`, `note`, `timezone`, `items[{id,kind,status,…}]` | **live widget**: review before → after and apply selected changes |
 | `memory` | `title`, `note`, `nodes[{id,kind,label,content,status}]` | Forget with confirmation; forgotten status persists in the widget. `recall` shows UI only with `show: true` |
+
+Timeline timezone is presentation context: stored blocks without it keep rendering without migration. Web, desktop and mobile pass the current session timezone through message and container renderers, so changing the session timezone updates unpinned numeric times. Empty or invalid block timezones defer to session context; if neither zone is usable, visual renderers retain the device-timezone fallback. Standalone renderers without session context also retain their device-timezone fallback. Plain-text renderers honor an explicit valid block timezone, retain the host-timezone fallback when absent, and use ISO text for invalid explicit zones. Epoch zero is a valid time, and machine-readable `datetime` values remain ISO instants. Producers may supply a timezone intentionally; rendering never rewrites stored blocks.
 
 Limits: at most 50 top-level blocks, 300 blocks per message, nesting depth 8, action ids unique within a message. Tones are `neutral | accent | info | success | warning | danger`. Icons are lucide-style names (`bell`, `calendar`, `check-circle`, `map-pin`, `brain`…) or a single emoji.
 

@@ -92,3 +92,13 @@ describe('confirmation expiry timestamps', () => {
     expect(screen.queryByText(/Expires in/)).toBeNull();
   });
 });
+
+
+it('passes viewer timezone from MessageView through nested timeline UI parts', () => {
+  const stored: Message = { ...message, status: 'complete', parts: [{ type: 'ui', id: 'ui_times', block: { type: 'card', children: [{ type: 'timeline', items: [{ time: 0, title: 'Epoch' }] }] } }] };
+  const view = wrap(<MessageView message={stored} timezone="America/New_York" />);
+  expect(view.container.querySelector('.neo-timeline__time')?.textContent).toBe('Dec 31, 1969, 7:00 PM');
+  view.rerender(<I18nProvider locale="en"><MessageView message={stored} timezone="UTC" /></I18nProvider>);
+  expect(view.container.querySelector('.neo-timeline__time')?.textContent).toBe('Jan 1, 1970, 12:00 AM');
+  expect(stored.parts[0]).toEqual({ type: 'ui', id: 'ui_times', block: { type: 'card', children: [{ type: 'timeline', items: [{ time: 0, title: 'Epoch' }] }] } });
+});

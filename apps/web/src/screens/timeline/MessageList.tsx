@@ -145,6 +145,7 @@ export function MessageList(props: MessageListProps): ReactElement {
                 <div ref={(el) => { if (el) rows.current.set(message.id, el); else rows.current.delete(message.id); }} className="timeline-message" data-timeline-message={message.id} data-highlight={highlight === message.id || undefined} data-off-record={episode?.offRecord || undefined}>
                   <div className="timeline-message-actions"><Menu label={t('timeline.message_actions')} items={[{ label: t('common.delete'), icon: 'trash', danger: true, onSelect: () => props.onDelete(message) }]} /></div>
                   <MessageView
+                    timezone={timezone}
                     message={message.error ? { ...message, error: { ...message.error, message: errorMessage(NeoError.fromShape(message.error), t) } } : message}
                     streaming={streaming} confirmations={confirmations} onConfirm={props.onConfirm} onUiAction={props.onUiAction}
                     recalled={recalled} assistantName="NEO" assistantAvatar={props.assistantAvatar} avatarState={streaming ? props.avatarState : undefined}
