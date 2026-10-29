@@ -18,8 +18,10 @@ download from [GitHub Releases](https://github.com/RichardZhengQuan/NEO/releases
 Unsigned arm64 app and DMG artifacts have been built and tested locally with an
 isolated packaged payload; their exact source, checksums and acceptance evidence
 are recorded in [#557](https://github.com/RichardZhengQuan/NEO/issues/557).
-Those receipts apply to the recorded artifacts. Separate x64 evidence and public
-distribution remain pending.
+Those receipts apply to the recorded artifacts. Current-main arm64 and separate
+x64 app/DMG build and static-check receipts are also recorded in #692. They do
+not establish new native startup, x64 runtime, valid signatures or public
+distribution.
 
 Developers can build an unsigned arm64 app from a recorded checkout on macOS:
 
@@ -54,8 +56,27 @@ to another NEO, including the first-launch choice. Use **Open NEO** to restore
 or reopen its window. Closing the window keeps NEO running; choose **Quit NEO**
 (or press **Command-Q**) to quit. The Dock icon remains available.
 
-Live tray close/reopen verification and the bounded macOS packaging/runtime CI
-workflow remain tracked in [#692](https://github.com/RichardZhengQuan/NEO/issues/692).
+### PR/manual build artifacts
+
+The [desktop artifact workflow](../.github/workflows/desktop-package.yml) is
+configured to build arm64 then x64 app/DMG outputs on macOS runners without
+supplied signing credentials.
+It builds the web and desktop workspace dependencies with a frozen lock and
+private caches, explicitly disables publishing/signing discovery, then performs
+structural, physical Mach-O and DMG payload checks. It never launches the app.
+Check the actual completed run before treating an uploaded artifact as available;
+the workflow configuration alone is not CI execution evidence.
+
+Successful architecture-named artifacts contain the DMG and a `.app.tar.gz`,
+checksums, exact source/tree, static reports and logs. Extract the tar to preserve
+the app's symlinks and modes. Each report retains `runtimeProven: false`.
+Failed checks upload separate diagnostics instead of checked app artifacts. See
+the [workflow guide](../.github/workflows/README.md#desktop-packageyml) for the
+triggers, sequential jobs, timeouts and artifact contents.
+
+Fresh/relaunch profile, native first-choice/onboarding, remote mode, live tray
+close/reopen, native negative-resource smoke and separate x64 runtime remain in
+[#692](https://github.com/RichardZhengQuan/NEO/issues/692) and #557.
 Windows and Linux distribution is planned. Unsigned Mac builds remain
 un-notarized under [#63](https://github.com/RichardZhengQuan/NEO/issues/63), so
 received artifacts can require macOS's **Open** confirmation.
