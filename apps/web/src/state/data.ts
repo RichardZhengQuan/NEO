@@ -146,11 +146,11 @@ export async function loadNotifications(client: NeoClient): Promise<void> {
   const epoch = currentSessionEpoch();
   const { items } = await client.notifications.list({ limit: 50 });
   if (!isCurrentSession(epoch, client)) return;
-  useData.setState({ notifications: items, unreadNotifications: items.filter((n) => !n.readAt).length });
+  useData.setState({ notifications: items, unreadNotifications: items.filter((n) => n.readAt == null).length });
 }
 
 export function addNotification(n: Notification): void {
-  useData.setState((s) => ({ notifications: [n, ...s.notifications.filter((x) => x.id !== n.id)].slice(0, 100), unreadNotifications: s.unreadNotifications + (n.readAt ? 0 : 1) }));
+  useData.setState((s) => ({ notifications: [n, ...s.notifications.filter((x) => x.id !== n.id)].slice(0, 100), unreadNotifications: s.unreadNotifications + (n.readAt != null ? 0 : 1) }));
 }
 
 /** Everything loaded is refetched (reconnect / seq gap). */

@@ -170,7 +170,7 @@ export function DevicesSection(): ReactElement {
                   </div>
                   <div className="row__meta">
                     <span>{t(`devices.platform_${d.platform}`)}</span>
-                    <span>{d.lastSeenAt ? t('devices.last_seen', { when: formatRelative(d.lastSeenAt, locale) }) : t('devices.never_seen')}</span>
+                    <span>{d.lastSeenAt != null ? t('devices.last_seen', { when: formatRelative(d.lastSeenAt, locale) }) : t('devices.never_seen')}</span>
                   </div>
                 </div>
                 {!d.owner && <IconButton icon="trash" label={t('devices.revoke_named', { name: d.name })} onClick={() => void revoke(d)} />}

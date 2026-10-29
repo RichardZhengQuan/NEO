@@ -96,11 +96,11 @@ export function useUiActionConfirm(): (confirmation: UiActionConfirmation) => Pr
 function useCountdown(until: number | undefined): number | null {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!until) return;
+    if (until == null) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [until]);
-  return until ? Math.max(0, Math.round((until - now) / 1000)) : null;
+  return until != null ? Math.max(0, Math.round((until - now) / 1000)) : null;
 }
 
 export function ConfirmationCard({
