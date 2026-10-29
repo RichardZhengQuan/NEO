@@ -135,6 +135,10 @@ describe('chat piped stdin', () => {
   it('aborts a waiting pipe confirmation on SIGINT without approving or hanging', async () => {
     fixture.client.timeline.stream.mockImplementation(async function* () { yield confirmation(); });
     await withPipe(async (stdin, waitFor) => {
+      fixture.close.mockImplementationOnce(() => {
+        expect(stdin.destroyed).toBe(false);
+        expect(stdin.isPaused()).toBe(true);
+      });
       stdin.write('forget tea\n');
       await waitFor('  → ');
       process.emit('SIGINT');
@@ -168,6 +172,12 @@ describe('chat piped stdin', () => {
       started();
     }));
     await withPipe(async (stdin) => {
+      // cleanup() closes the connection before withPipe's finally can end or
+      // destroy stdin, so this observes the production reader's actual state.
+      fixture.close.mockImplementationOnce(() => {
+        expect(stdin.destroyed).toBe(false);
+        expect(stdin.isPaused()).toBe(true);
+      });
       stdin.write('/forget tea\ny\n');
       await lookupStarted;
       process.emit('SIGINT');

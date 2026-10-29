@@ -108,6 +108,7 @@ export async function runChat(opts: ChatOptions): Promise<void> {
       abortController = null;
       process.stdout.write(`\n${yellow('  Turn cancelled.')}\n\n`);
       interrupted = false;
+      if (pipedStopped) return;
       rl.setPrompt(prompt());
       rl.prompt();
     } else if (!pipedLines) {
@@ -138,6 +139,7 @@ export async function runChat(opts: ChatOptions): Promise<void> {
     // Slash commands
     if (text.startsWith('/')) {
       await handleSlash(text, questions, client, ctx);
+      if (pipedStopped) return;
       rl.setPrompt(prompt());
       rl.prompt();
       return;
@@ -219,6 +221,7 @@ export async function runChat(opts: ChatOptions): Promise<void> {
 
     if (abortController === turnController) abortController = null;
     pendingConfirmationId = null;
+    if (pipedStopped) return;
     rl.resume();
     rl.setPrompt(prompt());
     rl.prompt();
@@ -238,7 +241,7 @@ export async function runChat(opts: ChatOptions): Promise<void> {
       ctx.privacyRevision = (ctx.privacyRevision ?? 0) + 1;
       ctx.offRecord = event.active;
       rl.setPrompt(prompt());
-      if (!abortController) rl.prompt();
+      if (!abortController && !pipedStopped) rl.prompt();
     },
     onStatus: (status) => {
       if (status !== 'open') return;
@@ -247,7 +250,7 @@ export async function runChat(opts: ChatOptions): Promise<void> {
         if (revision !== ctx.privacyRevision) return;
         ctx.offRecord = state.active;
         rl.setPrompt(prompt());
-        if (!abortController) rl.prompt();
+        if (!abortController && !pipedStopped) rl.prompt();
       }).catch(() => undefined);
     },
   });
