@@ -131,4 +131,26 @@ describe('finite Cartesian domains', () => {
     expect([...container.querySelectorAll('circle')].map((circle) => Number(circle.getAttribute('cy')))).toEqual([212, 12]);
     expect(Number(container.querySelector('line.neo-chart__grid:not([stroke-dasharray])')!.getAttribute('y1'))).toBe(112);
   });
+
+  it.each(['en', 'zh-CN'] as const)('keeps extreme stacked axis labels bounded in %s', (locale) => {
+    const block: ChartBlock = {
+      type: 'chart', kind: 'bar', stacked: true,
+      series: [6e307, 3e307].map((y, i) => ({ name: `Stack ${i}`, data: [{ x: 'A', y }, { x: 'B', y }] })),
+    };
+    const { container } = render(<I18nProvider locale={locale}><ChartRenderer block={block} /></I18nProvider>);
+    const labels = [...container.querySelectorAll('text.neo-chart__axis[text-anchor="end"]')].map((label) => label.textContent!);
+    expect(labels.length).toBeGreaterThan(1);
+    for (const label of labels) expect(label.length).toBeLessThanOrEqual(12);
+    expect(labels.some((label) => /E/i.test(label))).toBe(true);
+    expectFinitePlot(container);
+  });
+
+  it('preserves ordinary axis labels', () => {
+    const block: ChartBlock = {
+      type: 'chart', kind: 'line',
+      series: [{ name: 'Ordinary', data: [{ x: 'A', y: -10 }, { x: 'B', y: 10 }] }],
+    };
+    const { container } = render(<I18nProvider locale="en"><ChartRenderer block={block} /></I18nProvider>);
+    expect([...container.querySelectorAll('text.neo-chart__axis[text-anchor="end"]')].map((label) => label.textContent)).toEqual(['-10', '-5', '0', '5', '10']);
+  });
 });

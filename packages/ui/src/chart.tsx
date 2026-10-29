@@ -491,10 +491,13 @@ export function ChartRenderer({ block }: { block: ChartBlock }): ReactElement {
     }
   };
   const axisFmt = (v: number) => {
+    const extreme = Math.abs(v) >= 1e21;
     try {
-      return new Intl.NumberFormat(locale, { notation: Math.abs(v) >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 2 }).format(v);
+      // Compact suffixes stop scaling at a locale's largest named magnitude;
+      // scientific notation keeps extreme axes inside their bounded gutter.
+      return new Intl.NumberFormat(locale, { notation: extreme ? 'scientific' : Math.abs(v) >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 2 }).format(v);
     } catch {
-      return String(v);
+      return extreme ? v.toExponential(2) : String(v);
     }
   };
   const isPie = block.kind === 'pie' || block.kind === 'donut';
