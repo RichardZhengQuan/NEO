@@ -5,7 +5,8 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { auditPhysicalBundle, validateArchiveHeader, validateUnpacked, auditRuntimeDependencies, inspectPackagedArtifact } from './inspect-packaged.mjs';
+import * as inspector from './inspect-packaged.mjs';
+const { auditPhysicalBundle, validateArchiveHeader, validateUnpacked, auditRuntimeDependencies, inspectPackagedArtifact, auditWebEntryAssets } = inspector;
 const owned = [];
 test.after(async () => {
   for (const item of owned) {
@@ -491,4 +492,98 @@ test('truncated real ASAR payload is rejected before required entries count as p
   await truncate(item.archivePath, (await lstat(item.archivePath)).size - 1);
   item.asar.uncache(item.archivePath);
   await assert.rejects(inspectPackagedArtifact(item.app, item.repo), /Packed archive file exceeds payload/);
+});
+
+function webFs(html, assets = {}, links = {}) {
+  return memoryFs({ 'web/index.html': html, ...assets }, links);
+}
+test('web entry assets resolve relative/root paths, query fragments and HTML URL entities', async () => {
+  const fs = webFs(`<SCRIPT SRC="./assets/main.js?v=1&amp;x=2#top"></SCRIPT>
+    <link REL='modulepreload' href=/assets/vendor.js#entry>
+    <link rel="alternate stylesheet" href="assets/style%20sheet.css">`, {
+    'web/assets/main.js': 'main', 'web/assets/vendor.js': 'vendor', 'web/assets/style sheet.css': 'style'
+  });
+  const report = await auditWebEntryAssets(fs);
+  assert.deepEqual(report.entries.map(entry => entry.path), ['web/assets/main.js', 'web/assets/vendor.js', 'web/assets/style sheet.css']);
+  assert.equal(report.runtimeProven, false);
+  assert.equal(report.limits.length, 0);
+});
+test('web entry audit ignores comments and inline raw text, records nonlocal limits without fetching', async () => {
+  const report = await auditWebEntryAssets(webFs(`<!-- <script src="missing.js"></script> -->
+    <script>const example = '<link rel="stylesheet" href="missing.css">';</script>
+    <style>/* <script src="missing.js"></script> */</style>
+    <script src="https://example.invalid/entry.js"></script>`));
+  assert.equal(report.entries.length, 0);
+  assert.equal(report.limits.length, 1);
+  assert.match(report.limitations.join(' '), /transitive/);
+});
+for (const [kind, html] of [
+  ['script', '<script src="assets/missing.js"></script>'],
+  ['modulepreload', '<link rel="modulepreload" href="assets/missing.js">'],
+  ['stylesheet', '<link rel="stylesheet" href="assets/missing.css">']
+]) test('missing local web ' + kind + ' entry is rejected', async () => {
+  await assert.rejects(auditWebEntryAssets(webFs(html)), /Missing web entry asset: web\/assets\/missing/);
+});
+for (const url of ['../app.asar', '/%2e%2e/app.asar', '&#46;&#46;/app.asar', 'assets/%5csecret.js', 'file:///outside.js', 'assets/&#128;.js']) {
+  test('escaping or invalid web entry URL is rejected: ' + url, async () => {
+    await assert.rejects(auditWebEntryAssets(webFs(`<script src="${url}"></script>`, { 'web/outside.js': '' })), /Escaping|Invalid|Unsupported/);
+  });
+}
+test('a web entry symlink into another Resources sibling is rejected', async () => {
+  await assert.rejects(auditWebEntryAssets(webFs('<script src="assets/main.js"></script>', { 'other/main.js': '' }, { 'web/assets': 'other' })), /escapes web root/);
+});
+test('unsupported base and ambiguous HTML fail closed', async () => {
+  for (const html of ['<base href="../">', '<script src="a" src="b"></script>', '<script src="a>', '<template><script src="a"></script></template>', '<!--><script src="a"></script> -->']) {
+    await assert.rejects(auditWebEntryAssets(webFs(html)), { name: 'InspectorUnsupported' });
+  }
+});
+test('real ASAR inspection rejects an index whose referenced web entry is missing', async () => {
+  const item = await realArchiveFixture();
+  await writeFile(path.join(item.resources, 'web/index.html'), '<script type="module" src="./assets/entry.js"></script>');
+  await mkdir(path.join(item.resources, 'web/assets'));
+  await writeFile(path.join(item.resources, 'web/assets/entry.js'), '// entry fixture');
+  const green = await inspectPackagedArtifact(item.app, item.repo);
+  assert.equal(green.status, 'STRUCTURAL_CHECKS_PASS_RUNTIME_NOT_RUN');
+  assert.equal(green.runtimeProven, false);
+  await rm(path.join(item.resources, 'web/assets/entry.js'));
+  await assert.rejects(inspectPackagedArtifact(item.app, item.repo), /Missing web entry asset: web\/assets\/entry.js/);
+});
+
+test('web entry entities are decoded once and unsupported legacy names cannot match literal files', async () => {
+  const report = await auditWebEntryAssets(webFs('<script src="assets/a&amp;amp.js"></script>', { 'web/assets/a&amp.js': 'entry' }));
+  assert.equal(report.entries[0].path, 'web/assets/a&amp.js');
+  await assert.rejects(auditWebEntryAssets(webFs('<script src="assets/&copy.js"></script>', { 'web/assets/&copy.js': 'not the browser target' })), { name: 'InspectorUnsupported' });
+});
+
+test('web entry audit rejects nonstandard comments and declarations that could hide active tags', async () => {
+  for (const html of [
+    '<!-- ignored --!><script src="missing.js"></script> -->',
+    '<!-- outer <!--> <script src="missing.js"></script> -->',
+    '<!<script>><script src="missing.js"></script>',
+    '<?<script>><script src="missing.js"></script>',
+    '</div x="<script>"><script src="missing.js"></script>',
+    '<script.foo><script src="missing.js"></script></script.foo>',
+    '<script\u00a0><script src="missing.js"></script></script\u00a0>',
+    '<script><!--<script></script><style>--></script><script src="missing.js"></script></style>'
+  ]) await assert.rejects(auditWebEntryAssets(webFs(html)), { name: 'InspectorUnsupported' });
+});
+test('web entry audit rejects malformed effective raw-text closing tags instead of skipping entries', async () => {
+  for (const tag of ['script', 'style', 'title', 'textarea', 'noscript']) {
+    for (const ending of ['/>', ' x>', '\u00a0>']) {
+      const html = `<${tag}>0</${tag}${ending}<script src="missing.js"></script></${tag}>`;
+      await assert.rejects(auditWebEntryAssets(webFs(html)), { name: 'InspectorUnsupported' });
+    }
+  }
+});
+test('web entry named entities are case-sensitive and Unicode URL whitespace is preserved', async () => {
+  await assert.rejects(auditWebEntryAssets(webFs('<script src="assets/a&Amp;.js"></script>', { 'web/assets/a&.js': 'wrong decoded file' })), { name: 'InspectorUnsupported' });
+  await assert.rejects(auditWebEntryAssets(webFs('<script src="\u00a0assets/main.js"></script>', { 'web/assets/main.js': 'wrong trimmed file' })), /Missing web entry asset/);
+  const positive = await auditWebEntryAssets(webFs('<!DOCTYPE html><html><head></head><body><script src="assets/main.js"></script></body></html>', { 'web/assets/main.js': 'entry' }));
+  assert.equal(positive.entries.length, 1);
+});
+
+test('web entry raw-text offsets remain correct with Unicode before closing tags', async () => {
+  const report = await auditWebEntryAssets(webFs('<!doctype html><title>\u0130 NEO</title><script>const label = "\u0130";</script><script src="assets/main.js"></script>', { 'web/assets/main.js': 'entry' }));
+  assert.deepEqual(report.entries.map(entry => entry.path), ['web/assets/main.js']);
+  assert.equal(report.runtimeProven, false);
 });

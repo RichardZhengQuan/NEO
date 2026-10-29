@@ -384,6 +384,139 @@ export async function auditRuntimeDependencies(fs, {
     limitations: ['Declared dependencies and active entry/export files checked; not a JavaScript import-graph or native-addon ABI check.', 'Dynamic imports/requires, export conditions beyond node/import/require/default, and optional dependency behavior require actual packaged smoke.']
   };
 }
+// Vite emits ordinary HTML entry tags. Parse that bounded subset without
+// executing HTML; unsupported constructs fail instead of guessing browser URLs.
+function webEntryReferences(html) {
+  if (html.length > 2 * 1024 * 1024) fail('Bundled web index exceeds inspection bound');
+  const references = [];
+  const whitespace = /[ \t\n\f\r]/;
+  const trimUrl = value => value.replace(/^[ \t\n\f\r]+|[ \t\n\f\r]+$/g, '');
+  const unsupported = message => { throw new InspectorUnsupported(message); };
+  const decode = value => {
+    const entities = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' };
+    const pattern = /&#(x[0-9a-f]+|[0-9]+);?|&([a-z][a-z0-9]*);|&(amp|quot|lt|gt)(?![a-z0-9=])/gi;
+    // Legacy named references without a semicolon are deliberately unsupported
+    // outside this subset. Never certify a literal filename the browser decodes.
+    const residue = value.replace(pattern, '').split(/[?#]/, 1)[0];
+    if (/&(?:[a-z]|#)/i.test(residue)) unsupported('Unsupported web entry URL character reference');
+    return value.replace(pattern, (entity, numeric, named, legacy) => {
+      if (numeric) {
+        const code = numeric[0].toLowerCase() === 'x' ? parseInt(numeric.slice(1), 16) : Number(numeric);
+        if (!code || code > 0x10ffff || code >= 0xd800 && code <= 0xdfff || code >= 0x80 && code <= 0x9f) fail('Invalid web entry URL entity');
+        return String.fromCodePoint(code);
+      }
+      const key = named ?? legacy;
+      if (!Object.hasOwn(entities, key)) unsupported('Unsupported web entry URL entity: ' + entity);
+      return entities[key];
+    });
+  };
+  let i = 0;
+  while ((i = html.indexOf('<', i)) !== -1) {
+    if (html.startsWith('<!--', i)) {
+      if (/^<!--(?:>|->)/.test(html.slice(i))) unsupported('Abrupt web index comment ending');
+      const end = html.indexOf('-->', i + 4);
+      const alternate = html.indexOf('--!>', i + 4);
+      const nested = html.indexOf('<!--', i + 4);
+      if (end < 0 || alternate !== -1 && alternate < end || nested !== -1 && nested < end) unsupported('Nonstandard or unterminated web index comment');
+      i = end + 3;
+      continue;
+    }
+    if (html.startsWith('<!', i)) {
+      const doctype = /^<!doctype[ \t\n\f\r]+html[ \t\n\f\r]*>/i.exec(html.slice(i));
+      if (!doctype) unsupported('Unsupported web index markup declaration');
+      i += doctype[0].length;
+      continue;
+    }
+    if (html.startsWith('</', i)) {
+      const closing = /^<\/[a-z][a-z0-9:-]*[ \t\n\f\r]*>/i.exec(html.slice(i));
+      if (!closing) unsupported('Nonstandard web index closing tag');
+      i += closing[0].length;
+      continue;
+    }
+    const start = /^<([a-z][a-z0-9:-]*)/i.exec(html.slice(i));
+    if (!start || !/[ \t\n\f\r/>]/.test(html[i + start[0].length] ?? '')) unsupported('Unsupported web index markup or tag name');
+    const tag = start[1].toLowerCase(), attrs = new Map();
+    i += start[0].length;
+    let ended = false;
+    while (i < html.length) {
+      while (i < html.length && whitespace.test(html[i])) i++;
+      if (html[i] === '>') { i++; ended = true; break; }
+      if (html[i] === '/' && html[i + 1] === '>') { i += 2; ended = true; break; }
+      const name = /^[^ \t\n\f\r=/>"'<]+/.exec(html.slice(i));
+      if (!name) unsupported('Malformed web index tag attributes');
+      i += name[0].length;
+      while (i < html.length && whitespace.test(html[i])) i++;
+      let value = '';
+      if (html[i] === '=') {
+        i++;
+        while (i < html.length && whitespace.test(html[i])) i++;
+        const quote = html[i];
+        if (quote === '"' || quote === "'") {
+          const end = html.indexOf(quote, i + 1);
+          if (end < 0) unsupported('Unterminated web index attribute');
+          value = html.slice(i + 1, end); i = end + 1;
+        } else {
+          const unquoted = /^[^ \t\n\f\r>"'=<>`]+/.exec(html.slice(i));
+          if (!unquoted) unsupported('Malformed unquoted web index attribute');
+          value = unquoted[0]; i += value.length;
+        }
+      }
+      const key = name[0].toLowerCase();
+      if (attrs.has(key)) unsupported('Duplicate web index attribute: ' + key);
+      attrs.set(key, value);
+    }
+    if (!ended) unsupported('Unterminated web index tag');
+    if (tag === 'base' && attrs.has('href')) unsupported('Web index base URLs require browser validation');
+    if (['template', 'svg', 'math'].includes(tag)) unsupported('Unsupported web index container: ' + tag);
+    if (tag === 'script' && attrs.has('src')) references.push({ kind: 'script', url: trimUrl(decode(attrs.get('src'))) });
+    if (tag === 'link') {
+      const rel = decode(attrs.get('rel') ?? '').toLowerCase().split(/[ \t\n\f\r]+/);
+      const kind = rel.includes('modulepreload') ? 'modulepreload' : rel.includes('stylesheet') ? 'stylesheet' : null;
+      if (kind) {
+        if (!attrs.has('href')) fail('Missing web entry asset URL: ' + kind);
+        references.push({ kind, url: trimUrl(decode(attrs.get('href'))) });
+      }
+    }
+    if (['script', 'style', 'title', 'textarea', 'noscript'].includes(tag)) {
+      const end = new RegExp('</' + tag, 'gi');
+      end.lastIndex = i;
+      const closing = end.exec(html);
+      if (!closing) unsupported('Unterminated web index raw text: ' + tag);
+      const ordinary = new RegExp('^</' + tag + '[ \\t\\n\\f\\r]*>', 'i').exec(html.slice(closing.index));
+      if (!ordinary) unsupported('Nonstandard web index raw-text closing tag: ' + tag);
+      if (tag === 'script' && /<!--|-->/.test(html.slice(i, closing.index))) unsupported('Legacy escaped script text requires browser validation');
+      i = closing.index + ordinary[0].length;
+    }
+    if (references.length > 1000) fail('Too many web entry assets');
+  }
+  return references;
+}
+export async function auditWebEntryAssets(fs) {
+  const references = webEntryReferences((await fs.read('web/index.html')).toString('utf8'));
+  const root = await fs.realpath('web'), entries = [], limits = [];
+  for (const { kind, url } of references) {
+    if (!url || /[\\\u0000-\u001f\u007f]/.test(url)) fail('Invalid web entry asset URL: ' + url);
+    if (/^(?:https?:|data:|blob:|\/\/)/i.test(url)) {
+      limits.push({ kind, reason: 'Non-local entry URL was not fetched or validated' });
+      continue;
+    }
+    if (/^[a-z][a-z0-9+.-]*:/i.test(url)) fail('Unsupported web entry asset URL scheme: ' + url);
+    let decoded;
+    try { decoded = decodeURIComponent(url.split(/[?#]/, 1)[0]); } catch { fail('Invalid encoded web entry asset URL: ' + url); }
+    if (!decoded || /[\\\u0000-\u001f\u007f]/.test(decoded)) fail('Invalid decoded web entry asset URL: ' + url);
+    const local = clean(decoded.startsWith('/') ? decoded.slice(1) : decoded);
+    const file = 'web/' + local;
+    if (await fs.kind(file) !== 'file') fail('Missing web entry asset: ' + file);
+    const resolved = await fs.realpath(file);
+    if (!resolved.startsWith(root + '/')) fail('Web entry asset escapes web root: ' + file);
+    const bytes = await fs.read(file);
+    entries.push({ kind, url, path: file, resolved, bytes: bytes.length, sha256: sha(bytes) });
+  }
+  return {
+    entries, limits, runtimeProven: false,
+    limitations: ['Ordinary Vite HTML entry syntax is supported; ambiguous or unsupported HTML grammar fails closed.', 'Only explicit index script/modulepreload/stylesheet files checked; transitive JavaScript/CSS imports, dynamic loads, URL base behavior and browser execution remain unproved.']
+  };
+}
 export async function inspectPackagedArtifact(appBundle, repo, {
   arch = 'arm64'
 } = {}) {
@@ -459,6 +592,7 @@ export async function inspectPackagedArtifact(appBundle, repo, {
     }
   };
   for (const name of ['app.asar/dist/main.js', 'app.asar/dist/preload.cjs', 'web/index.html']) if ((await fs.kind(name)) !== 'file') fail('Missing required runtime resource ' + name);
+  const web = await auditWebEntryAssets(fs);
   const closure = await auditRuntimeDependencies(fs, {
     arch
   });
@@ -474,6 +608,7 @@ export async function inspectPackagedArtifact(appBundle, repo, {
       validatedUnpackedFiles: unpacked
     },
     closure,
+    web,
     runtimeProven: false
   };
 }
