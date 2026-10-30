@@ -4,9 +4,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loadConfig, startServer, type LoadConfigOptions } from '@neo/server';
-import { buildPairingUrl } from '@neo/protocol';
+import { buildPairingUrl, NeoError } from '@neo/protocol';
 import QRCode from 'qrcode';
 import { expandHome } from '../config-file.js';
+import { safeConfigDiagnostic } from '../config-diagnostic.js';
 import { renderBanner } from '../render.js';
 
 export interface ServeOptions {
@@ -45,7 +46,14 @@ export async function runServe(opts: ServeOptions): Promise<void> {
     path: opts.config,
     overrides: overrides as LoadConfigOptions['overrides'],
   };
-  const config = loadConfig(loadOpts);
+  let config: ReturnType<typeof loadConfig>;
+  try {
+    config = loadConfig(loadOpts);
+  } catch (error) {
+    const diagnostic = safeConfigDiagnostic(error);
+    if (diagnostic) throw new NeoError('config_error', diagnostic, { cause: error });
+    throw error;
+  }
 
   // Auto-detect only when config file, env, and CLI flags left webDir unset.
   if (!config.server.webDir) {
