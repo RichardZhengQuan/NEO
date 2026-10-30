@@ -4,6 +4,8 @@
  * avatar initials. Styling comes from the `neo-` classes in styles.css.
  */
 import {
+  createContext,
+  useContext,
   useEffect,
   useId,
   useRef,
@@ -629,6 +631,27 @@ export function tabPanelProps(prefix: string, id: string): { id: string; role: '
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+interface ModalLayer {
+  dialog: HTMLDivElement | null;
+  parent: ModalLayer | null;
+  previous: HTMLElement | null;
+  focus: () => void;
+}
+const ModalParent = createContext<ModalLayer | null>(null);
+const modalLayers: ModalLayer[] = [];
+
+function descendsFrom(layer: ModalLayer, ancestor: ModalLayer): boolean {
+  for (let parent = layer.parent; parent; parent = parent.parent) if (parent === ancestor) return true;
+  return false;
+}
+
+function topModal(includeDetached = false): ModalLayer | undefined {
+  const active = modalLayers.filter((layer) => includeDetached || layer.dialog?.isConnected);
+  // Child effects can run before their parent; registration order alone is not
+  // nesting order. Among independent leaves, the most recently opened wins.
+  return active.findLast((layer) => !active.some((other) => descendsFrom(other, layer)));
+}
+
 export function Modal(props: {
   open: boolean;
   onClose: () => void;
@@ -652,6 +675,8 @@ export function Modal(props: {
   const t = useT();
   const { open, onClose, title, children, footer, size = 'md', hideClose, dismissable = true, restoreFocus } = props;
   const dialogRef = useRef<HTMLDivElement>(null);
+  const parentLayer = useContext(ModalParent);
+  const layerRef = useRef<ModalLayer>({ dialog: null, parent: null, previous: null, focus: () => undefined });
   const titleId = useId();
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -666,17 +691,24 @@ export function Modal(props: {
     if (!open) return;
     const previous = restoreFocusRef.current ?? (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null);
     const el = dialogRef.current;
-    if (el) {
+    const layer = layerRef.current;
+    layer.dialog = el;
+    layer.previous = previous;
+    // ConfirmProvider portals are React siblings; their opener identifies the
+    // active parent just as a nested Modal's React context does.
+    layer.parent = parentLayer ?? modalLayers.findLast((other) => other.dialog?.contains(previous) && !descendsFrom(other, layer)) ?? null;
+    layer.focus = () => {
+      if (!el?.isConnected) return;
       const preferred = props.initialFocus ? el.querySelector<HTMLElement>(props.initialFocus) : null;
       const body = el.querySelector<HTMLElement>('.neo-modal__body');
-      const target = preferred ?? body?.querySelector<HTMLElement>(FOCUSABLE) ?? el.querySelector<HTMLElement>(FOCUSABLE) ?? el;
-      target.focus();
-    }
+      (preferred ?? body?.querySelector<HTMLElement>(FOCUSABLE) ?? el.querySelector<HTMLElement>(FOCUSABLE) ?? el).focus();
+    };
+    modalLayers.push(layer);
+    if (topModal() === layer) layer.focus();
     const onKey = (e: globalThis.KeyboardEvent) => {
+      if (topModal() !== layer) return;
       if (e.key === 'Escape') {
-        // stopImmediatePropagation prevents a second Modal listener (registered
-        // earlier, i.e. an outer/parent Modal) from also firing on the same
-        // event — avoiding a double-close when Modals are nested.
+        // Only the active layer consumes the event, regardless of listener order.
         e.stopImmediatePropagation();
         onCloseRef.current();
         return;
@@ -687,11 +719,15 @@ export function Modal(props: {
       const items = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
       if (items.length === 0) {
         e.preventDefault();
+        layer.focus();
         return;
       }
       const first = items[0]!;
       const last = items[items.length - 1]!;
-      if (e.shiftKey && document.activeElement === first) {
+      if (!dialogRef.current.contains(document.activeElement)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && document.activeElement === first) {
         e.preventDefault();
         last.focus();
       } else if (!e.shiftKey && document.activeElement === last) {
@@ -701,8 +737,18 @@ export function Modal(props: {
     };
     document.addEventListener('keydown', onKey, true);
     return () => {
+      const ownedFocus = topModal(true) === layer;
       document.removeEventListener('keydown', onKey, true);
-      previous?.focus?.();
+      const index = modalLayers.indexOf(layer);
+      if (index !== -1) modalLayers.splice(index, 1);
+      layer.dialog = null;
+      if (ownedFocus) {
+        const next = topModal();
+        let target = previous;
+        for (let parent = layer.parent; target && !target.isConnected && parent; parent = parent.parent) target = parent.previous;
+        if (target?.isConnected && (!next || next.dialog?.contains(target))) target.focus();
+        else next?.focus();
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -710,6 +756,7 @@ export function Modal(props: {
   if (!open || typeof document === 'undefined') return null;
 
   return createPortal(
+    <ModalParent.Provider value={layerRef.current}>
     <div
       className="neo-modal-backdrop"
       onMouseDown={(e) => {
@@ -744,7 +791,8 @@ export function Modal(props: {
         <div className="neo-modal__body">{children}</div>
         {footer && <div className="neo-modal__footer">{footer}</div>}
       </div>
-    </div>,
+    </div>
+    </ModalParent.Provider>,
     document.body,
   );
 }
