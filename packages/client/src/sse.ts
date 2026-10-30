@@ -2,7 +2,7 @@
  * SSE (Server-Sent Events) parsing for the NEO event stream.
  *
  * readEventStream parses a text/event-stream response body into AgentEvents,
- * handling chunk boundaries, CRLF, multi-line data fields, and comment lines.
+ * handling chunk boundaries, CR/LF/CRLF, multi-line data fields, and comment lines.
  */
 import { NeoError, type AgentEvent } from '@neo/protocol';
 
@@ -13,7 +13,7 @@ import { NeoError, type AgentEvent } from '@neo/protocol';
  *
  * Robust against:
  * - Chunks that split in the middle of a line
- * - CRLF (\r\n) and LF (\n) line endings
+ * - CR (\r), LF (\n), and CRLF (\r\n) line endings
  * - Multi-line `data:` fields (joined with newline)
  * - Comment lines (starting with `:`)
  * - Missing `event:` field (uses default event type from data)
@@ -29,6 +29,9 @@ export async function* readEventStream(
 
   // Buffer for incomplete lines across chunks.
   let buffer = '';
+  // A CR ends its line immediately; consume a following LF only once, even
+  // when it arrives in the next chunk.
+  let skipLF = false;
 
   // Current SSE message fields.
   let dataLines: string[] = [];
@@ -66,26 +69,23 @@ export async function* readEventStream(
       if (done) break;
       if (!value) continue;
 
-      // Decode the chunk and append to the buffer.
-      buffer += decoder.decode(value, { stream: true });
-
-      // Process complete lines in the buffer.
-      // Lines are delimited by \n or \r\n.
-      let pos = 0;
-      while (pos < buffer.length) {
-        // Find the next line terminator.
-        const lf = buffer.indexOf('\n', pos);
-        if (lf === -1) {
-          // No complete line yet — keep the remainder in the buffer.
-          buffer = buffer.slice(pos);
-          pos = 0;
-          break;
+      const chunk = decoder.decode(value, { stream: true });
+      let start = 0;
+      for (let pos = 0; pos < chunk.length; pos++) {
+        const char = chunk[pos];
+        if (skipLF) {
+          skipLF = false;
+          if (char === '\n') {
+            start = pos + 1;
+            continue;
+          }
         }
+        if (char !== '\r' && char !== '\n') continue;
 
-        // Extract the line (strip trailing \r if CRLF).
-        let line = buffer.slice(pos, lf);
-        if (line.endsWith('\r')) line = line.slice(0, -1);
-        pos = lf + 1;
+        const line = buffer + chunk.slice(start, pos);
+        buffer = '';
+        start = pos + 1;
+        skipLF = char === '\r';
 
         // An empty line dispatches the buffered message.
         if (line === '') {
@@ -129,10 +129,7 @@ export async function* readEventStream(
         // Ignore `event:`, `id:`, `retry:` fields.
       }
 
-      // If the inner while loop completed without break, clear the buffer.
-      if (pos > 0) {
-        buffer = buffer.slice(pos);
-      }
+      buffer += chunk.slice(start);
     }
   } finally {
     if (signal) {
